@@ -2094,6 +2094,113 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+printf '%s\n' '== F10 the plan-document header is ONE contract across its three carriers =='
+# #531. The plan-header template has three uncompared copies: write-plan/SKILL.md
+# (the standalone skill), agents/plan-writer.md (the copy the routed medium/large
+# pipeline actually emits from) and skills/orchestrator/SKILL.md (the in-main
+# fallback's prose enumeration). Porting upstream's `Spec:` pointer into the first
+# alone leaves /solve and /turbo emitting Spec-less plans with a fully green
+# suite, so this row EXTRACTS each carrier's header labels and compares them
+# rather than pinning one wording.
+#
+# Scope: the header REGION of each fence only, from the fence start up to (not
+# including) its first `---`. The two fences are not comparable as wholes -
+# write-plan fences the header alone, plan-writer fences the whole plan document
+# (header PLUS the per-task Depends on / Wave / Owns / Files blocks).
+f10_header_labels() {  # file, anchor-regex -> one header label per line
+  python3 - "$1" "$2" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path, anchor = Path(sys.argv[1]), sys.argv[2]
+text = path.read_text(encoding="utf-8")
+found = re.search(anchor, text, re.MULTILINE)
+if not found:
+    raise SystemExit("%s: cannot locate the header fence anchor %r"
+                     % (path.name, anchor))
+fence = re.search(r"^```markdown\n(.*?)^```$", text[found.end():],
+                  re.MULTILINE | re.DOTALL)
+if not fence:
+    raise SystemExit("%s: no ```markdown fence follows %r" % (path.name, anchor))
+header = []
+for line in fence.group(1).split("\n"):
+    if line == "---":
+        break
+    header.append(line)
+else:
+    raise SystemExit("%s: the header fence never reaches its `---` terminator"
+                     % path.name)
+# Column-0 anchor: excludes the `> **For agentic workers:**` note from both
+# carriers symmetrically, since it is quoted prose rather than a header slot.
+labels = re.findall(r"^\*\*([^*]+):\*\*", "\n".join(header), re.MULTILINE)
+sys.stdout.write("\n".join(labels))
+PY
+}
+
+if F10_WP_LABELS="$(f10_header_labels "$WRITE_PLAN" '^## Plan Document Header$')" \
+  && F10_PW_LABELS="$(f10_header_labels "$PLAN_WRITER" '^\*\*Plan document structure:\*\*$')"; then
+  assert_eq 'F10 write-plan and plan-writer emit the same ordered plan-header labels' \
+    "$F10_WP_LABELS" "$F10_PW_LABELS"
+
+  # F10b is the anti-vacuity arm: without it a renamed slot yields an empty list
+  # on BOTH sides and F10 reports green over nothing.
+  F10_MISSING=""
+  for f10_want in Goal Architecture 'Tech Stack' Spec; do
+    if ! grep -qxF -- "$f10_want" <<<"$F10_WP_LABELS"; then
+      F10_MISSING="$F10_MISSING write-plan:$f10_want"
+    fi
+    if ! grep -qxF -- "$f10_want" <<<"$F10_PW_LABELS"; then
+      F10_MISSING="$F10_MISSING plan-writer:$f10_want"
+    fi
+  done
+  assert_eq 'F10b both label lists carry Goal, Architecture, Tech Stack and Spec' \
+    '' "$F10_MISSING"
+
+  if python3 - "$ORCHESTRATOR" "$F10_WP_LABELS" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+orchestrator = Path(sys.argv[1])
+labels = [label for label in sys.argv[2].split("\n") if label]
+if not labels:
+    raise SystemExit("no plan-header labels were handed to the orchestrator check")
+step = None
+for line in orchestrator.read_text(encoding="utf-8").split("\n"):
+    if line.startswith("2. Synthesise the wave-decomposed plan yourself in-main"):
+        step = line
+        break
+if step is None:
+    raise SystemExit("orchestrator SKILL.md no longer carries the in-main "
+                     "plan-synthesis fallback step this row reads")
+# Prose dialect, so membership by word boundary rather than by order.
+absent = [l for l in labels if not re.search(r"\b%s\b" % re.escape(l), step)]
+if absent:
+    raise SystemExit("the in-main plan-synthesis fallback does not enumerate %r"
+                     % absent)
+PY
+  then
+    printf '%s\n' '  PASS F10a the in-main plan-synthesis fallback enumerates every plan-header label'
+    PASS=$((PASS + 1))
+  else
+    printf '%s\n' '  FAIL F10a the in-main plan-synthesis fallback has drifted from the plan-header template'
+    FAIL=$((FAIL + 1))
+  fi
+else
+  printf '%s\n' '  FAIL F10/F10a/F10b could not extract a plan-header label list from both carriers'
+  FAIL=$((FAIL + 1))
+fi
+
+# F10c pins the "that hunk only" boundary: upstream ships the `Spec:` pointer in
+# the same block as a `## Global Constraints` section RFC 0019 never adjudicated.
+# The predicate is the SECTION, not the substring: a markdown H2 opens its own
+# line, so the anchor catches a ported section while leaving the provenance
+# header free to NAME the section it declines. A blanket substring ban would be
+# unsatisfiable against a header that has to say what was not adopted.
+n=$(grep -cE '^[[:space:]]*#{1,6} Global Constraints' "$WRITE_PLAN" || true)
+assert_eq 'F10c the unadjudicated Global Constraints section stays unported' 0 "$n"
+
 printf '\n[orchestrator-plan-flatten] PASS=%s FAIL=%s\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then
   exit 1

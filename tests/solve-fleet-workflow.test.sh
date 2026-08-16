@@ -206,6 +206,33 @@ elif grep -q "implementBudget=\"\${UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET:-$FLEET_
 else
   fail "S22b no implementBudget key in the solve-fleet args envelope"
 fi
+# G31 — FLEET_DESIGN_BASE, the OTHER half of the CB1 term
+# `designCount * (BASE + IMPLEMENT_AGENT_BUDGET - 1)`, read out of the script for
+# exactly the reason FLEET_BUDGET is. Three rows retyped this base as a literal:
+# G16 (/goal's two cost copies), G18 (the two doc copies) and Run S's projection
+# inside the behavioural fixture. The base moves by one for every rung the design
+# chain gains, so a literal in three places is the #370 "one contract, N
+# uncompared copies" shape — a missed retyping reds a row for the right reason
+# with a misleading message, and the reviewer has to grep to find out which copy
+# drifted. The vacuity guard is part of the idiom (S22b above): an extraction
+# that silently yielded empty would make every dependent row pass on nothing.
+# The hit count is the second half of that guard — two differing terms in the
+# script would make the extracted value arbitrary rather than merely absent.
+FLEET_DESIGN_BASE="$(sed -n 's/.*designCount \* (\([0-9][0-9]*\) + IMPLEMENT_AGENT_BUDGET.*/\1/p' "$WORKFLOW")"
+FLEET_DESIGN_BASE_HITS="$(grep -cE 'designCount \* \([0-9]+ \+ IMPLEMENT_AGENT_BUDGET' "$WORKFLOW" || true)"
+if [ -z "$FLEET_DESIGN_BASE" ]; then
+  fail "G31 could not read the per-design-issue agent base out of the fleet script — G16, G18 and the fixture's projection would all derive from nothing"
+elif [ "${FLEET_DESIGN_BASE_HITS:-0}" != "1" ]; then
+  # An AMBIGUOUS base is worse than an absent one, and silently so: two terms
+  # make this a two-line value, and grep reads a multi-line pattern as OR-ed
+  # alternatives — a one-digit alternative matches almost any line of the file
+  # a dependent row is searching, turning G16 into a false PASS. Clear it, so
+  # every dependent row takes its own vacuity arm instead of matching noise.
+  FLEET_DESIGN_BASE=""
+  fail "G31 the designCount * (N + IMPLEMENT_AGENT_BUDGET …) term resolves ${FLEET_DESIGN_BASE_HITS:-0} times, not once — the extracted base is arbitrary"
+else
+  pass "G31 the per-design-issue agent base reads out of the fleet script as exactly one term (base $FLEET_DESIGN_BASE)"
+fi
 GOAL_PHASE0="$REPO_ROOT/plugins/uberdev/lib/goal-phase0.sh"
 if [ ! -r "$GOAL_PHASE0" ]; then
   fail "S22c lib/goal-phase0.sh is missing or unreadable: $GOAL_PHASE0"
@@ -213,6 +240,50 @@ elif grep -q 'maxAgents="${UBERDEV_GOAL_MAX_AGENTS:-900}"' "$GOAL_PHASE0"; then
   pass "S22c /goal's default agent ceiling covers the fleet's new per-issue cost"
 else
   fail "S22c UBERDEV_GOAL_MAX_AGENTS does not default to 900 — /goal CB1 would halt on cycle 1"
+fi
+
+# S23 (#524 item 3) — the risk-signal channel is a JOIN, and either half alone
+# is worthless.
+#
+# The triage predicate is computed for every issue and persisted into the
+# prepared root request on every backend; it is dropped on exactly ONE hop, the
+# per-issue manifest record. That record is the only channel into a Workflow
+# script (no fs), so a launcher that writes the field to a manifest the schema
+# does not declare buys nothing, and a schema that declares a field no launcher
+# writes gates the lens permanently OFF. One row over both ends, so neither can
+# ship alone and read as done.
+S23_LAUNCHER=0
+S23_SCRIPT=0
+grep -q 'rec\["risk_signals"\]' "$LAUNCHER" && grep -q '"${RISKS\[\$_midx\]}"' "$LAUNCHER" && S23_LAUNCHER=1
+grep -q 'riskSignals: { type: "array"' "$WORKFLOW" && S23_SCRIPT=1
+if [ "$S23_LAUNCHER" = "1" ] && [ "$S23_SCRIPT" = "1" ]; then
+  pass "S23 the launcher writes the triage risk_signals into every manifest record AND S.intake declares riskSignals"
+else
+  fail "S23 the risk-signal channel is half-built (launcher=$S23_LAUNCHER script=$S23_SCRIPT) — the security lens would be gated on a field that never crosses"
+fi
+
+# S24 — the same join for the COUNT channel, which is the negative branch's only
+# failure signal. Absent `riskSignals` and empty `riskSignals` behave alike by
+# design, so a relay that drops or renames the field looks exactly like a
+# risk-free batch. The launcher declares a run-wide count derived from the
+# manifest it just wrote; the script reads it and compares. Either half alone is
+# a number nobody checks, or a check against a number nobody sends.
+# Scoped to the emission block, not to the whole file: a `riskIssueCount=`
+# assignment elsewhere in the launcher is a local variable, not an envelope key,
+# and this row would then pass on a value the script never receives. Captured
+# first and read from a herestring — a `sed | grep -q` consumed as a truth value
+# is the EPIPE-poisoned shape tests/epipe-guard.test.sh forbids.
+S24_EMIT_BLOCK="$(sed -n '/uberdev_emit_workflow_args solve-fleet/,/^$/p' "$LAUNCHER")"
+S24_LAUNCHER=0
+S24_SCRIPT=0
+grep -q 'riskIssueCount=' <<<"$S24_EMIT_BLOCK" && S24_LAUNCHER=1
+grep -q 'CFG\.riskIssueCount' "$WORKFLOW" && S24_SCRIPT=1
+if [ -z "$S24_EMIT_BLOCK" ]; then
+  fail "S24 the solve-fleet args-emission block did not slice — the launcher half of this join would inspect nothing"
+elif [ "$S24_LAUNCHER" = "1" ] && [ "$S24_SCRIPT" = "1" ]; then
+  pass "S24 the launcher emits riskIssueCount in the solve-fleet envelope AND the script joins it against the relayed records"
+else
+  fail "S24 the risk-signal relay-fidelity join is half-built (launcher=$S24_LAUNCHER script=$S24_SCRIPT) — a dropped field would be indistinguishable from a risk-free batch"
 fi
 
 echo "== S: command files mandate the Workflow call =="
@@ -246,10 +317,18 @@ else
 fi
 
 # G2 — model policy: the solver/research/design agents are JUDGMENT paths and
-# must NOT be pinned to a cheap model; only the manifest relay pins haiku.
+# must NOT be pinned to a cheap model. TWO dispatches pin haiku, not one — the
+# manifest intake and the #515 PR-existence proof — and both are MECHANICAL
+# relays that pass an rc and rows through without interpreting them.
+#
+# Saying "only the manifest relay" here is the exact drift #560 reported against
+# workflow.js's own run-header note: model routing is locked by this suite, so a
+# maintainer auditing a pin against a one-relay policy reads the second,
+# deliberate pin as a mistake and "fixes" it. G23 locks the haiku COUNT; B10 and
+# B10b lock WHICH dispatch carries each pin, which a count alone cannot see.
 grep -q 'model: "haiku"' "$WORKFLOW" \
-  && pass "G2a the mechanical intake relay pins haiku" \
-  || fail "G2a no haiku pin on the mechanical relay"
+  && pass "G2a the mechanical relays pin haiku" \
+  || fail "G2a no haiku pin on either mechanical relay (manifest intake, verify-prs)"
 if grep -qE 'model:[[:space:]]*"(fable|sonnet|opus)"' "$WORKFLOW"; then
   fail "G2b a judgment agent is model-pinned — the session flagship must flow through"
 else
@@ -284,9 +363,15 @@ grep -q 'Co-Authored-By' "$WORKFLOW" \
 grep -q 'NOT bump the project version' "$WORKFLOW" \
   && pass "G5b the solver is told not to bump the version (parallel-batch collision guard)" \
   || fail "G5b no version-bump prohibition — parallel solvers would collide on the release surfaces"
+# G5c is a COARSE PRESENCE CHECK on the file, not a guard on the delivery
+# brief: since #554 the closing link is conditional — a complete chain gets
+# `Closes #N`, an unfinished one gets the non-closing `UberDev-Partial: #N` —
+# and a source grep through prLinkLine() cannot tell those arms apart. What the
+# delivery agent is actually told is asserted on the RENDERED prompt, per stop
+# path, by B254-B265 below.
 grep -q 'Closes #' "$WORKFLOW" \
-  && pass "G5c the PR body must carry Closes #N" \
-  || fail "G5c no Closes #N requirement in the delivery brief"
+  && pass "G5c the closing link still exists as a form the fleet can emit" \
+  || fail "G5c no Closes #N form anywhere in the fleet script"
 grep -q 'body-file' "$WORKFLOW" \
   && pass "G5d the PR body goes through --body-file (2nd-order injection guard)" \
   || fail "G5d the solver may pass an inline --body"
@@ -346,6 +431,38 @@ grep -qE 'IMPLEMENT_AGENT_BUDGET = clampInt\(CFG\.implementBudget, 4, 96, 24\)' 
   && pass "G14b the per-issue implement budget is ONE clamped, config-overridable constant" \
   || fail "G14b IMPLEMENT_AGENT_BUDGET is not a clamped CFG.implementBudget constant"
 
+# G14c — SPEC_REVISE_ROUNDS, the OTHER bounded ladder, needs BOTH halves of the
+# G14/B72 idiom and they cannot be the same row. FIX_ROUNDS has one exit
+# condition, so Run L (a reviewer that never approves) walks the bound to its
+# end and B72/B73 pin it behaviourally. The revision loop has TWO exits —
+# `round <= SPEC_REVISE_ROUNDS` and `!revised` — so every arm whose reviser
+# SUCCEEDS leaves on the flag with the bound untouched, and only an arm where
+# the reviser never lands usably can see it at all (that is B262c, on SR3/SR5).
+# This row pins the CONSTANT; B262c pins that the loop obeys whatever it says.
+#
+# The value is 1 because CB1's `designCount * (BASE + IMPLEMENT_AGENT_BUDGET-1)`
+# term (G31) charges exactly ONE reviser per design-tier issue. Raise the
+# constant without moving that base and the projection under-counts by
+# (N-1) x designCount while the breaker still fires only at the old ceiling —
+# an accumulator that reads low, which the SHARED COST block one screen above
+# the constant exists to prevent. The vacuity and hit-count guards are the
+# S22b/G31 idiom: an extraction that yielded empty, or resolved twice, would
+# make this row and the G32 join pass on nothing.
+FLEET_SPEC_REVISE_ROUNDS="$(sed -n 's/^const SPEC_REVISE_ROUNDS = \([0-9][0-9]*\);.*/\1/p' "$WORKFLOW")"
+SPEC_REVISE_ROUNDS_HITS="$(grep -cE '^const SPEC_REVISE_ROUNDS = [0-9]+;' "$WORKFLOW" || true)"
+if [ -z "$FLEET_SPEC_REVISE_ROUNDS" ]; then
+  fail "G14c could not read SPEC_REVISE_ROUNDS out of the fleet script — the G32 join would compare against nothing"
+elif [ "${SPEC_REVISE_ROUNDS_HITS:-0}" != "1" ]; then
+  FLEET_SPEC_REVISE_ROUNDS=""
+  fail "G14c SPEC_REVISE_ROUNDS is declared ${SPEC_REVISE_ROUNDS_HITS:-0} times, not once — the extracted cap is arbitrary"
+elif [ "$FLEET_SPEC_REVISE_ROUNDS" != "1" ]; then
+  fail "G14c SPEC_REVISE_ROUNDS is $FLEET_SPEC_REVISE_ROUNDS, not 1 — CB1 charges one reviser per design-tier issue, so the projection now under-counts by $((FLEET_SPEC_REVISE_ROUNDS - 1)) per design-tier issue"
+elif ! grep -q 'round <= SPEC_REVISE_ROUNDS && !revised' "$WORKFLOW"; then
+  fail "G14c the revision loop no longer bounds itself with SPEC_REVISE_ROUNDS — the constant would be a number written beside a loop, not the loop's bound"
+else
+  pass "G14c SPEC_REVISE_ROUNDS = 1 is the revision loop's own bound, and the one reviser CB1 charges per design-tier issue"
+fi
+
 # G15a — the house rules are one helper, reused by every prompt on the write
 # path. A copy per prompt is how one of them silently loses the version-bump
 # prohibition. (That the rules actually REACH each agent is proven at runtime by
@@ -362,12 +479,18 @@ GOAL_WF="$REPO_ROOT/plugins/uberdev/skills/goal-pipeline/workflow.js"
 if [ ! -r "$GOAL_WF" ]; then
   fail "G16 the goal-pipeline workflow script is missing or unreadable: $GOAL_WF"
 else
-  # FLEET_BUDGET is extracted ONCE, beside S22b above — this row reuses it so the
-  # launcher default and /goal's cost copies cannot be pinned to two numbers.
-  if [ -z "$FLEET_BUDGET" ]; then
-    fail "G16 could not read IMPLEMENT_AGENT_BUDGET out of the fleet script — the cross-file cost check is vacuous"
+  # FLEET_BUDGET and FLEET_DESIGN_BASE are extracted ONCE, beside S22b/G31 above
+  # — this row reuses both so the launcher default, /goal's cost copies and the
+  # fleet's own constants cannot be pinned to two different numbers.
+  #
+  # NOTE the off-by-one, which a blind retyping gets wrong: the FLEET's own term
+  # is `base + budget - 1` (the issue's own solver is already counted in
+  # intakeIssues.length), while /goal's per-issue cost — the family this row
+  # compares — is `base + budget`, with no `- 1`.
+  if [ -z "$FLEET_BUDGET" ] || [ -z "$FLEET_DESIGN_BASE" ]; then
+    fail "G16 could not read IMPLEMENT_AGENT_BUDGET and the design base out of the fleet script — the cross-file cost check is vacuous"
   else
-    EXPECTED_COST=$(( 6 + FLEET_BUDGET ))
+    EXPECTED_COST=$(( FLEET_DESIGN_BASE + FLEET_BUDGET ))
     GOAL_MARKERS="$(grep -c 'SHARED COST: solve-fleet-per-issue-agent-cost' "$GOAL_WF" || true)"
     G16_OK=1
     # Copy 1 — the PRE-dispatch projection. No envelope exists yet, so the
@@ -379,13 +502,31 @@ else
     # than threefold and CB1, the only named halt, then never fires. The clamp
     # bounds and default are read back out of the fleet's own constant, so the
     # two files still cannot drift apart.
-    grep -q "6 + clampInt(cfg.implementBudget, 4, 96, $FLEET_BUDGET)" "$GOAL_WF" || G16_OK=0
+    grep -q "$FLEET_DESIGN_BASE + clampInt(cfg.implementBudget, 4, 96, $FLEET_BUDGET)" "$GOAL_WF" || G16_OK=0
     grep -q "claimed.length \* perIssueFleetCost(" "$GOAL_WF" || G16_OK=0
     grep -q "claimed.length \* $EXPECTED_COST" "$GOAL_WF" && G16_OK=0
     [ "${GOAL_MARKERS:-0}" = "2" ] || G16_OK=0
+    # Deriving the term is only half of it — the cost still has to be CHARGED,
+    # on BOTH exit arms of the nested fleet call. The clean arm and the catch
+    # arm each carry their own copy, and the catch arm is the one that rots
+    # unnoticed: a fleet that threw is the likeliest to have spent the most
+    # (the usual cause is the runtime refusing further agents, which is the
+    # exact ceiling CB1 exists to stay under), yet deleting its copy left this
+    # row GREEN at 9002870b — measured against the seeded mutant, not assumed.
+    GOAL_CHARGE_SITES="$(grep -c 'agentsSpent += fleetCost' "$GOAL_WF" || true)"
+    [ "${GOAL_CHARGE_SITES:-0}" = "2" ] || G16_OK=0
+    # ...and the cycle whose real spend could not be measured must stay NAMED,
+    # so an estimate is never silently laundered into the ledger as a fact.
+    grep -q 'fleet_spend_unmeasured' "$GOAL_WF" || G16_OK=0
+    # HONEST LIMIT: both additions are a TRIPWIRE, not the fix. A structural
+    # grep cannot observe a value — `agentsSpent += fleetCost` can appear
+    # exactly twice with `fleetCost` computed from the wrong term, and this row
+    # would still pass. The runtime oracle is B91-B96 in goal-workflow.test.sh,
+    # which assert the accumulator as a number; these greps only stop the two
+    # charge sites and the named event from being deleted outright.
     [ "$G16_OK" = "1" ] \
-      && pass "G16 /goal's two per-issue cost copies both track the fleet's 6 + IMPLEMENT_AGENT_BUDGET ($EXPECTED_COST at the default) — the projection as a literal, the accumulator derived from the relayed envelope — and both carry the contract marker" \
-      || fail "G16 /goal's cost copies drifted from the fleet constant (want the literal $EXPECTED_COST in the projection, a clampInt(cfg.implementBudget, 4, 96, $FLEET_BUDGET) derivation in the accumulator, 2 markers, found ${GOAL_MARKERS:-0} markers)"
+      && pass "G16 /goal's two per-issue cost copies both track the fleet's $FLEET_DESIGN_BASE + IMPLEMENT_AGENT_BUDGET ($EXPECTED_COST at the default) — the projection as a literal, the accumulator derived from the relayed envelope — and both carry the contract marker" \
+      || fail "G16 /goal's cost copies drifted from the fleet constant (want the literal $EXPECTED_COST in the projection, a $FLEET_DESIGN_BASE + clampInt(cfg.implementBudget, 4, 96, $FLEET_BUDGET) derivation in the accumulator, 2 markers, found ${GOAL_MARKERS:-0} markers; want the cost CHARGED on both the clean and the catch arm, found ${GOAL_CHARGE_SITES:-0} of 2 'agentsSpent += fleetCost' sites; want the unmeasured-spend cycle still named by a fleet_spend_unmeasured event)"
   fi
 fi
 
@@ -471,18 +612,109 @@ else
   pass "G26 verifyPrsPrompt() interpolates no agent-derived string (the relay discovers headRefName itself)"
 fi
 
+# G33 (#524 item 2) — ONE framing, two kinds. The plan reviewer's findings reach
+# their consumers through the SAME sanitizeFindings() + envWrap() carrier #507
+# installed; the only thing that varies is a SCRIPT-CHOSEN kind. All three
+# halves are asserted, because each alone is satisfiable by the bug this guards:
+#   - the kind is drawn from a CLOSED literal table, so no caller can invent a
+#     source tag — an open string parameter is a prompt-tag steering seam and a
+#     silent-typo seam at once;
+#   - each of the two source tags is BUILT in exactly one place, the #370 "one
+#     contract, N uncompared copies" shape that is how two envelopes drift into
+#     two subtly different framings of one operation;
+#   - every call site names a kind, so a rung cannot inherit whichever framing
+#     happens to be the default (the lensBrief() fallthrough class).
+FS_SPEC_TAG_HITS="$(grep -cF 'solve-fleet-spec-review-findings-issue-' "$WORKFLOW" || true)"
+FS_PLAN_TAG_HITS="$(grep -cF 'solve-fleet-plan-review-findings-issue-' "$WORKFLOW" || true)"
+# Whole-line comments are dropped first: this file explains its own carrier in
+# prose, and a PROSE mention of the function is not a call site. A trailing
+# comment that named it would still be counted, which is the safe direction —
+# a false FAIL, never a false PASS.
+FS_UNKINDED="$(grep -nE 'findingsSection\(' "$WORKFLOW" \
+  | grep -vE '^[0-9]+:[[:space:]]*//' \
+  | grep -vE '^[0-9]+:function findingsSection' \
+  | grep -vE '"(spec-review|plan-review)"' || true)"
+if ! grep -q '^function findingsSection(issue, items, kind) {' "$WORKFLOW"; then
+  fail "G33 findingsSection() takes no kind argument — a second review gate would have to hand-roll its own framing"
+elif ! grep -q '^const FINDINGS_KINDS = {' "$WORKFLOW"; then
+  fail "G33 the findings kinds are not a closed script-chosen table (FINDINGS_KINDS) — the source tag would be an open parameter"
+elif [ "${FS_SPEC_TAG_HITS:-0}" != "1" ] || [ "${FS_PLAN_TAG_HITS:-0}" != "1" ]; then
+  fail "G33 a findings source tag is built in more than one place (spec=${FS_SPEC_TAG_HITS:-0}, plan=${FS_PLAN_TAG_HITS:-0}, want exactly 1 each)"
+elif [ -n "$FS_UNKINDED" ]; then
+  fail "G33 a findingsSection() call site names no kind from the closed table: $FS_UNKINDED"
+else
+  pass "G33 findingsSection() is ONE carrier selected by a closed kind table, each source tag built exactly once, every call site kinded"
+fi
+
+# G34 (#524 item 3) — lensBrief() is TOTAL, and its vocabulary is JOINED to the
+# one the research fan-out iterates.
+#
+# The old form was `if codebase / if constraints / <bare return of the coverage
+# brief>`: adding a lens name without adding its brief silently handed the new
+# agent the test-coverage brief, and nothing anywhere failed. B277/B279 catch
+# that at the two names this change introduces; this row catches it for the NEXT
+# lens, which is the one no behavioural fixture has been written for yet.
+#
+# Three halves, because each alone is satisfiable by the bug:
+#   - the briefs live in a MAP, so an unlisted name has nowhere to fall through
+#     to (an if-chain always has a last branch);
+#   - the function THROWS on an unknown name rather than returning anything —
+#     including rather than returning "" or undefined, which would degrade to an
+#     agent asked to investigate through no lens at all;
+#   - every member of the live BASE_LENSES vocabulary, PLUS the risk-gated
+#     `security` lens, has an entry. Read out of the script rather than retyped:
+#     a retyped list is the #370 shape, and this row exists precisely because a
+#     vocabulary and its brief table are one contract in two places.
+LENS_VOCAB_RAW="$(sed -n 's/^const BASE_LENSES = \[\(.*\)\];$/\1/p' "$WORKFLOW" | tr -d '\r')"
+LENS_BRIEF_KEYS="$(sed -n '/^const LENS_BRIEFS = {/,/^};$/p' "$WORKFLOW" \
+  | sed -n 's/^  "\([A-Za-z0-9_-]*\)":.*/\1/p' | tr -d '\r')"
+LENS_FN_BODY="$(sed -n '/^function lensBrief(lens) {/,/^}$/p' "$WORKFLOW" | tr -d '\r')"
+G34_MISSING=""
+if [ -z "$LENS_VOCAB_RAW" ] || [ -z "$LENS_BRIEF_KEYS" ] || [ -z "$LENS_FN_BODY" ]; then
+  # Every arm below reads one of these three; an empty capture would make the
+  # whole row inspect nothing and pass (#347).
+  fail "G34 could not read BASE_LENSES / LENS_BRIEFS / lensBrief() out of the fleet script — the totality check would inspect nothing"
+else
+  # The required set: the base vocabulary as the script declares it, plus the
+  # conditional lens, which is NOT in BASE_LENSES precisely because it is gated.
+  LENS_REQUIRED="$(printf '%s\n' "$LENS_VOCAB_RAW" | tr -d '" ' | tr ',' '\n'; printf 'security\n')"
+  while IFS= read -r lens; do
+    [ -n "$lens" ] || continue
+    grep -qxF -- "$lens" <<<"$LENS_BRIEF_KEYS" || G34_MISSING="$G34_MISSING $lens"
+  done <<<"$LENS_REQUIRED"
+  LENS_FN_RETURNS="$(grep -cE '^[[:space:]]*return ' <<<"$LENS_FN_BODY")"
+  if ! grep -q 'throw new Error("no research brief for lens: "' <<<"$LENS_FN_BODY"; then
+    fail "G34 lensBrief() does not throw on an unknown lens — an unlisted name would degrade silently instead of failing the issue's chain"
+  elif [ "$LENS_FN_RETURNS" != "1" ]; then
+    # EXACTLY one, not "at least one that reads the table": a second return is
+    # the bare fallthrough itself, and it would sit happily beside a correct one.
+    fail "G34 lensBrief() has $LENS_FN_RETURNS return statements, want exactly 1 — a second one is the bare fallthrough this row forbids"
+  elif ! grep -q 'return LENS_BRIEFS\[lens\];' <<<"$LENS_FN_BODY"; then
+    fail "G34 lensBrief()'s single return does not read the brief table — the briefs would not be the one source"
+  elif [ -n "$G34_MISSING" ]; then
+    fail "G34 a live lens has no entry in LENS_BRIEFS:$G34_MISSING"
+  else
+    pass "G34 lensBrief() is total: briefs live in one map, an unknown name throws, and every live lens (BASE_LENSES + security) has an entry"
+  fi
+fi
+
 # G18 — CB1 accounting must move WITH the agent. The proof relay is a real
 # dispatch; a ceiling that does not count it under-projects by one on every run
 # and the "abort before dispatch" guarantee stops being exact. Both doc copies
 # of the formula move too, or the next reader trusts the stale one.
+#
+# The design base in the doc needle is BUILT from FLEET_DESIGN_BASE (G31) rather
+# than retyped: this row is the third copy of that number and the one furthest
+# from the script. An empty extraction builds a needle that cannot match, so the
+# vacuity failure lands here as a FAIL — never as a silent match.
 RFC0015="$REPO_ROOT/docs/rfc/0015-workflow-native-dispatch.md"
 if [ ! -r "$RFC0015" ]; then
   # Never let a missing file read as "the stale formula is absent" — that is a
   # vacuous green, and this repo has shipped one before.
   fail "G18 cannot read $RFC0015 — the doc half of the assertion is unevaluable"
 elif grep -q 'const projected = 2 + intakeIssues.length' "$WORKFLOW" \
-  && grep -q '2 + issues + (6 + implementBudget' "$SKILL" \
-  && grep -q '2 + issues + (6 + implementBudget' "$RFC0015" \
+  && grep -q "2 + issues + ($FLEET_DESIGN_BASE + implementBudget" "$SKILL" \
+  && grep -q "2 + issues + ($FLEET_DESIGN_BASE + implementBudget" "$RFC0015" \
   && ! grep -q '1 + issues + 6' "$SKILL" \
   && ! grep -q '1 + issues + 6' "$RFC0015"; then
   # The per-design-tier term is #508's per-task chain, not the flat 6 this row
@@ -493,7 +725,7 @@ elif grep -q 'const projected = 2 + intakeIssues.length' "$WORKFLOW" \
   # silently reverted.
   pass "G18 the CB1 projection counts both batched relays and the per-task implement chain, in code and in both docs"
 else
-  fail "G18 the CB1 projection or one of its doc copies drifted (want '2 + issues + (6 + implementBudget - 1) x design-tier')"
+  fail "G18 the CB1 projection or one of its doc copies drifted (want '2 + issues + (${FLEET_DESIGN_BASE:-<unreadable>} + implementBudget - 1) x design-tier')"
 fi
 
 # G7b (#516) — the fleet's own baseline must not be attributed to a file this repo
@@ -584,6 +816,357 @@ else
   fail "G20 rung one is not dispatched against the stricter task-1-only schema (or S_TASK1 stopped requiring taskCount)"
 fi
 
+# G37 (#532) — the escalation channel has to EXIST on the wire, and it has to be
+# unconstrained there. Both halves are STRUCTURAL because no behavioural row can
+# reach them: the harness clones a canned return straight through and never
+# enforces `additionalProperties: false`, so every B row for the ratchet would
+# stay green against an S.solve that declares neither property — and a real
+# solver's return would then be refused outright.
+#
+# The second half is the deliberate design choice, pinned so a later "tighten the
+# schema" edit has to argue with it: an enum here turns an illegal ADVISORY value
+# into a rejected StructuredOutput, i.e. a lost delivery record for an issue that
+# was otherwise solved. The closed check belongs in the script, where refusing
+# costs an audit row instead of a PR number.
+SOLVE_SCHEMA_BLOCK="$(sed -n '/^  solve: {/,/^  },/p' "$WORKFLOW")"
+if [ -z "$SOLVE_SCHEMA_BLOCK" ]; then
+  fail "G37 could not locate the S.solve schema in workflow.js — the escalation-channel assertion cannot be evaluated"
+elif grep -qE '^[[:space:]]*escalatedTier: \{ type: "string"' <<<"$SOLVE_SCHEMA_BLOCK" \
+  && grep -qE '^[[:space:]]*escalationReason: \{ type: "string"' <<<"$SOLVE_SCHEMA_BLOCK" \
+  && ! grep -qE '^[[:space:]]*escalatedTier: \{[^}]*enum' <<<"$SOLVE_SCHEMA_BLOCK"; then
+  pass "G37 S.solve carries the mid-run escalation channel, and escalatedTier is deliberately NOT enum-constrained on the wire"
+else
+  fail "G37 S.solve is missing escalatedTier/escalationReason, or escalatedTier grew a wire-side enum (an illegal advisory value would cost the whole delivery record)"
+fi
+
+# G39 (#532) — the channel needs a PRODUCER on every path that calls
+# applyEscalation(), not just a schema. Both rungs that can report an escalation
+# must ASK for it in the prompt they render, because an agent returns what it was
+# told to return.
+#
+# This is structural because no behavioural row can reach it: every fixture in
+# this file injects escalatedTier into a CANNED return, so the whole ratchet
+# stays green against a prompt that never mentions the field — which is exactly
+# what shipped. `deliverPrompt` is the design-tier (medium/large) rung, and it
+# asked for neither field while applyEscalation() ran on its return and the
+# comment beside that call said "the delivery rung speaks for the whole chain".
+# The result was a ratchet that worked on trivial/small and was inert on the two
+# tiers where a mis-triage costs the most, reported as `tierEscalations: 0` —
+# indistinguishable from "nobody found one".
+SOLVE_PROMPT_FN="$(sed -n '/^function solvePrompt(/,/^}/p' "$WORKFLOW")"
+DELIVER_PROMPT_FN="$(sed -n '/^function deliverPrompt(/,/^}/p' "$WORKFLOW")"
+if [ -z "$SOLVE_PROMPT_FN" ] || [ -z "$DELIVER_PROMPT_FN" ]; then
+  fail "G39 could not locate solvePrompt()/deliverPrompt() in workflow.js — the producer assertion cannot be evaluated"
+elif grep -q 'escalatedTier' <<<"$SOLVE_PROMPT_FN"   && grep -q 'escalationReason' <<<"$SOLVE_PROMPT_FN"   && grep -q 'escalatedTier' <<<"$DELIVER_PROMPT_FN"   && grep -q 'escalationReason' <<<"$DELIVER_PROMPT_FN"; then
+  pass "G39 both rungs that call applyEscalation() ask their agent for escalatedTier and escalationReason"
+else
+  fail "G39 a rung that calls applyEscalation() never asks for the fields (solvePrompt and deliverPrompt must BOTH request escalatedTier + escalationReason, or the ratchet is inert on that path and reports 0 escalations)"
+fi
+
+# G38 (#532) — ONE ordered spelling of the tier vocabulary in this file. The
+# ratchet needs an ORDER to compare against, and the obvious way to get one is a
+# second array beside the existing membership map — which is the uncompared-copies
+# shape (#370) the moment a tier is added to one and not the other. The map must
+# be DERIVED from the ordered list, never written out again.
+if grep -qE '^const TIER_ORDER = \[' "$WORKFLOW" \
+  && grep -q 'TIER_ORDER.reduce(' "$WORKFLOW" \
+  && ! grep -qE '^const TIERS = \{' "$WORKFLOW"; then
+  pass "G38 the tier vocabulary is spelled ONCE as TIER_ORDER, with TIERS derived from it"
+else
+  fail "G38 workflow.js carries a second hand-written copy of the tier vocabulary (or lost the ordered one)"
+fi
+
+# G40 (#532) — the rejection vocabulary is spelled TWICE: the frozen map in
+# workflow.js and the documented list in SKILL.md. Two uncompared copies of one
+# contract is the #370 shape, and the failure is quiet — a verdict the script can
+# emit and the doc never names is a value an operator cannot look up. So join
+# them in BOTH directions, the way docs-accuracy T16 joins the reviewVerdict
+# union, with an anti-vacuity floor first: a silent zero-member extraction on
+# either side would make both comparisons pass while comparing nothing.
+#
+# The doc side reads a BULLET LIST rather than an inline union, so a re-wrap of
+# the prose cannot empty the extraction — each member is the first backtick token
+# of its own list item.
+ESC_JS_VERDICTS="$(sed -n '/^const ESCALATION_REJECTIONS = Object.freeze({/,/^});/p' "$WORKFLOW" \
+  | grep -oE '"[a-z][a-z-]*"' | tr -d '"' | sort -u)"
+ESC_DOC_VERDICTS="$(sed -n '/^## Mid-run tier escalation/,/^## /p' "$SKILL" \
+  | grep -oE '^- `[a-z][a-z-]*`' | tr -d '`' | sed 's/^- //' | sort -u)"
+esc_count() { local _n=0 _l; while IFS= read -r _l; do [ -n "$_l" ] && _n=$((_n + 1)); done <<<"$1"; printf '%s' "$_n"; }
+esc_absent() {
+  local _out="" _m
+  while IFS= read -r _m; do
+    [ -n "$_m" ] || continue
+    grep -qxF -- "$_m" <<<"$2" || _out="$_out $_m"
+  done <<<"$1"
+  printf '%s' "$_out"
+}
+ESC_JS_N="$(esc_count "$ESC_JS_VERDICTS")"
+ESC_DOC_N="$(esc_count "$ESC_DOC_VERDICTS")"
+if [ "$ESC_JS_N" -ge 3 ] && [ "$ESC_DOC_N" -ge 3 ]; then
+  pass "G40.1 both rejection-verdict lists extracted (workflow.js: $ESC_JS_N, SKILL.md: $ESC_DOC_N)"
+else
+  fail "G40.1 setup error: the rejection union did not extract from both sides (workflow.js: $ESC_JS_N, SKILL.md: $ESC_DOC_N — both expected >= 3)"
+fi
+ESC_MISSING="$(esc_absent "$ESC_DOC_VERDICTS" "$ESC_JS_VERDICTS")"
+ESC_EXTRA="$(esc_absent "$ESC_JS_VERDICTS" "$ESC_DOC_VERDICTS")"
+if [ -z "$ESC_MISSING" ] && [ -z "$ESC_EXTRA" ]; then
+  pass "G40.2 SKILL.md and workflow.js agree on the closed rejection vocabulary, both directions"
+else
+  fail "G40.2 the rejection vocabulary has drifted — documented but never emitted:$ESC_MISSING | emitted but never documented:$ESC_EXTRA"
+fi
+
+# G40.3 — the two audit event names are the operator's only handle on a
+# recorded-or-refused escalation, so both must be greppable in the doc too. An
+# event the script emits and the doc never names is an event nobody looks for.
+if grep -Fq 'tier_escalated' "$SKILL" && grep -Fq 'tier_escalation_rejected' "$SKILL" \
+  && grep -Fq 'tierEscalations' "$SKILL"; then
+  pass "G40.3 SKILL.md names both escalation audit events and the accepted-escalation counter"
+else
+  fail "G40.3 SKILL.md omits an escalation audit event or the tierEscalations counter"
+fi
+
+# G40.4 — the two per-record fields and the counter have to be declared where an
+# operator actually reads the record shape: the Return value fence. MEASURED as a
+# real hole before this row existed — deleting `escalatedTier, escalationReason`
+# from that fence reds nothing else in this file, in docs-accuracy, or in the
+# schema guard, because T16's joins cover the per-task record, the reviewVerdict
+# union and partialDelivery, and none of them reach the results member list.
+# Anti-vacuity first: an empty extraction would make the greps below meaningless.
+SF_RETURN_FENCE="$(awk '/^## Return value/{seen=1; next} seen && /^```/{n++; next} seen && n==1' "$SKILL")"
+if [ -z "$SF_RETURN_FENCE" ]; then
+  fail "G40.4 setup error: could not extract the Return value fence from SKILL.md"
+elif grep -q 'escalatedTier' <<<"$SF_RETURN_FENCE" \
+  && grep -q 'escalationReason' <<<"$SF_RETURN_FENCE" \
+  && grep -q 'tierEscalations' <<<"$SF_RETURN_FENCE"; then
+  pass "G40.4 the Return value fence declares both per-record escalation fields and the top-level counter"
+else
+  fail "G40.4 SKILL.md's Return value fence omits escalatedTier / escalationReason / tierEscalations — the documented record shape has drifted from the one the script publishes"
+fi
+
+# G35 (#563) — the RECOVERY ARM inside main()'s outer catch, pinned structurally
+# because it cannot be pinned behaviourally: nothing the harness exposes can make
+# classifyClaimCoherence() throw, so the inner `catch (e2)` that keeps a failing
+# classification from losing the run's results has no reachable lever. Rows
+# B301-B310 cover everything around it — that the pass is audited as never having
+# run, and that every live claim comes out UNVERIFIED and retained — so this row
+# is the missing half of that pair, not a duplicate of it. Do not "simplify" the
+# two down to this grep alone, and do not relax it into a repo-wide grep for
+# markAllClaimsUnverified: five call sites inside verifyClaims() already satisfy
+# that, which is exactly the vacuous shape this file keeps filing issues about.
+# Scoped to main() for the same reason, via the G22/G26 extraction pattern.
+MAIN_BLOCK="$(sed -n '/^async function main() {/,/^}/p' "$WORKFLOW")"
+if [ -z "$MAIN_BLOCK" ]; then
+  fail "G35 could not locate main() in workflow.js — the assertion cannot be evaluated"
+elif grep -Fq '!prVerifyRan' <<<"$MAIN_BLOCK" \
+  && grep -Fq 'pr_proof_not_run' <<<"$MAIN_BLOCK" \
+  && grep -Fq 'classifyClaimCoherence();' <<<"$MAIN_BLOCK" \
+  && grep -Fq 'markAllClaimsUnverified();' <<<"$MAIN_BLOCK" \
+  && grep -Fq 'pr_proof_not_run_recovery_failed' <<<"$MAIN_BLOCK"; then
+  pass "G35 main()'s outer catch runs the never-ran recovery — guarded on !prVerifyRan (the classifier is not idempotent), audited as pr_proof_not_run, classifying then marking every live claim, with its own failure audited rather than swallowed"
+else
+  fail "G35 main()'s outer catch is missing part of the never-ran recovery (want the !prVerifyRan guard, the pr_proof_not_run row, classifyClaimCoherence() + markAllClaimsUnverified(), and the pr_proof_not_run_recovery_failed arm)"
+fi
+
+# G36 (#563) — the never-ran arm needs VOCABULARY, not just behaviour. G35 pins
+# that the script emits `pr_proof_not_run`; this row pins that all three contract
+# surfaces name it, because the COUNTS CANNOT CARRY THE FACT. A run that threw
+# before the pass ran publishes `probed: 0` and `confirmed: 0` — exactly what a
+# batch with no PR claim to prove publishes — and on the zero-claim arm (B308-
+# B310) every count matches, so the audit row is the only discriminator there
+# is. That is the same "two facts separated only by the audit trail" shape
+# SKILL.md already uses for a null relayRc. Both command files gate the reporter
+# on `disproven` or `unverified` being non-zero, so an operator who is never
+# told to read auditEvents hears silence on the one path where the published PR
+# set is entirely unproven self-report.
+#
+# Three surfaces in ONE row, not three: documenting the arm in SKILL.md while
+# either command file keeps reporting from counts alone leaves the operator
+# exactly as blind, so a partial fix must not be able to go green. Same
+# both-ends-or-neither shape as G19 directly above.
+if grep -q 'pr_proof_not_run' "$SKILL" \
+  && grep -q 'pr_proof_not_run' "$SOLVE_CMD" \
+  && grep -q 'pr_proof_not_run' "$TURBO_CMD"; then
+  pass "G36 the never-ran arm is named on all three contract surfaces — SKILL.md's cannot-speak enumeration and both command files' reporter"
+else
+  fail "G36 pr_proof_not_run is missing from at least one of SKILL.md / commands/solve.md / commands/turbo.md — a thrown run's zero counts read as 'nothing to prove' to whichever surface omits it"
+fi
+
+# G40-G46 (#565) — one field, one meaning, on every surface that ships a
+# statement about it.
+#
+# `verification.relayRc` is published from several distinct exits, and `null`
+# is not one fact. SKILL.md's field table gave `null` an exhaustive two-case
+# meaning; the script's own declaration comment gave it two DIFFERENT cases;
+# and this suite asserted, ACROSS to the doc, that those were the only two.
+# Three shipped statements about one field, no two of them agreeing, and
+# nothing in the tree comparing them — which is why the disagreement survived
+# a review that read each surface on its own.
+#
+# Each surface therefore gets an anti-vacuity guard FIRST and its content rows
+# second. That order is the whole design: a `-F` needle over an empty capture
+# is a green that measures nothing, and an extraction anchored on a symbol that
+# has since been renamed fails OPEN by default.
+#
+# `tr -d '\r'` on every capture: the Windows job checks out with
+# `core.autocrlf=true` and grep cannot see a CR, so an untrimmed capture makes
+# every needle below miss for a reason no failure message would name.
+
+# --- the doc surface -------------------------------------------------------
+CV_SECTION="$(sed -n '/^## Claim verification/,/^## No-Workflow fallback/p' "$SKILL" | tr -d '\r')"
+CV_SECTION_LINES="$(grep -c '' <<<"$CV_SECTION" || true)"
+CV_SECTION_LAST="$(tail -n 1 <<<"$CV_SECTION")"
+
+# G40 — anti-vacuity, and it MUST run before G41/G42. The last-line check is
+# the half that carries the weight: a `sed` range whose closing anchor never
+# matches runs to EOF, and a bare non-empty guard passes on that runaway slice
+# while silently widening what G41 is allowed to match.
+if [ -z "$CV_SECTION" ]; then
+  fail "G40 the '## Claim verification' slice of SKILL.md came back empty — G41/G42 would be vacuous"
+elif [ "$CV_SECTION_LINES" -lt 15 ]; then
+  fail "G40 the claim-verification slice is only $CV_SECTION_LINES line(s) — too short to be the real section"
+elif [ "$CV_SECTION_LAST" != "## No-Workflow fallback" ]; then
+  fail "G40 the claim-verification slice ran past its closing anchor (last line: '$CV_SECTION_LAST') — G41 would be reading other sections"
+else
+  pass "G40 the claim-verification slice is the real section and stops on its own anchor (G41/G42 have something to read)"
+fi
+
+# G41 — the doc names every event that discriminates a null relayRc. Without
+# them `null` is unfalsifiable prose: a reader holding one has no way to tell
+# WHICH exit produced it, which is the defect this block exists to ratchet.
+CV_MISSING=""
+for cv_ev in pr_proof_skipped pr_proof_null pr_proof_relay_failed pr_proof_threw pr_proof_not_run; do
+  grep -qF -- "$cv_ev" <<<"$CV_SECTION" || CV_MISSING="$CV_MISSING $cv_ev"
+done
+if [ -z "$CV_MISSING" ]; then
+  pass "G41 SKILL.md's claim-verification section names all five events that discriminate a null relayRc"
+else
+  fail "G41 SKILL.md's claim-verification section names no discriminator for:$CV_MISSING"
+fi
+
+# G42 — the ratchet on the doc's retired sentence. It gave `null` an
+# EXHAUSTIVE two-case meaning, and both halves were wrong: there are more exits
+# than two, and one of the two it named — a non-zero rc — does not publish
+# `null` at all when the rc is an integer (B301b).
+if grep -qF -- 'both when no relay was dispatched' <<<"$CV_SECTION"; then
+  fail "G42 SKILL.md still gives relayRc null an exhaustive two-case meaning (the code has more exits — see B300b/B301b/B302)"
+else
+  pass "G42 SKILL.md no longer claims relayRc null means exactly two things"
+fi
+
+# G42b — the doc half of G45, and the reason the doc needs its own content row
+# at all: G41 asks only that the five names appear SOMEWHERE in the slice and
+# G42 asks only that the retired sentence be gone, so DELETING both asymmetry
+# bullets outright leaves G40, G41 and G42 all green. The three wordings below
+# are load-bearing, not decoration, and each was measured ABSENT from the
+# pre-fix section (`git show <base>:…/SKILL.md`), so none of them can be
+# satisfied by the prose this section replaced:
+#   `an integer one`     — the arm where relayRc is NOT null even though
+#                          pr_proof_relay_failed fired (B301b).
+#   `probed: 0`          — the whole signature of the one exit that emits no
+#                          pr_proof row at all (B302/B302b).
+#   `no usable integer`  — the OTHER arm of pr_proof_relay_failed. The event
+#                          fires on `prRelayRc !== 0`, and prRelayRc is null
+#                          whenever the relay's rc was not an integer (B217),
+#                          so a gloss reading only "a non-zero rc" excludes the
+#                          very exit B217 pins and re-opens this issue.
+CV_ASYM_MISSING=""
+for cv_needle in 'an integer one' 'probed: 0' 'no usable integer'; do
+  grep -qF -- "$cv_needle" <<<"$CV_SECTION" || CV_ASYM_MISSING="$CV_ASYM_MISSING [$cv_needle]"
+done
+if [ -z "$CV_ASYM_MISSING" ]; then
+  pass "G42b SKILL.md carries both asymmetries AND both firing arms of pr_proof_relay_failed (load-bearing wordings, each absent from the pre-fix section)"
+else
+  fail "G42b SKILL.md lost load-bearing claim-verification wording:$CV_ASYM_MISSING (see B217, B301b and B302/B302b)"
+fi
+
+# --- the script surface ----------------------------------------------------
+# The comment shipped beside the declaration is a shipped statement too, and it
+# is the surface this defect was BORN on: an earlier fix added a comment that
+# no row read, so it was free to contradict the doc. `awk` accumulates the
+# contiguous column-0 `//` run and prints it only once the declaration is
+# reached, so the capture can never bleed into the neighbouring prProbed /
+# prVerifyRan comments the way a `grep -B <n>` window would.
+PRRELAY_COMMENT="$(awk '/^\/\// { buf = buf $0 "\n"; next }
+                        /let prRelayRc = null;/ { printf "%s", buf; exit }
+                        { buf = "" }' "$WORKFLOW" | tr -d '\r')"
+PRRELAY_COMMENT_LINES="$(grep -c '^//' <<<"$PRRELAY_COMMENT" || true)"
+
+# G43 — anti-vacuity for the script half, symmetrical with G40. Rename
+# `prRelayRc` and the awk range matches nothing; G44 and G45 would then both
+# pass on an empty capture, because an absent comment trivially "no longer
+# says TWO facts" and trivially carries no stale wording.
+if [ -z "$PRRELAY_COMMENT" ]; then
+  fail "G43 no comment block was captured above the prRelayRc declaration — G44/G45 would be vacuous"
+elif [ "$PRRELAY_COMMENT_LINES" -lt 6 ]; then
+  fail "G43 only $PRRELAY_COMMENT_LINES comment line(s) above the prRelayRc declaration — too short to state the contract G44/G45 check"
+else
+  pass "G43 the prRelayRc declaration carries a captured comment block (G44/G45 have something to read)"
+fi
+
+# G44 — the script comment names the SAME five discriminators the doc names,
+# and has dropped the counting framing that made the two surfaces disagree.
+# Enumerating the cases is what went stale; naming the events does not.
+PRRELAY_MISSING=""
+for pr_ev in pr_proof_skipped pr_proof_null pr_proof_relay_failed pr_proof_threw pr_proof_not_run; do
+  grep -qF -- "$pr_ev" <<<"$PRRELAY_COMMENT" || PRRELAY_MISSING="$PRRELAY_MISSING $pr_ev"
+done
+if grep -qF -- 'TWO facts' <<<"$PRRELAY_COMMENT"; then
+  fail "G44 the prRelayRc comment still counts the null cases as exactly two — that is the claim the doc no longer makes"
+elif [ -n "$PRRELAY_MISSING" ]; then
+  fail "G44 the prRelayRc comment names no discriminator for:$PRRELAY_MISSING"
+else
+  pass "G44 the prRelayRc comment names the same five discriminators as SKILL.md and no longer counts the cases"
+fi
+
+# G45 — the script mirror of G42b: the same three facts a reader gets WRONG
+# from a comment that only lists exits. Every needle here is chosen so the
+# NEGATION of the fact cannot satisfy it, and every one was measured ABSENT
+# from the pre-fix comment — a needle the stale text already hits is not a
+# ratchet, it is a green that measures nothing:
+#   `an integer rc included`  — bare `integer rc` matched the retired comment's
+#                               own "returned a non-integer rc", i.e. it was
+#                               satisfied by the negation of the fact it pins.
+#   `deliberately silent`     — bare `silent` is equally satisfied by a comment
+#                               reading "not silent".
+#   `no usable integer rc`    — the second firing arm of pr_proof_relay_failed
+#                               (B217); see G42b for why it is load-bearing.
+PRRELAY_ASYM_MISSING=""
+for pr_needle in 'an integer rc included' 'deliberately silent' 'no usable integer rc'; do
+  grep -qF -- "$pr_needle" <<<"$PRRELAY_COMMENT" || PRRELAY_ASYM_MISSING="$PRRELAY_ASYM_MISSING [$pr_needle]"
+done
+if [ -z "$PRRELAY_ASYM_MISSING" ]; then
+  pass "G45 the prRelayRc comment carries both asymmetries AND both firing arms of pr_proof_relay_failed (load-bearing wordings, each absent from the pre-fix comment)"
+else
+  fail "G45 the prRelayRc comment lost load-bearing wording:$PRRELAY_ASYM_MISSING (see B217, B301b and B302/B302b)"
+fi
+
+# --- the test surface ------------------------------------------------------
+# G46 — this suite shipped the claim too, twice, and both copies asserted
+# ACROSS to SKILL.md. Fixing the doc alone would leave the repo's own
+# regression suite stating the thing the doc had just stopped saying.
+#
+# The needles are assembled from adjacent quoted fragments on purpose. Written
+# contiguously, each one matches ITSELF in this file and the row could never go
+# green — the same self-trip class as a secret-shaped fixture literal aborting
+# the pre-push scan.
+FLEET_TEST="$REPO_ROOT/tests/solve-fleet-workflow.test.sh"
+RETIRED_1="both publish ""relayRc null"
+RETIRED_2="Both publish ""verification.relayRc null"
+RETIRED_3="field table now ""says so in as many words"
+if [ ! -r "$FLEET_TEST" ]; then
+  fail "G46 cannot read $FLEET_TEST — the ratchet has nothing to scan"
+else
+  G46_HITS=""
+  for retired in "$RETIRED_1" "$RETIRED_2" "$RETIRED_3"; do
+    if grep -qF -- "$retired" "$FLEET_TEST"; then G46_HITS="$G46_HITS [$retired]"; fi
+  done
+  if [ -z "$G46_HITS" ]; then
+    pass "G46 no copy of the retired cross-file relayRc framing survives in this suite"
+  else
+    fail "G46 this suite still carries retired cross-file framing:$G46_HITS"
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # B — T3 behavioral fixtures
 # ---------------------------------------------------------------------------
@@ -609,6 +1192,18 @@ const src = fs.readFileSync(process.argv[3], "utf8");
 const meta = h.extractMeta(src).meta;
 const RD = "/r/.uberdev/run/RID";
 
+// readInt — the fixture's own reading of a scalar out of the fleet script, used
+// by Run S so its CB1 projection derives from the script instead of retyping
+// its constants. A non-match THROWS by name: a silent NaN would make the
+// projection meaningless and B62/B63 would then pin nothing. This is the second
+// of two independent extraction paths over the same constants (the shell's
+// `sed` beside S22b/G31 is the first); G32 compares them.
+function readInt(re, what) {
+  const m = re.exec(src);
+  if (!m) throw new Error("could not read " + what + " out of the fleet script");
+  return parseInt(m[1], 10);
+}
+
 function buildArgs(extra, cfgExtra) {
   const cfg = Object.assign({
     runId: "RID", runDirAbs: RD, pluginRootAbs: "/p", repoRootAbs: "/r",
@@ -621,8 +1216,15 @@ function buildArgs(extra, cfgExtra) {
     plugin_root: "/p", repo_root: "/r", cwd: "/r", pipeline: "solve-fleet", config: cfg }, extra || {});
 }
 function intake(issues) { return { rc: 0, issues: issues }; }
-function rec(issue, tier) {
-  return { issue: issue, tier: tier, promptFile: RD + "/solve-prompt-" + issue + ".txt" };
+// `extra` (#524 item 3) is OPTIONAL and merged in, so the ~30 existing two-arg
+// call sites keep producing the canonical record byte for byte. The security
+// lens is gated on a manifest field, and a field this fixture could not OMIT
+// would make the back-compat arm (an unpatched launcher relaying no
+// `riskSignals` at all) untestable — absence is one of the three states.
+function rec(issue, tier, extra) {
+  const r = { issue: issue, tier: tier, promptFile: RD + "/solve-prompt-" + issue + ".txt" };
+  if (extra) Object.keys(extra).forEach(function (k) { r[k] = extra[k]; });
+  return r;
 }
 function solved(issue, pr) {
   return { issue: issue, status: "PR_OPENED", branch: "fix/" + issue + "-x", prNumber: pr,
@@ -708,8 +1310,13 @@ function ladderReturns(sentinel) {
   for (let i = 1; i <= 3; i++) o["fix:#11:t1:r" + i] = task(1);
   return o;
 }
-function runOpen(args, fixture) {
-  const pre = h.preprocess(src);
+// `source` defaults to the real script and is overridden by exactly one caller:
+// the B278 bogus-lens mutant, which has to make the LENS VOCABULARY wrong to
+// observe where the resulting throw lands. Threaded as an argument rather than
+// copied into a second runner, so the mutant run goes through the same
+// preprocessing, the same sandbox and the same meta as every other row.
+function runOpen(args, fixture, source) {
+  const pre = h.preprocess(source || src);
   const record = h.makeRecord();
   const sb = h.makeSandbox(Object.assign({ args }, fixture), meta, record).sandbox;
   const pending = vm.runInNewContext(pre.wrapped, sb, { filename: "solve-fleet", timeout: 8000 });
@@ -719,6 +1326,10 @@ function runOpen(args, fixture) {
 }
 function run(args, fixture) {
   const open = runOpen(args, fixture);
+  return open.done.then(function () { return open.record; });
+}
+function runSource(source, args, fixture) {
+  const open = runOpen(args, fixture, source);
   return open.done.then(function () { return open.record; });
 }
 function resultOf(record) {
@@ -740,6 +1351,27 @@ function probedNums(record) {
 (async function () {
   const out = {};
 
+  // ------------------------------------------------------------------- #554
+  // LINKAGE vs COMPLETENESS. Every #554 row reads the RENDERED delivery prompt,
+  // never the script source. A source grep sees `Closes #` in the file and
+  // cannot tell "mandatory on both arms" from "mandatory on the complete arm
+  // only" — that blindness is why a chain which stopped at task 2 of 5 shipped
+  // a PR body asserting completeness and auto-closing the issue on merge.
+  //
+  // The `< 0` half is load-bearing: it forces the prohibition sentence to be
+  // written WITHOUT interpolating the closing form. A sentence reading "must
+  // not contain `Closes #11`" would satisfy a naive presence check and rebuild
+  // the exact vacuity this row exists to close.
+  const deliverTextOf = function (record) {
+    const c = record.agentCalls.find(function (x) { return x.label === "deliver:#11"; });
+    return c ? c.prompt : "";
+  };
+  const partialLinkOk = function (t) {
+    return t.indexOf("Closes #11") < 0             // the closing token is absent outright
+      && t.indexOf("UberDev-Partial: #11") >= 0    // the non-closing linkage is mandated
+      && t.indexOf("STOPPED EARLY") >= 0;          // anti-vacuity: this really IS the partial arm
+  };
+
   // Run A — trivial/small tiers: solver only, NO research/design agents.
   const recA = await run(buildArgs(), { agentReturns: trivialReturns() });
   const resA = resultOf(recA);
@@ -755,6 +1387,13 @@ function probedNums(record) {
   // the intake relay pins haiku; every solver inherits (model null)
   const intakeCall = recA.agentCalls.find(function (c) { return c.label === "manifest-intake"; });
   out.aIntakeHaiku = !!(intakeCall && intakeCall.model === "haiku");
+  // ...and so does the SECOND mechanical relay, the #515 PR-existence proof.
+  // G23 only counts the haiku sites, so a pin MIGRATING off this relay onto a
+  // reviewer keeps the count at 2 and sails past it (G2b cannot see it either —
+  // it only forbids the flagship names). This names the dispatch that must
+  // carry the pin, so the two-relay policy is checked per site, not in bulk.
+  const proofCall = recA.agentCalls.find(function (c) { return c.label === "verify-prs"; });
+  out.aProofHaiku = !!(proofCall && proofCall.model === "haiku");
   out.aSolversInherit = recA.agentCalls.filter(function (c) { return /^solve:#/.test(c.label || ""); })
     .every(function (c) { return c.model === null; });
 
@@ -787,6 +1426,30 @@ function probedNums(record) {
     && implRules.indexOf("leaf agent with no ability to dispatch subagents") >= 0
     && implRules.indexOf("UNTRUSTED INPUT") >= 0
     && implRules.indexOf("never fall back to the repository root") >= 0;
+  // #557 — the never-work-outside-the-shared-checkout clause has THREE call
+  // sites: the task-1 implementer (read back by B65 above), the LATER-task
+  // implementer, and the fix agent. Only task 1's was ever read off a rendered
+  // prompt, so deleting the clause from either of the other two left this whole
+  // suite green — the same invisible-deletion class as the missing fixer
+  // workspace gate this issue was filed for, one rung over. Chain agents run
+  // with NO runtime worktree isolation, so an agent that never entered the
+  // shared checkout writes in the caller's own repository root, and the JS gate
+  // (B204/B205) only refuses the return AFTER those bytes are written: the
+  // prompt clause is the half that stops them being written at all.
+  //
+  // Read from the RENDERED prompt, never the source: a grep cannot see through
+  // the shared existingCheckoutGate() builder, which is exactly how the fix
+  // rung's copy went missing. `/r` is buildArgs' repoRootAbs — the prohibition
+  // has to NAME the checkout it is protecting, or it forbids nothing concrete.
+  const implB2 = recB.agentCalls.find(function (c) { return c.label === "impl:#11:t2"; });
+  const laterRules = implB2 ? implB2.prompt : "";
+  out.bLaterTaskCheckoutGate = laterRules.indexOf('Never edit anything under "/r" directly') >= 0
+    && laterRules.indexOf("If the shared checkout is not there, report BLOCKED") >= 0
+    && laterRules.indexOf("never fall back to the repository root") >= 0;
+  out.bLaterTaskWorkspaceAsked =
+    laterRules.indexOf("`workspaceReady: true` only after that `cd` succeeded") >= 0
+    && laterRules.indexOf('workspaceReady (true only if you are working inside "'
+      + RD + '/worktrees/issue-11"') >= 0;
   const deliverB = recB.agentCalls.find(function (c) { return c.label === "deliver:#11"; });
   const deliverText = deliverB ? deliverB.prompt : "";
   out.bDeliverRules = deliverText.indexOf("Closes #11") >= 0
@@ -794,6 +1457,15 @@ function probedNums(record) {
     && deliverText.indexOf("do NOT chain into a review command") >= 0
     && deliverText.indexOf("Do NOT bump the project version") >= 0
     && deliverText.indexOf(RD + "/worktrees/issue-11") >= 0;
+  // #554 — B66 above only means "the COMPLETE arm still carries the closing
+  // link" if this fixture really is a complete chain; without this row it would
+  // stay green against a ledger that wrongly reported the run partial.
+  const b11 = resB ? resB.results.filter(function (r) { return r.issue === 11; })[0] : null;
+  out.bChainComplete = b11 ? b11.chainComplete : null;
+  // The commit-message guard belongs to the partial arm ALONE: a chain that
+  // finished every task has nothing to reword, and telling it to inspect its
+  // own history would be noise the complete path never earned.
+  out.bNoCommitGuard = deliverText.indexOf("git log --format=%B") < 0;
 
   // #516 — the constraints lens must DISCOVER which rule documents exist rather
   // than assert a fixed path list. Read from the RENDERED prompt, not the source:
@@ -1032,6 +1704,443 @@ function probedNums(record) {
   out.o2OnlyUsable = promptO2.indexOf("(1) FINDING-DELTA") >= 0;
   out.o2Count = !!(resO2 && resO2.auditEvents.some(function (e) {
     return e.event === "spec_findings_threaded" && e.count === 1; }));
+
+  // ------------------------------------------------------------------
+  // #524 item 1 — the BOUNDED spec-revision round. Before this the fleet had no
+  // REJECT fixture at the spec gate AT ALL: a non-APPROVE verdict produced a
+  // downgraded note and a list of what was wrong, and nothing ever corrected the
+  // spec. Runs SR* establish that gate, parameterised on the verdict and on what
+  // the reviser returns, so every row below reuses ONE shape.
+  //
+  // The reviser writes a SIBLING file, never over spec.md: the script cannot
+  // stat (T1), so an in-place rewrite makes a spec truncated by a dead reviser
+  // indistinguishable from a good one, and the planner reads it as
+  // authoritative. A script-chosen sibling path degrades to "the planner reads
+  // the original", which is the pre-#524 behaviour and the safe direction.
+  // ------------------------------------------------------------------
+  const SPEC_MD = RD + "/issue-11/spec.md";
+  const SPEC_R1 = RD + "/issue-11/spec-r1.md";
+  function reviseReturns(verdict, revReturn) {
+    const o = Object.assign({}, mediumReturns(), {
+      "spec-review:#11": { verdict: verdict, rc: 0, headline: "h",
+        blockingFindings: ["REVISE-FINDING-SENTINEL"] },
+    });
+    o["spec-revise:#11"] = (revReturn === undefined)
+      ? { path: SPEC_R1, rc: 0, headline: "h" }
+      : revReturn;
+    return o;
+  }
+  function promptOf(record, label) {
+    const c = record.agentCalls.find(function (x) { return x.label === label; });
+    return c ? c.prompt : "";
+  }
+  function countLabel(record, label) {
+    return labels(record).filter(function (l) { return l === label; }).length;
+  }
+  function rejectedFor(res, reason) {
+    return !!(res && res.auditEvents.some(function (e) {
+      return e.event === "spec_revision_rejected" && e.issue === 11 && e.reason === reason; }));
+  }
+
+  // SR1 — REVISIONS_REQUIRED, reviser answers at the script-derived path.
+  const recSR1 = await run(buildArgs(), { agentReturns: reviseReturns("REVISIONS_REQUIRED") });
+  const resSR1 = resultOf(recSR1);
+  out.srReviseCalls = countLabel(recSR1, "spec-revise:#11");
+  // The negative arm, read off the CLEAN fixture: an APPROVE spends no reviser.
+  // Without it SR1 proves only that the label can fire, never that it is gated.
+  out.srNoReviseOnApprove = countLabel(recB, "spec-revise:#11");
+
+  // SR2 — REJECT is not a second class of verdict: it takes the revision round
+  // on the same terms as REVISIONS_REQUIRED, and the reviewer is not re-run
+  // afterwards. A re-review here is the #308 unbounded-loop class rebuilt.
+  // The reviser SUCCEEDS on this arm, so the 1 below is the loop's `!revised`
+  // exit, NOT its bound — the bound is G14c plus B262c, on SR3/SR5.
+  const recSR2 = await run(buildArgs(), { agentReturns: reviseReturns("REJECT") });
+  out.srRejectSameRound = countLabel(recSR2, "spec-revise:#11") === 1
+    && countLabel(recSR2, "spec-review:#11") === 1;
+
+  const promptSR1Plan = promptOf(recSR1, "plan:#11");
+  out.srPlanReadsRevision = promptSR1Plan.indexOf(SPEC_R1) >= 0
+    && promptSR1Plan.indexOf(SPEC_MD) < 0;
+
+  // SR3 — a revision at a DIFFERENT in-run-dir path. underRunDir() is a PREFIX
+  // check and would accept this; the accept predicate is exact string equality
+  // against the path the script itself chose, so the planner can never be sent
+  // to a file no rung was told to write.
+  const recSR3 = await run(buildArgs(), { agentReturns:
+    reviseReturns("REVISIONS_REQUIRED", { path: RD + "/issue-11/spec-final.md", rc: 0, headline: "h" }) });
+  const resSR3 = resultOf(recSR3);
+  const promptSR3Plan = promptOf(recSR3, "plan:#11");
+  out.srPathRejected = promptSR3Plan.indexOf(SPEC_MD) >= 0
+    && promptSR3Plan.indexOf("spec-final.md") < 0
+    && rejectedFor(resSR3, "path");
+
+  // SR4 — the other arm of the predicate: the right path, a non-zero rc.
+  const recSR4 = await run(buildArgs(), { agentReturns:
+    reviseReturns("REVISIONS_REQUIRED", { path: SPEC_R1, rc: 1, headline: "h" }) });
+  const resSR4 = resultOf(recSR4);
+  const promptSR4Plan = promptOf(recSR4, "plan:#11");
+  out.srRcRejected = promptSR4Plan.indexOf(SPEC_MD) >= 0
+    && promptSR4Plan.indexOf(SPEC_R1) < 0
+    && rejectedFor(resSR4, "rc");
+
+  // SR1 envelope discipline — the reviewer findings reach the reviser through
+  // the SAME sanitizeFindings + envWrap path #507 installed, and the text sits
+  // ONLY inside the envelope. Asserted by excising the block and searching the
+  // remainder, so a second raw copy anywhere else in the prompt reds.
+  const promptSR1Rev = promptOf(recSR1, "spec-revise:#11");
+  const ENV_OPEN_SR = "<external-untrusted-input source=\"solve-fleet-spec-review-findings-issue-11\">";
+  const ENV_END_SR = "</external-untrusted-input>";
+  const srOpenAt = promptSR1Rev.indexOf(ENV_OPEN_SR);
+  const srEndAt = srOpenAt >= 0 ? promptSR1Rev.indexOf(ENV_END_SR, srOpenAt) : -1;
+  const srOutside = (srOpenAt >= 0 && srEndAt > srOpenAt)
+    ? promptSR1Rev.slice(0, srOpenAt) + promptSR1Rev.slice(srEndAt)
+    : promptSR1Rev;
+  out.srFindingsEnveloped = srOpenAt >= 0 && srEndAt > srOpenAt
+    && srOutside.indexOf("REVISE-FINDING-SENTINEL") < 0;
+
+  // SR5 — a null reviser is a missing agent, not a corrupt spec: it counts as a
+  // design-phase null, the planner falls back to the ORIGINAL spec, and the
+  // chain proceeds. Silently planning against a path nothing wrote would be the
+  // strictly worse outcome.
+  const recSR5 = await run(buildArgs(), { agentReturns: reviseReturns("REVISIONS_REQUIRED", null) });
+  const resSR5 = resultOf(recSR5);
+  out.srNullDegrades = !!(resSR5 && resSR5.nullsByPhase && resSR5.nullsByPhase.design >= 1)
+    && labels(recSR5).indexOf("plan:#11") >= 0
+    && promptOf(recSR5, "plan:#11").indexOf(SPEC_MD) >= 0
+    && rejectedFor(resSR5, "null");
+
+  // The CAP itself, on the only arms that can observe it. SR1/SR2 count
+  // dispatches but their reviser SUCCEEDS, so they leave the loop on `revised`
+  // and would count 1 at ANY bound — the number they pin is the success flag,
+  // not the ceiling. SR3 (wrong path) and SR5 (null reviser) both leave
+  // `revised` false, so what the loop dispatches there IS the bound. Compared
+  // against the constant READ OUT of the script (G31's idiom), never a retyped
+  // literal: the shell's G14c pins that constant at 1, this pins that the loop
+  // spends exactly what it declares, and G32 joins the two readings so neither
+  // regex can rot into a vacuous pass.
+  const SPEC_REVISE_ROUNDS_JS = readInt(/^const SPEC_REVISE_ROUNDS = (\d+);/m, "the spec revision round cap");
+  out.srRoundsRead = SPEC_REVISE_ROUNDS_JS;
+  out.srRoundsBounded = countLabel(recSR3, "spec-revise:#11") === SPEC_REVISE_ROUNDS_JS
+    && countLabel(recSR5, "spec-revise:#11") === SPEC_REVISE_ROUNDS_JS;
+
+  // A revision does not consume the findings. The planner is pointed at the
+  // corrected spec AND still receives the reviewer's own list, inside the #507
+  // envelope — the revision is unverified, so the planner needs to see what the
+  // reviewer objected to in order to check the answer.
+  out.srRevisedKeepsFindings = promptSR1Plan.indexOf(ENV_OPEN_SR) >= 0
+    && promptSR1Plan.indexOf("REVISE-FINDING-SENTINEL") >= 0;
+
+  out.srRevisedAudit = !!(resSR1 && resSR1.auditEvents.some(function (e) {
+    return e.event === "spec_revised" && e.issue === 11; }))
+    && promptSR1Rev.indexOf(SPEC_R1) >= 0;
+
+  // SR6 — the verdict is an AGENT-RETURNED STRING. S.reviewed declares a closed
+  // enum, but a schema is a request to the MODEL and an arbitrary value can land
+  // on that key, so the verdict is a reviewer string exactly like a finding is.
+  // It reaches the reviser and the planner in a SCRIPT-CHOSEN spelling: inside
+  // the enum it passes through verbatim, outside it is named as what it is.
+  const recSR6 = await run(buildArgs(), { agentReturns: reviseReturns("VERDICT-SENTINEL-TEXT") });
+  const resSR6 = resultOf(recSR6);
+  out.srVerdictNotRaw = promptOf(recSR6, "spec-revise:#11").indexOf("VERDICT-SENTINEL-TEXT") < 0
+    && promptOf(recSR6, "plan:#11").indexOf("VERDICT-SENTINEL-TEXT") < 0
+    && countLabel(recSR6, "spec-revise:#11") === 1
+    && promptSR1Rev.indexOf("REVISIONS_REQUIRED") >= 0;
+
+  // ------------------------------------------------------------------
+  // Runs PR* (#524 item 2) — the PLAN review gate.
+  //
+  // The plan is the artifact the implementers actually execute, and it was the
+  // only design artifact with no review at all. There is deliberately no plan
+  // REVISER — that would be a second bounded ladder and a second agent on the
+  // ceiling — so the reviewer's FINDINGS are its whole output, and where they
+  // go is the behaviour under test.
+  //
+  // They go to all THREE rungs that read the plan, not one. taskReviewPrompt
+  // already treats work outside the `## Task k:` section as a blocking finding,
+  // so telling only the implementer that a plan-review finding may be answered
+  // would put the two gates in direct contradiction over one document and burn
+  // a fix round on a CORRECT deviation; the fixer re-reads the same section one
+  // rung later (step 3 of taskFixPrompt), so leaving it out reintroduces the
+  // contradiction there.
+  // ------------------------------------------------------------------
+  const PLAN_ENV_OPEN = "<external-untrusted-input source=\"solve-fleet-plan-review-findings-issue-11\">";
+  const PLAN_ENV_END = "</external-untrusted-input>";
+  const PLAN_SENTINEL = "PLAN-REVIEW-FINDING-SENTINEL";
+  const FIXER_CLAUSE = "describes the PLAN, not the findings you are here to fix";
+  // The fixture has to REACH the fixer. A clean mediumReturns() approves every
+  // task at r1 and never dispatches fix:#11:t1:r1, so a row reading "" for that
+  // prompt would assert nothing at all; task 1 therefore draws one
+  // REVISIONS_REQUIRED review and one fix round here.
+  function planReviewReturns(planReview) {
+    return Object.assign({}, mediumReturns(), {
+      "plan-review:#11": planReview,
+      "review:#11:t1:r1": { verdict: "REVISIONS_REQUIRED", rc: 0, headline: "h",
+        blockingFindings: ["task-level finding, unrelated to the plan review"] },
+      "fix:#11:t1:r1": task(1),
+      "review:#11:t1:r2": approve(),
+    });
+  }
+  function planReviewOf(findings) {
+    return { verdict: "REVISIONS_REQUIRED", rc: 0, headline: "h", blockingFindings: findings };
+  }
+  // The three plan consumers, in the order the chain spends them.
+  function planConsumerPrompts(record) {
+    return ["impl:#11:t1", "review:#11:t1:r1", "fix:#11:t1:r1"].map(function (l) {
+      return promptOf(record, l);
+    });
+  }
+  // The prompt with its plan-review envelope EXCISED — null when the envelope is
+  // not there at all, so a caller cannot confuse "no second copy" with "no
+  // block". Every negative row below distinguishes the two.
+  function outsidePlanEnvelope(prompt) {
+    const openAt = prompt.indexOf(PLAN_ENV_OPEN);
+    const endAt = openAt >= 0 ? prompt.indexOf(PLAN_ENV_END, openAt) : -1;
+    return (openAt >= 0 && endAt > openAt)
+      ? prompt.slice(0, openAt) + prompt.slice(endAt)
+      : null;
+  }
+
+  const recPR = await run(buildArgs(), { agentReturns:
+    planReviewReturns(planReviewOf([PLAN_SENTINEL, "a second plan-level gap"])) });
+  const resPR = resultOf(recPR);
+  const prPrompts = planConsumerPrompts(recPR);
+
+  out.prReviewCalls = countLabel(recPR, "plan-review:#11");
+  out.prNotApprovedAudit = !!(resPR && resPR.auditEvents.some(function (e) {
+    return e.event === "plan_review_not_approved" && e.issue === 11
+      && e.verdict === "REVISIONS_REQUIRED"; }));
+  // The hand-off is ACCOUNTED, under this gate's own event name. #507's names
+  // stay reserved for the spec gate; one shared name would make the two gates
+  // indistinguishable in the audit trail the whole run is read back from.
+  out.prThreadedAudit = !!(resPR && resPR.auditEvents.some(function (e) {
+    return e.event === "plan_findings_threaded" && e.issue === 11
+      && e.count === 2 && e.truncated === false; }));
+
+  // One row per consumer rather than one `every()` row: a single aggregate
+  // would go red as a block and never say WHICH rung lost the hand-off.
+  out.prImplEnvelope = prPrompts[0].indexOf(PLAN_ENV_OPEN) >= 0
+    && prPrompts[0].indexOf("(1) " + PLAN_SENTINEL) >= 0;
+  out.prReviewEnvelope = prPrompts[1].indexOf(PLAN_ENV_OPEN) >= 0
+    && prPrompts[1].indexOf("(1) " + PLAN_SENTINEL) >= 0;
+  // The fixer additionally has to be told what the block IS: it arrives at that
+  // rung already holding a list of findings to fix (the review files), and two
+  // undistinguished lists is how a fixer starts "fixing" the plan.
+  out.prFixEnvelope = prPrompts[2].indexOf(PLAN_ENV_OPEN) >= 0
+    && prPrompts[2].indexOf("(1) " + PLAN_SENTINEL) >= 0
+    && prPrompts[2].indexOf(FIXER_CLAUSE) >= 0
+    && prPrompts[0].indexOf(FIXER_CLAUSE) < 0;
+
+  // The sentinel sits ONLY inside the envelope, in every one of the three.
+  out.prSentinelOnlyEnveloped = prPrompts.every(function (p) {
+    const rest = outsidePlanEnvelope(p);
+    return rest !== null && rest.indexOf(PLAN_SENTINEL) < 0;
+  });
+
+  // PR2 — the caps are the SAME ones #507 installed, not a second set. 12
+  // findings, the first over-long: 10 survive, and the long one is clipped with
+  // its tail dropped.
+  let prLong = "";
+  while (prLong.length < 590) prLong += "y";
+  prLong += "PLAN-TAIL-SENTINEL";
+  const prMany = [prLong];
+  for (let pi = 2; pi <= 12; pi += 1) prMany.push("P-" + ("0" + pi).slice(-2));
+  const recPR2 = await run(buildArgs(), { agentReturns:
+    planReviewReturns(planReviewOf(prMany)) });
+  out.prCaps = planConsumerPrompts(recPR2).every(function (p) {
+    return p.indexOf("(10) ") >= 0 && p.indexOf("(11) ") < 0
+      && p.indexOf("P-11") < 0 && p.indexOf("P-12") < 0
+      && p.indexOf("[truncated]") >= 0 && p.indexOf("PLAN-TAIL-SENTINEL") < 0;
+  });
+
+  // PR3 — APPROVE with nothing to say adds NO block anywhere. The negative arm:
+  // without it every row above is satisfied by an unconditional envelope.
+  const recPR3 = await run(buildArgs(), { agentReturns: planReviewReturns(approve()) });
+  out.prApproveNoEnvelope = planConsumerPrompts(recPR3).every(function (p) {
+    return p.length > 0 && p.indexOf(PLAN_ENV_OPEN) < 0
+      && p.indexOf("The plan reviewer returned") < 0;
+  });
+
+  // PR4 — a null reviewer is a missing agent, not a bad plan: it counts as a
+  // design-phase null and the chain proceeds against the plan as written.
+  // Stranding a written plan because its reviewer was skipped would be the
+  // strictly worse outcome.
+  const recPR4 = await run(buildArgs(), { agentReturns: planReviewReturns(null) });
+  const resPR4 = resultOf(recPR4);
+  out.prNullDegrades = !!(resPR4 && resPR4.nullsByPhase && resPR4.nullsByPhase.design >= 1)
+    && labels(recPR4).indexOf("impl:#11:t1") >= 0
+    && planConsumerPrompts(recPR4).every(function (p) {
+      return p.length > 0 && p.indexOf(PLAN_ENV_OPEN) < 0; });
+
+  // PR5 — findings that ARRIVE and are unusable. A non-array degrades to "no
+  // usable finding" like any malformed return, but silently: the three
+  // consumers are told nothing is wrong, and a later reader cannot tell that
+  // from a reviewer that genuinely had nothing to say. Counts only, never text.
+  const recPR5 = await run(buildArgs(), { agentReturns:
+    planReviewReturns({ verdict: "REVISIONS_REQUIRED", rc: 0, headline: "h",
+      blockingFindings: "not an array" }) });
+  const resPR5 = resultOf(recPR5);
+  out.prUnusableAudit = !!(resPR5 && resPR5.auditEvents.some(function (e) {
+    return e.event === "plan_findings_unusable" && e.issue === 11
+      && e.arrayShaped === false; }))
+    && !!(resPR5 && resPR5.auditEvents.every(function (e) { return e.event !== "solve_chain_threw"; }))
+    && planConsumerPrompts(recPR5).every(function (p) {
+      return p.length > 0 && p.indexOf(PLAN_ENV_OPEN) < 0 && p.indexOf("not an array") < 0; });
+
+  // ------------------------------------------------------------------
+  // Runs SEC* (#524 item 3) — the RISK-GATED security research lens.
+  //
+  // The triage predicate was never missing: lib/solve-launcher.sh computes
+  // `risk_signals` for EVERY issue and lib/dispatch.sh persists it into the
+  // prepared root request on every backend. It was dropped on exactly one hop —
+  // the per-issue manifest record, which is the ONLY channel into a Workflow
+  // script (no fs). These runs drive the field from the far end of that hop.
+  //
+  // Gated on PRESENCE, never on a vocabulary: re-declaring solve_triage.py's
+  // RISK_PATTERNS names in the fleet would be a second uncompared copy of a
+  // closed vocabulary (#370) and would have the script invent a risk taxonomy
+  // the issue forbids outright. Emptiness needs no vocabulary.
+  // ------------------------------------------------------------------
+  const SEC_LABEL = "research:#11:security";
+  const LENS_BODY_OPEN = "Investigate ONLY through your lens:\n";
+  const LENS_BODY_END = "\n\nYou are READ-ONLY";
+  function secReturns(riskFields) {
+    return Object.assign({}, mediumReturns(), {
+      "manifest-intake": intake([rec(11, "medium", riskFields), rec(12, "trivial")]),
+      "research:#11:security": { artifactPath: RD + "/issue-11/research-security.md", rc: 0, headline: "h" },
+    });
+  }
+  function researchLabels(record) {
+    return labels(record).filter(function (l) { return /^research:#11:/.test(l || ""); });
+  }
+  // The lens body the agent is ACTUALLY HANDED, sliced out of the rendered
+  // prompt rather than read off the source: a brief that stopped reaching the
+  // prompt would still grep clean in the file, which is precisely how a lens
+  // silently receiving another lens's brief goes unnoticed.
+  function lensBody(record, lens) {
+    const p = promptOf(record, "research:#11:" + lens);
+    const at = p.indexOf(LENS_BODY_OPEN);
+    if (at < 0) return null;
+    const end = p.indexOf(LENS_BODY_END, at);
+    return end > at ? p.slice(at + LENS_BODY_OPEN.length, end) : null;
+  }
+  function riskEventCount(res, name) {
+    return res ? res.auditEvents.filter(function (e) { return e.event === name; }).length : -1;
+  }
+
+  // SEC1 — one non-blank signal buys the fourth lens.
+  const recSEC = await run(buildArgs(), { agentReturns: secReturns({ riskSignals: ["security"] }) });
+  out.secLensCount = researchLabels(recSEC).length;
+  out.secDispatched = researchLabels(recSEC).indexOf(SEC_LABEL) >= 0;
+
+  // SEC2/SEC3/SEC4 — the three negative shapes, which are three different facts:
+  // an EMPTY array (triage ran and found nothing), an ABSENT key (an unpatched
+  // launcher, or a relay that dropped the field), and a WHITESPACE-ONLY member
+  // (the predicate is non-blank, not merely non-empty — otherwise a single
+  // stray space in the manifest buys an agent on every issue in the batch).
+  const recSECE = await run(buildArgs(), { agentReturns: secReturns({ riskSignals: [] }) });
+  out.secEmptyLensCount = researchLabels(recSECE).length;
+  out.secEmptyNoLens = researchLabels(recSECE).indexOf(SEC_LABEL) < 0;
+  const recSECA = await run(buildArgs(), { agentReturns: secReturns(null) });
+  out.secAbsentLensCount = researchLabels(recSECA).length;
+  const recSECW = await run(buildArgs(), { agentReturns: secReturns({ riskSignals: ["   "] }) });
+  out.secBlankLensCount = researchLabels(recSECW).length;
+
+  // SEC5 — the silent-fallthrough assertion the issue's item-3 hazard demands.
+  // lensBrief() used to end in a bare `return <test-coverage brief>`, so ANY
+  // name it did not recognise was handed the coverage brief and nothing failed.
+  // The needle is the coverage brief's own first line; the emptiness guard is
+  // what stops this row passing on a prompt that was never rendered.
+  const secPrompt = promptOf(recSEC, SEC_LABEL);
+  out.secNotCoverageBrief = secPrompt.length > 0 && secPrompt.indexOf("Detect the test runner") < 0;
+
+  // SEC6 — totality, asserted WITHOUT naming any brief's text: four lenses, four
+  // pairwise-distinct bodies. A fallthrough of any one lens onto another's brief
+  // reds here even if the wording of every brief changes tomorrow.
+  const secBodies = ["codebase", "constraints", "test-coverage", "security"]
+    .map(function (l) { return lensBody(recSEC, l); });
+  out.secBodiesDistinct = secBodies.length === 4
+    && secBodies.every(function (b) { return typeof b === "string" && b.length > 0; })
+    && secBodies.every(function (b, i) {
+      return secBodies.every(function (o, j) { return i === j || b !== o; });
+    });
+
+  // SEC7 — an unrecognised lens name must fail the issue's chain LOUDLY.
+  // parallel()'s documented contract maps a throwing thunk to null in its slot
+  // and never rejects, so a lensBrief throw raised INSIDE a thunk would be
+  // laundered into "a research agent returned null" — a real defect wearing the
+  // costume of a skipped agent. Building the prompts eagerly puts the throw in
+  // solveOne's own try, where it becomes solve_chain_threw + a FAILED record.
+  //
+  // The mutation is ASSERTED, not assumed: a replacement that matched nothing
+  // would run the unmutated script and certify a claim it never tested.
+  const BASE_LENS_DECL = 'const BASE_LENSES = ["codebase", "constraints", "test-coverage"];';
+  const BOGUS_SRC = src.split(BASE_LENS_DECL).join(
+    'const BASE_LENSES = ["codebase", "constraints", "test-coverage", "no-such-lens"];');
+  if (BOGUS_SRC === src) {
+    throw new Error("FIXTURE_ERROR: the B278 mutation did not apply — BASE_LENSES is not declared "
+      + "as one line the fixture can rewrite, so the unknown-lens row would test nothing");
+  }
+  const recSECX = await runSource(BOGUS_SRC, buildArgs(), { agentReturns: mediumReturns() });
+  const resSECX = resultOf(recSECX);
+  out.secUnknownLensThrows = !!(resSECX && resSECX.auditEvents.some(function (e) {
+    return e.event === "solve_chain_threw" && e.issue === 11; }))
+    && !!(resSECX && resSECX.nullsByPhase && (resSECX.nullsByPhase.research || 0) === 0)
+    && researchLabels(recSECX).length === 0;
+
+  // SEC8 — presence and COUNTS only (DR-5). The signal strings are triage
+  // output about the issue; the lens's brief is the same work whatever they
+  // said, so forwarding them would put an agent-adjacent string in a prompt for
+  // no information gain. Two sentinels plus one blank: the count is of NON-BLANK
+  // members, which is the same predicate the gate itself applies.
+  const SEC_SENTINEL_A = "RISK-SIGNAL-SENTINEL-A";
+  const SEC_SENTINEL_B = "RISK-SIGNAL-SENTINEL-B";
+  const recSECS = await run(buildArgs(), { agentReturns:
+    secReturns({ riskSignals: [SEC_SENTINEL_A, "   ", SEC_SENTINEL_B] }) });
+  const resSECS = resultOf(recSECS);
+  const secAuditJson = JSON.stringify(resSECS ? resSECS.auditEvents : []);
+  out.secNoSignalText = recSECS.agentCalls.length > 0
+    && recSECS.agentCalls.every(function (c) {
+      const p = String(c.prompt);
+      return p.indexOf(SEC_SENTINEL_A) < 0 && p.indexOf(SEC_SENTINEL_B) < 0;
+    })
+    && secAuditJson.indexOf(SEC_SENTINEL_A) < 0 && secAuditJson.indexOf(SEC_SENTINEL_B) < 0;
+  const secDispatchEvent = resSECS ? resSECS.auditEvents.find(function (e) {
+    return e.event === "security_lens_dispatched" && e.issue === 11; }) : null;
+  out.secSignalCount = secDispatchEvent ? secDispatchEvent.signalCount : null;
+
+  // SEC9/SEC10/SEC11 — the NEGATIVE branch's failure signal. With `riskSignals`
+  // absent and `riskSignals: []` behaving identically, a relay that drops,
+  // renames or mangles the field is indistinguishable from a genuinely risk-free
+  // batch and the lens silently never runs. The launcher therefore declares a
+  // run-wide COUNT derived from the manifest it just wrote, and the script joins
+  // it against what the relay actually delivered.
+  const recSECM = await run(buildArgs(null, { riskIssueCount: 1 }),
+    { agentReturns: secReturns(null) });
+  const resSECM = resultOf(recSECM);
+  out.secRelayMismatch = !!(resSECM && resSECM.auditEvents.some(function (e) {
+    return e.event === "risk_signals_relay_mismatch" && e.declared === 1 && e.observed === 0; }))
+    && !!(resSECM && resSECM.auditEvents.some(function (e) {
+      return e.event === "risk_signals_absent" && e.records === 2; }));
+
+  // A FAITHFUL relay is silent — without this row the two events above are
+  // satisfied by a join that fires unconditionally.
+  const recSECF = await run(buildArgs(null, { riskIssueCount: 1 }), { agentReturns:
+    Object.assign({}, secReturns({ riskSignals: ["security"] }), {
+      "manifest-intake": intake([rec(11, "medium", { riskSignals: ["security"] }),
+        rec(12, "trivial", { riskSignals: [] })]),
+    }) });
+  const resSECF = resultOf(recSECF);
+  out.secFaithfulQuiet = riskEventCount(resSECF, "risk_signals_relay_mismatch") === 0
+    && riskEventCount(resSECF, "risk_signals_absent") === 0;
+
+  // A LEGACY envelope (no riskIssueCount at all) degrades to SILENCE, not to
+  // noise: recSECA relays records with no `riskSignals` key whatsoever, which is
+  // exactly the shape that fires both events once a count is declared.
+  const resSECA = resultOf(recSECA);
+  out.secLegacyQuiet = riskEventCount(resSECA, "risk_signals_relay_mismatch") === 0
+    && riskEventCount(resSECA, "risk_signals_absent") === 0;
+
   // ------------------- #508: the per-task chain and its gate -------------------
 
   // Run L — the fix ladder is BOUNDED by FIX_ROUNDS. A reviewer that never
@@ -1045,6 +2154,10 @@ function probedNums(record) {
   out.lNoT2 = labels(recTL).indexOf("impl:#11:t2") < 0;
   out.lDelivered = labels(recTL).indexOf("deliver:#11") >= 0;
   out.lBlocked = resL ? resL.tasksBlocked : null;
+  // #554 — until now only the LABEL was checked here: the prompt that delivery
+  // agent reads was never read back, so the PR it opens over an exhausted
+  // ladder carried the same closing link as a finished chain.
+  out.tlLink = partialLinkOk(deliverTextOf(recTL));
 
   // Run M — REJECT means "wrong at the root": the ladder stops immediately
   // instead of burning three fix rounds on a task that cannot be saved.
@@ -1055,6 +2168,45 @@ function probedNums(record) {
   out.mNoFixers = !labels(recTM).some(function (l) { return /^fix:#11/.test(l || ""); });
   out.mRejectAudit = !!(resM && resM.auditEvents.some(function (e) { return e.event === "task_review_rejected"; }));
   out.mNoT2 = labels(recTM).indexOf("impl:#11:t2") < 0;
+  // #554 — a task rejected at its ROOT is the loudest partial there is, and it
+  // is the path the issue was filed against.
+  const deliverTMText = deliverTextOf(recTM);
+  out.tmLink = partialLinkOk(deliverTMText);
+  out.tmProhibition = deliverTMText.indexOf("must not close an issue it did not finish") >= 0;
+  // ORDER, not merely presence. A reword instruction issued AFTER the push is
+  // worthless: the branch is already public, so honouring it would need a
+  // force-push, which the house rules in this very prompt forbid. GitHub
+  // honours a closing keyword in a COMMIT MESSAGE that lands on the default
+  // branch, so the PR-body rule alone does not cover it.
+  out.tmGuardBeforePush = deliverTMText.indexOf("git log --format=%B") >= 0
+    && deliverTMText.indexOf("git log --format=%B") < deliverTMText.indexOf("Push the branch.");
+  // The base-AGNOSTIC arm (buildArgs resolves no base): the guard must name no
+  // ref range at all rather than guess one, the same rule baseInstruction()
+  // follows for --base. A guessed `main..HEAD` reads every commit of the branch
+  // point's own history on a stacked run.
+  out.tmGuardNoGuessedBase = deliverTMText.indexOf("..HEAD") < 0;
+
+  // Run KB — the same partial arm with a base the launcher DID resolve. Without
+  // it the base-aware half of the guard is written and never rendered, which is
+  // how a two-armed builder ships with one arm untested.
+  const recKB = await run(buildArgs(null, { baseBranch: "feat/parent" }), { agentReturns: tmReturns });
+  const deliverKBText = deliverTextOf(recKB);
+  out.kbGuardBase = deliverKBText.indexOf("git log --format=%B feat/parent..HEAD") >= 0
+    && deliverKBText.indexOf("over the commits step 1 had you enumerate") < 0;
+  out.kbViolations = recKB.violations.length;
+
+  // Run FN — the FIXER-NULL arm. It sets stopLoop exactly like a REJECT or an
+  // exhausted ladder, and it is the only such path with no delivery-prompt
+  // fixture in this file at all: nothing proved the PR it opens is linked as a
+  // partial, or even that delivery is reached.
+  const fnReturns = Object.assign({}, ladderReturns(null), { "fix:#11:t1:r1": null });
+  const recFN = await run(buildArgs(), { agentReturns: fnReturns });
+  const resFN = resultOf(recFN);
+  out.fnAudit = !!(resFN && resFN.auditEvents.some(function (e) {
+    return e.event === "task_fixer_null" && e.issue === 11 && e.task === 1; }));
+  out.fnDelivered = labels(recFN).indexOf("deliver:#11") >= 0;
+  out.fnLink = partialLinkOk(deliverTextOf(recFN));
+  out.fnViolations = recFN.violations.length;
 
   // Run N — SEQUENTIALITY, proven by interleaving rather than by label order
   // (label order cannot distinguish sequential from parallel). While task 1s
@@ -1136,6 +2288,20 @@ function probedNums(record) {
   out.qFixerDispatched = !!fixQ;
   out.qNoFindingText = !!(fixQ && fixQ.prompt.indexOf("SENTINEL-FINDING-TEXT") < 0);
   out.qReviewPathInPrompt = !!(fixQ && fixQ.prompt.indexOf("/issue-11/task-1/review-1.md") >= 0);
+  // #557 — the fix rung is the OTHER writing rung, and the one that rewrites an
+  // existing commit with `git commit --amend`. Its copy of the clause above is
+  // what keeps an amend that could not reach the shared checkout from landing on
+  // the caller's own HEAD; its copy of the workspaceReady request is the premise
+  // the JS gate (B204/B205) depends on — a rung never asked for the flag cannot
+  // be gated on it. Both were unpinned: dropping either left the suite green.
+  const fixText = fixQ ? fixQ.prompt : "";
+  out.qFixCheckoutGate = fixText.indexOf('Never edit anything under "/r" directly') >= 0
+    && fixText.indexOf("If the shared checkout is not there, report BLOCKED") >= 0
+    && fixText.indexOf("never fall back to the repository root") >= 0;
+  out.qFixWorkspaceAsked =
+    fixText.indexOf("`workspaceReady: true` only after that `cd` succeeded") >= 0
+    && fixText.indexOf('workspaceReady (true only if you are working inside "'
+      + RD + '/worktrees/issue-11"') >= 0;
   const resQ = resultOf(recQ);
   out.qNoFindingInLogs = !recQ.logs.some(function (l) { return l.indexOf("SENTINEL-FINDING-TEXT") >= 0; })
     && !!resQ && JSON.stringify(resQ).indexOf("SENTINEL-FINDING-TEXT") < 0;
@@ -1181,8 +2347,16 @@ function probedNums(record) {
 
   // Run S — CB1 arithmetic is PINNED, not merely "it trips at 2". One design
   // issue projects 2 batched relays (intake + PR-claim verification, #515)
-  // + 2 solvers + (6 design + 24 implement - 1) for the per-task chain (#508).
-  const PROJ = 2 + 2 + 1 * (6 + 24 - 1);   // 33
+  // + 2 solvers + (design base + implement budget - 1) for the per-task chain
+  // (#508). Both scalars are READ OUT of the script; only the SHAPE of the
+  // arithmetic is retyped here, and that shape is what B62/B63 pin. Retyping
+  // the scalars too would mean hand-editing a literal nothing derives every
+  // time the design chain gains a rung — the #370 shape G31 exists to close.
+  const DESIGN_BASE = readInt(/designCount \* \((\d+) \+ IMPLEMENT_AGENT_BUDGET - 1\)/, "the design base");
+  const FLEET_BUDGET_JS = readInt(/IMPLEMENT_AGENT_BUDGET = clampInt\(CFG\.implementBudget, 4, 96, (\d+)\)/, "the implement budget");
+  const PROJ = 2 + 2 + 1 * (DESIGN_BASE + FLEET_BUDGET_JS - 1);
+  out.sDesignBase = DESIGN_BASE;
+  out.sBudget = FLEET_BUDGET_JS;
   const recS1 = await run(buildArgs(null, { maxAgents: PROJ }), { agentReturns: mediumReturns() });
   out.sAtCeiling = !!(resultOf(recS1) && resultOf(recS1).cb1Tripped);
   const recS2 = await run(buildArgs(null, { maxAgents: PROJ - 1 }), { agentReturns: mediumReturns() });
@@ -1196,7 +2370,14 @@ function probedNums(record) {
 
   // Every new run must also be harness-clean — an undeclared opts.phase on any
   // of the four new agent kinds shows up here and nowhere else.
-  out.zViolations = [recB, recTL, recTM, openN.record, recTO, recP, recQ, recR, recU, recV, recS1, recS2, recT]
+  out.zViolations = [recB, recTL, recTM, openN.record, recTO, recP, recQ, recR, recU, recV, recS1, recS2, recT,
+    recSR1, recSR2, recSR3, recSR4, recSR5, recSR6,
+    recPR, recPR2, recPR3, recPR4, recPR5,
+    // recSECX is the bogus-lens MUTANT and belongs here too: the throw it
+    // provokes is caught by solveOne, so a mutated vocabulary must still leave
+    // a harness-clean run — an undeclared phase or a stray global phase() on
+    // that path would show up nowhere else.
+    recSEC, recSECE, recSECA, recSECW, recSECS, recSECM, recSECF, recSECX]
     .reduce(function (n, r) { return n + r.violations.length; }, 0);
   // ------------------------------------------------------------------ #515
   // Claim verification. Every run below is ultimately about ONE rule: the proof
@@ -1242,13 +2423,52 @@ function probedNums(record) {
   out.rProofs = vResR ? vResR.results.map(function (r) { return r.prProof; }).join(",") : null;
   out.rPrNums = vResR ? vResR.prsOpened.join(",") : null;
   out.rViolations = vRecR.violations.length;
-  // The event that separates a relay that NEVER RAN from one that ran and
-  // answered unusably. Both publish verification.relayRc null, and SKILL.md's
-  // field table now says so in as many words, so the audit trail is the ONLY
-  // thing left telling them apart — assert it, or the sentence is unbacked.
+  // This arm's own signature, not a general rule: `{}` carries no `rc`, so the
+  // non-integer branch stores null and pr_proof_relay_failed fires beside it.
+  // Read B301b before generalising — the SAME event fires with relayRc 1 when
+  // the rc is a non-zero integer, so the event's presence discriminates nothing
+  // on its own. The published value and the event's own rc field are what do.
   out.rRelayFailed = !!(vResR && vResR.auditEvents.some(function (e) {
     return e.event === "pr_proof_relay_failed"; }));
   out.rRelayRc = vResR ? vResR.verification.relayRc : "MISSING";
+
+  // Run RT — the relay THROWS. Zero fixtures reach pr_proof_threw today, so the
+  // catch arm's published relayRc has never been measured. The harness resolves a
+  // function agentReturns value per call (tests/_workflow_harness.js, agentStub)
+  // and records the agent call BEFORE resolving it, so the throw is the supported
+  // way to drive a caller's catch without hiding the dispatch.
+  const vRTReturns = Object.assign({}, trivialReturns());
+  vRTReturns["verify-prs"] = function () { throw new Error("relay exploded"); };
+  const vRecRT = await run(buildArgs(), { agentReturns: vRTReturns });
+  const vResRT = resultOf(vRecRT);
+  const rtEvent = vResRT ? vResRT.auditEvents.filter(function (e) {
+    return e.event === "pr_proof_threw"; })[0] : null;
+  out.rtThrew = !!rtEvent;
+  // "MISSING", never null: null is the value under test on this run, so a null
+  // fallback would let a run that produced no result at all read as a PASS.
+  out.rtRelayRc = vResRT ? vResRT.verification.relayRc : "MISSING";
+  out.rtEventRelayRc = rtEvent ? rtEvent.relayRc : "MISSING";
+  out.rtProbed = vResRT ? vResRT.verification.probed : "MISSING";
+  out.rtProofs = vResRT ? vResRT.results.map(function (r) { return r.prProof; }).join(",") : "MISSING";
+  out.rtPrNums = vResRT ? vResRT.prsOpened.join(",") : "MISSING";
+  out.rtViolations = vRecRT.violations.length;
+
+  // Run RI — a non-zero INTEGER rc. pr_proof_relay_failed fires on prRelayRc !== 0,
+  // so this arm publishes relayRc: 1 — the event's presence is NOT the null
+  // discriminator. Every existing proof()/intake() helper hardcodes rc 0, so this
+  // arm had no coverage at all.
+  const vRIReturns = Object.assign({}, trivialReturns());
+  vRIReturns["verify-prs"] = { rc: 1 };
+  const vRecRI = await run(buildArgs(), { agentReturns: vRIReturns });
+  const vResRI = resultOf(vRecRI);
+  const riEvent = vResRI ? vResRI.auditEvents.filter(function (e) {
+    return e.event === "pr_proof_relay_failed"; })[0] : null;
+  out.riRelayFailed = !!riEvent;
+  out.riRelayRc = vResRI ? vResRI.verification.relayRc : "MISSING";
+  out.riEventRc = riEvent ? riEvent.rc : "MISSING";
+  out.riProofs = vResRI ? vResRI.results.map(function (r) { return r.prProof; }).join(",") : "MISSING";
+  out.riPrNums = vResRI ? vResRI.prsOpened.join(",") : "MISSING";
+  out.riViolations = vRecRI.violations.length;
 
   // Run P — a batch where nothing claims a PR. No relay, no agent, and NO
   // verification noise: a clean non-PR batch must read exactly as it did before
@@ -1264,6 +2484,10 @@ function probedNums(record) {
   out.pPrEvents = vResP ? vResP.auditEvents.filter(function (e) {
     return String(e.event).indexOf("pr_") === 0;
   }).length : null;
+  // The silent path's FULL published signature, not just its silence: relayRc is
+  // null here too, so null on its own cannot mean "the relay never ran".
+  out.pRelayRc = vResP ? vResP.verification.relayRc : "MISSING";
+  out.pProbed = vResP ? vResP.verification.probed : "MISSING";
 
   // Run Q — THE FALSE-DOWNGRADE WALL. 403 is GitHub declining to answer (rate
   // limit, token scope), not evidence the PR is absent. Treating it as a 404
@@ -1605,6 +2829,9 @@ function probedNums(record) {
   out.tcAbsentBlockedTold = deliverXText.indexOf("BLOCKED task(s): 1.") >= 0
     && deliverXText.indexOf("Committed but NEVER REVIEWED (task(s)): 1.") >= 0;
   out.tcAbsentChainComplete = x11 ? x11.chainComplete : null;
+  // #554 — chainComplete:false is only half the fix: /goal reads that field,
+  // but GitHub reads the PR body, and it is the body that closes the issue.
+  out.xLink = partialLinkOk(deliverXText);
 
   // Run Y2 — NON-INTEGER. A stringified count is what a return that evaded
   // schema enforcement actually looks like. It takes the SAME stop, and the raw
@@ -1796,6 +3023,11 @@ function probedNums(record) {
   out.cfPartialTold = deliverCFText.indexOf("PARTIAL implementation of 2 planned task(s)") >= 0
     && deliverCFText.indexOf("BLOCKED task(s): 2.") >= 0
     && deliverCFText.indexOf("The implementation is DONE and reviewed") < 0;
+  // #554 — the CB3 budget arm is the ONE partial path SKILL.md documents as an
+  // intentional deliver-anyway, which makes it the likeliest to be excused from
+  // the linkage rule. It is not: an unfinished chain is unfinished however it
+  // came to stop.
+  out.cfLink = partialLinkOk(deliverCFText);
 
   // --- Run DS: the FOURTH ledger state — committed nothing while claiming DONE
   // A rung that commits nothing is rewritten to NO_CHANGES and skips the review
@@ -1842,6 +3074,10 @@ function probedNums(record) {
   const deliverDSText = deliverDS ? deliverDS.prompt : "";
   out.dsToldWhich = deliverDSText.indexOf("Committed NOTHING while reporting otherwise (task(s)): 1.") >= 0
     && deliverDSText.indexOf("The implementation is DONE and reviewed") < 0;
+  // #554 — the FOURTH ledger state takes the partial linkage too. `disputed` is
+  // not a member of partialDelivery, so a linkage keyed off that object rather
+  // than off ledger.complete would close the issue on this arm alone.
+  out.dsLink = partialLinkOk(deliverDSText);
 
   // --- Run DA: the AGREED no-change, which must NOT be disputed -------------
   // The anti-vacuity half of Run DS. Identical shape except task 1 SAYS
@@ -1858,6 +3094,12 @@ function probedNums(record) {
   const da11 = resDA ? resDA.results.filter(function (r) { return r.issue === 11; })[0] : null;
   out.daChainComplete = da11 ? da11.chainComplete : null;
   out.daNoPartial = !!(da11 && !da11.partialDelivery);
+  // #554 — the SECOND negative control (B66 is the first), on a fixture that
+  // reaches completeness through the disputed predicate rather than through a
+  // clean 2-task run. "Delete the closing line everywhere" cannot pass both.
+  const deliverDAText = deliverTextOf(recDA);
+  out.daClosesKept = deliverDAText.indexOf("Closes #11") >= 0
+    && deliverDAText.indexOf("UberDev-Partial") < 0;
 
   // --- Run FW: the FIX rung's shared-worktree gate --------------------------
   // The suite's only workspace fixture bends workspaceReady on the task-1
@@ -1944,9 +3186,375 @@ function probedNums(record) {
   out.zdBlockerNames = !!(zd11 && typeof zd11.blocker === "string"
     && zd11.blocker.indexOf("the task chain committed nothing for issue #11") >= 0);
 
+  // ------------------------------------------------------------------
+  // #532 — the ONE-WAY TIER RATCHET: the mid-run return channel.
+  //
+  // A solver that discovers hidden complexity mid-run cannot re-classify
+  // ITSELF. Re-running this run's ceremony under a raised tier would spend
+  // research and design agents CB1 never projected, mid-wave, on a budget
+  // already committed. So the escalation is RECORDED: this run finishes
+  // exactly as it was dispatched, and the NEXT classification of the issue
+  // is what acts on the record. W5 below is that invariant made
+  // BEHAVIOURAL — an agent count, not a sentence in a doc.
+  //
+  // The wire is deliberately NOT enum-constrained (see S.solve), so every
+  // illegal value has to be refused HERE, in the script, where a refusal is
+  // an audit row instead of a rejected StructuredOutput that would lose the
+  // delivery record of an issue that was otherwise solved. W3 is that.
+  // ------------------------------------------------------------------
+  // #11 rides the SINGLE-SOLVER path (small tier => no plan => no chain), so
+  // these exercise the solveOne return site. W2 uses the medium fixture
+  // instead, which returns through the DELIVERY rung — the other call site.
+  function escReturns(over) {
+    return {
+      "manifest-intake": intake([rec(11, "small"), rec(12, "small")]),
+      "solve:#11 (small)": claimed(11, 901, over),
+      "solve:#12 (small)": solved(12, 902),
+      "verify-prs": proof([proofRow(901, "fix/11-x"), proofRow(902, "fix/12-x")]),
+    };
+  }
+  function escRow(res, ev) {
+    if (!res || !Array.isArray(res.auditEvents)) return null;
+    return res.auditEvents.filter(function (e) { return e && e.event === ev; })[0] || null;
+  }
+  function escRec(res, issue) {
+    if (!res || !Array.isArray(res.results)) return null;
+    return res.results.filter(function (r) { return r && r.issue === issue; })[0] || null;
+  }
+
+  // W1 — a genuine upgrade is RECORDED, with both ends of the move, and the
+  // delivery record beside it is not disturbed by the note.
+  const recTE1 = await run(buildArgs(), { agentReturns: escReturns({
+    escalatedTier: "medium",
+    escalationReason: "the fix needs a schema migration no triage rule could see from the issue body",
+  }) });
+  const resTE1 = resultOf(recTE1);
+  const te1Row = escRow(resTE1, "tier_escalated");
+  const te1Rec = escRec(resTE1, 11);
+  out.escRecorded = !!(te1Row && te1Row.issue === 11 && te1Row.from === "small" && te1Row.to === "medium");
+  out.escReasonKept = !!(te1Row && typeof te1Row.reason === "string"
+    && te1Row.reason.indexOf("schema migration") >= 0);
+  out.escCount = resTE1 ? resTE1.tierEscalations : null;
+  out.escLogged = recTE1.logs.some(function (l) {
+    return l.indexOf("#11") >= 0 && l.indexOf("escalat") >= 0;
+  });
+  out.escDeliveryIntact = !!(te1Rec && te1Rec.status === "PR_OPENED"
+    && te1Rec.prNumber === 901 && te1Rec.branch === "fix/11-x");
+  out.escPublished = te1Rec ? te1Rec.escalatedTier : null;
+  out.escNoStrayReject = !escRow(resTE1, "tier_escalation_rejected");
+
+  // W2 — a DOWNGRADE is refused. This is the ratchet itself: `medium` -> `small`
+  // is the one move the channel exists to make impossible. It returns through
+  // the delivery rung, so the second call site is covered behaviourally too.
+  const recTE2 = await run(buildArgs(), { agentReturns: Object.assign({}, mediumReturns(), {
+    "deliver:#11": delivered(11, 901, {
+      escalatedTier: "small",
+      escalationReason: "this turned out easier than triage thought",
+    }),
+  }) });
+  const resTE2 = resultOf(recTE2);
+  const te2Row = escRow(resTE2, "tier_escalation_rejected");
+  const te2Rec = escRec(resTE2, 11);
+  out.escDownRejected = !!(te2Row && te2Row.rejection === "not-an-upgrade"
+    && te2Row.from === "medium" && te2Row.attempted === "small" && te2Row.issue === 11);
+  out.escDownCount = resTE2 ? resTE2.tierEscalations : null;
+  out.escDownNoUpgradeRow = !escRow(resTE2, "tier_escalated");
+  // the refused value must not survive onto the published record — the script
+  // said no, so `results` cannot carry a yes. It survives in the audit row.
+  out.escDownBlanked = !!(te2Rec && te2Rec.escalatedTier === "" && te2Rec.escalationReason === "");
+
+  // W2b — the EQUAL-tier boundary, which is the half a strict downgrade does not
+  // cover: reporting the tier you were already dispatched at is not an upgrade
+  // either. Measured: without this row, relaxing the gate from `<=` to `<` — so
+  // a same-tier "escalation" is accepted, counted, and logged as a real
+  // mis-triage — passes every other assertion in this file.
+  const recTE2B = await run(buildArgs(), { agentReturns: escReturns({
+    escalatedTier: "small",
+    escalationReason: "it really was small after all",
+  }) });
+  const resTE2B = resultOf(recTE2B);
+  const te2bRow = escRow(resTE2B, "tier_escalation_rejected");
+  out.escSameRejected = !!(te2bRow && te2bRow.rejection === "not-an-upgrade"
+    && te2bRow.from === "small" && te2bRow.attempted === "small");
+  out.escSameCount = resTE2B ? resTE2B.tierEscalations : null;
+  out.escSameNoUpgradeRow = !escRow(resTE2B, "tier_escalated");
+
+  // W3 — an unknown tier is refused WITHOUT losing the delivery. This is the
+  // whole reason the wire carries no enum: the PR still has to reach /goal.
+  const recTE3 = await run(buildArgs(), { agentReturns: escReturns({
+    escalatedTier: "epic", escalationReason: "bigger than large",
+  }) });
+  const resTE3 = resultOf(recTE3);
+  const te3Row = escRow(resTE3, "tier_escalation_rejected");
+  const te3Rec = escRec(resTE3, 11);
+  out.escUnknownRejected = !!(te3Row && te3Row.rejection === "unknown-tier"
+    && te3Row.attempted === "epic");
+  out.escUnknownKeepsPr = !!(te3Rec && te3Rec.status === "PR_OPENED" && te3Rec.prNumber === 901);
+  out.escUnknownInQueue = !!(resTE3 && resTE3.prsOpened.indexOf(901) >= 0);
+
+  // W4 — an UNEXPLAINED escalation is not a record. "Recorded with a reason" is
+  // the ask; a bare tier bump tells the next triage nothing it can act on.
+  const recTE4 = await run(buildArgs(), { agentReturns: escReturns({
+    escalatedTier: "large", escalationReason: "   ",
+  }) });
+  const resTE4 = resultOf(recTE4);
+  const te4Row = escRow(resTE4, "tier_escalation_rejected");
+  out.escNoReasonRejected = !!(te4Row && te4Row.rejection === "no-reason"
+    && te4Row.attempted === "large");
+  out.escNoReasonCount = resTE4 ? resTE4.tierEscalations : null;
+
+  // W5 — THE CB1 INVARIANT, behavioural. The escalated run and the byte-identical
+  // non-escalated run must spend the SAME agents, in the same order: recording a
+  // mis-triage buys the next classification a better tier, never this run a
+  // research fleet nobody projected.
+  const recTE5 = await run(buildArgs(), { agentReturns: escReturns() });
+  const resTE5 = resultOf(recTE5);
+  const cTE1 = h.countAgentsByPhase(recTE1);
+  const cTE5 = h.countAgentsByPhase(recTE5);
+  out.escSameFleet = labels(recTE1).join("|") === labels(recTE5).join("|");
+  out.escNoResearch = (cTE1.research || 0) === 0 && (cTE5.research || 0) === 0;
+  out.escNoDesign = (cTE1.design || 0) === 0 && (cTE5.design || 0) === 0;
+  out.escNotDesignedCount = resTE1 ? resTE1.designedIssues : null;
+
+  // W6 — the reason is agent text on the wire and is SANITIZED before it reaches
+  // an audit row or a log line: a raw newline in a log line forges log lines.
+  // One line, no control characters, clipped at the named constant.
+  const recTE6 = await run(buildArgs(), { agentReturns: escReturns({
+    escalatedTier: "medium",
+    escalationReason: "first line\nsecond line\tand\u0007a bell " + "z".repeat(400),
+  }) });
+  const resTE6 = resultOf(recTE6);
+  const te6Row = escRow(resTE6, "tier_escalated");
+  const te6Rec = escRec(resTE6, 11);
+  out.escSanitizedOneLine = !!(te6Row && typeof te6Row.reason === "string"
+    // The class is written as ESCAPES, never as literal control bytes: a raw
+    // control character in a test file is invisible in review, and a CRLF
+    // checkout is free to rewrite one.
+    && !/[\u0000-\u001F\u007F]/.test(te6Row.reason));
+  out.escSanitizedClipped = !!(te6Row && te6Row.reason.indexOf(" [truncated]") >= 0
+    && te6Row.reason.length <= 300 + " [truncated]".length);
+  // the published record and the audit row must carry the SAME text — two
+  // spellings of one reason is the uncompared-copies shape all over again.
+  out.escSanitizedAgrees = !!(te6Row && te6Rec && te6Rec.escalationReason === te6Row.reason);
+  out.escSanitizedLogOneLine = recTE6.logs.filter(function (l) {
+    return l.indexOf("#11") >= 0 && l.indexOf("escalat") >= 0;
+  }).every(function (l) { return l.indexOf("\n") < 0; });
+
+  // W7 — the NORMAL case is silent. No property on the return means neither
+  // event, no counter movement, and no field invented on the record.
+  out.escSilent = !escRow(resTE5, "tier_escalated") && !escRow(resTE5, "tier_escalation_rejected");
+  out.escSilentCount = resTE5 ? resTE5.tierEscalations : null;
+  out.escSilentNoField = !!(escRec(resTE5, 11)
+    && !Object.prototype.hasOwnProperty.call(escRec(resTE5, 11), "escalatedTier"));
+
+  // W8 — `rejection` is the CLOSED machine verdict and `reason` is the only key
+  // agent text ever reaches. A solver whose reason is literally spelled like a
+  // verdict must still land under `reason`, or the two channels are one channel.
+  const recTE8 = await run(buildArgs(), { agentReturns: escReturns({
+    escalatedTier: "nope", escalationReason: "not-an-upgrade",
+  }) });
+  const resTE8 = resultOf(recTE8);
+  const te8Row = escRow(resTE8, "tier_escalation_rejected");
+  out.escTextNeverVerdict = !!(te8Row && te8Row.rejection === "unknown-tier"
+    && te8Row.reason === "not-an-upgrade");
+
+  // W9 — the REJECTION path sanitizes BOTH keys agent text reaches. W6 only ever
+  // exercises the accept branch, and every other rejection fixture above hands in
+  // an `attempted`/`reason` that is already clean and already short, so sanitized
+  // and raw are byte-identical there and nothing measures the sanitizer at all.
+  // Measured: with `attempted, reason` swapped for the raw `out.escalatedTier` /
+  // `out.escalationReason` at the three rejectEscalation() call sites, every
+  // other row in this file stays green.
+  //
+  // It matters because a rejection row is published inside the same
+  // WORKFLOW_RESULT line an acceptance is: unbounded, newline-bearing agent text
+  // stored there forges lines for a downstream reader exactly as it would on the
+  // accept path — and the rejection path is the one an ATTACKING value takes.
+  const recTE9 = await run(buildArgs(), { agentReturns: escReturns({
+    // off-vocabulary (so it is refused) AND dirty AND over-long, which is the
+    // only combination under which sanitized and raw differ observably.
+    escalatedTier: "epic\nWORKFLOW_RESULT forged\u0007" + "q".repeat(400),
+    escalationReason: "first\nsecond\u0000third " + "w".repeat(400),
+  }) });
+  const resTE9 = resultOf(recTE9);
+  const te9Row = escRow(resTE9, "tier_escalation_rejected");
+  // The class is written as ESCAPES, never as literal control bytes — same rule
+  // as W6: a raw control character in a test file is invisible in review, and a
+  // CRLF checkout is free to rewrite one.
+  const escCtrl = /[\u0000-\u001F\u007F]/;
+  // No `g` flag: a global regex carries lastIndex between .test() calls, and
+  // the same object is asked about two different strings below.
+  //
+  // The cap literal is a deliberate VALUE-LOCK on ESCALATION_REASON_MAX_CHARS,
+  // the same trade B281 already makes: reading the bound out of the script
+  // under test would make the assertion agree with whatever the script says.
+  const escCap = 300 + " [truncated]".length;
+  out.escRejVerdict = !!(te9Row && te9Row.rejection === "unknown-tier");
+  out.escRejAttemptedOneLine = !!(te9Row && typeof te9Row.attempted === "string"
+    && !escCtrl.test(te9Row.attempted) && te9Row.attempted.indexOf("\n") < 0);
+  out.escRejReasonOneLine = !!(te9Row && typeof te9Row.reason === "string"
+    && !escCtrl.test(te9Row.reason) && te9Row.reason.indexOf("\n") < 0);
+  out.escRejAttemptedClipped = !!(te9Row && typeof te9Row.attempted === "string"
+    && te9Row.attempted.length <= escCap
+    && te9Row.attempted.indexOf(" [truncated]") >= 0);
+  out.escRejReasonClipped = !!(te9Row && typeof te9Row.reason === "string"
+    && te9Row.reason.length <= escCap
+    && te9Row.reason.indexOf(" [truncated]") >= 0);
+
+  // W10 — a whitespace-only `escalatedTier` is ABSENT, not an escalation. The
+  // contract is "absent, non-string, or empty emits nothing"; three spaces are
+  // none of those under a `=== ""` test, so they fall through to the vocabulary
+  // check and produce a rejection row whose `attempted` sanitizes to the empty
+  // string — an audit row about a move nobody made.
+  const recTE10 = await run(buildArgs(), { agentReturns: escReturns({
+    escalatedTier: "   ", escalationReason: "a reason for an escalation never named",
+  }) });
+  const resTE10 = resultOf(recTE10);
+  out.escBlankTierSilent = !!(resTE10 && !escRow(resTE10, "tier_escalated")
+    && !escRow(resTE10, "tier_escalation_rejected"));
+  out.escBlankTierCount = resTE10 ? resTE10.tierEscalations : null;
+
+  const escRejections = [resTE1, resTE2, resTE2B, resTE3, resTE4, resTE5, resTE6, resTE8,
+    resTE9, resTE10]
+    .filter(Boolean)
+    .reduce(function (acc, r) {
+      return acc.concat((r.auditEvents || []).filter(function (e) {
+        return e && e.event === "tier_escalation_rejected";
+      }));
+    }, []);
+  // anti-vacuity: an extraction that found no rejection row would make the
+  // every() below pass while checking nothing at all.
+  out.escRejectionsSeen = escRejections.length;
+  out.escVerdictsClosed = escRejections.every(function (e) {
+    return ["not-an-upgrade", "unknown-tier", "no-reason"].indexOf(e.rejection) >= 0;
+  });
+
+  out.escViolations = [recTE1, recTE2, recTE2B, recTE3, recTE4, recTE5, recTE6, recTE8,
+    recTE9, recTE10]
+    .reduce(function (n, r) { return n + r.violations.length; }, 0);
+
+  // --- Run TR: the WHOLE RUN throws with live PR claims outstanding (#563) --
+  // main()'s outer catch is the SECOND path that could reach emitResult() with
+  // every claim unproven AND unclassified. A throw anywhere in the wave loop or
+  // at the deliver boundary skips `await verifyClaims()` entirely, and
+  // finalize() then publishes prsOpened — the set /goal ingests and merges on —
+  // straight from solver self-reports while probed, confirmed, disproven,
+  // unverified and notApplicable ALL read zero: byte-identical to a batch that
+  // had no PR claim to prove. What that hides is a fabricated or mis-parsed PR
+  // number, a PR opened on a branch other than the one claimed, and the
+  // authoritative 404 that would have downgraded the record before /goal merged.
+  //
+  // The lever is the harness's `phaseThrows` (H17). It is the only one that can
+  // reach a script's run-level catch: every other seam on the whole-run path is
+  // modelled infallible — parallel() maps a throwing thunk to null and never
+  // rejects, pipeline() drops the item — which is precisely why deleting this
+  // recovery block left the whole suite green. `deliver` is the one phase()
+  // between the last wave and verifyClaims(), so both solvers have already
+  // reported their PR numbers by the time it throws.
+  const recTR = await run(buildArgs(), { agentReturns: trivialReturns(), phaseThrows: "deliver" });
+  const resTR = resultOf(recTR);
+  out.trRanThrew = !!(resTR && resTR.auditEvents.some(function (e) { return e.event === "run_threw"; }));
+  // By NAME, never by index: run_threw is pushed first and the recovery rows
+  // after it, and an index would silently re-point the moment either moves.
+  const trNotRun = resTR
+    ? resTR.auditEvents.filter(function (e) { return e.event === "pr_proof_not_run"; })[0] : null;
+  out.trNotRunReason = trNotRun ? trNotRun.reason : null;
+  out.trUnverified = resTR ? resTR.verification.unverified : null;
+  out.trProbed = resTR ? resTR.verification.probed : null;
+  // The length premise is load-bearing: every() over an empty results array is
+  // vacuously true, so the row would pass on a run that published nothing.
+  out.trAllUnverified = !!(resTR && resTR.results.length === 2
+    && resTR.results.every(function (r) { return r.prProof === "UNVERIFIED"; }));
+  out.trPrNums = resTR ? resTR.prsOpened.join(",") : null;
+  out.trRecordIntact = recTR.violations.length + "/" + recTR.phases.join(",");
+
+  // --- Run PT: the same throw path with NOTHING to prove (#563) ------------
+  // Run TR's anti-vacuity twin, and the reason the audit row cannot be keyed on
+  // "were any claims downgraded". An intake-stage budget ceiling makes the very
+  // first agent() throw (the scan-fleet-workflow.test.sh Run F precedent — no
+  // phaseThrows involved), so no solver ever runs, `solved` is empty and
+  // markAllClaimsUnverified() is a no-op. pr_proof_not_run must fire anyway: it
+  // reports that the pass never RAN, which is a fact about the run rather than
+  // about how many claims happened to be live. Keyed on the downgrade count
+  // instead, the trail would read "verification ran and found nothing" on
+  // exactly the runs where it never ran at all.
+  const recPT = await run(buildArgs(), { agentReturns: trivialReturns(), budgetTotal: 1, agentCost: 2 });
+  const resPT = resultOf(recPT);
+  out.ptObservable = !!resPT;
+  out.ptBothEvents = !!(resPT
+    && resPT.auditEvents.some(function (e) { return e.event === "run_threw"; })
+    && resPT.auditEvents.some(function (e) { return e.event === "pr_proof_not_run"; }));
+  out.ptPrNums = resPT ? resPT.prsOpened.join(",") : null;
+
+  // --- Runs X1/X2: the two cannot-speak arms #563's closing Note names ------
+  // The issue observes that verifyClaims()'s own catch carries a comment
+  // claiming to be the ONLY path that can leave a live claim with no proof
+  // class — main()'s outer catch (Runs TR/PT above) being the second. That
+  // comment is only worth anything if the arms it speaks for are themselves
+  // pinned, and two of them were not. Run O covers the null relay, Run R the
+  // unusable body and Run V the unusable slug (B141) — but the relay THROWING
+  // and the budget ceiling skipping it were both reachable and named by no
+  // test at all.
+  //
+  // Unlike TR/PT these are NOT red-first rows — they pass on HEAD and on a tree
+  // with the outer-catch recovery removed, because neither run ever enters
+  // main()'s catch. They are coverage of two live arms, so that deleting either
+  // one reds a row instead of silently republishing self-reports.
+  //
+  // The two are each other's contrast, and the pair is why both composites
+  // carry probedNums(): it is null when no relay was dispatched at all and the
+  // requested numbers when one was, which is the ONE observable separating
+  // "the pass never got to ask" from "the pass asked and the asking blew up".
+  // verification.probed cannot carry that distinction on its own — it is set
+  // from the request set immediately BEFORE the relay call, so a throw inside
+  // the relay still publishes probed=2.
+
+  // Run X1 — the relay agent itself throws. The harness resolves a function
+  // entry in agentReturns by CALLING it, so throwing from there models the
+  // relay dying mid-flight (a schema rejection, a transport fault) rather than
+  // returning an unusable body, which is Run R's arm. The throw text must ride
+  // in the audit row: `pr_proof_threw` with a swallowed reason would say a
+  // failure happened while destroying the only description of it.
+  const x1Returns = Object.assign({}, trivialReturns());
+  x1Returns["verify-prs"] = function () { throw new Error("verify-prs stub threw"); };
+  const recX1 = await run(buildArgs(), { agentReturns: x1Returns });
+  const resX1 = resultOf(recX1);
+  const x1Threw = resX1
+    ? resX1.auditEvents.filter(function (e) { return e.event === "pr_proof_threw"; })[0] : null;
+  // One composite so the failure message names WHICH half of the arm broke,
+  // rather than the "expected true, got false" a folded boolean would print.
+  out.x1Arm = resX1 ? [
+    x1Threw
+      ? (String(x1Threw.reason).indexOf("verify-prs stub threw") >= 0 ? "reason_kept" : "reason_lost")
+      : "no_pr_proof_threw_row",
+    String(probedNums(recX1)),
+    resX1.verification.probed,
+    resX1.verification.unverified,
+    resX1.prsOpened.join(","),
+  ].join("/") : "no_result";
+
+  // Run X2 — the token budget is gone before the relay. budgetTotal 3 is exact
+  // by construction: intake plus the two solvers spend it to zero, so the run
+  // completes normally and the ceiling lands on the relay alone. Nothing throws
+  // here: budgetExhausted() is checked BEFORE the call, which is why probedNums
+  // is null in this run and "901,902" in X1.
+  const recX2 = await run(buildArgs(), { agentReturns: trivialReturns(), budgetTotal: 3 });
+  const resX2 = resultOf(recX2);
+  const x2Skip = resX2
+    ? resX2.auditEvents.filter(function (e) { return e.event === "pr_proof_skipped"; })[0] : null;
+  out.x2Arm = resX2 ? [
+    x2Skip ? String(x2Skip.reason) : "no_pr_proof_skipped_row",
+    String(probedNums(recX2)),
+    resX2.verification.probed,
+    resX2.verification.unverified,
+    resX2.prsOpened.join(","),
+  ].join("/") : "no_result";
+
   // Every run added above must also be harness-clean — an undeclared opts.phase
   // on a rung these runs are the first to reach shows up here and nowhere else.
-  out.newViolations = [recW, recX, recY, recZ, recZ4, recCF, recDS, recDA, recZC, recZD, recFW]
+  // ENUMERATED, never derived: a new run is NOT covered until it is named here.
+  out.newViolations = [recW, recX, recY, recZ, recZ4, recCF, recDS, recDA, recZC, recZD, recFW,
+                       recTR, recPT, recX1, recX2]
     .reduce(function (n, r) { return n + r.violations.length; }, 0);
 
   process.stdout.write(JSON.stringify(out));
@@ -1980,10 +3588,16 @@ else
   check aPrNums '"901,902"'  "B7 PR numbers surface in prsOpened"
   check aDesigned 0          "B8 designedIssues=0 on the no-design path"
   check aIntakeHaiku true    "B10 the manifest relay runs on haiku"
+  check aProofHaiku true     "B10b the #515 PR-existence proof — the SECOND mechanical relay — runs on haiku"
   check aSolversInherit true "B11 solvers inherit the session model (never pinned)"
 
   check bResearch 3          "B12 medium tier runs 3 research lenses"
-  check bDesign 3            "B13 medium tier runs spec + review + plan"
+  # spec + spec-review + plan + plan-review = 4 on the CLEAN fixture. The
+  # revision round is a fifth design rung and it is CONDITIONAL on a non-APPROVE
+  # verdict, so this row is also the proof it stayed conditional — B254/B255 are
+  # the pair that move it. The plan review is NOT conditional: every accepted
+  # plan is reviewed, which is why the approving fixture spends it.
+  check bDesign 4            "B13 medium tier runs spec + spec-review + plan + plan-review, and spends no reviser on an approved spec"
   # RE-CUT (#508): the medium issue's implement phase is no longer one agent.
   # A 2-task plan spends impl t1 + review t1r1 + impl t2 + review t2r1 + deliver
   # = 5, and the trivial issue still spends its single solver.
@@ -1998,6 +3612,8 @@ else
   check bTasksApproved 2     "B48c every task passed its review gate"
   check bTasksUnreviewed 0   "B48d no task shipped unreviewed on the clean path"
   check bImplHouseRules true "B65 the house rules, the leaf constraint, the untrusted-input framing and the never-fall-back rule all REACH the agent that commits"
+  check bLaterTaskCheckoutGate true "B254 the LATER-task implementer is told never to edit the repository root and to report BLOCKED when the shared checkout is missing (#557)"
+  check bLaterTaskWorkspaceAsked true "B255 ...and is asked for workspaceReady, the flag its gate refuses on"
   check bDeliverRules true   "B66 Closes #N, --body-file, stop-at-PR, the version-bump ban and the shared worktree all reach the agent that pushes"
 
   check bLensNoDeadPaths true "B47 the constraints lens no longer asserts CLAUDE.md/docs/adr exist (#516)"
@@ -2070,6 +3686,65 @@ else
   check oNoEnvelope true            "B250 a non-array return leaves the plan prompt envelope-free"
   check o2OnlyUsable true           "B251 non-string and whitespace-only findings are dropped, the usable one renumbered"
   check o2Count true                "B252 the audit count reflects the SURVIVING findings, not the raw list"
+
+  # #524 item 1 — the bounded spec-revision round.
+  # B254/B256 drive a reviser that SUCCEEDS, so they leave the loop on its
+  # `!revised` exit and say nothing about the bound at any value of
+  # SPEC_REVISE_ROUNDS. The cap is G14c (the constant) plus B262c (the loop
+  # obeying it on an arm where the reviser never succeeds); these two rows claim
+  # only what they can see.
+  check srReviseCalls 1             "B312 a REVISIONS_REQUIRED verdict dispatches a spec reviser, and stops the moment one lands usably"
+  check srNoReviseOnApprove 0       "B313 an APPROVE dispatches none — the revision round is gated, not unconditional"
+  check srRejectSameRound true      "B256 REJECT takes the revision round on the same terms, and the reviewer is never re-run after it"
+  check srPlanReadsRevision true    "B257 an accepted revision is what the planner is pointed at, never the superseded spec"
+  check srPathRejected true         "B258 a revision at a different in-run-dir path is rejected (exact equality, not a prefix check) and audited"
+  check srRcRejected true           "B259 a non-zero rc at the right path is rejected too, and audited"
+  check srFindingsEnveloped true    "B260 the reviewer findings reach the reviser ONLY inside the #507 envelope"
+  check srNullDegrades true         "B261 a null reviser counts as a design null and the planner falls back to the original spec"
+  check srRevisedAudit true         "B262 the accepted revision is audited and the reviser is given the script-derived output path"
+  check srVerdictNotRaw true        "B262b the agent-returned verdict reaches no prompt raw — a value outside the closed enum is named, not echoed"
+  check srRoundsBounded true        "B262c the cap is the LOOP's bound: on the arms where the reviser never lands usably, exactly SPEC_REVISE_ROUNDS revisers are spent"
+  check srRevisedKeepsFindings true "B262d an accepted revision does not consume the findings — the planner still gets them, enveloped, to check the unverified revision against"
+
+  # #524 item 2 — the plan review gate and its three consumers.
+  #
+  # B270 is the NEGATIVE arm and passes on the pre-#524 tree by construction (no
+  # envelope exists to find): it is a regression pin, not a red-first row, and
+  # without it every positive row here is satisfied by an UNCONDITIONAL block.
+  # Every other row below fails without the gate.
+  check prReviewCalls 1             "B263 an accepted plan is reviewed exactly once — the design artifact the implementers execute no longer ships unreviewed"
+  check prThreadedAudit true        "B264 the hand-off is accounted under this gate's OWN event name (plan_findings_threaded), not the spec gate's"
+  check prNotApprovedAudit true     "B265 a non-APPROVE plan verdict is audited, never silent"
+  check prImplEnvelope true         "B266 the plan reviewer's findings reach the task IMPLEMENTER inside the #507 envelope, numbered"
+  check prReviewEnvelope true       "B267 they reach the task REVIEWER too — the two gates cannot contradict each other over one plan"
+  check prFixEnvelope true          "B268 they reach the FIXER, marked as context about the plan rather than the findings it is there to fix"
+  check prCaps true                 "B269 the #507 count and per-string caps bind the plan-review findings in all three prompts — no second set of caps"
+  check prApproveNoEnvelope true    "B270 an APPROVE with nothing to say adds NO block to any of the three prompts"
+  check prNullDegrades true         "B271 a null plan reviewer counts as a design null and the task chain still runs, envelope-free"
+  check prSentinelOnlyEnveloped true "B272 a reviewer-returned string appears in NO plan-consumer prompt outside its envelope block"
+  check prUnusableAudit true        "B272b a plan-review findings array that arrives UNUSABLE is audited by count, degrades to no block, and never takes the chain down"
+
+  # #524 item 3 — the risk-gated security lens, and lensBrief() made total.
+  #
+  # B274-B276 are the negative arms and pass on the pre-#524 tree by
+  # construction (no fourth lens exists to find): they are what stops every
+  # positive row being satisfied by a lens that runs unconditionally, which is
+  # the option the issue offers and this change deliberately does not take.
+  check secLensCount 4              "B273 a non-blank triage risk signal buys the fourth research lens"
+  check secDispatched true          "B273b that lens is dispatched under its own label (research:#11:security)"
+  check secEmptyLensCount 3         "B274 an EMPTY risk-signal array spends no security agent"
+  check secEmptyNoLens true         "B274b ...and dispatches no research:#11:security label"
+  check secAbsentLensCount 3        "B275 an ABSENT risk-signal key is back-compatible: an unpatched launcher still gets the 3-lens fan-out"
+  check secBlankLensCount 3         "B276 the predicate is NON-BLANK, not non-empty — a whitespace-only signal buys nothing"
+  check secNotCoverageBrief true    "B277 the security lens is NOT handed the test-coverage brief (the silent-fallthrough hazard)"
+  check secBodiesDistinct true      "B279 all four rendered lens briefs are pairwise distinct — lensBrief() is total, asserted without naming brief text"
+  check secUnknownLensThrows true   "B278 an unknown lens FAILS the issue's chain loudly (solve_chain_threw), never laundered by parallel() into a research null"
+  check secNoSignalText true        "B280 no risk-signal STRING reaches any prompt or any audit event (DR-5)"
+  check secSignalCount 2            "B281 security_lens_dispatched carries the count of NON-BLANK signals, and nothing else"
+  check secRelayMismatch true       "B282 a declared count with a relay that dropped the field audits risk_signals_relay_mismatch AND risk_signals_absent"
+  check secFaithfulQuiet true       "B283 a faithful relay audits neither — the join is a comparison, not an unconditional event"
+  check secLegacyQuiet true         "B284 a legacy envelope (no riskIssueCount) degrades to SILENCE, not to noise, whatever the records carry"
+
   check lFixCalls 3          "B72 the fix ladder dispatches at most FIX_ROUNDS=3 fixers"
   check lReviewCalls 4       "B73 a bounded ladder means FIX_ROUNDS+1=4 reviews, never an unbounded loop"
   check lExhaustedAudit true "B74 ladder exhaustion is audited (task_fix_rounds_exhausted), never silent"
@@ -2116,6 +3791,8 @@ else
   check qFixerDispatched true   "B59a REVISIONS_REQUIRED dispatches a fixer"
   check qNoFindingText true     "B59b reviewer-returned text NEVER reaches the fixer prompt"
   check qReviewPathInPrompt true "B59c the fixer is given the review file BY PATH"
+  check qFixCheckoutGate true   "B314 the fixer — the rung that amends an existing commit — is told never to fall back to the repository root and to report BLOCKED when the shared checkout is missing (#557)"
+  check qFixWorkspaceAsked true "B315 ...and is asked for workspaceReady, the flag B204/B205 gate its return on"
   check qNoFindingInLogs true   "B59d reviewer-returned text is never logged or returned either"
 
   check rChainAgents 4       "B60a CB3 stops the task chain at the live per-issue implement budget"
@@ -2135,6 +3812,27 @@ else
 
   check sAtCeiling false     "B62 CB1 does NOT trip at exactly the projected agent count"
   check sBelowCeiling true   "B63 CB1 trips one below the projection — the formula is pinned, not just the breaker"
+
+  # G32 — B62/B63 above only bite while Run S's projection still tracks the
+  # script, and B262c only bites while the fixture's cap reading is the script's
+  # cap. Two INDEPENDENT extraction paths read the same three constants — the
+  # shell `sed` beside S22b/G31/G14c and the fixture's JS `RegExp` — so if
+  # either rots (a reformatted term, a renamed constant) this row reds by name
+  # instead of the projection silently drifting to a stale number, or B262c
+  # comparing a dispatch count against a cap nobody enforces. Deliberately NOT a
+  # `check`: the agreement is over three fields at once and splitting it into
+  # three rows would report thirds of a single fact.
+  G32_JS="$(printf '%s' "$FIXTURE_OUT" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String(o.sDesignBase)+":"+String(o.sBudget)+":"+String(o.srRoundsRead));}catch(e){process.stdout.write("PARSE_ERROR:"+e.message);}})' 2>/dev/null)"
+  G32_SH="${FLEET_DESIGN_BASE}:${FLEET_BUDGET}:${FLEET_SPEC_REVISE_ROUNDS}"
+  if [ -z "$FLEET_DESIGN_BASE" ] || [ -z "$FLEET_BUDGET" ] || [ -z "$FLEET_SPEC_REVISE_ROUNDS" ]; then
+    # G31/S22b/G14c already failed by name; comparing against a blank field here
+    # would report the same defect a second time under a misleading heading.
+    fail "G32 skipped its join — the shell could not read one of the fleet's constants (read '$G32_SH'); see G31, S22b and G14c"
+  elif [ "$G32_JS" = "$G32_SH" ]; then
+    pass "G32 the fixture's own reading of the design base, implement budget and revision cap agrees with the shell's ($G32_JS)"
+  else
+    fail "G32 the fixture and the shell disagree about the fleet's constants (shell read $G32_SH, fixture read $G32_JS)"
+  fi
 
   check tFallback true       "B64a a design tier with no usable plan falls back to the single solver"
   check tNoImpl true         "B64b no task agent is dispatched without a plan (no plan, no tasks, no gate)"
@@ -2158,12 +3856,29 @@ else
   check rProofs '"UNVERIFIED,UNVERIFIED"' "B111 a bodyless return classifies UNVERIFIED, claims retained"
   check rPrNums '"901,902"'       "B111b the retained claims still surface in prsOpened"
   check rViolations 0             "B112 zero harness violations on the bodyless-return path"
-  check rRelayFailed true         "B217 pr_proof_relay_failed fires — the ONLY thing separating a relay that never ran from one that answered unusably, since both publish relayRc null"
-  check rRelayRc null             "B217b ...and the published relayRc really is null on that path, so the event is what carries the difference"
+  check rRelayFailed true         "B217 pr_proof_relay_failed fires on a bodyless return — no rc is present, so the non-integer branch is taken"
+  check rRelayRc null             "B217b ...and the published relayRc is null on THIS arm — B301b pins the same event firing with relayRc 1, so the event alone discriminates nothing"
+
+  check rtThrew true              "B300 a throwing relay fires pr_proof_threw — the first fixture in the tree to reach that arm"
+  check rtRelayRc null            "B300b the published verification.relayRc is null when the throw beat the assignment"
+  check rtEventRelayRc null       "B300c the event carries the rc in its own field rather than leaving it to be inferred"
+  check rtProbed 2                "B300d the pass had reached the relay — probed separates this from the silent no-claim exit"
+  check rtProofs '"UNVERIFIED,UNVERIFIED"' "B300e fail-soft: a thrown relay classifies, it never disproves"
+  check rtPrNums '"901,902"'      "B300f fail-soft: the claims stay in prsOpened, never dropped from /goal's queue"
+  check rtViolations 0            "B300g zero harness violations on the throwing-relay path"
+
+  check riRelayFailed true        "B301 a non-zero INTEGER rc fires pr_proof_relay_failed"
+  check riRelayRc 1               "B301b ...and verification.relayRc is 1, not null — the event is NOT the null discriminator"
+  check riEventRc 1               "B301c the event's own rc field carries the value"
+  check riProofs '"UNVERIFIED,UNVERIFIED"' "B301d fail-soft: a failed relay classifies, it never disproves"
+  check riPrNums '"901,902"'      "B301e fail-soft: the claims stay in prsOpened"
+  check riViolations 0            "B301f zero harness violations on the non-zero-rc path"
 
   check pNoRelay true             "B113 a batch with no PR claim dispatches NO proof relay at all"
   check pProofs '"NOT_APPLICABLE,NOT_APPLICABLE"' "B114 non-PR records are classified NOT_APPLICABLE"
   check pPrEvents 0               "B115 a clean non-PR batch emits zero verification noise"
+  check pRelayRc null             "B302 the no-claim exit publishes relayRc null too — three distinct paths, one published value"
+  check pProbed 0                 "B302b probed 0 with no pr_ event (B115) is that path's whole signature"
 
   check qStatus '"PR_OPENED"'     "B116 a 403 does NOT disprove a PR (false-downgrade wall)"
   check qPrNums '"901,902"'       "B117 the throttled claim stays in prsOpened and in /goal's queue"
@@ -2318,6 +4033,62 @@ else
   check fwTasks '"1:DONE:0,2:BLOCKED:0"' \
                                   "B205 the task is BLOCKED and its fixRounds counter did NOT advance — an unattributable amend is not a landed fix"
   check fwStopped true            "B206 ...and the chain stops: no second fix round, no re-review of bytes nobody attributable changed"
+
+  # --- #532: the one-way tier ratchet, mid-run return channel (W1-W8) -------
+  check escRecorded true          "B316 (W1) a genuine upgrade is audited as tier_escalated with BOTH ends of the move (from/to) and the issue it belongs to"
+  check escReasonKept true        "B317 (W1) ...carrying the solver's reason, so the next triage has something it can act on"
+  check escCount 1                "B318 (W1) tierEscalations counts it"
+  check escLogged true            "B319 (W1) ...and the operator gets a log line naming the issue"
+  check escDeliveryIntact true    "B320 (W1) the delivery record is untouched — an escalation is a note beside the result, never a rewrite of it"
+  check escPublished '"medium"'   "B321 (W1) the accepted tier is published on the record for the next classification to read"
+  check escNoStrayReject true     "B322 (W1) ...and no rejection row is emitted beside the acceptance"
+
+  check escDownRejected true      "B323 (W2) THE RATCHET: medium -> small is refused as not-an-upgrade, recorded through the DELIVERY rung's return site"
+  check escDownCount 0            "B324 (W2) ...and a refused move never advances the counter"
+  check escDownNoUpgradeRow true  "B325 (W2) ...and emits no tier_escalated row"
+  check escDownBlanked true       "B326 (W2) the refused value is blanked off the published record — results cannot carry a yes the script said no to (it survives in the audit row)"
+
+  # W2b was added after the block below, so its ids are the next free ones
+  # file-wide rather than the next ones in sequence — uniqueness is what the id
+  # scheme buys, and keeping these rows beside W2 is what makes them readable.
+  check escSameRejected true      "B291 (W2b) the EQUAL-tier boundary: reporting the tier you were already dispatched at is refused as not-an-upgrade too"
+  check escSameCount 0            "B292 (W2b) ...and advances no counter"
+  check escSameNoUpgradeRow true  "B293 (W2b) ...and emits no tier_escalated row"
+
+  check escUnknownRejected true   "B327 (W3) an off-vocabulary tier is refused as unknown-tier, with the attempted value preserved"
+  check escUnknownKeepsPr true    "B328 (W3) ...and the delivery record SURVIVES: the wire carries no enum precisely so an illegal advisory value cannot reject an otherwise-solved issue's return"
+  check escUnknownInQueue true    "B329 (W3) ...so the PR still reaches the queue /goal ingests"
+
+  check escNoReasonRejected true  "B330 (W4) a whitespace-only reason is refused as no-reason — an unexplained tier bump is not a record"
+  check escNoReasonCount 0        "B331 (W4) ...and does not advance the counter"
+
+  check escSameFleet true         "B332 (W5) CB1 INVARIANT: the escalated run dispatches exactly the same agents, in the same order, as the byte-identical non-escalated run"
+  check escNoResearch true        "B333 (W5) ...zero research agents in both — an escalation never buys THIS run a fleet nobody projected"
+  check escNoDesign true          "B334 (W5) ...and zero design agents in both"
+  check escNotDesignedCount 0     "B335 (W5) ...and the escalated issue is not counted as designed"
+
+  check escSanitizedOneLine true  "B336 (W6) the reason reaches the audit row as ONE line with no control characters — a raw newline in a log line forges log lines"
+  check escSanitizedClipped true  "B337 (W6) ...clipped at the named constant with the [truncated] suffix"
+  check escSanitizedAgrees true   "B338 (W6) ...and the published record carries the same sanitized text as the audit row, not a second spelling of it"
+  check escSanitizedLogOneLine true "B339 (W6) ...and the log line it produces is a single line"
+
+  check escSilent true            "B340 (W7) the normal case is SILENT: no escalatedTier on the return emits neither event"
+  check escSilentCount 0          "B285 (W7) ...and moves no counter"
+  check escSilentNoField true     "B286 (W7) ...and invents no field on the record"
+
+  check escTextNeverVerdict true  "B287 (W8) agent text spelled exactly like a verdict still lands under reason, never under the machine key rejection"
+  check escRejectionsSeen 6       "B288 (W8) anti-vacuity: the rejection rows really were extracted before the closed-enum check ran — and exactly one run above is expected to reject"
+  check escVerdictsClosed true    "B289 (W8) every rejection carries one of exactly three verdicts — rejection is a closed machine key"
+  check escViolations 0           "B290 zero harness violations across every run added for #532"
+
+  check escRejVerdict true          "B294 (W9) a dirty over-long tier is still refused as unknown-tier — sanitizing the value never launders it into the vocabulary"
+  check escRejAttemptedOneLine true "B295 (W9) the REJECTION row's attempted is sanitized: one line, no control characters — a rejection row is published in the same WORKFLOW_RESULT line an acceptance is"
+  check escRejReasonOneLine true    "B296 (W9) ...and so is its reason, on the branch an attacking value actually takes"
+  check escRejAttemptedClipped true "B297 (W9) ...attempted is bounded by the named constant and carries the [truncated] suffix when clipped"
+  check escRejReasonClipped true    "B298 (W9) ...and so is reason: neither key can put unbounded agent text into an audit row"
+
+  check escBlankTierSilent true   "B299 (W10) a whitespace-only escalatedTier is ABSENT, not an escalation: it emits neither event rather than an audit row about a move nobody made"
+  check escBlankTierCount 0       "B341 (W10) ...and moves no counter"
   check fwDelivered true          "B207 delivery still runs on task 1's real commit"
   check fwChainComplete false     "B208 ...but the chain is not complete, so /goal cannot read the PR as covering the whole plan"
 
@@ -2329,7 +4100,67 @@ else
   check zdNoDeliver true          "B192 ...and still dispatches no delivery agent — there is nothing committed to deliver"
   check zdBlockerNames true       "B193 ...and the blocker names the issue and points at the worktree, so /goal cannot read it as solved"
 
-  check newViolations 0           "B169 zero harness violations across every run added for #561 and #562"
+  # ------------------------------------------------------------------- #554
+  # The delivery PROMPT's linkage, read back per stop-path. Row ids start at
+  # B254 rather than at the plan's B209: B209-B216 are already taken by the
+  # delivery-workspace gate above, and two rows answering to one id is how a
+  # failure gets read as its neighbour.
+  #
+  # Every row keys off the RENDERED prompt. G5c further up greps the source for
+  # `Closes #` and passes on both arms by construction — it is a presence check
+  # on the file, never a guard on what the delivery agent is told.
+  check bChainComplete true       "B66b the B66 fixture really IS a complete chain, so its Closes-#N row means what it says"
+  check bNoCommitGuard true       "B66c ...and a complete chain is NOT told to inspect its commit messages — that guard is the partial arm's alone"
+  check tmLink true               "B342 a task REJECTED at its root delivers with the non-closing UberDev-Partial link, never Closes #N"
+  check tmProhibition true        "B343 ...and the body is forbidden a closing keyword pointing at this issue, in words that never render the closing form itself"
+  check tmGuardBeforePush true    "B344 ...and the commit-message reword instruction lands BEFORE the push, where honouring it needs no force-push"
+  # B256b is a NEGATIVE control and passes vacuously on a tree with no guard at
+  # all (the B234/B235 shape above); it means something only beside B256c, which
+  # is what proves a range is rendered when the launcher resolved one.
+  check tmGuardNoGuessedBase true "B256b ...and an UNRESOLVED base emits no ref range at all, never a guessed one (the --base rule, applied to git log)"
+  check kbGuardBase true          "B256c ...while a launcher-resolved base is named literally in the range the agent reads"
+  check kbViolations 0            "B256d ...and that run is harness-clean"
+  check tlLink true               "B345 an EXHAUSTED fix ladder delivers as a partial too — B52b only ever checked the label"
+  check fnAudit true              "B346 a NULL fixer is audited with its task"
+  check fnDelivered true          "B347 ...and delivery still runs on the work already committed"
+  check fnLink true               "B348 ...with the partial link: this stop path had no delivery-prompt fixture at all before now"
+  check fnViolations 0            "B349 ...and the new run is harness-clean"
+  check xLink true                "B350 a chain stopped by an unusable taskCount is linked as a partial, not just flagged chainComplete:false"
+  check cfLink true               "B351 the CB3 budget arm — documented as an intentional deliver-anyway — is still not allowed to close the issue"
+  check dsLink true               "B352 the DISPUTED bucket takes the partial link too, though it is no member of partialDelivery"
+  check daClosesKept true         "B353 ANTI-VACUITY: an AGREED no-change chain is complete and keeps Closes #N, with no partial trailer"
+
+  # --- #563: the run-level throw path, with claims and without ---------------
+  # Run TR — the wave loop finished, two PRs were claimed, and the run threw
+  # before the proof pass. Read the rows as a set: run_threw and prsOpened were
+  # ALWAYS present and probed was ALWAYS 0, so B301/B304/B306 are premises that
+  # hold on both trees. B302, B303 and B305 are the three that go red the moment
+  # the recovery block is removed, and they are the whole point of the group.
+  check trRanThrew true           "B354 a run that threw audits run_threw (the premise the rows below stand on)"
+  check trNotRunReason '"run_threw"' "B355 ...and audits pr_proof_not_run with reason=run_threw, so \"the pass never ran\" is on the record rather than inferred from three zero counts"
+  check trUnverified 2            "B303 both live claims are classed UNVERIFIED — the one number separating a thrown run carrying claims from a batch with nothing to prove"
+  check trProbed 0                "B304 probed stays 0: no relay was dispatched and the recovery must not pretend one was"
+  check trAllUnverified true      "B305 every published record carries prProof=UNVERIFIED, so a consumer reads a proof class per record instead of null"
+  check trPrNums '"901,902"'      "B306 the claims are RETAINED, never dropped — an unprovable claim still reaches /goal, flagged as unproven"
+  check trRecordIntact '"0/intake,deliver"' "B307 the throw lever leaves the record intact: zero harness violations, and both phases still recorded"
+
+  # Run PT — the same catch with an EMPTY claim set. Without this row the
+  # audit could be keyed on "did anything get downgraded" and still look right.
+  check ptObservable true         "B308 an intake-stage throw still emits a WORKFLOW_RESULT (DR-8: the run stays observable)"
+  check ptBothEvents true         "B309 ...and audits BOTH run_threw and pr_proof_not_run — the row keys off verification never running, not off having something to downgrade"
+  check ptPrNums '""'             "B310 ...with no PR claim to retain"
+
+  # --- #563: the two cannot-speak arms the issue's closing Note names --------
+  # Siblings of Run V's no_repo_slug (B141), and NOT red-first: both pass on
+  # HEAD and on a tree with main()'s recovery block removed, because neither
+  # enters that catch. They exist so the arms cannot be deleted in silence.
+  # Each row is one slash-joined composite — audit reason / numbers the relay
+  # was actually asked about (null = never dispatched) / probed / unverified /
+  # retained claims — so a break names its own half instead of printing "false".
+  check x1Arm '"reason_kept/901,902/2/2/901,902"' "B311 a proof relay that THROWS is audited as pr_proof_threw carrying the throw text, probed counts the dispatch that was made, and both claims are retained as UNVERIFIED rather than dropped or downgraded"
+  check x2Arm '"budget_exhausted/null/0/2/901,902"' "B356 a relay skipped by the token ceiling audits pr_proof_skipped reason=budget_exhausted, dispatches nothing (probed stays 0), and still classes both retained claims UNVERIFIED"
+
+  check newViolations 0           "B169 zero harness violations across every run added for #561, #562 and #563"
 fi
 
 echo "== S: /goal runs ON the workflow backend — the interim demotion is GONE (RFC 0015 §5) =="

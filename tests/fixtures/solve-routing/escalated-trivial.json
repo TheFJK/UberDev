@@ -1,0 +1,1 @@
+{"number":6,"title":"Correct a stale sentence in the install guide","state":"OPEN","body":"One sentence in docs/install.md still names the retired flag.","labels":[{"name":"docs"},{"name":"uberdev:tier-medium"}],"assignees":[],"comments":[]}

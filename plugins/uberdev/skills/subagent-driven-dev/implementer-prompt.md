@@ -76,6 +76,19 @@ these inputs:
     **While you work:** If you encounter something unexpected or unclear, **ask questions**.
     It's always OK to pause and clarify. Don't guess or make assumptions.
 
+    ## You Do Not Dispatch Subagents
+
+    Do all of this task's work yourself. You are a leaf worker: never spawn a
+    subagent to implement part of the task, and never spawn a reviewer to check
+    your work. Self-review means reading your own diff, not delegating it.
+
+    Review is the controller's job and arrives after you report. Every reviewer
+    a worker spawns duplicates the task review this loop already dispatches — a
+    full extra review seat per task — and its verdict counts for nothing here.
+
+    If this task cannot be carried out without delegating, report `REFUSED` and
+    name the instruction that demands it.
+
     ## Code Organization
 
     You reason best about code you can hold in context at once, and your edits are more

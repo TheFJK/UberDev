@@ -4,6 +4,70 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.48.0] — 2026-08-16
+
+Consolidated landing of 20 pull requests (#567, #569, #570, #573–#577, #584–#587, #589,
+#591, #593, #596–#600), combined onto one review branch by `/uberdev:review-pr` Phase 0
+and reviewed once as a unit. Closes #524, #531, #532, #533, #534, #546, #548, #549,
+#551, #554, #556, #557, #560, #563, #565.
+
+#530, #535, #536, #558 and #564 are NOT closed by this release. Their solver chains
+stopped early and said so, so their `Closes` lines were removed from the combined PR
+rather than left to auto-close unfinished work; the landed half is described below and
+each issue stays open with its remainder. An earlier draft of this entry listed them as
+closed, which contradicted the merge intent.
+
+#555, #559, #561 and #562 were closed unchanged: all four were already fixed on `main` by
+PR #553, which under-credited its `Closes:` list. Each was verified by executing the suite
+against an untouched tree, not by reading the code.
+
+### Added
+
+- **The remaining reviewer edges** (#524): the spec reviser, plan reviewer and security lens
+  now exist on the design path, raising the per-issue design base from 6 to 9.
+- **A one-way tier-escalation ratchet** (#532), so a mis-triage reaches the next dispatch
+  instead of being decided once at dispatch and never revisited.
+- **The 6.3.0 leaf-worker contract and rulings ledger** (#530), and two ported 6.3.0
+  track-component hunks with their `C-FILES` refresh (#531).
+- **An exit floor for `supervision-smoke-macos`** (#551): on bash 3.2 a `set -u` abort in a
+  script carrying an `EXIT` trap exits zero, so a fixture could die a third of the way in and
+  the job would stay green — which `child-dispatch.test.sh` did for months. The floor is a
+  completion flag no abort path can forge.
+- **A release-aware vendor drift job** (#535), which can now say a new upstream release needs
+  adjudicating instead of only watching `HEAD`.
+
+### Changed
+
+- An aborted task chain no longer delivers a PR whose body claims completeness and
+  auto-closes its issue (#554); `main()`'s outer catch now classifies and marks every
+  outstanding claim `UNVERIFIED` rather than publishing unproven self-reports as fact (#563).
+- A REFUSED Phase 1 fixer publishes its terminal, so findings defer instead of dropping (#556).
+- CB1 charges the fleet it actually ran, derived from the relayed envelope rather than a
+  hardcoded 30, and audits the cycle it could not measure (#564).
+- Provider role cards no longer declare a status vocabulary the assembled prompt overrides
+  (#546); `relayRc` is given one meaning on all four surfaces that ship it (#565); the
+  run-header model-policy note names both mechanical relays (#560).
+- Every `measured_diff_lines` carries a labelled basis and is reconciled against RFC 0019
+  (#534); the fictional `solve.lead.<tier>` root-edge pointer is gone (#536).
+
+### Fixed
+
+Four defects that only exist in combination, each found by reviewing the stack as a unit and
+invisible to any per-PR review:
+
+- **A guard from one PR catching violations added by another.** #551's exit-floor row asserts
+  every fixture in the macOS job is floored; a sibling PR added two unfloored fixtures to that
+  job. Neither branch is red alone.
+- **A measurement made stale by a sibling.** One PR measured every vendored component; sibling PRs
+  changed the bytes of five of them. Each number was right for its own branch and wrong for the
+  merged tree, so all five were re-measured against the combined tree and reconciled with RFC 0019.
+- **A typed mirror that drifted.** `goal-workflow.test.sh` held the fleet design base as a
+  literal `6`; #524 moved it to 9, shorting nine expected totals by 3 per issue. The base is
+  now read out of the fleet script and is mutation-proven.
+- **Row-id collisions.** Two PRs each numbered a new structural row `G31` and another `G32` at
+  different points in one file, so git merged them cleanly into duplicate ids; the later pair
+  was renumbered.
+
 ## [0.47.0] — 2026-08-14
 
 Consolidated landing of 18 pull requests (#523, #525–#529, #537–#545, #547, #550, #552),

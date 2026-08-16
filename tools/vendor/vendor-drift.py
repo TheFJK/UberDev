@@ -76,7 +76,28 @@ MARKER = "<!-- uberdev-vendor-drift-v1 -->"
 FINGERPRINT_KEY = "drift-fingerprint:"
 ISSUE_TITLE = "Vendored upstream drift — weekly report"
 SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
+# `git ls-remote --tags <url>` prints `refs/tags/<name>` for every tag and, for
+# an ANNOTATED tag, a SECOND `refs/tags/<name>^{}` line carrying the commit the
+# tag object peels to. The register records peeled commits, so the peel line is
+# the one that has to win — and `--refs`, the obvious-looking way to tidy the
+# output, DROPS that line entirely, which is why the query below deliberately
+# does not pass it.
+TAG_REF_RE = re.compile(r"^refs/tags/(.+?)(\^\{\})?$")
+# `release_key`'s pre-release field, named at both ends so the rule it encodes
+# stays legible: SemVer §11 ranks a pre-release BELOW the release it precedes,
+# so `v6.4.0-rc1` sorts under `v6.4.0`. `is_prerelease` reads the same field
+# back out, which is what keeps "is this a pre-release?" from becoming a second
+# answer — spelled, inevitably, as a substring test for `-` that disagrees with
+# this one on names upstreams really publish.
+PRERELEASE_RANK = 0
+FINAL_RANK = 1
+RELEASE_KEY_PRERELEASE_FIELD = 1
 FINGERPRINT_RE = re.compile(r"drift-fingerprint:\s*([0-9a-f]+)")
+# The two verdict fields the fingerprint payload leaves out, because neither can
+# vary within it: `id` is the key each entry is stored under, and `actionable` is
+# the filter that decides an entry is there at all. Everything else the verdict
+# carries goes in — see `build_report`.
+FINGERPRINT_VERDICT_SKIP = frozenset({"id", "actionable"})
 # Cap the per-component file list so one large upstream release cannot turn the
 # issue body into an unreadable wall; the residual count is still reported.
 MAX_LISTED_FILES = 25
@@ -125,6 +146,237 @@ def resolve_head(repo_url, repo_slug):
         fail("git ls-remote returned a non-40-hex ref for upstream %s: %r"
              % (repo_slug, sha))
     return sha
+
+
+def release_key(name):
+    """A SemVer-ish ordering key for a tag name, or None if it names no version.
+
+    The shape exists to prevent one specific inversion, so do not "simplify" it
+    into the digits alone: `v6.4.0-rc1` yields the digit run (6, 4, 0, 1), which
+    sorts ABOVE its own final release `v6.4.0` at (6, 4, 0) — `max()` would then
+    report a release CANDIDATE as the newest release. SemVer §11 ranks a
+    pre-release BELOW the version it precedes, and the `0 if sep else 1` field
+    is what encodes that.
+
+    `ls-remote` prints tags in lexical refname order, where `v6.0.10` precedes
+    `v6.0.2`; ordering is therefore always computed here, never taken from the
+    order the remote happened to print.
+    """
+    # SemVer §10: build metadata is not part of the version, so it is stripped
+    # before comparison. The trailing `name` field below is only a deterministic
+    # tiebreak, so `max()` over two names that differ ONLY in build metadata is
+    # still stable rather than arbitrary.
+    core = name.split("+", 1)[0]
+    stem, sep, pre = core.partition("-")
+    if not re.search(r"\d", stem):         # e.g. `release-1.2.3`: that "-" is a
+        stem, sep, pre = core, "", ""      # word separator, not a pre-release one
+    nums = tuple(int(n) for n in re.findall(r"\d+", stem))
+    if not nums:
+        return None
+    pre_nums = tuple(int(n) for n in re.findall(r"\d+", pre))
+    return (nums, PRERELEASE_RANK if sep else FINAL_RANK, pre_nums, pre, name)
+
+
+def is_prerelease(name):
+    """True when `name` names a version that PRECEDES its own final release.
+
+    Delegates the parse to `release_key` rather than testing the raw string for
+    a `-`, because the two disagree in BOTH directions on names upstreams
+    really publish: `release-1.2.3` carries a hyphen that is a word separator,
+    and SemVer §10 puts build metadata outside the version, so `v6.4.0+build`
+    is a final release. A substring test calls both of those pre-releases and
+    then quietly drops them from the candidate set — an upstream whose newest
+    release is invisible to the control that exists to notice it.
+    """
+    key = release_key(name)
+    return key is not None and key[RELEASE_KEY_PRERELEASE_FIELD] == PRERELEASE_RANK
+
+
+def validate_release_metadata(upstream_id, upstream):
+    """Refuse a release review point this script would otherwise mis-read.
+
+    Runs beside the `REQUIRED_COMPONENT_KEYS` loop, before the first subprocess
+    and before either mode branches, for the reason D13/D13b pin: a register
+    somebody broke exits 2, never the rc 1 `fail()` reserves for "an upstream
+    could not be resolved". A weekly job that reports a typo as an outage is one
+    that gets muted, and a muted control is not a control.
+
+    The orderability requirement is not decoration. `release_key` returns None
+    for a label naming no version, and None is not orderable against another
+    key's tuple — so a recorded `"latest"` would pass any presence-only check,
+    survive the whole tag resolution, and only THEN die at the comparison with
+    an uncaught TypeError: rc 1, mid-run, after the network cost, wearing an
+    outage's exit code. Demanding a KEY up front — from `release_key` itself,
+    never from a restatement of what it accepts — is what makes
+    `release_key(recorded)` total by the time any comparison runs.
+    """
+    if "last_reviewed_release" not in upstream:
+        # A missing label is not an error. An upstream can be a plugin inside a
+        # monorepo with no release vocabulary at all (RFC 0019, the #511
+        # amendment), and inventing a label for it would be exactly the
+        # fabrication this register exists to prevent.
+        return
+    label = upstream["last_reviewed_release"]
+    # The predicate IS the function whose totality it guarantees. Any restatement
+    # of what `release_key` accepts — "carries at least one digit", say — is a
+    # second source of truth that can drift from the first, and this one already
+    # does: SemVer §10 puts build metadata outside the version, so `release_key`
+    # strips it BEFORE looking for one, and `"stable+2026"` carries digits, would
+    # satisfy a digit test, and still keys to None. Asking `release_key` itself
+    # is the only predicate that cannot disagree with it.
+    #
+    # Two clauses, not three: `""` and `"latest"` both key to None, so a separate
+    # emptiness test would be a clause no test could ever red — the dead-contract
+    # shape this repo audits for.
+    if not isinstance(label, str) or release_key(label) is None:
+        die_usage("upstream %s declares last_reviewed_release %r — a recorded "
+                  "release review point must be a STRING that names a version "
+                  "this tool can order against what upstream publishes. "
+                  "Anything else has no key to compare, and would surface only "
+                  "at the comparison, as an uncaught TypeError wearing an "
+                  "unreachable upstream's exit code" % (upstream_id, label))
+    commit = upstream.get("last_reviewed_commit")
+    if not isinstance(commit, str) or not SHA40_RE.match(commit):
+        die_usage("upstream %s declares last_reviewed_release %r but no 40-hex "
+                  "last_reviewed_commit — half a review point is a broken "
+                  "register: the label records WHICH release was adjudicated "
+                  "and the commit records which bytes that was, and neither is "
+                  "checkable against upstream without the other"
+                  % (upstream_id, label))
+
+
+def resolve_tags(repo_url, repo_slug):
+    """Every tag a remote publishes, as {name: commit}. Loud on a failed query.
+
+    Mirrors `resolve_head`'s contract with ONE deliberate divergence: empty
+    output is DATA here, never a failure. `resolve_head` treats silence as fatal
+    because every remote has a HEAD, so an empty answer can only mean the query
+    did not really run. Tags are different — a plugin vendored out of a monorepo
+    really does have an upstream that publishes zero tags — so copying the
+    empty-is-fatal rule would take the weekly job red every week forever for an
+    upstream behaving exactly as the register describes it.
+
+    An annotated tag's `^{}` peel line OVERWRITES the tag object's own oid for
+    the same name: the register records the commit a release points at, and a
+    tag object's oid would never compare equal to it.
+    """
+    rc, out, err = run(["git", "ls-remote", "--tags", repo_url])
+    if rc != 0:
+        fail("git ls-remote --tags failed for upstream %s (rc=%d): %s"
+             % (repo_slug, rc, (err or out).strip()))
+    tags = {}
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split()
+        if len(fields) < 2:
+            fail("git ls-remote --tags returned a line with no ref for upstream "
+                 "%s: %r" % (repo_slug, line.strip()))
+        sha, ref = fields[0].strip(), fields[1].strip()
+        if not SHA40_RE.match(sha):
+            fail("git ls-remote --tags returned a non-40-hex object id for "
+                 "upstream %s: %r" % (repo_slug, sha))
+        match = TAG_REF_RE.match(ref)
+        if not match:
+            fail("git ls-remote --tags returned %r for upstream %s, which is not "
+                 "under refs/tags — refusing to read an answer to a question "
+                 "this script did not ask" % (ref, repo_slug))
+        name, peeled = match.group(1), bool(match.group(2))
+        if peeled or name not in tags:
+            tags[name] = sha
+    return tags
+
+
+def release_candidates(published, recorded):
+    """The names eligible to BE "the newest release", given the recorded vocabulary.
+
+    Two filters, and each exists to keep a finding from becoming unclearable
+    noise — the failure that trains a reader to mute the weekly issue, which
+    costs the same as not running it:
+
+      * a name that keys to None names no version at all (`latest`, `stable`,
+        `nightly`), so there is nothing to order it by and it is not a release;
+      * a pre-release counts only when the RECORDED review point is itself a
+        pre-release. An upstream that has published `v6.4.0-rc1` has not cut a
+        release anybody is obliged to adjudicate, and a finding that only
+        clears when the final lands is a weekly reminder with no permitted
+        action behind it. Where the register records a pre-release the
+        vocabulary is already pre-release-shaped, and the obligation is real.
+    """
+    allow_pre = recorded is not None and is_prerelease(recorded)
+    return [n for n in published
+            if release_key(n) is not None
+            and (allow_pre or not is_prerelease(n))]
+
+
+def release_verdict(upstream_id, meta, published):
+    """One upstream's release standing: what the register recorded, against what
+    upstream publishes.
+
+    Evaluation order is load-bearing:
+
+      1. no `last_reviewed_release`      -> `head-only`, not actionable. RFC
+         0019's #511 amendment: a plugin inside a monorepo with no release
+         vocabulary has no tag to name, and inventing one is the fabrication
+         the register exists to prevent.
+      2. the recorded label is not published (INCLUDING an empty published set)
+         -> `vanished`, actionable.
+      3. it is published, at a different commit -> `moved`, actionable.
+      4. the newest candidate outranks it -> `newer`, actionable. This is the
+         verdict #535 is about.
+      5. otherwise -> `level`, not actionable.
+
+    Rows 2 and 3 look the recorded label up by exact name over the FULL
+    published set, never over the candidate list, so an unusually shaped
+    recorded label is still FOUND rather than reported as vanished.
+
+    That last choice is DEFENSIVE, and deliberately unobservable: while
+    `validate_release_metadata` refuses every recorded label `release_key`
+    cannot order, a recorded label is admitted to the candidate list either
+    because it is final or because it is a pre-release and therefore turns
+    `allow_pre` on — so `recorded in candidates` and `recorded in published`
+    agree for every register this tool accepts, and no test can tell the two
+    spellings apart. Spelling it over `published` is what keeps that true if the
+    validation is ever loosened; do not read the absence of a row for it as
+    evidence the clause is dead.
+
+    THE RC DISCRIMINATOR, stated here so it is not rediscovered: rc 1 means the
+    query could not be ANSWERED. A published set that merely disagrees with the
+    register is reported at rc 0. A vanished `upstream_path` is rc 1 because
+    every changed-file count downstream of it is fabricated; a vanished or
+    re-tagged release is not — the HEAD diff is still exactly correct, and
+    exiting 1 here would abort before `gh issue edit` and suppress the very
+    finding this function just made.
+    """
+    recorded = meta.get("last_reviewed_release")
+    candidates = release_candidates(published, recorded)
+    newest = max(candidates, key=release_key) if candidates else None
+
+    if recorded is None:
+        state, actionable = "head-only", False
+    elif recorded not in published:
+        state, actionable = "vanished", True
+    elif published[recorded] != meta.get("last_reviewed_commit"):
+        state, actionable = "moved", True
+    # `release_key(recorded)` is total here: `validate_release_metadata` refused
+    # the register up front unless the recorded label has a key, precisely so
+    # this comparison can never put a tuple against None.
+    elif newest is not None and release_key(newest) > release_key(recorded):
+        state, actionable = "newer", True
+    else:
+        state, actionable = "level", False
+
+    return {
+        "id": upstream_id,
+        "slug": meta.get("repo"),
+        "recorded": recorded,
+        "recorded_commit": meta.get("last_reviewed_commit"),
+        "published_commit": published.get(recorded) if recorded else None,
+        "newest": newest,
+        "newest_commit": published.get(newest) if newest else None,
+        "state": state,
+        "actionable": actionable,
+    }
 
 
 def ensure_mirror(work_root, repo_url, repo_slug, refs, fetched):
@@ -311,10 +563,91 @@ def declared_files(register, component):
     return names
 
 
-def build_report(register, heads, changes):
+def release_summary(verdict):
+    """One upstream's standing, for the per-id block. Every state renders."""
+    state = verdict["state"]
+    if state == "head-only":
+        return ("no recorded release; HEAD-only upstream, as the register "
+                "declares")
+    recorded = "recorded `%s`" % verdict["recorded"]
+    if state == "level":
+        return "%s; level with the newest published release" % recorded
+    if state == "newer":
+        return "%s; upstream has since published `%s`" % (recorded,
+                                                          verdict["newest"])
+    if state == "vanished":
+        return "%s; not published upstream at all" % recorded
+    if state == "moved":
+        return "%s; published upstream at a different commit" % recorded
+    # Unreachable while `release_verdict` is the only producer, and loud rather
+    # than silently blank if that ever stops being true: a standing this
+    # function cannot describe must not render as an upstream with no standing.
+    raise ValueError("unhandled release state %r for upstream %s"
+                     % (state, verdict["id"]))
+
+
+def release_finding_lines(verdict):
+    """One `###` block for an actionable verdict: what disagrees, and the edit
+    that settles it. A finding with no remedy is one no reader can clear."""
+    state = verdict["state"]
+    review_point = ("- recorded review point: `%s` (`%s`)"
+                    % (verdict["recorded"],
+                       (verdict["recorded_commit"] or "")[:12]))
+    upstream = "- upstream: `%s`" % verdict["slug"]
+    if state == "newer":
+        return [
+            "### `%s`: upstream published a newer release than the recorded "
+            "review point" % verdict["id"],
+            "",
+            upstream,
+            review_point,
+            "- newest published release: `%s` (`%s`)"
+            % (verdict["newest"], (verdict["newest_commit"] or "")[:12]),
+            "- adjudicate that delta under RFC 0019 §7, then advance "
+            "`last_reviewed_release` and `last_reviewed_commit` on "
+            "`upstreams.%s`. That is the recorded act of having looked."
+            % verdict["id"],
+            "",
+        ]
+    if state == "vanished":
+        return [
+            "### `%s`: the recorded release review point is not published "
+            "upstream" % verdict["id"],
+            "",
+            upstream,
+            review_point,
+            "- upstream publishes no tag by that name, so the review point "
+            "names a release that has been deleted, renamed, or never "
+            "existed.",
+            "- reconcile `upstreams.%s.last_reviewed_release` with what "
+            "upstream publishes; until then no release verdict for this "
+            "upstream means anything." % verdict["id"],
+            "",
+        ]
+    if state == "moved":
+        return [
+            "### `%s`: the recorded release review point is published at a "
+            "different commit" % verdict["id"],
+            "",
+            upstream,
+            review_point,
+            "- upstream publishes `%s` at `%s`"
+            % (verdict["recorded"], (verdict["published_commit"] or "")[:12]),
+            "- a release re-tagged in place is not the release that was "
+            "reviewed. Re-adjudicate it under RFC 0019 §7 before advancing "
+            "anything.",
+            "",
+        ]
+    raise ValueError("release state %r is actionable but has no finding block "
+                     "(upstream %s)" % (state, verdict["id"]))
+
+
+def build_report(register, heads, tags, verdicts, changes):
     """Render the markdown body plus a stable fingerprint of its drift payload."""
     drifting = [c for c in changes if c["raw"]]
     declared_only = [c for c in changes if not c["raw"] and c["declared"]]
+    actionable = sorted([v for v in verdicts if v["actionable"]],
+                        key=lambda v: v["id"])
 
     payload = json.dumps(
         {
@@ -322,6 +655,27 @@ def build_report(register, heads, changes):
             "components": {c["id"]: {"head": c["head"], "raw": sorted(c["raw"]),
                                      "declared": sorted(c["declared"])}
                            for c in changes if c["raw"] or c["declared"]},
+            # Actionable verdicts only, mirroring how `components` carries only
+            # the entries with content. The fingerprint is what decides whether
+            # an ALREADY-OPEN issue gets a comment (see main()), so without this
+            # key a freshly cut release with an unchanged file set fingerprints
+            # identically to last week's report: the body is refreshed, the
+            # comparison matches, no comment is posted, and the news lands where
+            # nobody is watching.
+            #
+            # Each entry is the VERDICT ITSELF, minus its key and the constant
+            # that got it here — never a hand-picked subset of its fields. A
+            # finding can only render what the verdict carries, so copying the
+            # whole thing is what keeps "the body changed, the fingerprint did
+            # not" unreachable; a subset re-opens that hole the moment a finding
+            # renders a datum nobody remembered to list. `published_commit` is
+            # the one that proved it: it is the `moved` finding's only variable
+            # line, and `newest_commit` stops covering it as soon as a newer
+            # release sits above the re-tagged review point — which is exactly
+            # when a re-tag is worth telling somebody about.
+            "releases": {v["id"]: {key: value for key, value in v.items()
+                                   if key not in FINGERPRINT_VERDICT_SKIP}
+                         for v in actionable},
         },
         sort_keys=True,
     )
@@ -340,10 +694,63 @@ def build_report(register, heads, changes):
         lines.append("- `%s` @ `%s`" % (slug, heads[slug]))
     lines.append("")
 
+    # The second observable (#535). HEAD drift and release drift disagree in both
+    # directions — unreleased commits are drift the register has no obligation to
+    # chase, and a freshly cut release can land on a HEAD that has not moved since
+    # the last run — so what each remote PUBLISHES is reported in its own right.
+    # This block is a neutral OBSERVATION, keyed by slug because a tag query is
+    # answered by a repository, not by a vendored component.
+    lines.append("Upstream tags resolved this run:")
+    lines.append("")
+    for slug in sorted(tags):
+        published = tags[slug]
+        named = [n for n in published if release_key(n) is not None]
+        if not published:
+            lines.append("- `%s`: no published tags" % slug)
+        elif not named:
+            lines.append("- `%s`: %d published tag(s); none of them names a "
+                         "version" % (slug, len(published)))
+        else:
+            newest = max(named, key=release_key)
+            lines.append("- `%s`: %d published tag(s); newest `%s` (`%s`)"
+                         % (slug, len(published), newest, published[newest][:12]))
+    lines.append("")
+
+    # The verdicts, keyed by upstream ID and never by slug. Two ids can name two
+    # plugins inside ONE monorepo — they share a slug, and therefore a tag list
+    # — so slug-keying would attach that repository's releases to an upstream
+    # the register deliberately refuses to invent a label for. Every used
+    # upstream appears, including the HEAD-only ones: "this upstream has no
+    # release vocabulary" is a standing the report states, not a silence.
+    lines.append("Recorded release review points:")
+    lines.append("")
+    for verdict in sorted(verdicts, key=lambda v: v["id"]):
+        lines.append("- `%s` (`%s`): %s"
+                     % (verdict["id"], verdict["slug"],
+                        release_summary(verdict)))
+    lines.append("")
+
+    # Above the component diff: RFC 0019 §7 adjudicates releases, so a release
+    # awaiting adjudication is the more actionable of the two findings, and
+    # rendered only when there is one — an empty standing heading every week is
+    # the noise that gets an issue muted.
+    if actionable:
+        lines.append("## Releases awaiting adjudication")
+        lines.append("")
+        lines.append("RFC 0019 §7 adjudicates releases rather than individual "
+                     "commits, so these come before the component diff below.")
+        lines.append("")
+        for verdict in actionable:
+            lines.extend(release_finding_lines(verdict))
+
     if not drifting:
-        lines.append("**No drift.** Every vendored component is level with its "
-                     "recorded watermark, or its only changes are declared "
-                     "divergences.")
+        # The component-scoped sentence is true either way; the `**No drift.**`
+        # lead is not. A report carrying a release finding has drift — of the
+        # kind RFC 0019 §7 cares most about — so leading with "no drift" would
+        # contradict the section directly above it.
+        settled = ("Every vendored component is level with its recorded "
+                   "watermark, or its only changes are declared divergences.")
+        lines.append(settled if actionable else "**No drift.** " + settled)
     else:
         lines.append("## Components with upstream changes since their watermark")
         lines.append("")
@@ -384,7 +791,11 @@ def build_report(register, heads, changes):
     lines.append("Advance a component's `last_reviewed_upstream_commit` in "
                  "`plugins/uberdev/vendor.json` once its delta has been triaged. "
                  "That is the recorded act of having looked.")
-    return "\n".join(lines) + "\n", fingerprint, bool(drifting)
+    # The third value is what main() gates issue creation on, so it has to cover
+    # BOTH findings. Reporting only component drift here would render a release
+    # finding into a body no issue is ever opened for — #535's failure moved one
+    # layer down, and invisible in exactly the same way.
+    return "\n".join(lines) + "\n", fingerprint, bool(drifting) or bool(actionable)
 
 
 def find_tracking_issue(limit):
@@ -471,6 +882,10 @@ def main(argv=None):
                       % upstream_id)
         slugs[upstream_id] = slug
         urls.setdefault(slug, upstream.get("url") or UPSTREAM_HOST + slug)
+        # In the same pass as the coordinates, and on the same side of the
+        # --verify-bases return, so both modes reach one register verdict
+        # instead of two that can disagree about whether it is readable.
+        validate_release_metadata(upstream_id, upstream)
 
     # Base verification needs coordinates and nothing else, so it returns before
     # a single HEAD is resolved (see verify_bases' docstring).
@@ -483,6 +898,24 @@ def main(argv=None):
         if slug in heads:
             continue
         heads[slug] = resolve_head(urls[slug], slug)
+
+    # One tag query per distinct SLUG, not per upstream id and not per component:
+    # two upstream ids can name two plugins inside ONE monorepo, and asking that
+    # remote twice would double the network cost to answer the same question.
+    tags = {}
+    for upstream_id in used:
+        slug = slugs[upstream_id]
+        if slug in tags:
+            continue
+        tags[slug] = resolve_tags(urls[slug], slug)
+
+    # One verdict per upstream ID, off the tag list its slug published. The
+    # query is answered per repository; the REVIEW POINT is recorded per
+    # upstream, and two upstream ids sharing a monorepo record different ones
+    # (or none at all).
+    verdicts = [release_verdict(upstream_id, upstreams[upstream_id],
+                                tags[slugs[upstream_id]])
+                for upstream_id in used]
 
     work_root = Path(tempfile.mkdtemp(prefix="vendor-drift."))
     try:
@@ -519,7 +952,8 @@ def main(argv=None):
                 "raw": raw, "declared": dec,
             })
 
-        body, fingerprint, drifting = build_report(register, heads, changes)
+        body, fingerprint, reportable = build_report(register, heads, tags,
+                                                     verdicts, changes)
     finally:
         shutil.rmtree(work_root, ignore_errors=True)
 
@@ -529,8 +963,12 @@ def main(argv=None):
 
     issue = find_tracking_issue(args.issue_limit)
 
-    if not drifting and issue is None:
-        print("vendor-drift: no drift and no open tracking issue — nothing to do.")
+    # `reportable` covers component drift AND an actionable release verdict: a
+    # release nobody has adjudicated is news even in a week when not one
+    # vendored file changed, which is the whole of #535.
+    if not reportable and issue is None:
+        print("vendor-drift: no drift, no release awaiting adjudication, and "
+              "no open tracking issue — nothing to do.")
         return 0
 
     body_file = write_body(body)

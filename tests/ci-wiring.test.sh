@@ -43,6 +43,12 @@
 #         executed-row floor (see tests/ubersimplify-aggregate.test.sh) is the
 #         mechanism for that, and is required of any new file gating on an
 #         optional dependency.
+#   W11 — the macOS supervision job's block is comment-stripped before any
+#         wiring grep, so the required-subset floor and W7 are satisfied by the
+#         FACT that the job runs a fixture and never by a comment CLAIMING it
+#         does. #548 put prose inside that block, which is what opened the
+#         surface; the row re-runs the floor's own predicate against exactly
+#         that forgery.
 #
 # Portable: bash + awk + grep + sed + sort + comm + mktemp. Runs on
 # ubuntu-latest (native bash) and windows-latest (Git Bash) without any extra
@@ -62,10 +68,36 @@ WORKFLOW="$REPO_ROOT/.github/workflows/test.yml"
 # rather than left thinner: the renamed entrypoint test, the Workflow-native
 # review driver that replaced the six-child codex driver, and the real-git
 # child-worktree teardown that replaced the receipt transaction.
-macos_supervision_block=$(awk '/^  supervision-smoke-macos:/,/^  shape-checks-windows:/' "$WORKFLOW")
+#
+# #548 added dispatch-background and dispatch-wezterm. Each binds the runtime
+# PATH its dispatch runs under and then asserts WHICH preflight arm that
+# dispatch took (bounded vs unbounded). RFC 0004 §3.8 has the resolver try the
+# absolute /usr/bin/timeout BEFORE any PATH name, and both ubuntu-latest and
+# windows-latest ship one — so on those two runners the arm row passes whether
+# or not the binding keeps the host $PATH. macOS (no /usr/bin/timeout; the real
+# binary arrives via `brew install coreutils`) is the ONLY runner where the
+# widening changes behaviour, so this wiring is what stops that row being a
+# permanent tautology. Dropping either file from the job silently restores the
+# tautology, which is why the floor names them.
+#
+# The floor below and W7 both grep this block for `bash tests/<name>`, so the
+# block must carry only what the job DOES. Strip whole-line comments at capture
+# — the same "comment-strip BEFORE grep" convention this file applies to the
+# ubuntu and windows sets and states its reason for further down. Until #548 the
+# macOS block held no whole-line comment at all and the raw capture was harmless;
+# the nine lines of prose above the `run:` chain are what opened the surface, so
+# the strip lands with them. W11 re-runs the floor's predicate against a forged
+# comment and reds if this is ever simplified back out.
+macos_supervision_block_of() {  # $1 = a workflow file -> that job's block on stdout
+  awk '/^  supervision-smoke-macos:/,/^  shape-checks-windows:/' "$1" \
+    | grep -v '^[[:space:]]*#'
+}
+macos_supervision_block=$(macos_supervision_block_of "$WORKFLOW")
 for required in review-pr-entry.test.sh agent-dispatch.test.sh \
                 dispatch-child-worktree-teardown.test.sh \
                 child-dispatch.test.sh \
+                dispatch-background.test.sh \
+                dispatch-wezterm.test.sh \
                 review-pr-workflow.test.sh; do
   if ! grep -q "bash tests/$required" <<<"$macos_supervision_block"; then
     echo "  FAIL  macOS supervision smoke job is missing $required"
@@ -252,6 +284,55 @@ if [ -z "$missing_teardown_jobs" ]; then
   PASS=$((PASS+1))
 else
   echo "  FAIL  W7 child-worktree teardown is missing from: $missing_teardown_jobs"
+  FAIL=$((FAIL+1))
+fi
+
+# W11 — the macOS haystack must carry FACT, not CLAIM (#548).
+#
+# The required-subset floor and W7 both read $macos_supervision_block, and both
+# predicates are a bare grep for `bash tests/<name>`. #548 added nine lines of
+# prose inside that awk range, so from then on a comment could satisfy either
+# guard: drop `bash tests/dispatch-wezterm.test.sh` from the run: chain, write
+# `# dropped for speed: bash tests/dispatch-wezterm.test.sh` beside it, and a
+# guard whose entire purpose is to prove the fixture RUNS certifies wiring that
+# does not exist — measured rc=0, 22 PASS / 0 FAIL on exactly that mutation.
+# That is the forgeable-declaration shape W9 exists to close, so it is closed
+# here rather than left as a documented hole.
+#
+# The forgery is driven through macos_supervision_block_of — the SAME capture
+# the floor and W7 consume — over a mutated COPY of the real workflow, never
+# through a re-implementation of it here. A row that re-stripped the comments
+# itself would pass whatever the capture does, which is the disjoint-predicate
+# failure this suite keeps finding in other people's guards.
+#
+# Both arms are load-bearing. The negative arm alone would pass on a stale probe
+# name: the awk would rewrite no line, and the misspelled needle would be absent
+# from both blocks either way. The positive arm is what keeps the probe honest,
+# and it also proves the strip does not eat genuine wiring.
+w11_probe='dispatch-wezterm.test.sh'
+w11_fx_dir="$(mktemp -d)"
+awk -v claim="bash tests/$w11_probe" '
+  index($0, claim) && $0 ~ /^[[:space:]]*bash / { print "        # dropped for speed: " claim; next }
+  { print }
+' "$WORKFLOW" > "$w11_fx_dir/test.yml"
+w11_forged_block="$(macos_supervision_block_of "$w11_fx_dir/test.yml")"
+rm -rf "$w11_fx_dir"
+w11_err=''
+if [ -z "$w11_forged_block" ]; then
+  # A failed mktemp or an unwritable copy leaves an EMPTY block, in which the
+  # forged claim is absent for the wrong reason — the negative arm below would
+  # pass having tested nothing. Fail loudly instead.
+  w11_err='the forged workflow copy yielded no macOS block — mktemp or the copy failed'
+elif ! grep -q "bash tests/$w11_probe" <<<"$macos_supervision_block"; then
+  w11_err="the macOS block no longer wires $w11_probe — the probe is stale or the strip ate real wiring"
+elif grep -q "bash tests/$w11_probe" <<<"$w11_forged_block"; then
+  w11_err="a comment claiming $w11_probe satisfies the macOS floor — capture the block comment-stripped"
+fi
+if [ -z "$w11_err" ]; then
+  echo "  PASS  W11 the macOS floor reads wiring, not comments claiming it"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  W11 $w11_err"
   FAIL=$((FAIL+1))
 fi
 

@@ -17,6 +17,8 @@
 #                                                                (#428, #447)
 #   A5  no tests/*.test.sh arms `set -e` inside a subshell used as a
 #       condition, where errexit is inert                        (#469, #495)
+#   A6  no tests/*.test.sh binds a stub-prepend PATH that drops the host
+#       $PATH behind it                                          (#521, #548)
 #
 # Row ids are load-bearing outside this file (docs/testing.md and the
 # code-fixer-contract suites name A4 by id), which is why A0 exists: A5 above
@@ -992,7 +994,10 @@ fi
 #
 # Every fixture body is assembled at RUNTIME from the split fragments above, so
 # no needle ever appears contiguously in this file — A4.1 scans this file, and
-# epipe-guard.test.sh:294 records the identical trap for its own literals.
+# tests/epipe-guard.test.sh records the identical trap for its own literals, in
+# the section headed `E2`, which is where its `_G`/`_H`/`_R` fragments are split.
+# Named by symbol rather than by line so the cross-reference cannot drift when
+# either file grows.
 # Fixtures are written with plain `printf ... >file` redirection; never
 # `printf ... | grep -q`, which reds tests/epipe-guard.test.sh (known class).
 #
@@ -1254,6 +1259,132 @@ case "$A5_VERDICT" in
     echo "  FAIL  A5 — set -e is inert in these condition-position subshells; every assertion above the last is a no-op"
     printf '        %s\n' "${A5_VERDICT#OFFENDERS:}"
     echo "        fix:  run the subshell outside the condition, capture \$?, then test the captured status"
+    FAIL=$((FAIL + 1))
+    ;;
+esac
+
+echo
+echo "== A6: no tests/*.test.sh binds a stub-prepend PATH that drops the host \$PATH =="
+# Issues #521 and #548. A fixture that builds a stub bin and then binds the
+# runtime PATH its dispatch runs under to "$TMP/bin:/usr/bin:/bin" does not
+# merely pin the environment — it DELETES every other directory a host installs
+# coreutils into. On a host whose `timeout` lives outside those two directories
+# (Darwin: /opt/homebrew/bin) `_uberdev_dispatch_preflight_timeout_bin` in
+# plugins/uberdev/lib/dispatch.sh then resolves nothing, so the fixture silently
+# drives the UNBOUNDED preflight arm while ubuntu drives the bounded one:
+# different production code, and every other verdict in the fixture is
+# byte-identical on both arms, so nothing reds. #521 fixed the literal at one
+# site and left no detector; #548 was the same defect at three more. Per this
+# file's header, that is where a scanner replaces the per-suite copy.
+#
+# DECLARED BOUNDARY — what is, and is not, a site:
+#   * the corpus is tests/*.test.sh, NON-RECURSIVE (the glob below), as in
+#     A2-A5.
+#   * a whole-line `#` comment is NOT a site, so prose about the old literal
+#     stays writable — the same corpus boundary A2 declares, and what spares
+#     the narrating comments in child-dispatch.test.sh and run-manifest.test.sh.
+#   * an APPEND (`VAR="$VAR:…"` — colon, no slash, after the name) is not a
+#     prepend and is not a site: it preserves whatever the left-hand side held.
+#     review-pr-consolidate.test.sh's SCAN_PATH is that shape.
+#   * `env -i PATH=…` (review-pr.test.sh) and python `env={'PATH': …}` dict
+#     literals (prkit-generate.test.sh) are deliberate HERMETIC environments,
+#     not stub-dir prepends, and fall outside the predicate by shape.
+#   * this row bans ONE shape. It is not a general claim that every fixture
+#     environment in the corpus is honest.
+#
+# SELF-TRIP WARNING: this file is inside the corpus it scans, so the pinned
+# literal the self-test fixture needs is assembled at runtime and never written
+# contiguously in an assignment here — as A2, A3 and A4 do for their needles.
+A6_VERDICT="$(python3 -I - "$TESTS_DIR" <<'PY'
+import pathlib, re, sys
+
+# A shell assignment — standalone or command-env-prefix — whose value opens with
+# an expansion-rooted directory segment: VAR="$SOMEVAR/<seg>:…".
+# Keyed on the `$VAR/` prefix, NOT on the directory being named `bin`: the #521
+# donor's stub dir is `background-timeout-bin` and review-pr.test.sh uses
+# `shim`, and a guard that misses the site it exists to protect is worse than
+# none. The `/` is also what separates a PREPEND from an APPEND ("$VAR:…").
+ASSIGN = re.compile(r'(?:^|[\s;(])([A-Za-z_][A-Za-z0-9_]*)="(\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/[^"]*)"')
+BRACED = re.compile(r'\$\{[^}]*\}')
+
+def is_path_list(value):
+    # Brace expansions are masked first so `${x:-y}` colons cannot fake a segment.
+    segments = BRACED.sub("$V", value).split(":")
+    return len(segments) >= 2 and all(s[:1] in ("/", "$") and " " not in s for s in segments)
+
+def preserves_host_path(value):
+    return "$PATH" in value or "${PATH}" in value
+
+def scan(lines):
+    candidates, offenders = 0, []
+    for number, line in enumerate(lines, 1):
+        if line.lstrip().startswith("#"):
+            continue
+        for match in ASSIGN.finditer(line):
+            value = match.group(2)
+            if not is_path_list(value):
+                continue
+            candidates += 1
+            if not preserves_host_path(value):
+                offenders.append((number, match.group(1)))
+    return candidates, offenders
+
+corpus_candidates, corpus_offenders = 0, []
+for path in sorted(pathlib.Path(sys.argv[1]).glob("*.test.sh")):
+    count, hits = scan(path.read_text(encoding="utf-8").split("\n"))
+    corpus_candidates += count
+    corpus_offenders += ["%s:%d %s" % (path.name, n, v) for n, v in hits]
+
+# SELF-TRIP WARNING: assembled, never contiguous — this file is in the corpus.
+STUB = '"$FIXTURE_TMP/stub-bin:'
+PINNED = "/usr" + "/bin:" + "/bin"
+FIXTURE = [
+    "A_PATH=" + STUB + PINNED + '"',                   # 1 offender: the #548 shape
+    "B_PATH=" + STUB + "$PATH:" + PINNED + '"',        # 2 clean: widened tail form
+    "C_PATH=" + STUB + "$PATH" + '"',                  # 3 clean: the #521 donor form
+    "# prose about the old " + PINNED + " literal",    # 4 clean: whole-line comment
+    'D_PATH="$D_PATH:' + PINNED + ':/usr/local/bin"',  # 5 clean: append, preserves LHS
+    "E_PATH=" + '"$E_TMP/shim:' + PINNED + '"',        # 6 offender: stub dir not named bin
+]
+_, self_hits = scan(FIXTURE)
+found = [n for n, _ in self_hits]
+
+if found != [1, 6]:
+    print("SELFTEST:detector flagged %r, wanted [1, 6]" % (found,))
+elif corpus_candidates == 0:
+    print("VACUOUS:0")
+elif corpus_offenders:
+    print("OFFENDERS:" + " ".join(corpus_offenders))
+else:
+    print("OK:%d" % corpus_candidates)
+PY
+)"
+# Four arms, every one of them scored through this file's PASS/FAIL counters.
+# The vacuity denominator is CANDIDATE stub-prepend bindings, not offenders:
+# the steady state for offenders is zero, so — exactly as A5 records — a
+# zero-offender corpus cannot tell a clean repo from a detector that stopped
+# matching. The `SELFTEST:` arm is the primary anti-rot device; `VACUOUS:0`
+# catches the corpus glob or the assignment shape drifting out from under it.
+# An empty verdict (no interpreter, or the scanner died) reaches the catch-all
+# and FAILs too — a detector that could not run is never "clean".
+case "$A6_VERDICT" in
+  OK:*)
+    echo "  PASS  A6 — every stub-prepend PATH binding keeps the host \$PATH (${A6_VERDICT#OK:} binding(s) scanned)"
+    PASS=$((PASS + 1))
+    ;;
+  SELFTEST:*)
+    echo "  FAIL  A6 — the detector no longer detects its own fixture: ${A6_VERDICT#SELFTEST:}"
+    FAIL=$((FAIL + 1))
+    ;;
+  VACUOUS:0)
+    echo "  FAIL  A6 — the scanner matched no stub-prepend PATH binding at all, so the row cannot red"
+    echo "        Either the tests/*.test.sh glob or the assignment shape drifted out from under the detector."
+    FAIL=$((FAIL + 1))
+    ;;
+  *)
+    echo "  FAIL  A6 — these bindings drop the host \$PATH behind a stub dir, so the code they drive is chosen by the host, not by the fixture"
+    printf '        %s\n' "${A6_VERDICT#OFFENDERS:}"
+    echo "        fix:  keep the host \$PATH behind the stub dir — \"\$TMP/bin:\$PATH…\" (precedent: child-dispatch.test.sh:1043)"
     FAIL=$((FAIL + 1))
     ;;
 esac

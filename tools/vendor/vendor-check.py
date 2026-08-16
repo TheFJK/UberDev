@@ -57,6 +57,11 @@ traceback that suppresses the checks queued behind it.
     C-DIVREF     every components[].divergences[].ref resolves to a declared
                  permanent_divergences[].id, for every component regardless of
                  stance
+    C-MEASURE    every recorded measured_diff_lines carries a measured_diff_basis
+                 naming BOTH operands the count was taken against — the upstream
+                 revision and the concrete tree that was diffed, plus the commit
+                 of THIS repository whose bytes were counted — over a closed
+                 sub-key set; fails rather than passing over an empty set
 
 Repo-agnostic: no organisation, project id or repository name is hardcoded. All
 upstream coordinates come from the register.
@@ -143,7 +148,38 @@ BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".zip",
 
 ALL_CHECKS = ("C-SCHEMA", "C-COVER", "C-FILES", "C-HEADER", "C-BASE",
               "C-EVIDENCE", "C-README", "C-LICENSE", "C-STANCE", "C-WATERMARK",
-              "C-REFS", "C-DIVREF")
+              "C-REFS", "C-DIVREF", "C-MEASURE")
+
+# The CLOSED sub-key set of `measured_diff_basis` (C-MEASURE). Same discipline
+# as COMPONENT_KEYS one level up, and for the same reason: on an optional-looking
+# record a misspelt member is indistinguishable from an omitted one, so a typo
+# would drop the operand out of the reconciliation while the register stayed
+# green — the unfalsifiable state this record exists to eliminate.
+#
+# Every member except `component_digest` is REQUIRED. A count of diff lines has
+# two operands, and a record that names only one of them cannot say whether a
+# disagreement with another copy of the number means "that copy is stale" or
+# "these are two honest measurements taken at different points" (#534).
+#
+# `component_digest` is the one OPTIONAL member and is deliberately unset today.
+# Requiring it — and reddening when it disagreed with disk — is the only arm that
+# would force a measurement to stay FRESH rather than merely dated, but it also
+# taxes every future PR that touches a vendored byte with a network-bound
+# re-measurement, and a guard that reds on unrelated work gets suppressed (the
+# failure mode RFC 0019 names repeatedly). It is declared, and validated where
+# present, so that decision stays a one-line change rather than a schema change.
+MEASURE_KEYS = frozenset({
+    "upstream_rev", "upstream_tree", "uberdev_rev", "measured_on", "method",
+    "component_digest",
+})
+MEASURE_REQUIRED = frozenset(MEASURE_KEYS - {"component_digest"})
+
+# The upstream operand is either a release tag the upstream itself publishes or
+# a 40-hex commit. A branch name, a cache directory version or "latest" all name
+# a MOVING target, so a number recorded against one is unreproducible the moment
+# that target advances — which is the drift this check exists to stop, spelled
+# into the basis instead of out of it.
+MEASURE_UPSTREAM_REV_RE = re.compile(r"^(v[0-9]+\.[0-9]+\.[0-9]+|[0-9a-f]{40})$")
 
 # The only recovery method this register knows how to state. A second method
 # would need its own required fields, so an unrecognised literal is refused
@@ -654,6 +690,129 @@ def check_evidence(register, failures):
                                    "set.")
 
 
+def check_measure(register, failures):
+    """Every recorded diff measurement names the basis it was taken under (#534).
+
+    `measured_diff_lines` was a BARE INTEGER. A diff count has two operands —
+    an upstream revision and a set of local bytes — and the register named
+    neither, while RFC 0019 §4.2/§4.3 carried a second copy of the same numbers
+    with nothing comparing the two. They drifted, exactly as that shape
+    guarantees: `skills/systematic-debugging` grew local `find-polluter.sh`
+    additions (#430, #476) and `skills/test-driven-development` had its file set
+    changed by the `writing-good-tests.md` swap (#457), so both numbers moved
+    legitimately and neither copy could say which of them had moved. A number
+    that legitimately changes, recorded in two places with no reconciliation,
+    silently becomes two different claims about one measurement.
+
+    `measured_diff_basis` makes the number SELF-DESCRIBING: the revision, the
+    concrete tree that was actually diffed, the commit of this repository whose
+    bytes were counted, the date, and the counting rule. `upstream_tree` is
+    separate from `upstream_rev` on purpose — the 14 skill measurements were
+    taken against `claude-plugins-official`'s repackaging of `superpowers`, which
+    RFC 0019's 2026-08-13 (#511) amendment records as corroborated rather than
+    trusted, so "the number was produced against a repackaging" is a recorded
+    field and not a sentence buried in prose.
+
+    This check owns the SHAPE of that record and nothing else. It does NOT
+    re-derive any count: that needs the upstream bytes, which is
+    `vendor-drift.py`'s network job — this file stays a pure register reader with
+    no disk, no `git` and no socket, because that is what makes RFC 0019 §2.3's
+    offline guarantee structural rather than a convention. It does not compare
+    the register to the RFC either; that reconciliation lives in
+    `tests/vendor-provenance.test.sh`, beside the other register-derived rows.
+
+    SCOPE, as a rule rather than a count so it cannot go stale: every component
+    that RECORDS a measurement must record its basis, and the two keys are a
+    biconditional. Universal coverage is deliberately NOT demanded — a component
+    nobody has measured is not a defect — but an EMPTY measured set is, because
+    deleting the corpus would otherwise be the cheapest way to make this check
+    permanently green.
+    """
+    measured = 0
+    for component in register.get("components", []):
+        cid = component_id(component)
+        lines = component.get("measured_diff_lines")
+        basis = component.get("measured_diff_basis")
+        if lines is None and basis is None:
+            continue
+        if lines is None:
+            failures.add("C-MEASURE", "%s records measured_diff_basis but no "
+                                      "measured_diff_lines — a basis for a "
+                                      "measurement it never states" % cid)
+            continue
+        measured += 1
+        if isinstance(lines, bool) or not isinstance(lines, int) or lines < 0:
+            # `isinstance(x, bool)` FIRST: True is an int in Python, so a
+            # boolean would otherwise pass as a count of 1.
+            failures.add("C-MEASURE", "%s: measured_diff_lines is %r, expected a "
+                                      "non-negative integer" % (cid, lines))
+        if basis is None:
+            failures.add("C-MEASURE", "%s records measured_diff_lines %r with no "
+                                      "measured_diff_basis — a bare count names "
+                                      "neither operand it was taken against, so "
+                                      "nothing can tell a stale copy from an "
+                                      "honest re-measurement" % (cid, lines))
+            continue
+        if not isinstance(basis, dict):
+            failures.add("C-MEASURE", "%s: measured_diff_basis is %s, expected an "
+                                      "object" % (cid, type(basis).__name__))
+            continue
+        present = frozenset(basis)
+        unknown = sorted(present - MEASURE_KEYS)
+        if unknown:
+            failures.add("C-MEASURE", "%s: measured_diff_basis declares unknown "
+                                      "member(s) %s — a misspelt member is a typo "
+                                      "until somebody says otherwise (known: %s)"
+                         % (cid, unknown, sorted(MEASURE_KEYS)))
+        missing = sorted(MEASURE_REQUIRED - present)
+        if missing:
+            failures.add("C-MEASURE", "%s: measured_diff_basis is missing required "
+                                      "member(s) %s — the measurement does not "
+                                      "name what it was taken against"
+                         % (cid, missing))
+        # Each member is validated only where it is PRESENT: absence is already
+        # reported above, and reporting it twice would make one defect read as
+        # two.
+        if "upstream_rev" in basis:
+            rev = basis["upstream_rev"]
+            if not MEASURE_UPSTREAM_REV_RE.match(rev if isinstance(rev, str) else ""):
+                failures.add("C-MEASURE", "%s: measured_diff_basis upstream_rev is "
+                                          "%r, expected a vX.Y.Z release tag or a "
+                                          "40-hex commit — anything else names a "
+                                          "moving target" % (cid, rev))
+        if "uberdev_rev" in basis:
+            rev = basis["uberdev_rev"]
+            if not SHA40_RE.match(rev if isinstance(rev, str) else ""):
+                failures.add("C-MEASURE", "%s: measured_diff_basis uberdev_rev is "
+                                          "%r, not a 40-hex commit of this "
+                                          "repository — nothing can re-derive the "
+                                          "local half of the count" % (cid, rev))
+        if "measured_on" in basis:
+            when = basis["measured_on"]
+            if not ISO_DATE_RE.match(when if isinstance(when, str) else ""):
+                failures.add("C-MEASURE", "%s: measured_diff_basis measured_on is "
+                                          "%r, expected an ISO date" % (cid, when))
+        for name in ("upstream_tree", "method"):
+            if name not in basis:
+                continue
+            value = basis[name]
+            if not isinstance(value, str) or not value.strip():
+                failures.add("C-MEASURE", "%s: measured_diff_basis %s is %r, "
+                                          "expected a non-empty string"
+                             % (cid, name, value))
+        if "component_digest" in basis:
+            digest = basis["component_digest"]
+            if not SHA256_RE.match(digest if isinstance(digest, str) else ""):
+                failures.add("C-MEASURE", "%s: measured_diff_basis "
+                                          "component_digest is %r, not a sha256"
+                             % (cid, digest))
+    if measured == 0:
+        failures.add("C-MEASURE", "no component records measured_diff_lines — "
+                                  "every recorded divergence size is gone, or the "
+                                  "register was misread. Refusing to pass over an "
+                                  "empty set.")
+
+
 def sibling_refs(text):
     """Relative sibling references in a markdown body, deduped and sorted.
 
@@ -969,6 +1128,8 @@ def main(argv=None):
         check_refs(register, plugin_dir, failures)
     if "C-DIVREF" in selected:
         check_divref(register, failures)
+    if "C-MEASURE" in selected:
+        check_measure(register, failures)
 
     if failures:
         print("vendor-check: %d failure(s) across %s"

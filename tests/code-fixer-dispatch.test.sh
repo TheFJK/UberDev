@@ -159,6 +159,30 @@ assert_in_section "$CODE_FIXER" '^## Refusal triggers' '^## Return contract' \
 assert_in_section "$CODE_FIXER" '^## Refusal triggers' '^## Return contract' \
   'exact `findings:\[\]` is valid|findings:\[\].*valid' \
   "Refusal triggers explicitly accept an exact empty aggregate"
+# WHO OWNS THE ARTIFACTS OF A TERMINAL THAT APPLIED NOTHING (#556). A refusing
+# child restores the worktree and stops, so it writes NEITHER the disposition
+# nor the applied-content record; the controller publishes both on its behalf
+# from the rows it returned. That ownership has to be DECLARED somewhere, and
+# this is the one place. Note the reason is NOT the `Write` denylist asserted
+# above — the child creates these very bytes on every successful run, through
+# the authorised contract helper rather than through `Write`. It is that
+# `publish-unapplied-terminal` is gated on the launch binding, which is never in
+# the child's `## Inputs`, and that `publish-disposition` is pinned to the raw
+# `.git/index` bytes its own authorised `git status` / `git diff` already moved
+# (`plugins/uberdev/lib/code_fixer_contract.py`, the `publish_unapplied_terminal`
+# docstring). A contract resting on the denylist instead would be falsifiable
+# from `agents/code-fixer.md`'s own publish-disposition step, and the first
+# reader to notice would "fix" it by granting the child `Write`.
+#
+# This row pins the declaration so it cannot drift back to "the child
+# publishes". It is a PROSE lock, not the behavioural one: what actually
+# publishes the record is `publish-unapplied-terminal`, driven through
+# `review_fixer_terminal_outcome` and covered by the W-UNAP rows in
+# tests/review-pr-workflow.test.sh and the U rows in
+# tests/code-fixer-contract.test.sh.
+assert_in_section "$CODE_FIXER" '^## Refusal triggers' '^## Return contract' \
+  'controller publishes them on your behalf' \
+  "Refusal triggers declare the controller — not the child — publishes a refused terminal's record (#556)"
 # Return contract YAML shape
 assert_in_section "$CODE_FIXER" '^## Return contract' '^## Output Rules' \
   '^status: APPLIED \| NO_FIXES_NEEDED \| REFUSED' \

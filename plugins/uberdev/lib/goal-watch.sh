@@ -201,7 +201,8 @@ while true; do
   # `pushed PR #N`) is retired: on CLI 2.1.150 `claude --bg` detaches with a
   # banner-only stdout and `pushed PR #N` has zero producers, so the loop keying
   # on it never advanced. Authoritative completion signal = a PR that closes
-  # issue N exists on GitHub (`closingIssuesReferences` / `feat/N-` head). When
+  # issue N exists on GitHub (`closingIssuesReferences`, or a `<type>/N-` head
+  # for any conventional type in _UBERDEV_GOAL_HEAD_REF_TYPES). When
   # no PR exists yet, `uberdev_goal_agent_busy_for_issue` disambiguates "solver
   # still working" from "solver died", bounded by _UBERDEV_GOAL_SOLVE_TIMEOUT.
   _uberdev_goal_phase2_release_claim() {

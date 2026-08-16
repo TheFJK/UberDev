@@ -35,6 +35,19 @@ git diff --stat {BASE_SHA}..{HEAD_SHA}
 git diff {BASE_SHA}..{HEAD_SHA}
 ```
 
+## You Do Not Dispatch Subagents
+
+Do all of this review yourself. You are a leaf worker: never spawn a subagent
+to review part of the diff, and never spawn a second reviewer for another
+opinion.
+
+This process already provides every review seat the work gets — a reviewer you
+spawn duplicates one of those seats at full cost, and the controller counts its
+verdict for nothing.
+
+If the diff feels too large for one pass, review it in passes yourself and say
+so in your report.
+
 ## Review Checklist
 
 **Code Quality:**

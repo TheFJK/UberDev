@@ -43,7 +43,7 @@ leaf agent cannot do that, so **the orchestration moved into the script**:
 | Tier | What the fleet runs |
 |---|---|
 | `trivial`, `small` | ONE solver agent (`isolation:"worktree"`). Unchanged from the detached-session behaviour — those tiers were always a single session. |
-| `medium`, `large` (`--full`) | `parallel()` research fan-out (codebase / constraints / test-coverage) → spec writer → spec reviewer (**one** revision round, never unbounded — the #308 class; its blocking findings are forwarded to the plan writer inside an untrusted-input envelope, #507) → plan writer → a **sequential per-task loop** (implementer → reviewer → bounded fix ladder, at most `FIX_ROUNDS` = 3 fixes and 4 reviews per task) in ONE script-named worktree at `<runDirAbs>/worktrees/issue-<N>` → one delivery agent (full suite, push, PR). |
+| `medium`, `large` (`--full`) | `parallel()` research fan-out (codebase / constraints / test-coverage — plus a fourth **`security` lens** on any issue whose relayed triage `risk_signals` hold at least one non-blank entry; absent and empty alike buy the 3-lens fan-out) → spec writer → spec reviewer (its blocking findings are forwarded to the plan writer inside an untrusted-input envelope, #507 — and to the reviser below, in the same envelope, whenever one runs) → on any non-`APPROVE` verdict, **one** spec-revision round and never more — the #308 class; the reviser writes a sibling `spec-r1.md` rather than rewriting `spec.md` in place, so a half-written revision degrades to the original spec, and it is not re-reviewed → plan writer, pointed at the revision when it lands at exactly that path and at the original otherwise → **plan reviewer** — the plan is never rewritten, so its blocking findings ARE its output and they are forwarded, in the same envelope, to all three rungs that read the plan: the implementer, task reviewer and fixer (a finding reaching only the implementer would have the task reviewer report a correct deviation as scope creep) → a **sequential per-task loop** (implementer → reviewer → bounded fix ladder, at most `FIX_ROUNDS` = 3 fixes and 4 reviews per task) in ONE script-named worktree at `<runDirAbs>/worktrees/issue-<N>` → one delivery agent (full suite, push, PR). |
 | any tier with **no usable plan** | falls back to the single solver above — no plan means no tasks, so there is no boundary a **review gate** could sit on. |
 
 Only the **solver** is worktree-isolated. The research and design agents are
@@ -106,10 +106,13 @@ SOLVE_FLEET_WORKFLOW_JS="$UBERDEV_PLUGIN_ROOT/skills/solve-fleet/workflow.js"
 [ -f "$SOLVE_FLEET_WORKFLOW_JS" ] || { echo "error: ... missing (RFC 0012 §4.1)" >&2; exit 2; }
 ```
 
-It writes `$UBERDEV_TMPDIR/solve-fleet-manifest.json` (one record per issue:
-`issue`, `tier`, `prompt_file`, and the `context_file`/`context_sha256` from the
-prepared root request), then emits the args envelope via
-`uberdev_emit_workflow_args solve-fleet …` between the
+It writes `$UBERDEV_TMPDIR/solve-fleet-manifest.json` with
+one record per issue: `issue`, `tier`, `prompt_file`, `risk_signals`, and the
+`context_file`/`context_sha256` from the prepared root request. The triage
+`risk_signals` array is written ALWAYS, including empty: the manifest is the
+only channel into a Workflow script, and an absent key has to keep meaning "the
+relay dropped it" rather than "this issue had no risk". It then emits the args
+envelope via `uberdev_emit_workflow_args solve-fleet …` between the
 `WORKFLOW_ARGS_BEGIN`/`WORKFLOW_ARGS_END` markers. The command file relays that
 JSON **verbatim** (DR-2 — no LLM-composed handoffs):
 
@@ -124,6 +127,7 @@ Workflow({scriptPath: "$CLAUDE_PLUGIN_ROOT/skills/solve-fleet/workflow.js"}, <th
 | `manifestPathAbs` | the per-issue manifest the `intake` relay reads |
 | `issues` | comma-joined issue numbers — cross-checked against the manifest |
 | `issueCount` | declared count; a mismatch is recorded as an audit event |
+| `riskIssueCount` | how many of those issues carry non-blank triage `risk_signals`, derived from the manifest the launcher just wrote. The script re-counts the relayed records and audits `risk_signals_relay_mismatch` / `risk_signals_absent` on a disagreement — counts only, never signal text. Absent on a pre-#524 envelope, and then neither check runs. |
 | `concurrency` | wave size (`fanout_concurrency.solve_bg`, default 6) |
 | `autoMode` | true for `/turbo` (unattended) |
 | `runDirAbs` | where prompts, contexts and per-issue design artifacts live |
@@ -136,7 +140,7 @@ Workflow({scriptPath: "$CLAUDE_PLUGIN_ROOT/skills/solve-fleet/workflow.js"}, <th
 
 | ID | Guard |
 |---|---|
-| CB1 | projected agents (`2 + issues + (6 + implementBudget − 1) × design-tier issues`) over `maxAgents` → abort **before** any dispatch. The leading 2 is the intake relay plus the batched PR-verification relay (#515); the per-issue term is the #508 per-task chain, bounded by CB3's `implementBudget` (default 24). `T` is unknowable before the plan is written, so the projection uses the live cap — deliberately pessimistic. |
+| CB1 | projected agents (`2 + issues + (9 + implementBudget − 1) × design-tier issues`) over `maxAgents` → abort **before** any dispatch. The leading 2 is the intake relay plus the batched PR-verification relay (#515); the per-issue term is the #508 per-task chain, bounded by CB3's `implementBudget` (default 24). `T` is unknowable before the plan is written, so the projection uses the live cap — deliberately pessimistic, and the same way about the two other conditional rungs: the spec-revision round (no verdict exists yet at projection time) and the risk-gated `security` research lens — whose gate IS readable by then, but whose cost is a per-design-issue constant shared with `/goal`'s own cycle projection, which runs before any manifest exists. The plan review needs no such allowance: every accepted plan is reviewed. |
 | CB2 | runtime `budget` exhausted between waves → stop, report, leave remaining claims intact |
 | CB3 | a **live** counter of implement-phase agents per issue against `implementBudget`. On exhaustion the task loop stops, the remaining tasks are recorded `SKIPPED`, `implement_budget_exhausted` is audited — and delivery still runs on what is already committed (the one dispatch deliberately exempt, so reviewed commits never strand in a worktree). |
 | — | a per-issue chain that throws is caught and recorded as `FAILED` for that issue only; one bad issue never takes the batch down |
@@ -161,6 +165,7 @@ The script logs `WORKFLOW_RESULT <json>` and returns:
   designedIssues, researchArtifacts,
   results: [ {issue, status, branch, prNumber, prUrl,
   commitCount, testsRunClaimed, summary, blocker,
+  escalatedTier, escalationReason,
   prProof, provenCommitCount, claimedStatus, claimedPrNumber, claimedPrUrl,
   chainComplete, partialDelivery: {tasksTotal, blocked, skipped, unreviewed},
   tasks: [{id, status, reviewVerdict, fixRounds, commitCount, claimedStatus}]} ],
@@ -168,7 +173,7 @@ The script logs `WORKFLOW_RESULT <json>` and returns:
   counts: {prOpened, pushedNoPr, committedNotPushed, noChangesNeeded, refused, failed},
   tasksTotal, tasksApproved, tasksBlocked, tasksUnreviewed,
   verification: {probed, confirmed, disproven, unverified, notApplicable, relayRc},
-  cb1Tripped, cb2Tripped, nullsByPhase, auditEvents }
+  tierEscalations, cb1Tripped, cb2Tripped, nullsByPhase, auditEvents }
 ```
 
 `status` ∈ `PR_OPENED | PUSHED_NO_PR | COMMITTED_NOT_PUSHED | NO_CHANGES_NEEDED
@@ -198,12 +203,90 @@ different field from the per-issue `claimedStatus`, which holds the solver's own
 status after the PR proof disproved it.
 
 `chainComplete` is script-derived, so no delivery agent can report its way out
-of it: `false` means the per-task chain did not finish — some task is BLOCKED,
-SKIPPED or UNREVIEWED — and `partialDelivery` then carries the ids, in the shape
-declared above. Both appear only on a record the per-task chain delivered, and
-`partialDelivery` only when the chain fell short: its presence IS the signal.
-`/goal` ingests `prsOpened` — bare numbers, carrying neither field — so a PR
-opened over an unfinished chain is distinguishable only here.
+of it: `false` means the per-task chain did not finish. **Four** buckets make it
+false, not three — a task recorded BLOCKED, a task SKIPPED, a task whose commits
+no reviewer saw (UNREVIEWED), and a **disputed** task: one rewritten to
+`NO_CHANGES` because it committed nothing while its own implementer claimed
+`DONE`. `partialDelivery` carries the ids of the first three, in the shape
+declared above; the disputed ids are deliberately **not** members of it —
+widening that object is a contract change joined against this section in both
+directions — and they ride in the `partial_delivery` audit event and in the
+delivery agent's brief instead. Both fields appear only on a record the per-task
+chain delivered, and `partialDelivery` only when the chain fell short: its
+presence IS the signal. `/goal` ingests `prsOpened` — bare numbers, carrying
+neither field — so a PR opened over an unfinished chain is distinguishable only
+here.
+
+The flag also decides **how the PR links to its issue** (#554) — the one
+consequence of it that is visible outside this return value, because linkage and
+completeness used to be the same token:
+
+- `chainComplete: true` → the delivery brief mandates `Closes #N` in the PR
+  body, and GitHub closes the issue when that PR merges.
+- `chainComplete: false` → it mandates the non-closing, whole-line trailer
+  `UberDev-Partial: #N` instead, and forbids any GitHub closing keyword standing
+  in front of this issue's number in the body **or** in any commit message on
+  the branch (GitHub honours them in both). The issue therefore stays **OPEN**
+  when the PR merges — the tasks the chain never reached still need an issue to
+  come back to — and `/merge` Step 3.4 reads that trailer to release the
+  `uberdev:active` claim anyway, so the issue is immediately re-solvable rather
+  than stranded behind a claim no solver still holds.
+
+## Mid-run tier escalation (#532)
+
+Triage classifies an issue from its **body**, before anyone has read the code, so
+a `small` issue that turns out to need a schema migration is simply mis-triaged.
+A solver may report that discovery on its return — `escalatedTier` plus an
+`escalationReason` — and the script records it.
+
+**An escalation changes NO ceremony in this run.** The fleet is already
+dispatched: raising the tier mid-flight would spend research and design agents
+CB1 never projected, mid-wave, against a committed budget. `DESIGN_TIERS`, the
+design gate and CB1's projection are all untouched by design. That the escalated
+run gets no in-run design chain is a deliberate limitation, not an oversight, and
+closing it is deferred to a follow-up rather than attempted here.
+
+What this channel produces is the **run's own record** of the mis-triage — a
+counted audit event an operator can grep, and the field on `results[]`. The tier
+is actually raised on the **next** classification, and that path runs through the
+issue rather than through this JSON: `lib/solve_triage.py` reads an
+`uberdev:tier-<tier>` label on the issue and raises `raw_tier`, recording
+`escalation-label:<tier>` in `matched_rules`. A solver that escalates is expected
+to write that label; this return is what makes the same claim visible in the run
+result, so an escalation reported here and never labelled on the issue is
+distinguishable from one that was never reported at all.
+
+The ratchet is **one-way**: the only accepted move is strictly *up* the ordered
+vocabulary `trivial < small < medium < large`. A solver cannot talk an issue down
+into a cheaper ceremony — and `trivial` is therefore never an escalation target,
+matching the same rule on the triage side.
+
+`escalatedTier` is deliberately **not** enum-constrained on the wire, for the
+same reason `prProof` carries observations and no verdict: an enum would refuse
+the whole structured return over an illegal value on an advisory field, losing
+the delivery record — branch, PR number, commit count — of an issue that was
+otherwise solved. The vocabulary check lives in the script instead, where a
+refusal costs one audit row and nothing else.
+
+| Event | When |
+|---|---|
+| `tier_escalated` | accepted — carries `from`, `to` and the sanitized `reason`; `tierEscalations` counts these and only these |
+| `tier_escalation_rejected` | refused — carries `from`, the `attempted` value, the sanitized `reason`, and a `rejection` verdict |
+
+`rejection` is a **closed machine verdict** — the script's word, never the
+agent's — and is always exactly one of:
+
+- `unknown-tier` — the value is not a member of the tier vocabulary
+- `not-an-upgrade` — the same tier or a lower one; this is the ratchet itself
+- `no-reason` — no usable explanation for the next classification to act on
+
+Agent text reaches `reason` and `attempted` only, both sanitized to a single
+bounded line, because a raw newline in a log line forges log lines. On any
+rejection the published record's `escalatedTier` and `escalationReason` are
+blanked — the script said no, so `results` may not carry a yes — and the refused
+value survives in the audit event. A return whose `escalatedTier` is absent, not
+a string, or blank emits neither event: that is not a refused escalation, it is
+no escalation reported.
 
 ## Claim verification (#515)
 
@@ -220,7 +303,7 @@ adjudicates, downgrades and audits.
 | `prProof` | `CONFIRMED` · `DISPROVEN` · `UNVERIFIED` · `NOT_APPLICABLE` |
 | `provenCommitCount` | commits GitHub reports on the PR (`null` when not observed) |
 | `claimedStatus` / `claimedPrNumber` / `claimedPrUrl` | present only on a downgraded record — the original claim, preserved |
-| `verification` | run totals; `relayRc` is `null` both when no relay was dispatched and when a dispatched relay answered with an unusable rc — the audit events are what tell the two apart |
+| `verification` | run totals, plus `relayRc` — the proof relay's own rc, whose `null` cases this section defines below |
 
 The rule: **the proof wins in the field that drives behaviour, the claim is
 never erased, and the disagreement is an audit event.** `status` is overwritten
@@ -233,6 +316,48 @@ non-zero rc, a missing row, 0/401/403/429/5xx) classifies `UNVERIFIED` and
 **retains** the claim: a probe that cannot speak must never drop a real PR out
 of `/goal`'s queue. A status is never *upgraded* — a non-`PR_OPENED` record
 carrying a PR number is audited, never promoted.
+
+Those are the arms the pass itself can take. One more sits outside it: a run
+that **threw before the pass ever ran**. `main()`'s outer catch still finalizes,
+so `prsOpened` is published from unproven self-reports — and a pass that never
+ran leaves every verification count at zero, which is byte-identical to a batch
+that had no PR claim to prove. So the catch runs the same two steps the pass's
+own catch runs — the coherence classification, then marking every retained claim
+`UNVERIFIED` — and audits **`pr_proof_not_run`**. `probed: 0` beside a non-zero
+`unverified` is the shape, and that audit row is the only thing telling a thrown
+run apart from one with nothing to prove: another two facts separated only by
+the audit trail. Nothing is downgraded — unproven is reported as unproven.
+
+`relayRc` carries the relay's rc **only** when the relay both ran and answered
+with an integer `rc`. Every other exit publishes `null`: no PR was claimed, so
+no relay was dispatched; `repoSlug` was not an addressable `owner/name` pair;
+the budget was exhausted before the relay; the relay returned nothing; the
+relay answered with a non-integer `rc`; the pass threw before the rc was read;
+or the run threw before verification was reached at all. A `null` is therefore
+never evidence that the relay ran cleanly.
+
+Which of those exits produced it is carried by the audit trail, never inferred
+from the value: `pr_proof_skipped` (with `reason` `no_repo_slug` or
+`budget_exhausted`), `pr_proof_null` (the relay returned nothing),
+`pr_proof_relay_failed` (the relay's rc was not `0`: either a non-zero integer,
+or no usable integer `rc` at all), `pr_proof_threw` (the pass threw — it carries
+its own `probed` and `relayRc` copies) and `pr_proof_not_run` (the run threw
+before verification ran). Two of those names cover more than one exit apiece —
+`pr_proof_skipped` splits on its `reason`, `pr_proof_relay_failed` on whether an
+integer `rc` came back — so between them the five account for every exit above
+**except the first**, which audits nothing at all. Two asymmetries make that
+trail authoritative rather than merely convenient:
+
+- `pr_proof_relay_failed` fires on **any** rc that is not `0`, an integer one
+  included, so its presence does not imply `relayRc` is `null` — read the
+  event's own `rc` field, not the published one.
+- The no-claim exit is deliberately **silent**: no relay is dispatched and
+  nothing is audited, so its whole signature is `probed: 0` with no `pr_proof`
+  row at all. Silence there is the design, not a lost event.
+
+The row-level events — `pr_proof_row_unusable`, `pr_proof_duplicate_row`,
+`pr_proof_row_mismatch` — describe a relay that *did* answer, and say nothing
+about `relayRc`.
 
 `testsRunClaimed` is deliberately **honest, not verifiable**: nothing here can
 falsify it, so nothing reads it.

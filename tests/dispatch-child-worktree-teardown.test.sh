@@ -129,13 +129,14 @@ FAIL=0
 ok() { echo "  PASS  $1"; PASS=$((PASS + 1)); }
 ko() { echo "  FAIL  $1"; FAIL=$((FAIL + 1)); }
 
+. "$REPO_ROOT/tests/_lib_exit_floor.sh" || { echo "FATAL: _lib_exit_floor.sh missing/unreadable" >&2; exit 2; }
 TMP="$(mktemp -d)"
 cleanup_tmp() {
   # Every scratch worktree lives under $TMP; prune the registry copies too so a
   # failed case cannot leave a dangling admin entry behind in the fixture repo.
   rm -rf "$TMP"
 }
-trap cleanup_tmp EXIT
+trap '_floor_rc=$?; cleanup_tmp; uberdev_test_exit_floor dispatch-child-worktree-teardown "$_floor_rc"' EXIT
 
 mkdir -p "$TMP/bin"
 printf 'child worktree teardown\n' >"$TMP/prompt.txt"
@@ -1337,4 +1338,5 @@ fi
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"
+uberdev_test_exit_floor_reached
 [ "$FAIL" -eq 0 ]

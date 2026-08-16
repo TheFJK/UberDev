@@ -244,6 +244,17 @@ assert_grep "$MERGE_PIPELINE" \
 assert_grep "$MERGE_PIPELINE" \
   "\`uberdev_active_label_cleared\`" \
   "uberdev_active_label_cleared listed in AUDIT_EVENT_ENUM"
+# #554: the claim must also come off when the PR lands WITHOUT closing the issue
+# (a solve-fleet chain that stopped early). Two rows, deliberately: one on the
+# declaration and one on the emitter. Either alone is a half-contract — the
+# declaration can name a reason nothing emits, and the emitter can emit a reason
+# the enum never declared. Joining them is what makes the doc surface checkable.
+assert_grep "$MERGE_PIPELINE" \
+  '`data\.reason: string ∈ [{]"merge", "merge-partial"[}]`' \
+  "uberdev_active_label_cleared declares BOTH reasons (merge, merge-partial)"
+assert_grep "$MERGE_PIPELINE" \
+  '\\"reason\\":\\"merge-partial\\"' \
+  "Step 3.4 fence emits the merge-partial reason for a non-closing landing"
 assert_grep_not "$MERGE_PIPELINE" \
   '^### Step 3\.4 .* Failure-mode summary' \
   "Old Step 3.4 'Failure-mode summary' header is gone (renamed to 3.5)"
@@ -273,8 +284,8 @@ assert_grep "$SOLVE_CMD" \
   "small-team issue-claim protocol" \
   "solve.md mentions small-team claim protocol"
 
-echo "== Version bump 0.46.0 -> 0.47.0 propagated =="
-assert_version_bump "$REPO_ROOT" "0.47.0"
+echo "== Version bump 0.47.0 -> 0.48.0 propagated =="
+assert_version_bump "$REPO_ROOT" "0.48.0"
 
 echo "== #123 B1: closing-keyword regex left-anchor (rejects preclose/postfix/unresolve) =="
 # The closing-keyword regex in merge-pipeline Step 3.4 MUST require either start-of-input

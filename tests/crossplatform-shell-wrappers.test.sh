@@ -21,6 +21,21 @@
 #      the native process-record probe; os.kill(pid, 0) terminates the target
 #      under CPython on Windows instead of performing a POSIX liveness check.
 #
+#   4. plugins/uberdev/skills/writing-skills/render-graphs.js — the graphviz
+#      binary must be spawned DIRECTLY (execFileSync('dot', […])), never located
+#      by shelling out to `which dot`: `which` is not a command on Windows, and
+#      this repo runs a windows-latest CI job, so the probe throws there even
+#      when graphviz is installed and every render dies with "graphviz (dot) not
+#      found". We assert both shell-mediated call shapes are gone, that the
+#      `child_process` destructure was widened alongside them (porting the two
+#      call sites without it is a ReferenceError at runtime), that the file
+#      stayed CommonJS (RFC 0019 declined the ESM half of the same upstream
+#      hunk), and we EXECUTE the file in both the dot-present and dot-absent
+#      arms — nothing else in the repo runs this file at all. The two execution
+#      arms assert on POSIX only and print their rc as evidence on native
+#      Windows: no stub `dot` a shell test can write is spawnable there (see
+#      XH8.5). The shape rows above are what gate every platform.
+#
 # Portable grep-and-assert + runtime model — runs green on ubuntu (GNU sed),
 # windows-latest Git Bash (GNU sed), and macOS (BSD sed) alike.
 
@@ -2777,6 +2792,177 @@ else
   echo "  PASS  XH6c the bash arm answers on POSIX, as \"shell\": \"bash\" assumes"
   PASS=$((PASS + 1))
 fi
+
+echo
+echo "== render-graphs.js: dot is spawned directly, never located via \`which\` (#531) =="
+# Section 4 of this file's header. `grep -rn render-graphs tests/ .github/` was
+# ZERO HITS before this section existed: nothing in the repo executed or even
+# inspected the file, so the two-call-site diff the issue quotes could land
+# without its `child_process` destructure and still leave a fully green suite —
+# the failure would only surface the first time a human ran the renderer.
+# The negative rows below therefore target the DEFECT (a shell-mediated probe),
+# not the substring `which`: the word legitimately survives in the ported
+# upstream comment and in the provenance header, and XH8.2c is what keeps that
+# distinction honest.
+
+# The file's assert_grep is ERE-only and every positive probe here is dense with
+# regex metacharacters (`{`, `(`, `[`, `'`), so the section brings its own
+# fixed-string form rather than escaping each literal twice.
+assert_grep_fixed() {  # file, literal, desc
+  local file="$1" lit="$2" desc="$3"
+  if grep -qF -- "$lit" "$file"; then
+    echo "  PASS  $desc"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc"
+    echo "        literal: $lit"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+XH_RG="$REPO_ROOT/plugins/uberdev/skills/writing-skills/render-graphs.js"
+
+# XH8.0 — anti-vacuity preflight. A moved or emptied target must FAIL, and a
+# runner without node must abort loudly rather than announce a skip: node is
+# preinstalled on both CI images, so its absence is a broken runner, not a
+# platform the rows do not apply to.
+if [ -s "$XH_RG" ]; then
+  echo "  PASS  XH8.0 render-graphs.js is present and non-empty"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  XH8.0 render-graphs.js missing or empty: $XH_RG"
+  FAIL=$((FAIL + 1))
+fi
+command -v node >/dev/null 2>&1 || {
+  echo "FATAL: node is required for XH8 (preinstalled on both CI images)" >&2
+  exit 2
+}
+
+# XH8.1 — the ported file still parses. Cheap, and it is the row that catches a
+# botched hand-edit of the call sites before any of the shape rows read it.
+if node --check "$XH_RG" >/dev/null 2>&1; then
+  echo "  PASS  XH8.1 render-graphs.js parses under node --check"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  XH8.1 render-graphs.js does not parse under node --check"
+  FAIL=$((FAIL + 1))
+fi
+
+# XH8.2a — `execFileSync` does NOT contain the substring `execSync` (they
+# diverge at character 5), so this negative is exact rather than approximate.
+assert_grep_not "$XH_RG" \
+  'execSync' \
+  "XH8.2a no execSync anywhere — the shell-mediated form is gone"
+assert_grep_not "$XH_RG" \
+  'which dot' \
+  "XH8.2b the old \`which dot\` argv is gone"
+
+# XH8.2c — `which` may survive only inside a comment (upstream's own rationale
+# line, and this repo's provenance header). Anywhere else it is a shell probe
+# again. Computed in ONE awk process so no pipeline exists whose rc could be
+# poisoned (tests/epipe-guard.test.sh).
+XH_RG_WHICH="$(awk '/which/ && $0 !~ /^[[:space:]]*(\/\/|\/\*|\*)/ {printf "%d:%s\n", NR, $0}' "$XH_RG")"
+if [ -z "$XH_RG_WHICH" ]; then
+  echo "  PASS  XH8.2c \`which\` appears on comment lines only, never as a probe"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  XH8.2c \`which\` appears on a non-comment line — that is a shell probe again"
+  printf '        %s\n' "$XH_RG_WHICH"
+  FAIL=$((FAIL + 1))
+fi
+
+# XH8.3 — the positive shapes. The destructure row is the one that catches the
+# half-port the issue's two-line diff would produce.
+assert_grep_fixed "$XH_RG" \
+  "const { execFileSync } = require('child_process');" \
+  "XH8.3a the child_process destructure binds execFileSync"
+assert_grep_fixed "$XH_RG" \
+  "execFileSync('dot', ['-Tsvg'], {" \
+  "XH8.3b the render call spawns dot directly with an argv array"
+assert_grep_fixed "$XH_RG" \
+  "execFileSync('dot', ['-V'], { stdio: 'ignore' });" \
+  "XH8.3c the availability check runs the binary itself"
+
+# XH8.4 — encodes RFC 0019's DECLINED ruling on the CommonJS -> ESM half of the
+# same upstream diff (it raises an undeclared Node floor for a tree with no
+# `engines` field and no CI node-version pin). A future "modernise" PR reds here.
+assert_grep_not "$XH_RG" \
+  '^import ' \
+  "XH8.4a no ESM import statement (the ESM half stays declined)"
+assert_grep_not "$XH_RG" \
+  '^export ' \
+  "XH8.4b no ESM export statement (the ESM half stays declined)"
+assert_grep "$XH_RG" \
+  'require\(' \
+  "XH8.4c CommonJS require() retained"
+
+# --- XH8.5/XH8.6: EXECUTE it, both arms — POSIX-gated -----------------------
+# Shape rows cannot tell an argv change from a working renderer. The fixture is
+# a throwaway skill with one ```dot fence plus a stub `dot` on PATH.
+#
+# Both arms assert on POSIX only, because the stub is unreachable on native
+# Windows and no stub written from a shell test can replace it. execFileSync
+# does NOT resolve through PATHEXT: node reaches for %COMSPEC%/cmd.exe only
+# inside `if (options.shell)` (lib/child_process.js) and nowhere else, so
+# without `shell: true` the unresolved name goes straight to uv_spawn, whose
+# path_search_walk_ext appends exactly two extensions — `.com` and `.exe`,
+# "since CreateProcess can start only .com and .exe files". An extension-less
+# script is therefore never found, and a `.cmd` twin is never even searched for
+# — measured on this tree: with only `dot.cmd` on PATH the renderer prints
+# "Error: graphviz (dot) not found." and exits 1, exactly as with an empty PATH.
+# So XH8.5 prints its rc as evidence on Windows and gates its assertion there,
+# the same shape XH6c and XH8.6 already use.
+XH_RG_TMP="$(mktemp -d)"
+mkdir -p "$XH_RG_TMP/skill" "$XH_RG_TMP/bin" "$XH_RG_TMP/emptybin"
+cat > "$XH_RG_TMP/skill/SKILL.md" <<'XH_RG_MD'
+# fixture skill
+
+```dot
+digraph xh8_fixture {
+  a -> b;
+}
+```
+XH_RG_MD
+printf '#!/bin/sh\nexit 0\n' > "$XH_RG_TMP/bin/dot"
+chmod +x "$XH_RG_TMP/bin/dot"
+
+XH_RG_OUT="$(PATH="$XH_RG_TMP/bin:$PATH" node "$XH_RG" "$XH_RG_TMP/skill" 2>&1)"
+XH_RG_RC=$?
+echo "  INFO  XH8.5 dot-present arm: rc=${XH_RG_RC} first-line=$(head -n 1 <<<"$XH_RG_OUT")"
+if [ "$XH_NATIVE_WINDOWS" = yes ]; then
+  echo "  SKIP  XH8.5 assertion (native Windows — uv_spawn appends only .com/.exe, so no stub dot is reachable; the rc above is evidence, not a gate)"
+elif grep -qF 'Found 1 diagram(s)' <<<"$XH_RG_OUT"; then
+  echo "  PASS  XH8.5 with dot on PATH the renderer finds and processes the diagram"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  XH8.5 with dot on PATH the renderer did not reach the diagram"
+  printf '        first-line: %s\n' "$(head -n 1 <<<"$XH_RG_OUT")"
+  FAIL=$((FAIL + 1))
+fi
+
+# XH8.6 — the absent arm, made deterministic: the runner image may or may not
+# ship graphviz, so the whole PATH is an EMPTY directory and node is invoked by
+# absolute path. rc alone is not the assertion — any crash exits non-zero — so
+# the diagnostic is demanded too.
+XH_RG_NODE="$(command -v node)"
+XH_RG_OUT2="$(env PATH="$XH_RG_TMP/emptybin" "$XH_RG_NODE" "$XH_RG" "$XH_RG_TMP/skill" 2>&1)"
+XH_RG_RC2=$?
+echo "  INFO  XH8.6 dot-absent arm: rc=${XH_RG_RC2} first-line=$(head -n 1 <<<"$XH_RG_OUT2")"
+if [ "$XH_NATIVE_WINDOWS" = yes ]; then
+  # XH6c precedent: an emptied Windows PATH is not a reliable process-creation
+  # environment, so the rc above is evidence for adjudication, not a gate.
+  # XH8.0-XH8.4 — every shape row, including the destructure — still assert on
+  # this platform; XH8.5 is evidence here for the reason given above it.
+  echo "  SKIP  XH8.6 assertion (native Windows — an emptied PATH is not a reliable process-creation environment)"
+elif [ "$XH_RG_RC2" = "1" ] && grep -qF 'Error: graphviz (dot) not found.' <<<"$XH_RG_OUT2"; then
+  echo "  PASS  XH8.6 with no dot reachable the renderer exits 1 with the graphviz diagnostic"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  XH8.6 with no dot reachable the renderer did not fail with the graphviz diagnostic (rc=${XH_RG_RC2})"
+  printf '        first-line: %s\n' "$(head -n 1 <<<"$XH_RG_OUT2")"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$XH_RG_TMP"
 
 echo
 echo "== Summary =="

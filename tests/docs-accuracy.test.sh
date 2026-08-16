@@ -85,6 +85,12 @@ SOLVE_FLEET_JS="$PLUGIN_DIR/skills/solve-fleet/workflow.js"
 # below locks the three against each other rather than pinning any one alone.
 SOLVE_FLEET_SKILL="$PLUGIN_DIR/skills/solve-fleet/SKILL.md"
 DISPATCH15_RFC="$RFC_DIR/0015-workflow-native-dispatch.md"
+# #554 partial-linkage surface. The non-closing `UberDev-Partial: #N` trailer is
+# one contract living in three files — the producer (the fleet's delivery
+# prompt), the fleet's own return-value declaration, and the ONLY consumer that
+# acts on it (/merge Step 3.4). T16.10 below joins them; the consumer is listed
+# here so a rename is an explicit FATAL rather than a silently-skipped row.
+MERGE_PIPELINE_SKILL="$PLUGIN_DIR/skills/merge-pipeline/SKILL.md"
 GOAL_WATCH_SH="$PLUGIN_DIR/lib/goal-watch.sh"
 BUMP_VERSION_SH="$PLUGIN_DIR/lib/bump-version.sh"
 STRUCTURAL_LIB="$REPO_ROOT/tests/_lib_assert_structural.sh"
@@ -108,7 +114,7 @@ for f in "$TESTING_MD" "$CONTRIBUTING_MD" "$DISPATCH_RFC" "$ALIAS_RFC" \
          "$USING_SKILL" "$CONFIG_REF" "$HOOKS_JSON" "$HOOKS_CURSOR_JSON" \
          "$PRE_COMPACT" "$WORKFLOW_RFC" "$GOAL_RFC" "$VENDOR_RFC" \
          "$PRECISION_RFC" "$PRECISION_MINER" "$AGENTS_MD" "$SOLVE_FLEET_JS" \
-         "$SOLVE_FLEET_SKILL" "$DISPATCH15_RFC" \
+         "$SOLVE_FLEET_SKILL" "$DISPATCH15_RFC" "$MERGE_PIPELINE_SKILL" \
          "$GOAL_WATCH_SH" "$BUMP_VERSION_SH" "$STRUCTURAL_LIB" \
          "$ADAPTIVE_RFC" "$RUN_MANIFEST_PY" "$DOCS_ACCURACY_SELF"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
@@ -327,6 +333,45 @@ assert_grep "$VENDOR_RFC" '^## Amendment \(2026-08-13, #511\) — ' "T3.6 vendor
 assert_in_section "$VENDOR_RFC" '^## Amendment \(2026-08-13, #511\)' '^### ' \
   'Status of this amendment: \*\*Accepted, implemented\.\*\*' \
   "T3.6b the #511 amendment declares its own status inside its own block"
+# §4.2 and §4.3 record a `measured_diff_lines` per component and the register
+# records the same numbers again, with nothing reconciling the two — they had
+# already drifted on two components (#534). The fix labels each table with the
+# revision, date and counting rule its numbers were taken under, and makes
+# `measured_diff_basis` a required record in the register.
+# Division of labour: the LABELS are reconciled against the register by
+# tests/vendor-provenance.test.sh (the comparator reads every `Diff lines` table
+# in this document); what these three rows own is the amendment that says what a
+# label means, why the two frozen tables keep their cells, and what the numbers
+# were measured against. Both T3.6 traps apply here verbatim:
+#   - assert_grep is `grep -qE`, so '(2026-08-14, #534)' MUST escape its parens.
+#     An unescaped form matches a heading that was never written.
+#   - the heading carries no U+2192; this file runs on ubuntu AND windows-latest.
+assert_grep "$VENDOR_RFC" '^## Amendment \(2026-08-14, #534\) — ' "T3.7 vendor RFC carries the dated #534 amendment heading"
+# Anchored to this amendment's OWN block for the T3.6b reason: three earlier
+# amendments already carry a byte-identical status line, so a whole-file
+# assert_grep would pass against #457's and never notice this one was missing.
+# The section end is '^### ', NOT '^## ' — see the awk-range note above T3.6b.
+assert_in_section "$VENDOR_RFC" '^## Amendment \(2026-08-14, #534\)' '^### ' \
+  'Status of this amendment: \*\*Accepted, implemented\.\*\*' \
+  "T3.7b the #534 amendment declares its own status inside its own block"
+# The honesty claim the 14 skill numbers rest on. They were measured against the
+# claude-plugins-official plugin cache — a repackaging of the peeled v6.3.0 tag,
+# which the #511 amendment records as corroborated rather than trusted — and NOT
+# against obra/superpowers itself. The register keeps that distinction in a field
+# (`upstream_tree`, beside `upstream_rev`) instead of a sentence; this row is
+# what stops the amendment from shipping the field while dropping the paragraph
+# that says why the two are not the same thing.
+# The end pattern is '^# ' (ONE hash), and both alternatives are wrong here:
+# '^### ' stops at the first sub-heading, and the claim lives in a sub-section
+# BELOW the blockquote; '^## ' matches the '## Amendment …' start line itself and
+# collapses the range to that one line (the awk trap T3.6b records). '^# ' can
+# match neither a two- nor a three-hash heading, so the range spans the whole
+# amendment. It over-reaches to EOF while this is the last amendment in the file,
+# which is why the pattern is a full sentence naming a field that did not exist
+# before this change rather than a generic phrase a later amendment could repeat.
+assert_in_section "$VENDOR_RFC" '^## Amendment \(2026-08-14, #534\)' '^# ' \
+  '`upstream_tree` records that the cache is a repackaging of upstream, not upstream itself\.' \
+  "T3.7c the #534 amendment states the measured tree is not upstream itself"
 
 echo
 echo "== dispatch RFC 0004: internal version refs agree on v0.30.0 =="
@@ -1869,6 +1914,76 @@ assert_in_section "$DISPATCH15_RFC" '^- \*\*R-2 — medium-tier fidelity' '^- \*
   'blocking findings' \
   "T14.6 RFC 0015 R-2 records that the reviewer findings ARE threaded"
 
+# #524 item 1. Both chain rows already claimed "one revision round" while NO
+# reviser was ever dispatched — a doc statement about a rung that did not exist.
+# The rows below need a needle the pre-#524 prose cannot satisfy, so they name
+# the artifact the round writes: a versioned sibling, never an in-place rewrite
+# of spec.md. That is the load-bearing half (the script cannot stat, so a
+# truncated in-place spec would be indistinguishable from a good one), which is
+# exactly the half a reader must not have to infer.
+#
+# Anchored to the medium/large TIER ROW, not to the file: each doc describes the
+# chain in exactly one line, and a file-wide needle would let the claim drift
+# into a footnote while the row a reader actually consults stayed stale.
+assert_grep "$SOLVE_FLEET_SKILL" '^\| .medium., .large.*spec-r1\.md' \
+  "T14.7 SKILL.md chain row names the versioned artifact the bounded revision round writes"
+assert_grep "$DISPATCH15_RFC" '^\| .medium., .large.*spec-r1\.md' \
+  "T14.8 RFC 0015 chain row names the same versioned revision artifact"
+
+# #524 item 2. Naming the plan REVIEWER is not enough on its own: the rung has
+# no reviser, so its findings ARE its whole output and a chain row that says a
+# plan reviewer runs, without saying where what it finds goes, describes a stage
+# that could be theatre. Both halves are therefore in the one anchored needle.
+# Same TIER-ROW anchor as T14.7/T14.8, for the same reason.
+assert_grep "$SOLVE_FLEET_SKILL" '^\| .medium., .large.*plan reviewer.*implementer, task reviewer and fixer' \
+  "T14.9a SKILL.md chain row names the plan reviewer AND the three rungs its findings reach"
+assert_grep "$DISPATCH15_RFC" '^\| .medium., .large.*plan reviewer.*implementer, task reviewer and fixer' \
+  "T14.9b RFC 0015 chain row names the plan reviewer AND the three rungs its findings reach"
+
+# R-2 is the RFC's own register of what the translation still LOSES. It named
+# the plan reviewer as the gap that remained; shipping the gate without moving
+# it leaves the document asserting the opposite of the code. Positive and
+# absence rows in a PAIR (the T13 doctrine): an absence-only predicate is
+# disjoint from the drift it must catch, and a positive-only one passes while
+# the stale sentence sits two lines below it.
+assert_in_section "$DISPATCH15_RFC" '^- \*\*R-2 — medium-tier fidelity' '^- \*\*R-3' \
+  '#524 item 2 closed the plan-review gap' \
+  "T14.10 RFC 0015 R-2 records that the plan review gate now exists"
+# Sliced, then guarded on non-emptiness: an awk range whose anchors were renamed
+# yields nothing, and grep over nothing is a PASS that inspected no bytes (#347).
+R2_SECTION="$(awk '/^- \*\*R-2 — medium-tier fidelity/,/^- \*\*R-3/' "$DISPATCH15_RFC")"
+if [ -z "$R2_SECTION" ]; then
+  echo "  FAIL  T14.10b the R-2 slice is EMPTY — its anchors are gone, and an absence check over nothing passes vacuously"
+  FAIL=$((FAIL + 1))
+elif grep -qF 'What remains missing is the' <<<"$R2_SECTION"; then
+  echo "  FAIL  T14.10b R-2 still names a remaining missing design rung — the plan reviewer ships in #524 item 2"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  T14.10b R-2 no longer describes a design-review rung as missing"
+  PASS=$((PASS + 1))
+fi
+
+# #524 item 3. The security lens is the first CONDITIONAL research rung, and the
+# condition lives in another file: lib/solve-launcher.sh's triage `risk_signals`,
+# carried one hop through the manifest record and joined run-wide by the
+# `riskIssueCount` envelope key. Three separate statements, so three rows —
+# naming the lens while leaving the gate undocumented would describe a fan-out
+# that reads as unconditional, which is precisely the design this change
+# rejected, and an operator reading the envelope table would find a key the
+# launcher sends and the doc does not admit to.
+#
+# Same TIER-ROW anchor as T14.7-T14.9 for the chain rows, for the same reason:
+# each doc describes the chain in exactly one line, and a file-wide needle lets
+# the claim drift into a footnote while the row a reader consults stays stale.
+assert_grep "$SOLVE_FLEET_SKILL" '^\| .medium., .large.*security. lens.*risk_signals' \
+  "T14.11a SKILL.md chain row names the security lens AND the triage field that gates it"
+assert_grep "$DISPATCH15_RFC" '^\| .medium., .large.*security. lens.*risk_signals' \
+  "T14.11b RFC 0015 chain row names the same risk-gated lens"
+assert_grep "$SOLVE_FLEET_SKILL" 'one record per issue.*risk_signals' \
+  "T14.11c SKILL.md records that the manifest record carries risk_signals — the one hop the value crosses"
+assert_grep "$SOLVE_FLEET_SKILL" '^\| .riskIssueCount. \|' \
+  "T14.11d SKILL.md envelope-keys table documents riskIssueCount"
+
 echo "== T15: RFC 0013 §13 <-> run_manifest.py ALLOWED_FIELDS, compared both directions (#518) =="
 # Extraction. The RFC's field list lives in a ```text fence that does NOT
 # immediately follow its anchor line — there is a blank line between them — so
@@ -2096,6 +2211,25 @@ sf_members_absent() {  # <needles> <haystack> -> space-prefixed missing members
   printf '%s' "$_out"
 }
 
+# Same rule as the _lib_assert_structural.sh guard near the top of this file,
+# and for the same reason — this file has no errexit and no assertion floor, so
+# a helper that is renamed, moved or typo'd at a call site fails with
+# command-not-found (rc 127), which increments NEITHER counter. Every row below
+# is of the shape `X="$(sf_… )"; [ -z "$X" ]`, so a missing helper yields the
+# empty string, which reads as "no violations found" and prints PASS while
+# asserting nothing. Verified: renaming sf_members_absent alone left this file at
+# `259 passed, 0 failed`, rc 0, with 8 command-not-found errors on stderr and a
+# fabricated 19/19 in the row text.
+#
+# The guard sits HERE rather than beside the other one because these helpers are
+# defined further down the file than that loop runs.
+for _sf_fn in sf_doc_members sf_js_keys sf_member_count sf_members_absent; do
+  command -v "$_sf_fn" >/dev/null 2>&1 || {
+    echo "FATAL: solve-fleet doc-join helper $_sf_fn is not defined (renamed, or a typo'd call site) — every row that calls it would report PASS having asserted nothing" >&2
+    exit 2
+  }
+done
+
 # The per-task record. On the script side that is every literal built with an
 # `id:` key and a `reviewVerdict:` key, PLUS every field assigned onto `taskRec`
 # afterwards — a field introduced only by mutation is still a published field,
@@ -2221,12 +2355,243 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-# T16.9 — the completeness flag has no members to join, so it gets the symbol
-# pair instead: named in the doc, and resolving in the script it describes.
-assert_grep "$SOLVE_FLEET_SKILL" 'chainComplete' \
-  "T16.9 SKILL.md's return value declares the chainComplete flag"
-assert_grep "$SOLVE_FLEET_JS" 'chainComplete' \
-  "T16.9b the chainComplete symbol resolves in the fleet script"
+# The ENCLOSING per-issue record. `chainComplete` has no members of its own, so
+# it was previously guarded by a whole-file `assert_grep` — a predicate scoped
+# to a DIFFERENT surface than the contract it guards: SKILL.md spells the symbol
+# twice (the normative fence AND the prose that explains it), so deleting it
+# from the published fence left the row green. Joining the record it belongs to
+# makes the flag an ordinary member and removes the need for a grep (#558).
+#
+# Doc side needs DEPTH tracking, unlike sf_doc_members above: this record nests
+# `partialDelivery: {...}` and `tasks: [{...}]`, and a first-closer reader would
+# stop inside the first nested object. Only depth-0 tokens are emitted, so the
+# nested objects appear by KEY NAME and never by their members. A depth tracker
+# that BREAKS fails loudly on T16.10, the forward row: the over-collected
+# members (tasksTotal, blocked, skipped, unreviewed) land on the DOC side, and
+# the script writes none of them.
+sf_doc_record_members() {   # <file> <anchor>
+  tr -d '\r' < "$1" | awk -v anchor="$2" '
+    { if (fin) next
+      if (!cap) { p = index($0, anchor); if (p == 0) next
+                  cap = 1; line = substr($0, p + length(anchor)) }
+      else { line = $0 }
+      n = length(line)
+      for (i = 1; i <= n; i++) {
+        c = substr(line, i, 1)
+        if (c == "{" || c == "[") { depth++; continue }
+        if (c == "}" || c == "]") { if (depth == 0) { fin = 1; break } depth--; continue }
+        if (depth == 0) buf = buf c
+      }
+      if (fin) { gsub(/[,|]/, " ", buf)
+                 m = split(buf, parts, /[ \t]+/)
+                 for (j = 1; j <= m; j++) { gsub(/:$/, "", parts[j])
+                   if (parts[j] != "") print parts[j] } }
+    }
+  ' | sort -u
+}
+
+
+# Same fail-open rule as the sf_* guard above; this helper is defined below that
+# loop, so it needs its own check before its first call site.
+command -v sf_doc_record_members >/dev/null 2>&1 || {
+  echo "FATAL: solve-fleet doc-join helper sf_doc_record_members is not defined (renamed, or a typo'd call site) — every row that calls it would report PASS having asserted nothing" >&2
+  exit 2
+}
+
+# Script side: the unpushedIssue() literal UNION every `out.<f> =` / `r.<f> =`
+# assignment — the same construction-plus-mutation shape T16.1–T16.3 already
+# uses for `taskRec.`, and `=[^=]` keeps the `===` comparisons out.
+#
+# THE `\b` IS LOAD-BEARING; do not strip it for POSIX tidiness. `ledger` ends in
+# `r`, so without the boundary the alternation also matches the tail of
+# `ledger.complete =` (workflow.js:1572) and harvests a phantom member
+# `complete` — measured: 18 names instead of 17 — which reds the reverse row
+# spuriously. `\b` is a GNU/BSD ERE extension supported by both CI greps
+# (ubuntu-latest and windows-latest/Git Bash); it is NOT one of the undefined
+# escapes the `\{`/`\}` note above warns about.
+#
+# A file-wide bare `X:` key harvest is wrong for the opposite reason: `prProof`
+# is spelled twice in this script with two meanings — a relay object SCHEMA at
+# :471 and the published string classification at `r.prProof = "DISPROVEN"`
+# (:1739) — so a key harvest drags in schema properties
+# (deliveryWorkspaceReady, rows, httpStatus, …) the record never carries.
+#
+# `out` is bound five times in the script and only three of those are this
+# record (:1154 the unpushedIssue literal, :1588 the delivered record, :2106 the
+# single-solver record). `var out = [], i;` (:255) and
+# `var out = reviewPath(...)` (:884) are unrelated bindings that today carry no
+# property writes at all. A stray `out.foo =` added under either would red the
+# reverse row: a REVIEWABLE FALSE POSITIVE, never a silent pass. That is the
+# deliberate trade, stated here so it is a decision rather than an accident.
+SF_DOC_ISSUE_FIELDS="$(sf_doc_record_members "$SOLVE_FLEET_SKILL" 'results: [ {')"
+SF_JS_ISSUE_FIELDS="$({ sf_js_keys '[{] *issue: issue,[^{}]*[}]'
+  grep -oE '\b(out|r)\.[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[^=]' "$SOLVE_FLEET_JS" \
+    | tr -d '\r' | sed 's/^[a-z]*\.//; s/[[:space:]]*=.*$//'; } | sort -u)"
+SF_DOC_ISSUE_N="$(sf_member_count "$SF_DOC_ISSUE_FIELDS")"
+SF_JS_ISSUE_N="$(sf_member_count "$SF_JS_ISSUE_FIELDS")"
+
+# T16.9 — anti-vacuity. A moved or renamed anchor yields ZERO, which would make
+# T16.10/T16.11 pass while comparing nothing at all. The floor is 12 rather than
+# 16 (live is 17/17) deliberately: on a 17-member record a floor one below live
+# is not an anti-vacuity guard, it is a SIZE RATCHET that reds on a legitimate
+# two-sided field removal. Any positive floor catches the failure mode this row
+# exists for, because a lost anchor extracts zero names, not fifteen.
+if [ "$SF_DOC_ISSUE_N" -ge 12 ] && [ "$SF_JS_ISSUE_N" -ge 12 ]; then
+  echo "  PASS  T16.9 both per-issue record field lists extracted (SKILL.md: $SF_DOC_ISSUE_N, workflow.js: $SF_JS_ISSUE_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.9 setup error: the per-issue record did not extract from both sides"
+  echo "        SKILL.md 'results: [ {...}]' members: $SF_DOC_ISSUE_N (expected >= 12) — $SOLVE_FLEET_SKILL"
+  echo "        workflow.js record fields:           $SF_JS_ISSUE_N (expected >= 12) — $SOLVE_FLEET_JS"
+  FAIL=$((FAIL + 1))
+fi
+
+# T16.10 — forward. A documented field the script never writes is a field a
+# consumer reads as undefined on every record.
+T16_ISSUE_MISSING="$(sf_members_absent "$SF_DOC_ISSUE_FIELDS" "$SF_JS_ISSUE_FIELDS")"
+if [ -z "$T16_ISSUE_MISSING" ]; then
+  echo "  PASS  T16.10 every per-issue field SKILL.md documents is one workflow.js writes ($SF_DOC_ISSUE_N/$SF_DOC_ISSUE_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.10 SKILL.md documents per-issue field(s) no result record carries"
+  echo "        absent from workflow.js:$T16_ISSUE_MISSING"
+  FAIL=$((FAIL + 1))
+fi
+
+# T16.11 — reverse. This is the half that closes #558's residual: deleting
+# `chainComplete` from the published fence while leaving the prose that explains
+# it reds HERE, where the whole-file grep this replaced stayed green.
+T16_ISSUE_EXTRA="$(sf_members_absent "$SF_JS_ISSUE_FIELDS" "$SF_DOC_ISSUE_FIELDS")"
+if [ -z "$T16_ISSUE_EXTRA" ]; then
+  echo "  PASS  T16.11 every per-issue field workflow.js writes is documented in SKILL.md ($SF_JS_ISSUE_N/$SF_JS_ISSUE_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.11 workflow.js publishes per-issue field(s) SKILL.md never declares"
+  echo "        undocumented:$T16_ISSUE_EXTRA"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== T17: the brainstorm launcher is invoked through bash, with the reason recorded (#533) =="
+# WHY THIS SECTION EXISTS. visual-companion.md prescribed `scripts/start-server.sh` bare — an
+# invocation that only runs where the exec bit survived the distribution path AND the shell honours
+# the shebang. Neither holds on the marketplace copy or on Windows, and the file had ZERO test
+# coverage, so the shape was unfalsifiable and a future editor could "simplify" the prefix back out
+# with nothing noticing. Two halves are locked here:
+#   (a) the shape — every documented launch goes through `bash`, and NO bare form survives at any
+#       indentation, plus the reason recorded where the next editor reads it (the Windows block);
+#   (b) the cross-file citation — orchestrator/SKILL.md quotes a fragment OUT of this file, and it
+#       used to name a LINE RANGE (`visual-companion.md:118-127`). Editing (a) shifted those lines
+#       and silently invalidated it. Same class as #349 / T9: anchor on a SYMBOL that resolves.
+#
+# FLOOR, NOT AN EXACT COUNT (deliberate, see #533 review finding 4). The absence row forbids ANY bare
+# invocation, whitespace-tolerantly — that alone fully enforces "every invocation is prefixed". The
+# companion count row is purely an ANTI-VACUITY floor: it proves the corpus did not shrink to
+# nothing. Pinning it to exactly 7 would red CI the day an eighth launch block is legitimately
+# documented, for no detection gain.
+#
+# CHANGELOG.md:2859 carries the same `:118-127` literal and is deliberately NOT guarded: it is a
+# frozen record of what a past release shipped, and it is a forbidden version surface in the fleet
+# lane (skills/solve-fleet/workflow.js).
+VC_MD="$REPO_ROOT/plugins/uberdev/skills/brainstorm/visual-companion.md"
+ORCH_SKILL="$REPO_ROOT/plugins/uberdev/skills/orchestrator/SKILL.md"
+if [ ! -r "$VC_MD" ] || [ ! -r "$ORCH_SKILL" ]; then
+  echo "  FAIL  T17.0 corpus missing or unreadable — every row below would pass vacuously"
+  echo "        visual-companion: $VC_MD"
+  echo "        orchestrator:     $ORCH_SKILL"
+  FAIL=$((FAIL + 10))
+else
+  assert_absent_fixed "$ORCH_SKILL" 'visual-companion.md:' \
+    "T17.1 the orchestrator's cross-file citation carries no line-number anchor"
+  assert_grep "$ORCH_SKILL" 'Unload when returning to terminal' \
+    "T17.2a the orchestrator anchors on the step's heading text instead"
+  assert_grep "$VC_MD" 'Unload when returning to terminal' \
+    "T17.2b that heading still resolves in the file it cites"
+  assert_grep "$VC_MD" 'Continuing in terminal' \
+    "T17.3 the waiting.html fragment the orchestrator quotes verbatim still exists there"
+  T17_BASH_N="$(grep -cE '^bash scripts/(start|stop)-server\.sh' "$VC_MD")"
+  if [ "${T17_BASH_N:-0}" -ge 7 ] 2>/dev/null; then
+    echo "  PASS  T17.4 every documented launcher call goes through bash ($T17_BASH_N sites, floor 7)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T17.4 only ${T17_BASH_N:-0} bash-prefixed launcher calls, floor is 7 — a launch block was deleted or un-prefixed"
+    echo "        file: $VC_MD"
+    FAIL=$((FAIL + 1))
+  fi
+  # Whitespace-tolerant on purpose: a column-0 anchor is blind to `  scripts/start-server.sh`
+  # written one space in, which is the exact "simplified it back" regression this row exists for.
+  # Measured: this ERE matches the 7 invocation lines and NOT the prose mentions (the `start-server.sh`
+  # reference inside an indented list item, and the two `- Frame template …` reference bullets).
+  T17_BARE_N="$(grep -cE '^[[:space:]]*scripts/(start|stop)-server\.sh' "$VC_MD")"
+  if [ "${T17_BARE_N:-0}" -eq 0 ] 2>/dev/null; then
+    echo "  PASS  T17.5 no bare launcher invocation survives at any indentation"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T17.5 ${T17_BARE_N} bare launcher invocation(s) survive — the exec-bit/shebang dependency is back"
+    grep -nE '^[[:space:]]*scripts/(start|stop)-server\.sh' "$VC_MD" | sed 's/^/        /'
+    FAIL=$((FAIL + 1))
+  fi
+  # The reason must live IN the Windows block — the platform where the hazard bites — not merely
+  # somewhere in the file. Sliced by the two platform headings; no fence delimiter is matched, so no
+  # backtick-run escaping is involved. Herestring readers only: epipe-guard.test.sh E1 scans this
+  # file (it sets pipefail) and a `awk … | grep -q` here would red both CI jobs.
+  T17_WIN="$(awk '/^\*\*Claude Code \(Windows\):\*\*/{f=1} f && /^\*\*Codex:\*\*/{exit} f' "$VC_MD")"
+  T17_WIN_N="$(grep -c . <<<"$T17_WIN")"
+  if [ "${T17_WIN_N:-0}" -ge 8 ] 2>/dev/null; then
+    echo "  PASS  T17.6 Windows block sliced ($T17_WIN_N lines) — the token rows below are scoped, not vacuous"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T17.6 Windows block slice is empty or too small (${T17_WIN_N:-0} lines) — a platform heading was renamed"
+    echo "        file: $VC_MD"
+    FAIL=$((FAIL + 1))
+  fi
+  # Durable tokens, not a sentence: `shebang`, `exec bit` and `bash.exe` survive rewording, whereas a
+  # whole-sentence literal invites satisfying the test with prose that no longer matches the code.
+  for t17_probe in 'shebang|T17.7 the Windows block names the shebang dependency the prefix removes' \
+                   'exec bit|T17.8 the Windows block names the exec-bit dependency the prefix removes' \
+                   'bash\.exe|T17.9 the Windows block names Git Bash bash.exe for the PowerShell tool'; do
+    t17_re="${t17_probe%%|*}"; t17_desc="${t17_probe#*|}"
+    if grep -qE -e "$t17_re" <<<"$T17_WIN"; then
+      echo "  PASS  $t17_desc"; PASS=$((PASS + 1))
+    else
+      echo "  FAIL  $t17_desc"
+      echo "        file: $VC_MD (Windows block slice)"
+      echo "        pattern: $t17_re"
+      FAIL=$((FAIL + 1))
+    fi
+  done
+fi
+
+# T16.10 — the OTHER contract the completeness flag produced, and the one with a
+# consumer. `chainComplete: false` makes the delivery prompt mandate the
+# non-closing `UberDev-Partial: #N` trailer instead of `Closes #N` (#554), and
+# that spelling now lives in three files: the producer (the fleet script), the
+# fleet's own return-value doc, and /merge's Step 3.4 cleanup, which is the only
+# code that parses it. Three uncompared copies of one literal is exactly the
+# class #370 named, and here the consequence is concrete — a consumer that
+# never learns the spelling silently strands the `uberdev:active` claim on a
+# still-OPEN issue and blocks every later /solve, /turbo and /goal Phase 1.
+#
+# A per-file grep rather than a set-difference: this is a fixed literal, not a
+# member list, so what must hold is that the exact spelling resolves in every
+# copy. `grep -qF` reads each file directly — no pipeline, so no writer exists
+# for pipefail to poison (tests/epipe-guard.test.sh).
+T16_PARTIAL_TOKEN='UberDev-Partial:'
+T16_PARTIAL_UNJOINED=""
+for T16_PARTIAL_FILE in "$SOLVE_FLEET_JS" "$SOLVE_FLEET_SKILL" "$MERGE_PIPELINE_SKILL"; do
+  grep -qF -e "$T16_PARTIAL_TOKEN" "$T16_PARTIAL_FILE" \
+    || T16_PARTIAL_UNJOINED="$T16_PARTIAL_UNJOINED $T16_PARTIAL_FILE"
+done
+if [ -z "$T16_PARTIAL_UNJOINED" ]; then
+  echo "  PASS  T16.10 the $T16_PARTIAL_TOKEN trailer resolves in all three copies (fleet script, fleet SKILL.md, /merge SKILL.md)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.10 the partial-linkage trailer is missing from a copy of its own contract"
+  echo "        literal: $T16_PARTIAL_TOKEN"
+  echo "        absent from:$T16_PARTIAL_UNJOINED"
+  echo "        a copy that never learns the spelling strands the uberdev:active claim (#554)"
+  FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== Summary =="

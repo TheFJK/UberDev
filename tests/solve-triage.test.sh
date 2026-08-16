@@ -144,4 +144,175 @@ grep -q 'triage_invalid_issue' "$TMP/err"; PASS=$((PASS+1))
 python3 -I "$ROOT/tests/component-token-schema.py" "$TRIAGE" "$ROOT/plugins/uberdev/lib/agent-dispatch.sh"
 PASS=$((PASS+1))
 
+# --- R0: matched_rules vocabulary must satisfy the routing-context schema -----
+# Same class as the component-token guard above, one field over: `matched_rules`
+# is validated against a closed `allowed_rule` alternation in agent-dispatch.sh,
+# and a token the producer emits but that validator refuses aborts the ENTIRE
+# batch with route_context_create_failed, not just the one issue. See
+# tests/triage-rule-vocabulary.py for the full rationale.
+python3 -I "$ROOT/tests/triage-rule-vocabulary.py" "$TRIAGE" "$ROOT/plugins/uberdev/lib/agent-dispatch.sh"
+PASS=$((PASS+1))
+
+# R1: the guard's exit contract, end to end at the CLI the launcher drives.
+# Every other triage code above is asserted through the CLI; triage_rule_unknown
+# rides the TriageError path __main__ already owns, so it must be the bare code
+# on stderr with exit 2 exactly -- not a traceback, and not a new exit path.
+# finalize reads matched_rules straight off --decision, so an undeclared token
+# needs no fixture.
+RC=0
+python3 -I "$TRIAGE" finalize --decision '{"raw_tier":"small","matched_rules":["bogus:rule"]}' \
+  --clamped small >"$TMP/out" 2>"$TMP/err" || RC=$?
+if [ "$RC" -ne 2 ]; then
+  echo "FAIL: finalize on an undeclared rule token exited $RC, expected 2" >&2; exit 1
+fi
+grep -q '^triage_rule_unknown$' "$TMP/err"
+PASS=$((PASS+1))
+# ...and it does not refuse a legitimate decision: same subcommand, declared
+# tokens, exit 0 with the floor clamp applied.
+python3 -I "$TRIAGE" finalize --decision '{"raw_tier":"small","matched_rules":["small:concrete-reproduction"]}' \
+  --clamped medium >"$TMP/out"
+grep -q '"source":"floor"' "$TMP/out"
+PASS=$((PASS+1))
+
+# --- E/F: the one-way tier ratchet (#532) ------------------------------------
+# A solver that opens the code and finds the issue is structurally larger than
+# triage said cannot re-classify itself mid-run: it labels the issue
+# `uberdev:tier-<tier>` and the NEXT classification reads that label. The ratchet
+# is UPGRADE-ONLY by construction -- a label naming a tier at or below the
+# computed one is inert, so the same mechanism can never be used to shop for a
+# lighter workflow. `trivial` is not an escalation target at all: escalating *to*
+# trivial is an upgrade from nothing.
+#
+# escalated-trivial.json classifies `trivial` on its OWN signals (docs label, one
+# named file, short body, no risk match) and carries `uberdev:tier-medium`. That
+# separation is what makes E1 an escalation assertion rather than a restatement
+# of the trivial rule: strip the label and the fixture still reads trivial.
+
+# E1: the label raises raw_tier, and the raise is recorded as evidence.
+assert_case escalated-trivial.json medium
+ESC="$(python3 -I "$TRIAGE" classify --snapshot "$FIX/escalated-trivial.json")"
+python3 - "$ESC" <<'PY'
+import json,sys
+v=json.loads(sys.argv[1])
+assert v["raw_tier"]=="medium", v
+# A pure escalation is still a COMPUTED tier -- it moves `raw`, so the existing
+# floor/ceiling/override machinery composes on top of it untouched.
+assert v["source"]=="computed", v
+assert "escalation-label:medium" in v["matched_rules"], v
+# The computed signal survives beside it: the trail reads "computed trivial,
+# escalated to medium", not "was always medium".
+assert "trivial:bounded-explicit-signal" in v["matched_rules"], v
+PY
+PASS=$((PASS+1))
+
+# E2: one-way. A label BELOW the computed tier changes nothing and leaves no
+# token -- the anti-label-shopping property, asserted rather than asserted-about.
+python3 - "$FIX/large-refactor.json" "$TMP/no-downgrade.json" <<'PY'
+import json,pathlib,sys
+v=json.loads(pathlib.Path(sys.argv[1]).read_text())
+v["labels"]=list(v["labels"])+[{"name":"uberdev:tier-small"}]
+pathlib.Path(sys.argv[2]).write_text(json.dumps(v))
+PY
+assert_case "$TMP/no-downgrade.json" large
+DOWN="$(python3 -I "$TRIAGE" classify --snapshot "$TMP/no-downgrade.json")"
+python3 - "$DOWN" <<'PY'
+import json,sys
+v=json.loads(sys.argv[1])
+assert v["raw_tier"]=="large", v
+assert not [r for r in v["matched_rules"] if r.startswith("escalation-label:")], v
+PY
+PASS=$((PASS+1))
+
+# E3: a ceiling still wins over an escalation -- the operator's explicit clamp is
+# not overridable by an issue label -- but the escalation evidence is preserved,
+# so the ceiling is visibly a DECISION and not a missing signal.
+assert_case escalated-trivial.json small --ceiling small
+CEIL="$(python3 -I "$TRIAGE" classify --snapshot "$FIX/escalated-trivial.json" --ceiling small)"
+python3 - "$CEIL" <<'PY'
+import json,sys
+v=json.loads(sys.argv[1])
+assert v["tier"]=="small" and v["source"]=="ceiling", v
+assert "escalation-label:medium" in v["matched_rules"], v
+PY
+PASS=$((PASS+1))
+
+# E4: same for an explicit override.
+assert_case escalated-trivial.json trivial --override trivial
+OVER="$(python3 -I "$TRIAGE" classify --snapshot "$FIX/escalated-trivial.json" --override trivial)"
+python3 - "$OVER" <<'PY'
+import json,sys
+v=json.loads(sys.argv[1])
+assert v["tier"]=="trivial" and v["source"]=="override", v
+assert "escalation-label:medium" in v["matched_rules"], v
+PY
+PASS=$((PASS+1))
+
+# E5: a label naming no known tier is INERT -- it must not raise, not emit a
+# token, and not fail the run. A solver typo cannot break the dispatch.
+python3 - "$FIX/escalated-trivial.json" "$TMP/bogus-tier.json" <<'PY'
+import json,pathlib,sys
+v=json.loads(pathlib.Path(sys.argv[1]).read_text())
+v["labels"]=[{"name":"docs"},{"name":"uberdev:tier-bogus"}]
+pathlib.Path(sys.argv[2]).write_text(json.dumps(v))
+PY
+assert_case "$TMP/bogus-tier.json" trivial
+BOGUS="$(python3 -I "$TRIAGE" classify --snapshot "$TMP/bogus-tier.json")"
+python3 - "$BOGUS" <<'PY'
+import json,sys
+v=json.loads(sys.argv[1])
+assert v["raw_tier"]=="trivial", v
+assert not [r for r in v["matched_rules"] if r.startswith("escalation-label:")], v
+PY
+PASS=$((PASS+1))
+
+# E6: several tier labels at once resolve to EXACTLY ONE token, the highest --
+# `matched_rules` is length-capped and duplicate-checked by the context
+# validator, so an unbounded emitter here would be a dispatch failure, not just
+# noise. `uberdev:tier-trivial` is not an escalation label at all.
+python3 - "$FIX/escalated-trivial.json" "$TMP/multi-tier.json" <<'PY'
+import json,pathlib,sys
+v=json.loads(pathlib.Path(sys.argv[1]).read_text())
+v["labels"]=[{"name":"docs"},{"name":"uberdev:tier-small"},
+             {"name":"uberdev:tier-large"},{"name":"uberdev:tier-trivial"}]
+pathlib.Path(sys.argv[2]).write_text(json.dumps(v))
+PY
+assert_case "$TMP/multi-tier.json" large
+MULTI="$(python3 -I "$TRIAGE" classify --snapshot "$TMP/multi-tier.json")"
+python3 - "$MULTI" <<'PY'
+import json,sys
+v=json.loads(sys.argv[1])
+assert v["raw_tier"]=="large", v
+tokens=[r for r in v["matched_rules"] if r.startswith("escalation-label:")]
+assert tokens==["escalation-label:large"], tokens
+PY
+PASS=$((PASS+1))
+
+# F1: finalize round-trip -- first coverage of the launcher's actual two-step
+# (classify -> shell clamp -> finalize). The escalated raw_tier has to survive
+# the hand-off, because the launcher reads raw_tier off classify and it is
+# finalize's output that reaches the routing context.
+FIN="$(python3 -I "$TRIAGE" finalize --decision "$ESC" --clamped medium)"
+python3 - "$FIN" <<'PY'
+import json,sys
+v=json.loads(sys.argv[1])
+assert v["clamped_tier"]=="medium" and v["effective_tier"]=="medium" and v["tier"]=="medium", v
+assert v["source"]=="computed", v
+assert v["schema_version"]==1, v
+assert "escalation-label:medium" in v["matched_rules"], v
+assert json.dumps(v,sort_keys=True,separators=(",",":"),ensure_ascii=False)==sys.argv[1], \
+    "finalize output is not canonical bytes"
+PY
+PASS=$((PASS+1))
+
+# F2: an override at finalize keeps the escalation evidence, same as E4 does at
+# classify -- the two entry points must not disagree about what is recorded.
+FIN_OVER="$(python3 -I "$TRIAGE" finalize --decision "$ESC" --clamped medium --override trivial)"
+python3 - "$FIN_OVER" <<'PY'
+import json,sys
+v=json.loads(sys.argv[1])
+assert v["tier"]=="trivial" and v["source"]=="override", v
+assert "escalation-label:medium" in v["matched_rules"], v
+PY
+PASS=$((PASS+1))
+
 echo "solve-triage: $PASS passed"

@@ -977,7 +977,7 @@ Steps:
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
-Skip /uberdev:brainstorm. Skip multi-step planning. Escalate to /uberdev:brainstorm ONLY if the scope turns out to be materially larger than triaged.
+Skip /uberdev:brainstorm. Skip multi-step planning. The ratchet is one-way. If the work turns out to be materially larger than triaged, do not quietly keep the lighter workflow: raise your own bar for the rest of the task (write a short design note before you edit, tests first, and drop any shortcut you were taking only because the triage was light), put the line \`Tier escalated: <from> -> <to> — <reason>\` in the PR body, and add the \`uberdev:tier-<to>\` label to the issue (\`gh label create uberdev:tier-<to> --force\` first if it does not exist; if the label write fails, say so in your summary and still deliver — never abandon the PR over a label). Nothing downgrades mid-task.
 EOF
 else
 # trivial heredoc — turbo (/turbo): no research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
@@ -994,7 +994,7 @@ Steps:
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
-Skip /uberdev:brainstorm. Skip multi-step planning. Escalate to /uberdev:brainstorm ONLY if the scope turns out to be materially larger than triaged.
+Skip /uberdev:brainstorm. Skip multi-step planning. The ratchet is one-way. If the work turns out to be materially larger than triaged, do not quietly keep the lighter workflow: raise your own bar for the rest of the task (write a short design note before you edit, tests first, and drop any shortcut you were taking only because the triage was light), put the line \`Tier escalated: <from> -> <to> — <reason>\` in the PR body, and add the \`uberdev:tier-<to>\` label to the issue (\`gh label create uberdev:tier-<to> --force\` first if it does not exist; if the label write fails, say so in your summary and still deliver — never abandon the PR over a label). Nothing downgrades mid-task.
 EOF
 fi
 ;;
@@ -1015,7 +1015,7 @@ Steps:
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
-Escalate to /uberdev:brainstorm if the scope proves larger than triaged.
+The ratchet is one-way. If the work turns out to be materially larger than triaged, do not quietly keep the lighter workflow: raise your own bar for the rest of the task (write a short design note before you edit, tests first, and drop any shortcut you were taking only because the triage was light), put the line \`Tier escalated: <from> -> <to> — <reason>\` in the PR body, and add the \`uberdev:tier-<to>\` label to the issue (\`gh label create uberdev:tier-<to> --force\` first if it does not exist; if the label write fails, say so in your summary and still deliver — never abandon the PR over a label). Nothing downgrades mid-task.
 EOF
 else
 # small heredoc — turbo (/turbo): no research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
@@ -1031,7 +1031,7 @@ Steps:
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
-Escalate to /uberdev:brainstorm if the scope proves larger than triaged.
+The ratchet is one-way. If the work turns out to be materially larger than triaged, do not quietly keep the lighter workflow: raise your own bar for the rest of the task (write a short design note before you edit, tests first, and drop any shortcut you were taking only because the triage was light), put the line \`Tier escalated: <from> -> <to> — <reason>\` in the PR body, and add the \`uberdev:tier-<to>\` label to the issue (\`gh label create uberdev:tier-<to> --force\` first if it does not exist; if the label write fails, say so in your summary and still deliver — never abandon the PR over a label). Nothing downgrades mid-task.
 EOF
 fi
 ;;
@@ -1127,9 +1127,17 @@ if [[ "${UBERDEV_RESOLVED_BACKEND:-}" == "workflow" ]]; then
     for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
       [ "$_mfirst" = "1" ] || printf ','
       _mfirst=0
+      # risk_signals is written ALWAYS, including as [] (#524 item 3). The
+      # triage predicate is computed for every issue above and persisted into
+      # the prepared root request on every backend; this record is the ONLY
+      # channel into a Workflow script (no fs), and it was the one hop the value
+      # never crossed. Writing the empty array rather than omitting the key is
+      # what lets the fleet read an ABSENT key as "the relay dropped it" instead
+      # of as "this issue had no risk" — the two are otherwise indistinguishable
+      # and the security research lens is gated on the difference.
       python3 -I -c '
 import json,sys
-issue,tier,prompt_file,root_request=sys.argv[1:5]
+issue,tier,prompt_file,root_request,risk_signals=sys.argv[1:6]
 rec={"issue":int(issue),"tier":tier,"prompt_file":prompt_file}
 try:
     r=json.loads(root_request) if root_request else {}
@@ -1138,14 +1146,44 @@ except ValueError:
 for key in ("context_file","context_sha256","run_id"):
     if r.get(key):
         rec[key]=r[key]
+try:
+    rs=json.loads(risk_signals) if risk_signals else None
+except ValueError:
+    sys.exit("risk_signals is not valid JSON; refusing to publish it as [] when [] is read as this issue had no risk")
+if not isinstance(rs,list):
+    sys.exit("risk_signals is not a JSON array; refusing to publish it as [] when [] is read as this issue had no risk")
+rec["risk_signals"]=[s for s in rs if isinstance(s,str)]
 print(json.dumps(rec,sort_keys=True,separators=(",",":")),end="")
 ' "$ISSUE_NUM" "${TIERS[$_midx]}" "$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt" "${ROOT_REQUESTS[$_midx]:-}" \
+        "${RISKS[$_midx]}" \
         || { echo "error: failed to build the solve-fleet manifest record for #$ISSUE_NUM" >&2; exit 2; }
       _midx=$((_midx + 1))
     done
     printf ']}\n'
   } > "$SOLVE_FLEET_MANIFEST" || { echo "error: failed to write $SOLVE_FLEET_MANIFEST" >&2; exit 2; }
   chmod 600 "$SOLVE_FLEET_MANIFEST" 2>/dev/null || true
+
+  # PAIRED PREDICATE — "at least one non-blank string".
+  # Its twin is riskSignalCount() in skills/solve-fleet/workflow.js, which
+  # re-counts the RELAYED records with the same rule; each comment names the
+  # other, and tests/solve-fleet-workflow.test.sh S24 joins the two ends so
+  # neither can ship alone. They must agree by construction: the script audits
+  # their disagreement as a RELAY failure, so a predicate that drifted here
+  # would raise a fault against an innocent relay.
+  #
+  # Derived from the MANIFEST rather than from RISKS[] directly, so both ends of
+  # the comparison describe the same bytes: a count taken from the array while
+  # the record-builder above wrote something else would report a disagreement
+  # that does not exist, and hide one that does. Failing loud beats emitting a
+  # wrong number — a fleet told "1 risky issue" that sees none audits a relay
+  # failure, and a wrong declaration would manufacture exactly that false alarm.
+  SOLVE_FLEET_RISK_ISSUES="$(python3 -I -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(sum(1 for r in d["issues"]
+          if any(isinstance(s,str) and s.strip() for s in r.get("risk_signals",[]))),end="")
+' "$SOLVE_FLEET_MANIFEST")" \
+    || { echo "error: failed to derive the solve-fleet risk-issue count from $SOLVE_FLEET_MANIFEST" >&2; exit 2; }
 
   _uberdev_audit_emit solve_workflow_fleet_prepared \
     "{\"issues\":${#ISSUE_NUMS[@]},\"manifest\":\"$SOLVE_FLEET_MANIFEST\",\"concurrency\":$MAX_PARALLEL_BG_AGENTS}"
@@ -1159,6 +1197,7 @@ print(json.dumps(rec,sort_keys=True,separators=(",",":")),end="")
     runDirAbs="$UBERDEV_TMPDIR" \
     issues="$SOLVE_FLEET_ISSUES" \
     issueCount="${#ISSUE_NUMS[@]}" \
+    riskIssueCount="$SOLVE_FLEET_RISK_ISSUES" \
     concurrency="$MAX_PARALLEL_BG_AGENTS" \
     autoMode="$([[ "$AUTO_MODE" == "1" ]] && echo true || echo false)" \
     repoSlug="$REPO_SLUG" \
@@ -1208,23 +1247,29 @@ UBERDEV_AGENT_PREPARED_REQUEST_JSON="${ROOT_REQUESTS[$_widx]}"
 UBERDEV_AGENT_RISK_SIGNALS_JSON="${RISKS[$_widx]}"
 UBERDEV_AGENT_WORKFLOW="$WORKFLOW"
 UBERDEV_AGENT_TRIAGE_DECISION_JSON="${TRIAGE_DECISIONS[$_widx]}"
-# Root carrier lineage `solve.lead.<tier>` (legacy catalog alias:
-# `solve.issue.lead`). Descendant workflows inherit this closed,
+# Root carrier lineage `solve.issue.lead` — the run tree's `root_edge_id`.
+# Edge ids are a CLOSED LITERAL vocabulary: every id named in this file must be
+# a key of `policy/solve-run-tree-v1.json` `edges`, so none may be composed at
+# runtime. An id interpolated from the tier named no edge at all, and nothing
+# read it (#536); the tier travels in this edge's `required_inputs` (as
+# `"tier": "string"`), handed to the child by uberdev_dispatch_one below, never
+# as a segment of the id.
+# Guarded by tests/launcher_edge_ids.py, wired into tests/solve-run-tree.test.sh.
+# Descendant workflows inherit the UBERDEV_RUN_CARRIER_JSON built below as an
 # immutable pointer/hash tuple and use it to construct handoff JSON for
 # uberdev_dispatch_child; they never reconstruct routing state from prose.
 UBERDEV_RUN_CARRIER_JSON="$(python3 -I -B -c '
 import json,sys
 r=json.loads(sys.argv[1])
 print(json.dumps({"schema_version":1,"run_id":r["run_id"],"workflow":r["workflow"],"issue_num":r["issue_num"],"context_file":r["context_file"],"context_sha256":r["context_sha256"]},sort_keys=True,separators=(",",":")),end="")
-' "$UBERDEV_AGENT_PREPARED_REQUEST_JSON")" || { echo "error: failed to construct solve.lead.$TIER carrier" >&2; exit 2; }
-UBERDEV_ROOT_EDGE_ID="solve.lead.$TIER"
-export UBERDEV_AGENT_PREPARED_REQUEST_JSON UBERDEV_AGENT_RISK_SIGNALS_JSON UBERDEV_AGENT_WORKFLOW UBERDEV_AGENT_TRIAGE_DECISION_JSON UBERDEV_RUN_CARRIER_JSON UBERDEV_ROOT_EDGE_ID
+' "$UBERDEV_AGENT_PREPARED_REQUEST_JSON")" || { echo "error: failed to construct the solve.issue.lead run carrier" >&2; exit 2; }
+export UBERDEV_AGENT_PREPARED_REQUEST_JSON UBERDEV_AGENT_RISK_SIGNALS_JSON UBERDEV_AGENT_WORKFLOW UBERDEV_AGENT_TRIAGE_DECISION_JSON UBERDEV_RUN_CARRIER_JSON
 _widx=$((_widx + 1))
 # DISPATCH_RC + DISPATCH_ID are reset at the top of uberdev_dispatch_one
 # (lib/dispatch.sh central SSOT reset) and documented always-set on return.
 PROMPT_FILE="$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt"
 uberdev_dispatch_one "$ISSUE_NUM" "$TIER" "$PROMPT_FILE"
-unset UBERDEV_AGENT_PREPARED_REQUEST_JSON UBERDEV_RUN_CARRIER_JSON UBERDEV_ROOT_EDGE_ID
+unset UBERDEV_AGENT_PREPARED_REQUEST_JSON UBERDEV_RUN_CARRIER_JSON
 BG_DISPATCH_RC="$DISPATCH_RC"
 BG_SESSION_ID="${DISPATCH_ID:-}"
 

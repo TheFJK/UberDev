@@ -111,7 +111,7 @@ Plus 2 phase2_5-observability members (#116): `audit_json_phase2_5_parse_failure
 
 And `halt_tool_unavailable` (`data.tool: string`) — fires from `commands/review-pr.md` Step 6b.1 when `ToolSearch` fails to load the named tool (e.g. `AskUserQuestion`); `/review-pr` aborts (exit 1) rather than silently auto-pick a Phase 2.5 halt-choice.
 
-**+1 issue-claim-cleanup member (#TBD v0.28.0):** `uberdev_active_label_cleared` (`data.issue: int`, `data.pr: int`, `data.reason: string ∈ {"merge"}`) — fires from Step 3.4 once per linked issue after a successful `gh pr merge`. The Step 3.4 cleanup performs a **single combined `gh issue edit --remove-label "uberdev:active" --remove-assignee "@me"`** mutation (label and assignee removed in one round-trip; gh fails atomically on partial error) — symmetric with the Phase B dispatch-failure rollback in `solve-pipeline/SKILL.md` (which also clears both label and assignee). Without the assignee removal here, the dispatcher's "Assigned to me" GitHub filter would accumulate closed-and-merged issues over time. The audit event gates on the combined rc: success emits, failure stays silent. Pairs the cleanup-half of the small-team issue-claim protocol set in `solve-pipeline/SKILL.md` Step 4.5 (the dispatch-half emits `claim_acquired`). Fail-soft: a combined-call failure does NOT emit the event (the issue may already be closed by GitHub's auto-close, the label may have been removed by hand, or the assignee may differ from @me — none of these are conditions the operator wants to see surface as an audit-noisy failure on a UI-cleanup pass).
+**+1 issue-claim-cleanup member (#TBD v0.28.0):** `uberdev_active_label_cleared` (`data.issue: int`, `data.pr: int`, `data.reason: string ∈ {"merge", "merge-partial"}`) — fires from Step 3.4 once per linked issue after a successful `gh pr merge`. The two reasons name two different end states, and collapsing them would hide the one an operator has to act on: `merge` is a claim released **because the issue closed** (a closing keyword linked it, GitHub auto-closed it on merge, the work is done); `merge-partial` is a claim released off the non-closing `UberDev-Partial: #N` trailer, where the PR landed real work but the issue is **still OPEN and re-solvable** (#554). The Step 3.4 cleanup performs a **single combined `gh issue edit --remove-label "uberdev:active" --remove-assignee "@me"`** mutation (label and assignee removed in one round-trip; gh fails atomically on partial error) — symmetric with the Phase B dispatch-failure rollback in `solve-pipeline/SKILL.md` (which also clears both label and assignee). Without the assignee removal here, the dispatcher's "Assigned to me" GitHub filter would accumulate closed-and-merged issues over time. The audit event gates on the combined rc: success emits, failure stays silent. Pairs the cleanup-half of the small-team issue-claim protocol set in `solve-pipeline/SKILL.md` Step 4.5 (the dispatch-half emits `claim_acquired`). Fail-soft: a combined-call failure does NOT emit the event (the issue may already be closed by GitHub's auto-close, the label may have been removed by hand, or the assignee may differ from @me — none of these are conditions the operator wants to see surface as an audit-noisy failure on a UI-cleanup pass).
 ## Inputs
 
 Argument parsing:
@@ -1249,18 +1249,24 @@ viii. **Tear down the scratch worktree** per `using-git-worktrees` protocol: `gi
 
 ### Step 3.4 — Post-merge issue cleanup (NEW v0.28.0)
 
-After a successful `gh pr merge` (Step 3.2 clean-merge path or Step 3.3vii conflict-resolve path), parse the PR body for issue-closing keywords and remove the `uberdev:active` label from each linked issue. This is the cleanup half of the small-team issue-claim protocol set in `solve-pipeline/SKILL.md` Step 4.5 — `/solve` and `/turbo` mark an issue ACTIVE on dispatch; `/merge` clears it when the PR lands.
+After a successful `gh pr merge` (Step 3.2 clean-merge path or Step 3.3vii conflict-resolve path), parse the PR body for **two** issue-linkage forms and remove the `uberdev:active` label from each linked issue. This is the cleanup half of the small-team issue-claim protocol set in `solve-pipeline/SKILL.md` Step 4.5 — `/solve` and `/turbo` mark an issue ACTIVE on dispatch; `/merge` clears it when the PR lands.
 
-GitHub's documented closing-keyword set (case-insensitive): `close | closes | closed | fix | fixes | fixed | resolve | resolves | resolved` followed by `#N`. Cross-repo references (`org/repo#N`) are intentionally not parsed here — `/solve` and `/turbo` always operate against the current repo, so the bare-`#N` form is the only one that can carry a `uberdev:active` claim made by this plugin.
+**Form 1 — the closing keywords.** GitHub's documented set (case-insensitive): `close | closes | closed | fix | fixes | fixed | resolve | resolves | resolved` followed by `#N`. Cross-repo references (`org/repo#N`) are intentionally not parsed here — `/solve` and `/turbo` always operate against the current repo, so the bare-`#N` form is the only one that can carry a `uberdev:active` claim made by this plugin. The issue closes on merge and the claim comes off with it (audit reason `merge`).
+
+**Form 2 — `UberDev-Partial: #N`** (#554). A solve-fleet PR whose task chain stopped early lands real work without finishing the issue, so it deliberately carries **no** closing keyword — it must not close what it did not finish. Form 1 therefore finds nothing, and without a second form the claim would strand on a still-OPEN issue and block every later `/solve`, `/turbo` and `/goal` Phase 1. The trailer is **whole-line, case-sensitive and namespaced**, parsed exactly like the `Blocks: #N` trailer `lib/goal-state.sh` already reads (`BLOCKS_LINE_REGEX`), and it has exactly one producer: `skills/solve-fleet/workflow.js`. A bare `Refs #N` was rejected for that reason — `/merge` runs on **every** PR, so a drive-by `Refs #42` would release a claim a **live** solver still holds. The issue stays OPEN and re-solvable; only the claim is released (audit reason `merge-partial`).
+
+**The release stays at merge time, never at PR-open.** While a partial PR is open the issue must remain claimed, or a second fleet would cut a competing branch against work already in flight.
+
+An issue named by both forms is released **once**, under the closing reason — it was released *because it closed*.
 
 The cleanup loop calls TWO `gh issue edit` mutations per linked issue: `--remove-label "uberdev:active"` (the canonical claim-release signal), and `--remove-assignee "@me"` (so the dispatcher's "Assigned to me" GitHub filter does not accumulate closed-and-merged issues — symmetric with the Phase B dispatch-failure rollback in `solve-pipeline/SKILL.md`, which clears both label and assignee).
 
-Failure-soft semantics: a PR with no closing keywords is a no-op (drive-by PR, manual issue close). A `gh issue edit --remove-label` failure is silently ignored (issue may already be closed by GitHub's auto-close or the label may have been removed by hand). The `--remove-assignee "@me"` call is independently fail-soft for the same reason (issue may already be unassigned, or assignee may differ from @me if a teammate triaged the issue before /solve ran). The dispatch-time stale-claim sweeper in `solve-pipeline/SKILL.md` Step 4 (state==CLOSED + label present → auto-prune) is the safety net for any cleanup the merge step misses.
+Failure-soft semantics: a PR carrying neither linkage form is a no-op (drive-by PR, manual issue close). A `gh issue edit --remove-label` failure is silently ignored (issue may already be closed by GitHub's auto-close or the label may have been removed by hand). The `--remove-assignee "@me"` call is independently fail-soft for the same reason (issue may already be unassigned, or assignee may differ from @me if a teammate triaged the issue before /solve ran). The dispatch-time stale-claim sweeper in `solve-pipeline/SKILL.md` Step 4 (state==CLOSED + label present → auto-prune) is the safety net for any cleanup the merge step misses.
 
-The cleanup fence is delimited by `# BEGIN merge-issue-cleanup-fence-v1` / `# END merge-issue-cleanup-fence-v1`. Those markers are a CONTRACT, not a comment: `tests/merge-pipeline-zsh.test.sh` extracts everything between them and EXECUTES it under `zsh -f` against a recording `gh` stub. Keep the block self-contained (it may assume only `PR`, `PR_JSON`, a `gh` on `PATH` and an `_uberdev_audit_emit` emitter), and bump the marker version if the contract changes.
+The cleanup fence is delimited by `# BEGIN merge-issue-cleanup-fence-v2` / `# END merge-issue-cleanup-fence-v2`. Those markers are a CONTRACT, not a comment: `tests/merge-pipeline-zsh.test.sh` extracts everything between them and EXECUTES it under `zsh -f` against a recording `gh` stub. Keep the block self-contained (it may assume only `PR`, `PR_JSON`, a `gh` on `PATH` and an `_uberdev_audit_emit` emitter), and bump the marker version if the contract changes.
 
 ```bash
-# BEGIN merge-issue-cleanup-fence-v1
+# BEGIN merge-issue-cleanup-fence-v2
 # --- Step 3.4: post-merge issue cleanup (NEW v0.28.0) ---
 # $PR (the merged PR number) and $PR_JSON (cached projection with .body field)
 # are in scope per the Phase 3 per-PR loop convention. Parse closing keywords
@@ -1288,6 +1294,24 @@ CLOSED_ISSUES=($(printf '%s' "$PR_BODY_FOR_CLEANUP" \
   | grep -oE '#[0-9]+' \
   | tr -d '#' \
   | awk -v c0=0 '!seen[$c0]++'))
+# Second linkage form (#554): the NON-closing `UberDev-Partial: #N` trailer a
+# solve-fleet PR carries when its task chain stopped early. Such a PR lands real
+# work but does NOT finish the issue, so GitHub never auto-closes it and the
+# keyword harvest above finds nothing — leaving `uberdev:active` set on a still
+# OPEN issue, which then blocks every later /solve, /turbo and /goal Phase 1.
+# Whole-line, case-sensitive and namespaced, exactly like the `Blocks: #N`
+# trailer lib/goal-state.sh already parses (BLOCKS_LINE_REGEX). A bare `Refs #N`
+# was rejected deliberately: /merge runs on EVERY PR, so a drive-by reference
+# would release a claim a LIVE solver still holds. The trailer has exactly one
+# producer (skills/solve-fleet/workflow.js), which is what makes it safe.
+# `tr -d '\r'` before matching: a body edited in the GitHub web textarea decodes
+# to CRLF, and the `$` anchor would then match nothing — silently stranding the
+# very claim this arm exists to release. The keyword harvest above needs no
+# strip; its ERE has no right anchor, so a trailing CR cannot break it.
+PARTIAL_ISSUES=($(printf '%s\n' "$PR_BODY_FOR_CLEANUP" | tr -d '\r' \
+  | grep -oE '^UberDev-Partial: #[0-9]+$' \
+  | grep -oE '[0-9]+' \
+  | awk -v c0=0 '!seen[$c0]++'))
 for CLEAR_ISSUE_NUM in "${CLOSED_ISSUES[@]}"; do
   # Combined cleanup: label + assignee in one gh round-trip. gh fails atomically
   # on partial error so the previous split-call form (with assignee removal as
@@ -1303,7 +1327,28 @@ for CLEAR_ISSUE_NUM in "${CLOSED_ISSUES[@]}"; do
       "{\"issue\":$CLEAR_ISSUE_NUM,\"pr\":$PR,\"reason\":\"merge\"}" || true
   fi
 done
-# END merge-issue-cleanup-fence-v1
+# Partial landings, minus anything the arm above already released. One body may
+# legitimately carry both forms (one issue finished, another only advanced); an
+# issue named by BOTH is released exactly ONCE, under the closing reason, since
+# it was released *because it closed*. Padded-haystack `case` for the membership
+# test: `for known in $SCALAR` is a zsh-breaking bashism (zsh does not word-split
+# an unquoted scalar) and these fences run under zsh, while zsh arrays are
+# 1-based so an index-arithmetic form would diverge too. `${CLOSED_ISSUES[*]:-}`
+# rather than a bare `[*]` keeps the join alive under `set -u` when the closing
+# harvest came back empty — the divergence MZ3.c pins for the array expansion.
+_CLEAR_SEEN=" ${CLOSED_ISSUES[*]:-} "
+for CLEAR_ISSUE_NUM in "${PARTIAL_ISSUES[@]}"; do
+  case "$_CLEAR_SEEN" in *" $CLEAR_ISSUE_NUM "*) continue ;; esac
+  # Same combined mutation and same fail-soft rc gate as the closing arm above;
+  # only the audit reason differs. `merge-partial` records that the issue is
+  # still OPEN and re-solvable, not closed-and-done — the two are different
+  # operator-visible states and must not collapse into one reason.
+  if gh issue edit "$CLEAR_ISSUE_NUM" --remove-label "uberdev:active" --remove-assignee "@me" >/dev/null 2>&1; then
+    _uberdev_audit_emit uberdev_active_label_cleared \
+      "{\"issue\":$CLEAR_ISSUE_NUM,\"pr\":$PR,\"reason\":\"merge-partial\"}" || true
+  fi
+done
+# END merge-issue-cleanup-fence-v2
 ```
 
 ### Step 3.5 — Failure-mode summary

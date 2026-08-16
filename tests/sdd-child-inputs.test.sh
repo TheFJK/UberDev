@@ -727,13 +727,17 @@ PY
 # against the LIVE policy/solve-run-tree-v1.json — these assertions therefore
 # exercise the shipped binding, not a fixture.
 #
-# With no `output_contract` on `sdd.task.implement`, lib/child-dispatch.sh ends
-# every implementer prompt with its contract-less fallback directive, `Return
-# completed, blocked, or refused.` That line lands AFTER the role card, so it is
-# the last word on the vocabulary — and it names three states the controller
-# does not branch on while omitting the two it does. DONE_WITH_CONCERNS and
-# NEEDS_CONTEXT were therefore unreachable, which is what made `context_rounds`
-# a cap on a state that could not occur.
+# Before this binding, `sdd.task.implement` carried no `output_contract`, so
+# lib/child-dispatch.sh ended every implementer prompt with a contract-less
+# fallback directive that NAMED a three-member vocabulary of its own. That line
+# lands AFTER the role card, so it was the last word on the vocabulary — and it
+# named three states the controller does not branch on while omitting the two it
+# does. DONE_WITH_CONCERNS and NEEDS_CONTEXT were therefore unreachable, which is
+# what made `context_rounds` a cap on a state that could not occur. #546 retired
+# that wording composer-wide — the contract-less arm now delegates to the role
+# card, pinned on a live-manifest prompt by AC-14b below — so what this block
+# still proves is the half that delegation cannot give you: a machine-checkable
+# return shape embedded in the bytes THIS child receives.
 python3 -I -B - "$PROVIDER_ARGS_LOG" "$FIXTURE_SCOPE" \
   "$ROOT/plugins/uberdev/shared/sdd-implementer-output-v1.md" <<'PY'
 import json
@@ -753,16 +757,103 @@ assert count == 1, (
     f"the assembled implementer prompt embeds the output contract {count} time(s), expected 1"
 )
 
-fallback = b"Return completed, blocked, or refused."
+# The needle is whatever the OTHER arm emits, so this stays falsifiable: this
+# guard's purpose is "the bound edge selected the bound arm", and pinning it to
+# the sentence the composer retired in #546 would make it vacuously true
+# forever. Swapping the composer's two arms is what must red it.
+fallback = b"Return only a response matching the return contract your role card declares above."
 assert fallback not in prompt, (
-    "the assembled implementer prompt still ends with the contract-less fallback "
-    "directive; the terminal vocabulary the child is told to use disagrees with "
-    "the vocabulary the controller branches on (#517)"
+    "the bound implementer edge selected the contract-less arm; its prompt "
+    "delegates the return shape back to the role card instead of pointing at "
+    "the output contract the manifest bound to it (#517, #546)"
 )
 
 directive = b"Return only a response matching the output contract above."
 assert directive in prompt, (
     "the assembled implementer prompt does not point the child at its output contract"
+)
+PY
+
+# ── AC-14b: the contract-less arm, on a LIVE-manifest prompt (#546) ───────────
+# `sdd.task.spec_review` carries no `output_contract` in
+# policy/solve-run-tree-v1.json, and this suite does not set
+# UBERDEV_CHILD_MANIFEST_PATH — so the dispatch above resolved against the
+# shipped manifest and this is a real unbound edge, not a fixture one.
+# tests/child-dispatch.test.sh pins the same arm against a fixture manifest;
+# this block is the only place the LIVE manifest's unbound arm is asserted, and
+# 31 further composable provider edges take exactly this path.
+#
+# The directive is appended AFTER the role card, so its last line is the last
+# word the child reads about what to return. Naming a vocabulary there silently
+# overrides whatever the card just declared — that override was #517 on
+# `sdd.task.implement` and #546 on every other unbound provider edge.
+# `row["prompt"]` is a PATH, so read the bytes it points at.
+python3 -I -B - "$PROVIDER_ARGS_LOG" "$FIXTURE_SCOPE" \
+  "$ROOT/plugins/uberdev/agents/spec-compliance-reviewer.md" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+provider_path, scope, role_path = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+rows = [json.loads(line) for line in provider_path.read_text().splitlines()]
+instance = f"sdd-p{scope}-w1-t43-spec-review-a1"
+row = next(r for r in rows if r["instance_id"] == instance)
+prompt = Path(row["prompt"]).read_bytes()
+last = prompt.rstrip(b"\n").rsplit(b"\n", 1)[-1]
+
+# AC-14b.1 — EQUALITY on the whole last line, not `endswith`: equality also
+# forecloses anything being prepended onto the terminal sentence. The count pin
+# beside it means a partial revert that emits both the retired sentence and this
+# one cannot hide behind the last-line check.
+unbound = (
+    b"Execute only the bounded role and inputs above. "
+    b"Return only a response matching the return contract your role card declares above."
+)
+assert last == unbound, (
+    "AC-14b.1: the live-manifest spec-review prompt does not end with the "
+    f"delegating sentence, so the contract-less arm is naming a return shape of "
+    f"its own again: {last!r}"
+)
+occurrences = prompt.count(unbound)
+assert occurrences == 1, (
+    f"AC-14b.1: the delegating sentence occurs {occurrences} time(s), expected 1"
+)
+
+# AC-14b.2 — the role card stays the authority. The delegating sentence is only
+# worth anything while the card it points at still declares a return shape, and
+# this change edits no card.
+verdict = b"verdict: APPROVE | REVISIONS_REQUIRED"
+assert verdict in role_path.read_bytes(), (
+    f"AC-14b.2: {role_path.name} no longer declares its verdict vocabulary, so "
+    "the contract-less directive now delegates to nothing"
+)
+assert verdict in prompt, (
+    "AC-14b.2: the spec-compliance reviewer card's verdict vocabulary did not "
+    "survive into the assembled prompt"
+)
+
+# AC-14b.3 — ANTI-VACUITY. This row guards the CLASS (the arm naming any
+# terminal vocabulary at all), not the wording: a vocabulary-free reword leaves
+# it green, a reword that names any status reds it. Scoped to the LAST LINE
+# only — the directive above it interpolates the routing context and a mktemp
+# child path, and a scratch path containing a denylisted word would make a
+# whole-directive scan flaky.
+# `_` is a word character in Python `re`, so \bDONE\b does NOT match inside
+# DONE_WITH_CONCERNS; both members are required, as are timed_out and
+# NO_FIXES_NEEDED.
+DENY = (
+    "completed", "blocked", "refused", "failed", "timed_out", "cancelled",
+    "running", "DONE", "DONE_WITH_CONCERNS", "NEEDS_CONTEXT", "BLOCKED",
+    "APPLIED", "NO_FIXES_NEEDED", "APPROVE", "REVISIONS_REQUIRED", "REJECT",
+    "SURVIVES", "CULLED", "RESOLVED", "AMBIGUOUS", "CLASSIFIED", "REBASED",
+    "CONFLICT",
+)
+deny = re.compile(r"\b(?:" + "|".join(re.escape(w) for w in DENY) + r")\b", re.IGNORECASE)
+named = deny.findall(last.decode())
+assert not named, (
+    f"AC-14b.3: the contract-less terminal line names the status vocabulary "
+    f"{named}, overriding whatever the role card declared: {last!r}"
 )
 PY
 
@@ -1299,6 +1390,137 @@ assert_exhaustion_rejected 'symlink ledger' "$LEDGER_SYMLINK" fix_rounds 4
 assert_exhaustion_rejected 'two arguments' "$LEDGER" fix_rounds
 assert_exhaustion_rejected 'four arguments' "$LEDGER" fix_rounds 4 surplus
 
+# ── AC-16: rulings are bytes on disk, one append-only line per decision ──────
+# A decision not on disk was not made. sdd_append_ruling is the carrier the
+# controller's "## Rulings I made" roll-up is read back from, so it gets the
+# same refusals its fix-ledger sibling has: absolute path only, every field
+# non-empty, fixed arity, symlink target refused, append-only at mode 0600.
+RULINGS_DIR="$INPUT_DIR/rulings"
+mkdir -p "$RULINGS_DIR"
+chmod 700 "$RULINGS_DIR"
+RULINGS="$RULINGS_DIR/rulings.md"
+
+rulings_bytes() {
+  if [ -e "$RULINGS" ]; then
+    wc -c <"$RULINGS" | tr -d ' '
+  else
+    printf '0'
+  fi
+}
+
+# stderr is discarded on purpose: a refused open raises in python3, and the
+# traceback is noise the suite must not carry. The contract asserted here is
+# the rc, never the errno text — the symlink message differs per platform.
+assert_ruling_rejected() {
+  local label="$1"
+  shift
+  local rc=0 before after
+  before="$(rulings_bytes)"
+  sdd_append_ruling "$@" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || {
+    printf 'sdd_append_ruling accepted %s (rc %s)\n' "$label" "$rc" >&2
+    exit 1
+  }
+  after="$(rulings_bytes)"
+  [ "$after" -eq "$before" ] || {
+    printf 'sdd_append_ruling wrote while rejecting %s (%s -> %s)\n' \
+      "$label" "$before" "$after" >&2
+    exit 1
+  }
+}
+
+# AC-16a — fixed arity of four.
+assert_ruling_rejected 'three arguments' "$RULINGS" 'decision' 'why'
+assert_ruling_rejected 'five arguments' "$RULINGS" 'decision' 'why' 'cost' surplus
+
+# AC-16b — the path is absolute or nothing. The name is deliberately unique:
+# a relative path resolves against the CALLER's cwd, which is the repository
+# root here, so a broken guard has to be caught as a file that appeared there
+# rather than as a rejection that happened to return the right code.
+assert_ruling_rejected 'relative rulings path' 'sdd-relative-rulings.md' \
+  'decision' 'why' 'cost'
+[ ! -e 'sdd-relative-rulings.md' ] || {
+  printf 'sdd_append_ruling wrote a relative rulings file into %s\n' "$PWD" >&2
+  exit 1
+}
+
+# AC-16c — an empty field is a ruling nobody can read back.
+assert_ruling_rejected 'empty decision' "$RULINGS" '' 'why' 'cost'
+assert_ruling_rejected 'empty why' "$RULINGS" 'decision' '' 'cost'
+assert_ruling_rejected 'empty cost' "$RULINGS" 'decision' 'why' ''
+
+# AC-16d — O_NOFOLLOW refuses a symlink, and writes nothing through it.
+RULINGS_SYMLINK_TARGET="$RULINGS_DIR/symlink-target.md"
+: >"$RULINGS_SYMLINK_TARGET"
+chmod 600 "$RULINGS_SYMLINK_TARGET"
+RULINGS_SYMLINK="$RULINGS_DIR/rulings-symlink.md"
+ln -s "$RULINGS_SYMLINK_TARGET" "$RULINGS_SYMLINK"
+assert_ruling_rejected 'symlink rulings path' "$RULINGS_SYMLINK" \
+  'decision' 'why' 'cost'
+[ ! -s "$RULINGS_SYMLINK_TARGET" ] || {
+  printf 'sdd_append_ruling wrote through a symlink\n' >&2
+  exit 1
+}
+
+# AC-16e — two appends, two lines, in call order, at mode 0600.
+sdd_append_ruling "$RULINGS" \
+  'first decision: kept the plan step and narrowed its scope' \
+  'the wider read was unowned by this task' \
+  'a reviewer re-derives the narrowing from the diff'
+sdd_append_ruling "$RULINGS" \
+  'second decision: parked a finding at the cap' \
+  'the fix round cap fired with the finding still open' \
+  'the finding ships unfixed until the follow-up lands'
+
+rulings_stat="$(python3 -I -B -c 'import os,stat,sys; entry=os.lstat(sys.argv[1]); print("%s %s %s" % (oct(stat.S_IMODE(entry.st_mode)), stat.S_ISREG(entry.st_mode), entry.st_nlink), end="")' "$RULINGS")"
+[ "$rulings_stat" = '0o600 True 1' ] || {
+  printf 'the rulings file is not a mode-0600 regular file with one link: %s\n' \
+    "$rulings_stat" >&2
+  exit 1
+}
+
+python3 -I -B - "$RULINGS" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+body = Path(sys.argv[1]).read_bytes().decode("utf-8")
+assert body.endswith("\n"), "the rulings file does not end with a newline"
+rows = body.split("\n")[:-1]
+assert len(rows) == 2, rows
+shape = re.compile("^Ruling: .+ — .+ — .+$")
+for row in rows:
+    assert "\r" not in row, row
+    assert shape.match(row), row
+assert "first decision" in rows[0], rows
+assert "second decision" in rows[1], rows
+PY
+
+# AC-16f — a third append grows the file; it never truncates or rewrites.
+rulings_lines_before="$(wc -l <"$RULINGS" | tr -d ' ')"
+rulings_first_line_before="$(sed -n '1p' "$RULINGS")"
+sdd_append_ruling "$RULINGS" \
+  'third decision: resequenced the wave' \
+  'the second task owned a file the first still held' \
+  'the wave finishes later than the plan predicted'
+rulings_lines_after="$(wc -l <"$RULINGS" | tr -d ' ')"
+rulings_first_line_after="$(sed -n '1p' "$RULINGS")"
+[ "$rulings_lines_before" -eq 2 ] || {
+  printf 'the rulings file had %s lines before the third append, expected 2\n' \
+    "$rulings_lines_before" >&2
+  exit 1
+}
+[ "$rulings_lines_after" -eq 3 ] || {
+  printf 'the rulings file has %s lines after the third append, expected 3\n' \
+    "$rulings_lines_after" >&2
+  exit 1
+}
+[ "$rulings_first_line_before" = "$rulings_first_line_after" ] || {
+  printf 'the third append rewrote line 1 (%s -> %s)\n' \
+    "$rulings_first_line_before" "$rulings_first_line_after" >&2
+  exit 1
+}
+
 # ── AC-9b: the accepted stage set is closed, and matches the prose ───────────
 SKILL_STAGE_TOKENS="$(python3 -I -B - "$SKILL" <<'PY'
 import re
@@ -1653,14 +1875,22 @@ emit_quiet append-round-1 sdd_append_fix_ledger "$SDD_PARITY_LEDGER" 1 fix_round
 emit_quiet append-round-2 sdd_append_fix_ledger "$SDD_PARITY_LEDGER" 2 fix_rounds quality-fix \
   sdd-w1-t1-quality-review-a1 "$SDD_PARITY_TASK" "$SDD_PARITY_PRIOR" "$SDD_PARITY_FINDINGS"
 emit_quiet exhausted sdd_note_cap_exhausted "$SDD_PARITY_LEDGER" fix_rounds 4
+emit_quiet ruling-relative sdd_append_ruling relative.md decision why cost
+emit_quiet ruling-arity sdd_append_ruling "$SDD_PARITY_RULINGS" decision why
+emit_quiet ruling-empty-why sdd_append_ruling "$SDD_PARITY_RULINGS" decision '' cost
+emit_quiet ruling-one sdd_append_ruling "$SDD_PARITY_RULINGS" 'first decision' 'first why' 'first cost'
+emit_quiet ruling-two sdd_append_ruling "$SDD_PARITY_RULINGS" 'second decision' 'second why' 'second cost'
 cat "$SDD_PARITY_LEDGER"
+cat "$SDD_PARITY_RULINGS"
 PROBE
   export SDD_RUNTIME_FENCE="$TMP/runtime.sh"
   export SDD_PARITY_TASK="$task_path"
   export SDD_PARITY_PRIOR="$report_path"
   export SDD_PARITY_FINDINGS="$FINDINGS"
-  bash_parity_output="$(SDD_PARITY_LEDGER="$LEDGER_DIR/parity-bash.md" bash "$SDD_PARITY_PROBE")"
-  zsh_parity_output="$(SDD_PARITY_LEDGER="$LEDGER_DIR/parity-zsh.md" zsh -f "$SDD_PARITY_PROBE")"
+  bash_parity_output="$(SDD_PARITY_LEDGER="$LEDGER_DIR/parity-bash.md" \
+    SDD_PARITY_RULINGS="$RULINGS_DIR/parity-bash-rulings.md" bash "$SDD_PARITY_PROBE")"
+  zsh_parity_output="$(SDD_PARITY_LEDGER="$LEDGER_DIR/parity-zsh.md" \
+    SDD_PARITY_RULINGS="$RULINGS_DIR/parity-zsh-rulings.md" zsh -f "$SDD_PARITY_PROBE")"
   [ "$bash_parity_output" = "$zsh_parity_output" ] || {
     printf 'bash/zsh parity broke for the new SDD helpers\nbash:\n%s\nzsh:\n%s\n' \
       "$bash_parity_output" "$zsh_parity_output" >&2

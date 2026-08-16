@@ -43,15 +43,26 @@ DISPATCH="$REPO_ROOT/plugins/uberdev/lib/dispatch.sh"
 WORKFLOW="$REPO_ROOT/plugins/uberdev/skills/review-fleet/workflow.js"
 SKILL="$REPO_ROOT/plugins/uberdev/skills/review-fleet/SKILL.md"
 CONTRACT="$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py"
+# The fence library the command files' helpers actually live in (#427). Section
+# W-UNAP carves a helper out of these bytes and RUNS it, so it is a required
+# input of this suite, not merely a grep target.
+FENCES="$REPO_ROOT/plugins/uberdev/lib/review-fences.sh"
 
-for f in "$REVIEW_CMD" "$SIMPLIFY_CMD" "$ARGS_LIB" "$DISPATCH" "$WORKFLOW" "$SKILL" "$CONTRACT"; do
+for f in "$REVIEW_CMD" "$SIMPLIFY_CMD" "$ARGS_LIB" "$DISPATCH" "$WORKFLOW" "$SKILL" "$CONTRACT" "$FENCES"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
 # `node` joined this list with section W, which EXECUTES workflow.js rather
 # than grepping it. A missing interpreter must be one FATAL line, never
 # fifteen mysterious W-row failures that read as engine bugs. Both CI images
 # ship node (tests/workflow-scripts.test.sh relies on the same fact).
-for tool in jq python3 node; do
+#
+# `zsh` joined it with W-UNAP, which re-drives a carved fence helper -- and, in
+# W-UNAP-E2E, a whole lifted command fence -- under the interpreter the
+# Skill-tool `bash` fence actually gets. A bashism there is a runtime-only
+# defect no shape test can see, so the second interpreter is the whole point of
+# the row — silently skipping it would be a vacuous green.
+# ubuntu-latest installs zsh in the shape-checks job; macos-latest ships it.
+for tool in jq python3 node zsh; do
   command -v "$tool" >/dev/null 2>&1 || { echo "FATAL: $tool is required" >&2; exit 2; }
 done
 
@@ -60,10 +71,11 @@ FAIL=0
 pass() { echo "  PASS  $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL  $1"; FAIL=$((FAIL + 1)); }
 
+. "$REPO_ROOT/tests/_lib_exit_floor.sh" || { echo "FATAL: _lib_exit_floor.sh missing/unreadable" >&2; exit 2; }
 TMP="$(mktemp -d)"
 TMP="$(cd "$TMP" && pwd -P)"
 cleanup() { rm -rf "$TMP"; }
-trap cleanup EXIT
+trap '_floor_rc=$?; cleanup; uberdev_test_exit_floor review-pr-workflow "$_floor_rc"' EXIT
 
 echo "## review-pr-workflow (#381) — the review-fleet wiring in both command files"
 
@@ -336,8 +348,16 @@ done
 # G10 — the post-return capture verbs, per stage. Without these the run
 # dispatches a real fanout and then proves nothing, which is the one outcome
 # this whole seam exists to prevent.
+#
+# RE-POINTED (#556). The fix stage's two verbs moved out of the command file and
+# into `review_fixer_terminal_outcome`, which owns the three-way branch all four
+# fixer fences now call. Grepping $REVIEW_CMD for them would go red on a change
+# that improved the wiring, so each verb is asserted where it now LIVES and the
+# command file is asserted to name the owner — this is the known "SSOT
+# extraction breaks structural-grep anchors" class, and re-pointing is the fix.
 grep -Fq 'capture-bound-child' "$REVIEW_CMD" \
-  && grep -Fq 'capture-review-terminal' "$REVIEW_CMD" \
+  && grep -Fq 'review_fixer_terminal_outcome' "$REVIEW_CMD" \
+  && grep -Fq 'capture-review-terminal' "$FENCES" \
   && grep -Fq 'capture-persistence-terminal' "$REVIEW_CMD" \
   && grep -Fq 'post_review_validated_evidence_complete' "$REVIEW_CMD" \
   && grep -Fq 'post_review_write_aggregate_v2' "$REVIEW_CMD" \
@@ -355,7 +375,9 @@ grep -Fq 'capture-bound-child' "$SIMPLIFY_CMD" \
 grep -Fq 'post_review_write_simplify_aggregate_v2' "$SIMPLIFY_CMD" \
   && pass "G10d simplify aggregates the captured lens wave into the phase2 document" \
   || fail "G10d simplify captures three lenses and never builds the phase2 aggregate"
-grep -Fq 'validate-review-outcome' "$REVIEW_CMD" \
+# G10c — same re-point (#556): the review terminal is validated inside the
+# branch owner, so the fix stage's validator is asserted against $FENCES.
+grep -Fq 'validate-review-outcome' "$FENCES" \
   && grep -Fq 'validate-persistence-result' "$REVIEW_CMD" \
   && grep -Fq 'validate-standalone-outcome' "$SIMPLIFY_CMD" \
   && grep -Fq 'validate-persistence-result' "$SIMPLIFY_CMD" \
@@ -1283,6 +1305,672 @@ for w_dispc_n in 1 2; do
     fail "W-DISPC${w_dispc_n}c fence $w_dispc_n mishandled an absent disposition: $(w_dispc_drive "$w_dispc_fence" "$W_DISPC_GONE" "$W_DISPC_GONE")"
   fi
 done
+
+# --- W-UNAP: review_fixer_terminal_outcome, the three-way terminal branch ---
+# #556. A Phase 1 fixer that returns REFUSED writes NEITHER artifact the
+# controller binds by path: the applied-content document is never created and
+# the disposition is left at the zero bytes the workspace pre-created. Every
+# fixer fence went straight to `capture-review-terminal`, whose
+# `--applied-content-path` is required and whose disposition capture has
+# minimum=1 — so a clean refusal could not be captured at all, and the six
+# BLOCKER rows it refused were dropped instead of deferred.
+#
+# The branch that tells those states apart is ONE function, in the fence
+# library, because the four fixer fences (Phase 1 and 2 × routed and
+# Workflow-native) each held their own copy of the terminal chain — the #370
+# "one contract, N uncompared copies" shape this file already polices elsewhere.
+#
+# EXECUTED, not grepped, and for the same reason W-DISPC is: a three-way branch
+# proved by greps passes identically when two of its arms are wired to the same
+# verb. The helper is carved out of lib/review-fences.sh by the loader's own
+# rule and run against the three states the disposition file can be in, with a
+# recording stand-in on CODE_FIXER_CONTRACT so the row observes WHICH verb ran
+# and with WHICH flags, never merely that something exited 0.
+W_UNAP_FN="$TMP/w-unap-fn.sh"
+awk -v b='review_fixer_terminal_outcome() {' '
+  index($0, b) == 1 { grab = 1 }
+  grab { print }
+  grab && $0 == "}" { exit }
+' "$FENCES" >"$W_UNAP_FN"
+
+W_UNAP_DEFS="$(grep -cF 'review_fixer_terminal_outcome() {' "$FENCES")"
+W_UNAP_BEGINS="$(grep -cF '# BEGIN review-fixer-terminal-outcome-v1' "$FENCES")"
+W_UNAP_ENDS="$(grep -cF '# END review-fixer-terminal-outcome-v1' "$FENCES")"
+if [ "$W_UNAP_DEFS" = 1 ] && [ "$W_UNAP_BEGINS" = 1 ] && [ "$W_UNAP_ENDS" = 1 ]; then
+  pass "W-UNAP0a review_fixer_terminal_outcome is defined exactly once, inside exactly one marker pair"
+else
+  fail "W-UNAP0a expected one definition in one marker pair, found def=$W_UNAP_DEFS begin=$W_UNAP_BEGINS end=$W_UNAP_ENDS"
+fi
+
+# W-UNAP0b — ONE DEFINITION IS ONLY HALF OF ONE OWNER. The other half is that
+# nothing else still does the job itself, and that is the half #370 keeps
+# catching: the branch owner shipped, three of the four fences kept their
+# private copy, and the copies drifted.
+#
+# So: all four fixer fences (Phase 1 and 2 x routed and Workflow-native) call
+# the owner with the binding they bound, and NEITHER underlying verb is spelled
+# in the command file at all any more. A fence that quietly kept its own
+# `capture-review-terminal` would still pass every behavioural row in this
+# section -- the helper it does not call cannot misbehave -- so the count is the
+# assertion, not the presence.
+#
+# This is also the machine-checkable half of "one owner". An RFC 0016
+# `CONTRACT:` marker cannot express it: tests/contract_markers.py maps a closed
+# VOCABULARY name to the sites that declare it and compares the members those
+# sites harvest; it has no notion of a function or a call site.
+#
+# OCCURRENCES, not matching lines. `grep -c` counts lines, so two call sites
+# folded onto one line would total 3 where 4 are owed and the row would go red
+# for the right reason by accident -- or, on the stray-verb side, a verb spelled
+# twice on one line would count as one. `index()` in a loop is the only cheap
+# counter that answers the question actually being asked. No regex and no
+# backslash reaches awk here: both needles are shell text, made almost entirely
+# of metacharacters, and are matched as FIXED STRINGS.
+w_count_occurrences() {  # FILE NEEDLE -> occurrences of NEEDLE in FILE
+  awk -v needle="$2" '
+    {
+      line = $0
+      while ((at = index(line, needle)) > 0) {
+        n += 1
+        line = substr(line, at + length(needle))
+      }
+    }
+    END { print n + 0 }
+  ' "$1"
+}
+W_UNAP_CALLS="$(w_count_occurrences "$REVIEW_CMD" 'review_fixer_terminal_outcome "$REVIEW_FIXER_LAUNCH_BINDING"')"
+W_UNAP_STRAY_CAPTURE="$(w_count_occurrences "$REVIEW_CMD" 'capture-review-terminal')"
+W_UNAP_STRAY_VALIDATE="$(w_count_occurrences "$REVIEW_CMD" 'validate-review-outcome')"
+if [ "$W_UNAP_CALLS" = 4 ] \
+   && [ "$W_UNAP_STRAY_CAPTURE" = 0 ] && [ "$W_UNAP_STRAY_VALIDATE" = 0 ]; then
+  pass "W-UNAP0b all four fixer fences route through the owner, and neither verb is spelled in the command file"
+else
+  fail "W-UNAP0b expected 4 owner calls and 0 stray verbs, found calls=$W_UNAP_CALLS capture=$W_UNAP_STRAY_CAPTURE validate=$W_UNAP_STRAY_VALIDATE"
+fi
+
+# The stand-in is a PYTHON file, because every call site spells
+# `python3 -I -B "$CODE_FIXER_CONTRACT" <verb>`; a shell script on that carrier
+# would not be exercising the invocation the fences actually make. It resolves
+# its own log paths from __file__ rather than the environment: `-I` is isolated
+# mode, and a row that depended on an inherited variable would be one export
+# away from silently logging nothing. Four DISTINCT digests, so an extraction
+# that reads the right JSON key into the wrong flag is caught.
+W_UNAP_SHIM="$TMP/w-unap-contract.py"
+cat >"$W_UNAP_SHIM" <<'PY'
+import json
+import os
+import sys
+
+here = os.path.dirname(os.path.abspath(__file__))
+verb = sys.argv[1] if len(sys.argv) > 1 else ""
+flags = {}
+rest = sys.argv[2:]
+for index in range(0, len(rest) - 1, 2):
+    flags[rest[index]] = rest[index + 1]
+with open(os.path.join(here, "w-unap-verbs.log"), "a", encoding="utf-8") as stream:
+    stream.write(verb + "\n")
+with open(os.path.join(here, "w-unap-argv.log"), "a", encoding="utf-8") as stream:
+    stream.write(json.dumps({"verb": verb, "flags": flags}, sort_keys=True) + "\n")
+# The sentinel makes the NEXT verb refuse the way a real contract refusal does:
+# rc 74, nothing on stdout. Logged first, so the row can see how far the chain
+# got before it stopped.
+if os.path.exists(os.path.join(here, "w-unap-refuse")):
+    sys.stderr.write("w-unap stand-in: refusing %s\n" % verb)
+    raise SystemExit(74)
+if verb == "capture-review-terminal":
+    payload = {
+        "status_sha256": "a" * 64,
+        "result_sha256": "b" * 64,
+        "disposition_sha256": "c" * 64,
+        "applied_content_sha256": "d" * 64,
+    }
+elif verb == "validate-review-outcome":
+    payload = {"terminal": "validated-non-empty"}
+elif verb == "publish-unapplied-terminal":
+    payload = {"terminal": "published-unapplied"}
+else:
+    sys.stderr.write("w-unap stand-in: unexpected verb %r\n" % verb)
+    raise SystemExit(64)
+sys.stdout.write(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+PY
+
+W_UNAP_WORKTREE="$TMP/w-unap-worktree"
+mkdir -p "$W_UNAP_WORKTREE"
+W_UNAP_BINDING='{"run_nonce":"w-unap-nonce"}'
+W_UNAP_AUTHORITY="$TMP/w-unap-authority.json"
+W_UNAP_AUTHORITY_SHA256="$W_HEX64_A"
+W_UNAP_CONTENT="$TMP/w-unap-applied-content.json"
+# DISTINCT heads: identical ones would let a helper that passed head_before
+# twice satisfy the flag-map rows below.
+W_UNAP_HEAD_BEFORE="$(printf '1a%.0s' $(seq 20))"
+W_UNAP_HEAD_AFTER="$(printf '2b%.0s' $(seq 20))"
+W_UNAP_REAL="$TMP/w-unap-real.json"
+printf '{"findings_disposition":[]}' >"$W_UNAP_REAL"
+W_UNAP_ZERO="$TMP/w-unap-zero.json"
+: >"$W_UNAP_ZERO"
+W_UNAP_GONE="$TMP/w-unap-absent.json"
+rm -f "$W_UNAP_GONE"
+
+w_unap_drive() {  # w_unap_drive SHELL DISPOSITION_PATH [refuse] -> "<rc>|<stdout>"
+  local shell="$1" disposition="$2" refuse="${3:-}" out rc
+  : >"$TMP/w-unap-verbs.log"
+  : >"$TMP/w-unap-argv.log"
+  : >"$TMP/w-unap-stderr.txt"
+  rm -f "$TMP/w-unap-refuse"
+  [ -z "$refuse" ] || : >"$TMP/w-unap-refuse"
+  out="$("$shell" -c '
+    set -u
+    CODE_FIXER_CONTRACT="$2"
+    WORKTREE_ROOT="$3"
+    . "$1" || exit 9
+    review_fixer_terminal_outcome "$4" "$5" "$6" "$7" "$8" "$9" "${10}"
+  ' _ "$W_UNAP_FN" "$W_UNAP_SHIM" "$W_UNAP_WORKTREE" \
+      "$W_UNAP_BINDING" "$W_UNAP_AUTHORITY" "$W_UNAP_AUTHORITY_SHA256" \
+      "$disposition" "$W_UNAP_CONTENT" "$W_UNAP_HEAD_BEFORE" "$W_UNAP_HEAD_AFTER" \
+      2>"$TMP/w-unap-stderr.txt")"
+  rc=$?
+  printf '%s|%s' "$rc" "$out"
+}
+
+w_unap_verbs() {  # the verbs the stand-in saw, in order, comma-terminated
+  tr '\n' ',' <"$TMP/w-unap-verbs.log"
+}
+
+w_unap_flags() {  # w_unap_flags VERB -> that call's flag map, key-sorted
+  jq -cS --arg verb "$1" 'select(.verb == $verb) | .flags' <"$TMP/w-unap-argv.log"
+}
+
+# bash first, then zsh: the Skill tool runs `bash` fences through /bin/zsh, so a
+# bashism in the helper is a live defect that only the second pass can see.
+for w_unap_shell in bash zsh; do
+  case "$w_unap_shell" in
+    bash) w_unap_row="W-UNAP" ;;
+    *)    w_unap_row="W-UNAPd" ;;
+  esac
+
+  # A NON-EMPTY disposition is today's path, unchanged: capture, then validate.
+  # The anti-vacuity half of the whole section — a branch rewired to reach the
+  # new publisher unconditionally fails right here.
+  w_unap_out="$(w_unap_drive "$w_unap_shell" "$W_UNAP_REAL")"
+  w_unap_seen="$(w_unap_verbs)"
+  w_unap_validate_flags="$(w_unap_flags validate-review-outcome)"
+  w_unap_validate_expected="$(jq -cS -n \
+    --arg binding "$W_UNAP_BINDING" --arg authority "$W_UNAP_AUTHORITY" \
+    --arg authority_sha "$W_UNAP_AUTHORITY_SHA256" --arg disposition "$W_UNAP_REAL" \
+    --arg content "$W_UNAP_CONTENT" --arg worktree "$W_UNAP_WORKTREE" \
+    --arg head_before "$W_UNAP_HEAD_BEFORE" --arg head_after "$W_UNAP_HEAD_AFTER" \
+    '{"--launch-binding-json":$binding,
+      "--authority-path":$authority, "--authority-sha256":$authority_sha,
+      "--disposition-path":$disposition, "--disposition-sha256":("c"*64),
+      "--applied-content-path":$content, "--applied-content-sha256":("d"*64),
+      "--status-sha256":("a"*64), "--result-sha256":("b"*64),
+      "--working-dir":$worktree,
+      "--head-before":$head_before, "--head-after":$head_after}')"
+  if [ "$w_unap_out" = '0|{"terminal":"validated-non-empty"}' ] \
+     && [ "$w_unap_seen" = "capture-review-terminal,validate-review-outcome," ]; then
+    pass "${w_unap_row}a a non-empty disposition still captures then validates, and never publishes ($w_unap_shell)"
+  else
+    fail "${w_unap_row}a non-empty disposition took the wrong arm ($w_unap_shell): out=$w_unap_out verbs=$w_unap_seen"
+  fi
+  if [ "$w_unap_validate_flags" = "$w_unap_validate_expected" ]; then
+    pass "${w_unap_row}a2 every captured digest reaches validate-review-outcome on its own flag ($w_unap_shell)"
+  else
+    fail "${w_unap_row}a2 validate-review-outcome flags drifted ($w_unap_shell): $w_unap_validate_flags"
+  fi
+
+  # EXACTLY ZERO BYTES is the refusal the controller must publish for the child.
+  w_unap_out="$(w_unap_drive "$w_unap_shell" "$W_UNAP_ZERO")"
+  w_unap_seen="$(w_unap_verbs)"
+  w_unap_publish_flags="$(w_unap_flags publish-unapplied-terminal)"
+  w_unap_publish_expected="$(jq -cS -n \
+    --arg binding "$W_UNAP_BINDING" --arg authority "$W_UNAP_AUTHORITY" \
+    --arg authority_sha "$W_UNAP_AUTHORITY_SHA256" --arg disposition "$W_UNAP_ZERO" \
+    --arg content "$W_UNAP_CONTENT" --arg worktree "$W_UNAP_WORKTREE" \
+    --arg head_before "$W_UNAP_HEAD_BEFORE" --arg head_after "$W_UNAP_HEAD_AFTER" \
+    '{"--launch-binding-json":$binding,
+      "--authority-path":$authority, "--authority-sha256":$authority_sha,
+      "--disposition-path":$disposition, "--applied-content-path":$content,
+      "--working-dir":$worktree,
+      "--head-before":$head_before, "--head-after":$head_after}')"
+  if [ "$w_unap_out" = '0|{"terminal":"published-unapplied"}' ] \
+     && [ "$w_unap_seen" = "publish-unapplied-terminal," ]; then
+    pass "${w_unap_row}b a zero-byte disposition publishes the unapplied terminal instead ($w_unap_shell)"
+  else
+    fail "${w_unap_row}b zero-byte disposition took the wrong arm ($w_unap_shell): out=$w_unap_out verbs=$w_unap_seen"
+  fi
+  if [ "$w_unap_publish_flags" = "$w_unap_publish_expected" ]; then
+    pass "${w_unap_row}b2 all eight publish-unapplied-terminal flags carry the caller's own values ($w_unap_shell)"
+  else
+    fail "${w_unap_row}b2 publish-unapplied-terminal flags drifted ($w_unap_shell): $w_unap_publish_flags"
+  fi
+
+  # ABSENT is neither. The controller allocates this file, so a path naming no
+  # file is workspace loss or tampering — and answering it with a published
+  # "nothing was applied" record would fabricate evidence about a run whose
+  # artifacts are gone. No verb may run at all.
+  w_unap_out="$(w_unap_drive "$w_unap_shell" "$W_UNAP_GONE")"
+  w_unap_seen="$(w_unap_verbs)"
+  if [ "$w_unap_out" != "0|" ] && [ "${w_unap_out%%|*}" != 0 ] \
+     && [ -z "$w_unap_seen" ] \
+     && grep -qF 'is LOST' "$TMP/w-unap-stderr.txt"; then
+    pass "${w_unap_row}c an absent disposition refuses, names the loss, and invokes no contract verb ($w_unap_shell)"
+  else
+    fail "${w_unap_row}c absent disposition mishandled ($w_unap_shell): out=$w_unap_out verbs=$w_unap_seen stderr=$(tr '\n' ' ' <"$TMP/w-unap-stderr.txt")"
+  fi
+
+  # THE RC BELONGS TO THE SUB-CALL. A helper that swallowed a contract refusal
+  # into rc 0 would hand review_promote_validated_fixer_outcome an empty
+  # document, and the fence's review_guard_failed_fixer_return arm — the only
+  # thing that turns a residue-bearing failure into MUTATED_BLOCKED — would
+  # never run. Both arms are driven, because they propagate through different
+  # shell shapes (a bare tail call vs `|| return $?` off an assignment).
+  w_unap_out="$(w_unap_drive "$w_unap_shell" "$W_UNAP_ZERO" refuse)"
+  w_unap_seen="$(w_unap_verbs)"
+  if [ "$w_unap_out" = "74|" ] && [ "$w_unap_seen" = "publish-unapplied-terminal," ]; then
+    pass "${w_unap_row}e a refusing publish-unapplied-terminal returns its own rc, printing nothing ($w_unap_shell)"
+  else
+    fail "${w_unap_row}e the unapplied arm did not propagate the refusal ($w_unap_shell): out=$w_unap_out verbs=$w_unap_seen"
+  fi
+
+  # And the chain STOPS at the first refusal: a capture that failed must not be
+  # followed by a validate over an unset digest.
+  w_unap_out="$(w_unap_drive "$w_unap_shell" "$W_UNAP_REAL" refuse)"
+  w_unap_seen="$(w_unap_verbs)"
+  if [ "$w_unap_out" = "74|" ] && [ "$w_unap_seen" = "capture-review-terminal," ]; then
+    pass "${w_unap_row}f a refusing capture stops the chain there and returns its own rc ($w_unap_shell)"
+  else
+    fail "${w_unap_row}f the capture arm did not fail closed ($w_unap_shell): out=$w_unap_out verbs=$w_unap_seen"
+  fi
+done
+
+# --- W-UNAP-E2E: the reported incident, start to finish, through THE FENCES -
+# The rows above prove the OWNER picks the right verb. These prove the two
+# claims the owner cannot make for itself:
+#
+#   ROUTING -- that the fixer fences actually reach it, with the arguments the
+#   run's own state says they owe it. A helper driven directly proves the
+#   helper; every fence could still be spelling its own terminal chain, or
+#   passing argument 7 empty, and a suite that only drives the helper stays
+#   green. That is what the first cut of this section did.
+#
+#   CONSEQUENCE -- that after a clean refusal the six Phase 1 BLOCKER rows reach
+#   findings-to-issues instead of being dropped, which is the issue itself.
+#
+# So the thing driven here is the FENCE, lifted verbatim out of
+# commands/review-pr.md, for BOTH Workflow-native fixer fences (Phase 1 and
+# Phase 2). Those two are the pair nothing else executes: the routed pair is
+# lifted and run by tests/review-child-inputs.test.sh, and on the default
+# transport (RFC 0015) these two are the ones a real run enters.
+#
+# Everything the fence touches is real, and only the fixer child is stood in for:
+#
+#   * a REAL run, from tests/_lib_review_run_fixture.sh --make-run -- never a
+#     hand-seeded directory (#427). `phase{1,2}-disposition.json` is the
+#     zero-byte file lib/command-workspace.py allocates, which is precisely the
+#     state a refusing child leaves behind. The fence is entered from a fresh
+#     shell inside that repository carrying nothing but the plugin root, RUN_ID
+#     and PR_NUMBER, so every path it uses it rehydrated for itself.
+#   * the REAL fence library (lib/review-fences.sh), loaded by the fence's own
+#     rehydration prologue, so `review_fixer_terminal_outcome` is the shipped
+#     one rather than a copy.
+#   * the REAL step 6b.0 gate (`digest --path ... --minimum 1`) off the shipped
+#     lib/code_fixer_contract.py, which is the fence that decides whether the
+#     disposition counts as published.
+#   * the REAL Phase 2.5 defer fences, lifted out of the command file by W-DISPC
+#     above and re-driven here through w_dispc_drive.
+#
+# The stand-in on CODE_FIXER_CONTRACT publishes what publish-unapplied-terminal
+# publishes AND refuses -- rc 64, nothing on stdout -- unless the eight flags it
+# is handed are byte-for-byte the ones this run's own state implies. That is the
+# per-argument identity assertion: a swapped disposition/applied-content pair, a
+# swapped head pair, an authority read off the wrong phase's sidecar, or the
+# `FIXER_HEAD_AFTER` read moved back below the call (which leaves argument 7
+# expanding to the empty string) all fail the fence here rather than shipping.
+# The verb's own proof that it may only publish on a genuinely unapplied tree
+# belongs to tests/code-fixer-contract.test.sh; duplicating it here would test
+# the contract twice and the wiring never.
+#
+# `review_promote_validated_fixer_outcome` is stubbed, and RECORDING. It is the
+# next fence's subject (tests/review-pr.test.sh executes the real one against a
+# receipt publish-unapplied-terminal really produced); what this section owes is
+# that the fence hands it the terminal document it just obtained together with
+# the two heads, which the recorder captures.
+W_UNAP_E2E_ROOT="$TMP/w-unap-e2e"
+mkdir -p "$W_UNAP_E2E_ROOT"
+W_UNAP_E2E_RUN_ID=20260814-074622-b2421484c09
+# stderr to a FILE, never /dev/null: a fixture that cannot build is the one
+# failure mode of this section that carries no other evidence, and "could not
+# build a run fixture" with no reason is not debuggable from a CI log.
+W_UNAP_E2E_FIXTURE="$(bash "$REPO_ROOT/tests/_lib_review_run_fixture.sh" --make-run \
+  "$W_UNAP_E2E_ROOT" "$REPO_ROOT/plugins/uberdev" 41 "$W_UNAP_E2E_RUN_ID" \
+  2>"$W_UNAP_E2E_ROOT/fixture.err")" || W_UNAP_E2E_FIXTURE=''
+W_UNAP_E2E_REPO="$(printf '%s\n' "$W_UNAP_E2E_FIXTURE" | sed -n 1p)"
+W_UNAP_E2E_RESEARCH="$(printf '%s\n' "$W_UNAP_E2E_FIXTURE" | sed -n 3p)"
+
+# The two Workflow-native fixer fences, by the ONE line that is unique to each:
+# the sidecar read. `REVIEW_FLEET_FIX_SIDECAR` alone also appears in the dispatch
+# fence that WRITES the sidecar, which is a different fence in a different shell.
+W_UNAP_E2E_FENCE1="$(extract_fence "$REVIEW_CMD" \
+  'review_fleet_read_sidecar "$REVIEW_FLEET_FIX_SIDECAR" binding')" || W_UNAP_E2E_FENCE1=''
+W_UNAP_E2E_FENCE2="$(extract_fence "$REVIEW_CMD" \
+  'review_fleet_read_sidecar "$REVIEW_FLEET_FIX2_SIDECAR" binding')" || W_UNAP_E2E_FENCE2=''
+if [ -n "$W_UNAP_E2E_FENCE1" ] && [ -n "$W_UNAP_E2E_FENCE2" ] \
+   && [ "$W_UNAP_E2E_FENCE1" != "$W_UNAP_E2E_FENCE2" ]; then
+  pass "W-UNAP-E2EL both Workflow-native fixer fences lift out of the command file, as distinct bodies"
+else
+  fail "W-UNAP-E2EL a Workflow-native fixer fence did not lift; the drives below cannot run"
+fi
+
+# w_unap_e2e_stage PHASE SHELL -- everything one drive needs, on disk.
+#
+# Per-phase DISTINCT values throughout (authority bytes, and therefore digest),
+# so a fence that read the other phase's sidecar fails the flag-identity check
+# rather than passing on its sibling's state. Per-SHELL scratch too, so the two
+# interpreters never read each other's verb log or expectation.
+#
+# It also puts the workspace back into the state a refusing child leaves: the
+# zero-byte disposition lib/command-workspace.py allocated and no applied-content
+# plan at all. That is a RESET to the fixture's own initial state, not a seed --
+# the second drive of a phase must start where the first one did or it would be
+# asserting over its predecessor's published record.
+w_unap_e2e_stage() {  # PHASE SHELL -> 0, with $TMP/w-unap-e2e-<phase>-<shell>/ ready
+  # Two statements, never `local phase="$1" out="...$phase"`: a builtin's words
+  # are all expanded BEFORE it runs, so the second would read the outer scope's
+  # `phase` -- which under `set -u` is an unbound-variable abort.
+  local phase="$1" shell="$2"
+  local out="$TMP/w-unap-e2e-phase$phase-$shell" authority authority_sha binding
+  local head_before head_after
+  mkdir -p "$out" || return 1
+  : >"$W_UNAP_E2E_RESEARCH/phase$phase-disposition.json" || return 1
+  rm -f "$W_UNAP_E2E_RESEARCH/review-applied-content-phase$phase-iter1.json" || return 1
+  head_before="$(git -C "$W_UNAP_E2E_REPO" rev-parse HEAD)" || return 1
+  authority="$W_UNAP_E2E_RESEARCH/code-fixer-authority-phase$phase-iter1.json"
+  printf '{"phase":"phase%s","authority":"fixture"}\n' "$phase" >"$authority" || return 1
+  authority_sha="$(python3 -I -B -c 'import hashlib,sys
+print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest(),end="")' "$authority")" || return 1
+  # A 64-hex run_nonce because that is what the controller mints and what
+  # review_promote_validated_fixer_outcome requires of the receipt the stand-in
+  # echoes it back in.
+  binding="$(jq -cn --arg nonce "$(python3 -I -B -c 'import sys
+print(sys.argv[1] * 64, end="")' "$phase")" \
+    --arg authority "$authority" --arg authority_sha "$authority_sha" \
+    --arg edge "review_pr.fix.phase$phase" \
+    '{run_nonce:$nonce,edge_id:$edge,backend:"workflow",branch:"",
+      authority_path:$authority,authority_sha256:$authority_sha}')" || return 1
+  ( . "$ARGS_LIB" && review_fleet_write_sidecar \
+      "$W_UNAP_E2E_RESEARCH/review-fleet-fix-phase$phase-iter1.launch.json" \
+      "$binding" "$W_UNAP_E2E_RESEARCH/children/fix-phase$phase-iter01" \
+      "review-pr-$W_UNAP_E2E_RUN_ID-fix-phase$phase" "$head_before" ) || return 1
+  # THE TREE MOVES between dispatch and return, so the two heads this fence
+  # forwards are DISTINCT. That is not decoration: with head_before == head_after
+  # a fence that passed argument 6 twice, or swapped 6 and 7, satisfies any
+  # assertion made about them. head_before is the sidecar's (what was recorded at
+  # dispatch) and head_after is the repository's (what the fence reads for
+  # itself), and only a fence that keeps them apart can hand over both.
+  #
+  # Whether the terminal verb may publish an unapplied record for a tree that
+  # moved is the CONTRACT's question, and it is answered in
+  # tests/code-fixer-contract.test.sh against the real verb. What this section
+  # owns is that both heads leave the fence intact.
+  #
+  # Distinct BYTES per drive, not merely a distinct filename: re-committing an
+  # unchanged tree exits 1 ("nothing to commit"), which would leave the second
+  # interpreter's stage failing for a reason that has nothing to do with it.
+  printf 'phase %s fixer commit (%s)\n' "$phase" "$shell" \
+    >"$W_UNAP_E2E_REPO/fixer-phase$phase-$shell.txt" || return 1
+  git -C "$W_UNAP_E2E_REPO" add "fixer-phase$phase-$shell.txt" >/dev/null 2>&1 || return 1
+  git -C "$W_UNAP_E2E_REPO" commit -qm "fix: phase $phase fixer commit ($shell)" >/dev/null 2>&1 || return 1
+  head_after="$(git -C "$W_UNAP_E2E_REPO" rev-parse HEAD)" || return 1
+  [ "$head_before" != "$head_after" ] || return 1
+  printf '%s\n%s\n' "$head_before" "$head_after" >"$out/heads.txt" || return 1
+  # THE EXPECTATION, built from the run rather than from the fence: the two
+  # artifact paths are the workspace's own (phase<N>-disposition.json comes off
+  # the descriptor, the applied-content name is the one iteration 1 implies),
+  # the heads are the sidecar's and the repository's, and the authority pins are
+  # the binding's. REVIEW_ITERATION is 1 here because the run has no
+  # ci-loop-state.json yet, which is the first-pass state.
+  jq -n --arg binding "$binding" --arg authority "$authority" \
+    --arg authority_sha "$authority_sha" \
+    --arg disposition "$W_UNAP_E2E_RESEARCH/phase$phase-disposition.json" \
+    --arg content "$W_UNAP_E2E_RESEARCH/review-applied-content-phase$phase-iter1.json" \
+    --arg worktree "$W_UNAP_E2E_REPO" --arg before "$head_before" --arg after "$head_after" \
+    --arg phase "phase$phase" \
+    '{phase:$phase,
+      flags:{"--launch-binding-json":$binding,
+             "--authority-path":$authority,"--authority-sha256":$authority_sha,
+             "--disposition-path":$disposition,"--applied-content-path":$content,
+             "--working-dir":$worktree,
+             "--head-before":$before,"--head-after":$after}}' >"$out/expected.json" || return 1
+  # The stand-in resolves BOTH its expectation and its log from __file__, never
+  # from the environment: `-I` is isolated mode, and a row that depended on an
+  # inherited variable would be one export away from asserting nothing.
+  cat >"$out/contract.py" <<'PY'
+import hashlib
+import json
+import os
+import sys
+
+here = os.path.dirname(os.path.abspath(__file__))
+verb = sys.argv[1] if len(sys.argv) > 1 else ""
+with open(os.path.join(here, "verbs.log"), "a", encoding="utf-8") as stream:
+    stream.write(verb + "\n")
+
+
+def refuse(message):
+    sys.stderr.write("w-unap-e2e stand-in: " + message + "\n")
+    raise SystemExit(64)
+
+
+if verb != "publish-unapplied-terminal":
+    refuse("unexpected verb %r" % verb)
+rest = sys.argv[2:]
+if len(rest) % 2:
+    refuse("odd flag list: %r" % (rest,))
+flags = {rest[index]: rest[index + 1] for index in range(0, len(rest) - 1, 2)}
+with open(os.path.join(here, "expected.json"), encoding="utf-8") as stream:
+    plan = json.load(stream)
+if flags != plan["flags"]:
+    # ONLY the flags that differ. The eight values are absolute paths and a
+    # serialised binding, so dumping both maps buries the one wrong argument in
+    # two kilobytes of identical text -- in a CI log, on one line.
+    differing = sorted(set(flags) | set(plan["flags"]))
+    refuse("flag map is not this run's: " + "; ".join(
+        "%s got=%r want=%r" % (name, flags.get(name), plan["flags"].get(name))
+        for name in differing if flags.get(name) != plan["flags"].get(name)))
+
+
+def canonical(value):
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode() + b"\n"
+
+
+rows = [
+    {"finding_index": index, "location": "plugins/uberdev/lib/example.sh:%d" % index,
+     "summary_sha256": hashlib.sha256(b"finding-%d" % index).hexdigest(),
+     "disposition": "REFUSED", "behavior_tag": "n/a",
+     "reason": "prepared and verified; publication gate refused"}
+    for index in range(1, 7)
+]
+disposition = canonical({
+    "schema_version": 1, "phase": plan["phase"],
+    "aggregate_sha256": "0" * 64,
+    "findings_disposition": rows,
+})
+with open(flags["--disposition-path"], "wb") as stream:
+    stream.write(disposition)
+content = canonical({
+    "schema_version": 1, "applied": [],
+    "authority_sha256": "1" * 64,
+    "disposition_sha256": hashlib.sha256(disposition).hexdigest(),
+})
+with open(flags["--applied-content-path"], "wb") as stream:
+    stream.write(content)
+sys.stdout.write(json.dumps({
+    "status": "REFUSED", "declared_tip": "", "commit": None,
+    "run_nonce": json.loads(plan["flags"]["--launch-binding-json"])["run_nonce"],
+    "status_sha256": "2" * 64, "result_sha256": "3" * 64,
+    "disposition_sha256": hashlib.sha256(disposition).hexdigest(),
+    "applied_content_sha256": hashlib.sha256(content).hexdigest(),
+}, sort_keys=True, separators=(",", ":")))
+PY
+  return 0
+}
+
+# w_unap_e2e_drive PHASE SHELL BODY -> the LIFTED fence's rc, from a fresh shell
+# inside the fixture repository. Nothing is seeded that a real fence would not
+# have: the prologue resolves the run root with `git rev-parse --show-toplevel`,
+# so the cwd is load-bearing, and `set -u` makes a carrier the fence forgot to
+# establish a hard failure rather than an empty argument.
+#
+# SHELL is bash then zsh, for the reason W-UNAP already runs twice: the Skill
+# tool hands a ```bash fence to /bin/zsh, so these fence bytes really do execute
+# on both, and a bashism in one of them is a runtime-only defect a shape test
+# cannot see. This is the only place any commands/review-pr.md fence is executed
+# under the second interpreter.
+w_unap_e2e_drive() {  # PHASE SHELL BODY -> rc
+  local phase="$1" shell="$2" body="$3"
+  local out="$TMP/w-unap-e2e-phase$phase-$shell" rc
+  {
+    echo 'set -u'
+    printf "UBERDEV_REVIEW_PLUGIN_ROOT='%s'\n" "$REPO_ROOT/plugins/uberdev"
+    printf "CODE_FIXER_CONTRACT='%s'\n" "$out/contract.py"
+    printf "RUN_ID='%s'\n" "$W_UNAP_E2E_RUN_ID"
+    echo 'PR_NUMBER=41'
+    printf "W_UNAP_E2E_PROMOTE_ARGV='%s'\n" "$out/promote.argv"
+    # Defined BEFORE the prologue runs, so the fence library's gap-filling
+    # loader keeps it (a name the calling shell already holds is never carved).
+    cat <<'PROMOTE'
+review_promote_validated_fixer_outcome() {
+  printf '%s\n' "$#" "$@" >"$W_UNAP_E2E_PROMOTE_ARGV"
+  return 0
+}
+PROMOTE
+    echo 'uberdev_review_fixer_terminal_fence() {'
+    # printf with the newline: $( ) strips the body's trailing one, and without
+    # it the closing brace lands on the last command's line.
+    printf '%s\n' "$body"
+    echo '}'
+    echo 'uberdev_review_fixer_terminal_fence'
+  } >"$out/fence.sh"
+  ( cd "$W_UNAP_E2E_REPO" && "$shell" "$out/fence.sh" >"$out/fence.out" 2>"$out/fence.err" )
+  rc=$?
+  printf '%s' "$rc"
+}
+
+if [ -n "$W_UNAP_E2E_REPO" ] && [ -d "$W_UNAP_E2E_RESEARCH" ] \
+   && [ -n "$W_UNAP_E2E_FENCE1" ] && [ -n "$W_UNAP_E2E_FENCE2" ]; then
+  W_UNAP_E2E_DISPOSITION="$W_UNAP_E2E_RESEARCH/phase1-disposition.json"
+  W_UNAP_E2E_DISPOSITION2="$W_UNAP_E2E_RESEARCH/phase2-disposition.json"
+  if [ -f "$W_UNAP_E2E_DISPOSITION" ] && [ ! -s "$W_UNAP_E2E_DISPOSITION" ] \
+     && [ -f "$W_UNAP_E2E_DISPOSITION2" ] && [ ! -s "$W_UNAP_E2E_DISPOSITION2" ]; then
+    pass "W-UNAP-E2E0 the run allocates both phase dispositions at exactly zero bytes"
+  else
+    fail "W-UNAP-E2E0 the run fixture did not allocate zero-byte phase dispositions"
+  fi
+
+  # THE INCIDENT, before the fix reaches it: the zero-byte record fails step
+  # 6b.0's gate, and the defer fence forwards the EMPTY path -- which is how six
+  # BLOCKER rows became zero filed issues. Asserted first, so the rows below
+  # cannot pass on a file that was already publishable.
+  if ! python3 -I -B "$CONTRACT" digest --path "$W_UNAP_E2E_DISPOSITION" \
+       --minimum 1 --maximum 16777216 >/dev/null 2>&1 \
+     && [ "$(w_dispc_drive "$TMP/w-dispc-1.sh" "$W_UNAP_E2E_DISPOSITION" "$W_UNAP_E2E_DISPOSITION2")" = "||no" ]; then
+    pass "W-UNAP-E2E1 an unpublished refusal fails step 6b.0 and reaches Phase 2.5 as the empty path (the incident)"
+  else
+    fail "W-UNAP-E2E1 the zero-byte disposition was already accepted; the control half of this row is vacuous"
+  fi
+
+  # bash first, then zsh, and both phases under each. FOUR drives, because the
+  # two fences are two separate copies of one shape and the two interpreters are
+  # two separate runtimes -- and every pairing of those is a real production path.
+  for w_unap_e2e_shell in bash zsh; do
+   case "$w_unap_e2e_shell" in
+     bash) w_unap_e2e_row=W-UNAP-E2E2 ;;
+     *)    w_unap_e2e_row=W-UNAP-E2E2d ;;
+   esac
+   for w_unap_e2e_phase in 1 2; do
+    case "$w_unap_e2e_phase" in
+      1) w_unap_e2e_body="$W_UNAP_E2E_FENCE1" ;;
+      *) w_unap_e2e_body="$W_UNAP_E2E_FENCE2" ;;
+    esac
+    w_unap_e2e_dir="$TMP/w-unap-e2e-phase$w_unap_e2e_phase-$w_unap_e2e_shell"
+    w_unap_e2e_record="$W_UNAP_E2E_RESEARCH/phase$w_unap_e2e_phase-disposition.json"
+    w_unap_e2e_content="$W_UNAP_E2E_RESEARCH/review-applied-content-phase$w_unap_e2e_phase-iter1.json"
+    if ! w_unap_e2e_stage "$w_unap_e2e_phase" "$w_unap_e2e_shell"; then
+      fail "${w_unap_e2e_row}p$w_unap_e2e_phase could not stage the phase $w_unap_e2e_phase launch sidecar ($w_unap_e2e_shell)"
+      continue
+    fi
+    w_unap_e2e_rc="$(w_unap_e2e_drive "$w_unap_e2e_phase" "$w_unap_e2e_shell" "$w_unap_e2e_body")"
+    w_unap_e2e_verbs="$(tr '\n' ',' <"$w_unap_e2e_dir/verbs.log" 2>/dev/null)"
+
+    # THE ROUTING ROW. rc 0 is only half of it: the stand-in refuses unless every
+    # one of the eight flags carries this run's own value, so reaching it at all
+    # is the argument-identity assertion.
+    if [ "$w_unap_e2e_rc" = 0 ] \
+       && [ "$w_unap_e2e_verbs" = 'publish-unapplied-terminal,' ] \
+       && [ -s "$w_unap_e2e_record" ] && [ -s "$w_unap_e2e_content" ] \
+       && python3 -I -B "$CONTRACT" digest --path "$w_unap_e2e_record" \
+            --minimum 1 --maximum 16777216 >/dev/null 2>&1; then
+      pass "${w_unap_e2e_row}p$w_unap_e2e_phase the Workflow-native phase $w_unap_e2e_phase fence routes the refusal to the owner with this run's own arguments, publishes it, and step 6b.0's real gate accepts it ($w_unap_e2e_shell)"
+    else
+      fail "${w_unap_e2e_row}p$w_unap_e2e_phase the phase $w_unap_e2e_phase fence did not publish ($w_unap_e2e_shell): rc=$w_unap_e2e_rc verbs=$w_unap_e2e_verbs stderr=$(tr '\n' ' ' <"$w_unap_e2e_dir/fence.err" 2>/dev/null)"
+    fi
+
+    # And what it promotes is what it obtained: the terminal document plus the
+    # two heads, in that order, and nothing else. The heads are DISTINCT (the
+    # stage commits between recording head_before and the drive), so promoting
+    # one of them twice cannot satisfy this row.
+    w_unap_e2e_promoted="$(sed -n 1p "$w_unap_e2e_dir/promote.argv" 2>/dev/null)"
+    w_unap_e2e_promoted_doc="$(sed -n 2p "$w_unap_e2e_dir/promote.argv" 2>/dev/null)"
+    if [ "$w_unap_e2e_promoted" = 3 ] \
+       && [ "$(printf '%s' "$w_unap_e2e_promoted_doc" | jq -r '.status')" = REFUSED ] \
+       && [ "$(printf '%s' "$w_unap_e2e_promoted_doc" | jq -r '.disposition_sha256')" \
+            = "$(python3 -I -B -c 'import hashlib,sys
+print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest(),end="")' "$w_unap_e2e_record")" ] \
+       && [ "$(sed -n 3p "$w_unap_e2e_dir/promote.argv" 2>/dev/null)" \
+            = "$(sed -n 1p "$w_unap_e2e_dir/heads.txt" 2>/dev/null)" ] \
+       && [ "$(sed -n 4p "$w_unap_e2e_dir/promote.argv" 2>/dev/null)" \
+            = "$(sed -n 2p "$w_unap_e2e_dir/heads.txt" 2>/dev/null)" ]; then
+      pass "${w_unap_e2e_row}q$w_unap_e2e_phase the phase $w_unap_e2e_phase fence promotes the terminal it just obtained, with both heads ($w_unap_e2e_shell)"
+    else
+      fail "${w_unap_e2e_row}q$w_unap_e2e_phase the phase $w_unap_e2e_phase promotion argv is wrong ($w_unap_e2e_shell): $(tr '\n' ' ' <"$w_unap_e2e_dir/promote.argv" 2>/dev/null)"
+    fi
+   done
+  done
+
+  # And the record travels. BOTH defer fences are driven: the routed one and the
+  # Workflow-native one carry separate copies of the guard, and the incident is
+  # only fixed when both forward the real paths.
+  W_UNAP_E2E_DEFER_OK=1
+  for w_unap_e2e_n in 1 2; do
+    [ "$(w_dispc_drive "$TMP/w-dispc-$w_unap_e2e_n.sh" \
+         "$W_UNAP_E2E_DISPOSITION" "$W_UNAP_E2E_DISPOSITION2")" \
+       = "$W_UNAP_E2E_DISPOSITION|$W_UNAP_E2E_DISPOSITION2|no" ] || W_UNAP_E2E_DEFER_OK=0
+  done
+  if [ "$W_UNAP_E2E_DEFER_OK" = 1 ]; then
+    pass "W-UNAP-E2E3 both Phase 2.5 defer fences forward the published refusals instead of the empty path"
+  else
+    fail "W-UNAP-E2E3 a defer fence still empties a published refusal"
+  fi
+
+  # The rows themselves survived the round trip as REFUSED -- the whole point.
+  # A publisher that wrote a well-formed but EMPTY findings_disposition would
+  # satisfy every size and path assertion above.
+  if [ "$(python3 -I -B -c '
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+rows = value["findings_disposition"]
+print(len(rows) if all(row["disposition"] == "REFUSED" for row in rows) else 0, end="")
+' "$W_UNAP_E2E_DISPOSITION" 2>/dev/null)" = 6 ]; then
+    pass "W-UNAP-E2E4 all six refused BLOCKER rows are in the record Phase 2.5 receives"
+  else
+    fail "W-UNAP-E2E4 the published record does not carry the six REFUSED rows"
+  fi
+else
+  fail "W-UNAP-E2E could not build a run fixture or lift the fences; the end-to-end rows did not run: $(tr '\n' ' ' <"$W_UNAP_E2E_ROOT/fixture.err" 2>/dev/null)"
+fi
+
 assert_stage_runs ci-classify ci-classify "$W_NONCE1" "$W_CI_COMMON" 1
 assert_stage_runs ci-fix-code ci-fix "$W_NONCE1" \
   "$(printf '%s' "$W_CI_COMMON" | jq '. + {ciFixerEdgeId:"review_pr.ci.fix_code",
@@ -3910,5 +4598,6 @@ echo ""
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
+uberdev_test_exit_floor_reached
 [ "$FAIL" -eq 0 ] || exit 1
 exit 0
