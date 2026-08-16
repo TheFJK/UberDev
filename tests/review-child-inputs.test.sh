@@ -180,7 +180,12 @@ if not post_instance_lines or any(
 # defect (#427). Take them from the library every prologued fence loads.
 builder_names = ("review_json_string", "review_child_record", "review_child_fanout",
                  "review_child_wait_all", "review_child_result_path", "review_child_single",
-                 "review_guard_failed_fixer_return", "review_fixer_child_bound")
+                 "review_guard_failed_fixer_return", "review_fixer_child_bound",
+                 # #556. The fixer fences no longer spell the terminal chain
+                 # themselves; they call this one owner, and it is the REAL one
+                 # here -- the arm it picks is what the two Phase 1 drives below
+                 # assert.
+                 "review_fixer_terminal_outcome")
 write("review-builder.sh", "\n".join(library_definition(name) for name in builder_names))
 
 # The production review_fixer_child_bound under a second name, renamed in the
@@ -413,6 +418,27 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def canonical(value):
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode() + b"\n"
+
+
+def record_terminal(name):
+    """Append a terminal verb to the caller's per-drive log, when it asked.
+
+    The fence picks ONE of three terminal verbs, and which one it picked is the
+    whole behaviour under test (#556). A drive that only checked the exit status
+    would pass identically on a fence wired to the wrong arm, so the arm is
+    observed rather than inferred. Per-drive path, because the waves run
+    concurrently and a shared log would interleave.
+    """
+    path = os.environ.get("REVIEW_FIXTURE_TERMINAL_LOG")
+    if path:
+        with open(path, "a", encoding="utf-8") as stream:
+            stream.write(name + "\n")
+
+
 command = sys.argv[1]
 arguments = options(sys.argv[2:])
 if command == "digest":
@@ -478,12 +504,22 @@ elif command == "bind-fixer-launch-receipt":
         "status_path": arguments["--status-path"],
     }, sort_keys=True, separators=(",", ":")), end="")
 elif command == "capture-review-terminal":
+    # READ-ONLY, exactly like the verb it stands in for -- and this is the arm
+    # that hid #556 from this suite. It used to WRITE both artifacts itself, so
+    # the terminal was captured successfully no matter what the child had
+    # actually left behind, and the zero-byte disposition a refusing child
+    # leaves could never be observed here. The real verb freezes the disposition
+    # with minimum=1 and takes --applied-content-path as required; both of those
+    # refusals are what the controller must now avoid reaching, so both are
+    # reproduced rather than papered over.
     binding = json.loads(arguments["--launch-binding-json"])
     disposition = Path(arguments["--disposition-path"])
     applied = Path(arguments["--applied-content-path"])
-    for path in (disposition, applied):
-        path.write_text("{}\n", encoding="utf-8")
-        os.chmod(path, 0o600)
+    record_terminal(command)
+    if not disposition.is_file() or disposition.stat().st_size < 1:
+        raise SystemExit(74)
+    if not applied.is_file():
+        raise SystemExit(74)
     print(json.dumps({
         "status_sha256": digest(binding["status_path"]),
         "result_sha256": digest(binding["result_path"]),
@@ -491,7 +527,57 @@ elif command == "capture-review-terminal":
         "applied_content_path": str(applied),
         "applied_content_sha256": digest(applied),
     }, sort_keys=True, separators=(",", ":")), end="")
+elif command == "publish-unapplied-terminal":
+    # The controller publishing on a refusing child's behalf. Only the
+    # post-condition is modelled -- the two artifacts appear, with the rows the
+    # child returned -- because the proof that it may do so only on a genuinely
+    # unapplied tree is the contract's own, in tests/code-fixer-contract.test.sh.
+    # It consumes the zero-byte seed, so a non-empty file refuses here too.
+    record_terminal(command)
+    binding = json.loads(arguments["--launch-binding-json"])
+    disposition = Path(arguments["--disposition-path"])
+    applied = Path(arguments["--applied-content-path"])
+    if not disposition.is_file() or disposition.stat().st_size != 0:
+        raise SystemExit(74)
+    if applied.exists():
+        raise SystemExit(74)
+    disposition_bytes = canonical({
+        "schema_version": 1,
+        "phase": "phase1" if "phase1" in str(disposition) else "phase2",
+        "aggregate_sha256": "0" * 64,
+        "findings_disposition": [{
+            "finding_index": 1,
+            "location": "src/refused.py:1",
+            "summary_sha256": "1" * 64,
+            "disposition": "REFUSED",
+            "behavior_tag": "n/a",
+            "reason": "prepared and verified; publication gate refused",
+        }],
+    })
+    disposition.write_bytes(disposition_bytes)
+    os.chmod(disposition, 0o600)
+    applied_bytes = canonical({
+        "schema_version": 1,
+        "applied": [],
+        "authority_sha256": arguments["--authority-sha256"],
+        "disposition_sha256": hashlib.sha256(disposition_bytes).hexdigest(),
+    })
+    applied.write_bytes(applied_bytes)
+    os.chmod(applied, 0o600)
+    print(json.dumps({
+        "status": "REFUSED",
+        "declared_tip": "",
+        "commit": None,
+        "receipt_sha256": binding.get("receipt_sha256", "2" * 64),
+        "status_sha256": digest(binding["status_path"])
+        if binding.get("status_path") else "3" * 64,
+        "result_sha256": digest(binding["result_path"])
+        if binding.get("result_path") else "4" * 64,
+        "disposition_sha256": hashlib.sha256(disposition_bytes).hexdigest(),
+        "applied_content_sha256": hashlib.sha256(applied_bytes).hexdigest(),
+    }, sort_keys=True, separators=(",", ":")), end="")
 elif command == "validate-review-outcome":
+    record_terminal(command)
     print('{"status":"NO_FIXES_NEEDED"}', end="")
 else:
     raise SystemExit(2)
@@ -503,11 +589,32 @@ CODE_FIXER_CONTRACT="$CODE_FIXER_CONTRACT_FIXTURE"
 # fixer wrapper's receipt/status/terminal authorization is exercised by the
 # dedicated code-fixer contract tests; using it here would make a payload test
 # own process cancellation and repository-transaction semantics as well.
+
+# The binding half of that stand-in, shared by both drives below (#556). It used
+# to be the empty object, which it could get away with only while the stub also
+# produced the terminal document itself. The fence now hands the binding to a
+# REAL terminal verb, which reads the child's status and result out of it -- so
+# the stand-in owes the post-condition the production wrapper has: two child
+# artifacts on disk, named by the binding it leaves behind.
+review_fixture_bind_child() {
+  [ "$#" -eq 1 ] || return 2
+  local prefix="$1"
+  printf '{"state":"completed"}\n' >"$prefix.child-status.json"
+  printf 'bounded fixture child result\n' >"$prefix.child-result.md"
+  chmod 600 "$prefix.child-status.json" "$prefix.child-result.md"
+  REVIEW_FIXER_LAUNCH_BINDING="{\"result_path\":$(review_json_string "$prefix.child-result.md"),\"status_path\":$(review_json_string "$prefix.child-status.json")}"
+}
+
+# EIGHT arguments, and no canned terminal (#556). The wrapper stopped capturing:
+# the disposition and applied-content paths were only ever there to feed a
+# capture it no longer performs, and the terminal document is now produced by
+# review_fixer_terminal_outcome IN THE FENCE, from whatever the child left on
+# disk. A stub that still set REVIEW_FIXER_TERMINAL would be answering a
+# question nothing asks any more, and would hide a fence that still read it.
 review_fixer_child_bound() {
-  [ "$#" -eq 10 ] || return 2
+  [ "$#" -eq 8 ] || return 2
   review_child_single "$1" "$2" "$3" "$4" "$5" "$6" || return $?
-  REVIEW_FIXER_LAUNCH_BINDING='{}'
-  REVIEW_FIXER_TERMINAL='{"applied_content_sha256":"0000000000000000000000000000000000000000000000000000000000000000","disposition_sha256":"0000000000000000000000000000000000000000000000000000000000000000","result_sha256":"0000000000000000000000000000000000000000000000000000000000000000","status_sha256":"0000000000000000000000000000000000000000000000000000000000000000"}'
+  review_fixture_bind_child "$5"
 }
 
 review_promote_validated_fixer_outcome() {
@@ -977,18 +1084,39 @@ review_refresh_phase1_scope() {
        "$SCOPE_EXPECTED_BASE" main ) \
   || { echo "review-child-inputs: could not seed the reviewed-base carrier" >&2; exit 1; }
 
+# The artifacts a child that APPLIED something leaves behind (#556). The
+# contract fixture's capture arm no longer fabricates them -- that is exactly
+# what hid this bug here -- so the applied-content documents have to exist for
+# the same reason they exist in a real run: the child wrote them. The
+# disposition halves are the non-empty PHASE{1,2}_DISPOSITION_FIXTURE files
+# seeded above.
+PHASE1_APPLIED_CONTENT_FIXTURE="$RESEARCH_DIR_ABS/review-applied-content-phase1-iter7.json"
+PHASE2_APPLIED_CONTENT_FIXTURE="$RESEARCH_DIR_ABS/review-applied-content-phase2-iter7.json"
+for fixture in "$PHASE1_APPLIED_CONTENT_FIXTURE" "$PHASE2_APPLIED_CONTENT_FIXTURE"; do
+  printf '{"applied":[],"schema_version":1}\n' >"$fixture"
+  chmod 600 "$fixture"
+done
+PHASE1_TERMINAL_LOG="$TMP/phase1-terminal-applied.log"
+PHASE2_TERMINAL_LOG="$TMP/phase2-terminal-applied.log"
+
 wave=()
 (
   UBERDEV_CHILD_TEST_SOURCE="$POST_SOURCE"
   . "$TMP/post-retry.sh"
 ) & wave+=("$!")
-(. "$TMP/review-phase1.sh") & wave+=("$!")
+(
+  export REVIEW_FIXTURE_TERMINAL_LOG="$PHASE1_TERMINAL_LOG"
+  . "$TMP/review-phase1.sh"
+) & wave+=("$!")
 (
   REVIEW_ITERATION=7
   FOCUS="$FOCUS_PRESENT"
   . "$TMP/review-simplify.sh"
 ) & wave+=("$!")
-(. "$TMP/review-phase2.sh") & wave+=("$!")
+(
+  export REVIEW_FIXTURE_TERMINAL_LOG="$PHASE2_TERMINAL_LOG"
+  . "$TMP/review-phase2.sh"
+) & wave+=("$!")
 (. "$TMP/review-defer.sh") & wave+=("$!")
 # WORKFLOW-NATIVE SURFACE (#383). The Phase 3 CI classify child no longer takes
 # the ROUTED adapter -- it is dispatched by skills/review-fleet/workflow.js as
@@ -1011,6 +1139,82 @@ CLASSIFY_INPUTS_CAPTURE="$TMP/ci-classify-inputs.json"
   [ -s "$CLASSIFY_INPUTS_CAPTURE" ] || { echo "review-classify: never built the CI classify input closure: $CLASSIFY_OUTPUT" >&2; exit 1; }
 ) & wave+=("$!")
 review_wait_jobs "${wave[@]}"
+
+# #556 — WHICH TERMINAL ARM THE FENCE TOOK, on both fixer fences. The wave above
+# ran them over a child that published its own disposition, so both must have
+# captured and validated it, and neither may have reached the publisher. This is
+# the anti-vacuity half: a fence rewired to publish unconditionally would
+# overwrite a real record with an empty one, and only this row would see it.
+for terminal_log in "$PHASE1_TERMINAL_LOG" "$PHASE2_TERMINAL_LOG"; do
+  [ "$(tr '\n' ',' <"$terminal_log")" = "capture-review-terminal,validate-review-outcome," ] || {
+    echo "review-child-inputs: ${terminal_log##*/} took the wrong terminal arm: $(tr '\n' ',' <"$terminal_log")" >&2
+    exit 1
+  }
+done
+
+# The OTHER arm, driven through the same fence bytes. A refusing child leaves
+# the disposition at the zero bytes lib/command-workspace.py allocated and never
+# creates the applied-content document; before #556 the fence walked straight
+# into `capture-review-terminal`, which cannot freeze either of them, and the
+# findings were dropped instead of deferred.
+#
+# Its own REVIEW_ITERATION, so the authority and applied-content paths the fence
+# derives cannot collide with the wave's, and a dispatch-free stand-in for the
+# bound wrapper, so this second drive adds no child to the receipt/lifecycle
+# closure the enumeration below is exact about. The dispatch half is what the
+# first drive proves; this one is about the terminal.
+REFUSED_TERMINAL_LOG="$TMP/phase1-terminal-refused.log"
+REFUSED_DISPOSITION="$RESEARCH_DIR_ABS/phase1-refused-disposition.json"
+: >"$REFUSED_DISPOSITION"
+chmod 600 "$REFUSED_DISPOSITION"
+REFUSED_APPLIED_CONTENT="$RESEARCH_DIR_ABS/review-applied-content-phase1-iter9.json"
+rm -f "$REFUSED_APPLIED_CONTENT"
+REFUSED_OUTCOME_CAPTURE="$TMP/phase1-refused-outcome.json"
+REFUSED_CARRIER_CAPTURE="$TMP/phase1-refused-carrier.txt"
+(
+  export REVIEW_FIXTURE_TERMINAL_LOG="$REFUSED_TERMINAL_LOG"
+  REVIEW_ITERATION=9
+  PHASE1_DISPOSITION_PATH="$REFUSED_DISPOSITION"
+  review_fixer_child_bound() {
+    [ "$#" -eq 8 ] || return 2
+    review_fixture_bind_child "$5"
+  }
+  # The fence's post-condition, captured on the way out: PHASE1_FIXER_OUTCOME is
+  # now produced IN THIS SHELL by review_fixer_terminal_outcome, and
+  # REVIEW_FIXER_TERMINAL -- the carrier the bound wrapper used to set on the
+  # fence's behalf -- is gone. Both halves, because a fence that still read the
+  # retired carrier would bind an empty outcome and promote it.
+  trap 'printf "%s" "${PHASE1_FIXER_OUTCOME-}" >"$REFUSED_OUTCOME_CAPTURE"
+        printf "%s" "${REVIEW_FIXER_TERMINAL-<unset>}" >"$REFUSED_CARRIER_CAPTURE"' EXIT
+  . "$TMP/review-phase1.sh"
+) || { echo 'review-child-inputs: the refused Phase 1 terminal did not complete' >&2; exit 1; }
+[ "$(cat "$REFUSED_CARRIER_CAPTURE")" = '<unset>' ] || {
+  echo "review-child-inputs: REVIEW_FIXER_TERMINAL is still being set: $(cat "$REFUSED_CARRIER_CAPTURE")" >&2
+  exit 1
+}
+python3 -I -B - "$REFUSED_OUTCOME_CAPTURE" <<'PY' || exit 1
+import json
+import sys
+
+raw = open(sys.argv[1], encoding="utf-8").read()
+if not raw:
+    raise SystemExit("the Phase 1 fence bound no PHASE1_FIXER_OUTCOME at all")
+value = json.loads(raw)
+if value.get("status") != "REFUSED":
+    raise SystemExit(f"PHASE1_FIXER_OUTCOME is not the publisher's receipt: {value!r}")
+PY
+[ "$(tr '\n' ',' <"$REFUSED_TERMINAL_LOG")" = "publish-unapplied-terminal," ] || {
+  echo "review-child-inputs: the refused terminal took the wrong arm: $(tr '\n' ',' <"$REFUSED_TERMINAL_LOG")" >&2
+  exit 1
+}
+# And the record the incident lost now exists, on both paths the controller
+# bound: a size assertion, because the whole failure was two artifacts that were
+# zero bytes and absent.
+[ -s "$REFUSED_DISPOSITION" ] && [ -s "$REFUSED_APPLIED_CONTENT" ] || {
+  echo 'review-child-inputs: the refused terminal published no disposition or content plan' >&2
+  exit 1
+}
+
 PHASE1_AUTHORITY_FIXTURE="$RESEARCH_DIR_ABS/code-fixer-authority-phase1-iter7.json"
 PHASE2_AUTHORITY_FIXTURE="$RESEARCH_DIR_ABS/code-fixer-authority-phase2-iter7.json"
 PHASE1_AUTHORITY_SHA256_FIXTURE="$(python3 -I -B -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest(),end="")' "$PHASE1_AUTHORITY_FIXTURE")"
@@ -1064,8 +1268,7 @@ BIND_FAILURE_EXITED="$TMP/bind-failure-controller-exited"
   set +e
   review_fixer_child_bound_production review_pr.fix.phase1 "$BIND_FAILURE_INSTANCE" \
     "$BIND_FAILURE_INPUTS" null "$RESEARCH_DIR_ABS/bind-failure" 2 \
-    "$BIND_FAILURE_AUTHORITY" "$BIND_FAILURE_AUTHORITY_SHA256" \
-    "$BIND_FAILURE_DISPOSITION" "$RESEARCH_DIR_ABS/bind-failure-applied.json"
+    "$BIND_FAILURE_AUTHORITY" "$BIND_FAILURE_AUTHORITY_SHA256"
   bind_failure_rc=$?
   set -e
   [ "$bind_failure_rc" -eq 73 ]

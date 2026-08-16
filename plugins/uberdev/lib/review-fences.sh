@@ -289,7 +289,7 @@ review_child_single() {
   review_child_fanout "$prefix.records" "$prefix.descriptors" "$prefix.launched" "$timeout_s" || return $?
   review_child_wait_all "$prefix.launched" "$timeout_s"
 }
-# BEGIN review-fixer-child-bound-v2
+# BEGIN review-fixer-child-bound-v3
 # BEGIN review-failed-return-guard-v1
 review_guard_failed_fixer_return() {
   [ "$#" -eq 2 ] || return 2
@@ -310,9 +310,22 @@ review_guard_failed_fixer_return() {
 }
 # END review-failed-return-guard-v1
 review_fixer_child_bound() {
-  [ "$#" -eq 10 ] || return 2
+  # DISPATCH ONLY, as of v3 (#556). The disposition and applied-content paths
+  # were arguments 9 and 10 for exactly one reason -- to feed the
+  # `capture-review-terminal` call that used to sit in the successful-wait arm
+  # below -- and that call has moved to review_fixer_terminal_outcome, which the
+  # fences invoke themselves. It moved because capture is only ONE of three
+  # answers: a child that refused writes neither artifact, and capturing is not
+  # what a controller owes that terminal. Two of the four fixer fences never
+  # called this helper at all, so the branch could not live in here.
+  #
+  # REVIEW_FIXER_TERMINAL went with it. A carrier set here and read two fences
+  # later is the #427 shape; the terminal document is now produced and consumed
+  # in the same shell, and this helper's post-condition is just
+  # REVIEW_FIXER_LAUNCH_BINDING plus a returned child.
+  [ "$#" -eq 8 ] || return 2
   local edge="${@:1:1}" instance="${@:2:1}" inputs="${@:3:1}" risks="${@:4:1}" prefix="${@:5:1}" timeout_s="${@:6:1}"
-  local authority_path="${@:7:1}" authority_sha256="${@:8:1}" disposition_path="${@:9:1}" applied_content_path="${@:10:1}"
+  local authority_path="${@:7:1}" authority_sha256="${@:8:1}"
   local receipt wait_rc
   uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks" >/dev/null || return $?
   uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" || return $?
@@ -345,17 +358,13 @@ PY
     return "$wait_rc"
   }
   if uberdev_wait_child "$REVIEW_FIXER_STATUS_PATH" "$REVIEW_FIXER_RESULT_PATH" "$timeout_s"; then
-    REVIEW_FIXER_TERMINAL="$(python3 -I -B "$CODE_FIXER_CONTRACT" capture-review-terminal \
-      --launch-binding-json "$REVIEW_FIXER_LAUNCH_BINDING" \
-      --disposition-path "$disposition_path" \
-      --applied-content-path "$applied_content_path")" || return 74
     return 0
   fi
   wait_rc=$?
   uberdev_unwind_child "$REVIEW_FIXER_STATUS_PATH" "$REVIEW_FIXER_RESULT_PATH" "$timeout_s" || return 74
   return "$wait_rc"
 }
-# END review-fixer-child-bound-v2
+# END review-fixer-child-bound-v3
 # BEGIN review-fixer-terminal-outcome-v1
 # review_fixer_terminal_outcome BINDING AUTHORITY_PATH AUTHORITY_SHA256
 #                               DISPOSITION_PATH APPLIED_CONTENT_PATH

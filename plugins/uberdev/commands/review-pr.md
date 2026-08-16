@@ -1417,7 +1417,10 @@ is the first call of every executed fence below.
 
 **Functions do not survive a fence boundary either.** The routed child builders
 (`review_child_record`, `review_child_fanout`, `review_child_wait_all`,
-`review_child_single`, `review_fixer_child_bound`), the scope and head helpers,
+`review_child_single`, `review_fixer_child_bound`), the fixer terminal branch
+(`review_fixer_terminal_outcome` — the single owner all four fixer fences call
+to turn a returned child into the authenticated outcome document, whichever of
+the three states it left its disposition in), the scope and head helpers,
 and the Phase 3 authority helpers all ship in `lib/review-fences.sh`, which
 `review_fleet_rehydrate` loads. There is no builder fence to run: a fence that
 carries the prologue already has them, and one that does not would have had them
@@ -1924,9 +1927,8 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
      authority_path "$(review_json_string "$PHASE1_AUTHORITY_PATH")" \
      authority_sha256 "$(review_json_string "$PHASE1_AUTHORITY_SHA256")")"
    FIXER_HEAD_BEFORE="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || return 74
-   REVIEW_FIXER_TERMINAL=
    # builder dispatch: uberdev_dispatch_child review_pr.fix.phase1
-   if review_fixer_child_bound review_pr.fix.phase1 "$(uberdev_child_instance_id "review-pr-${RUN_ID}-fix-phase1-iter${REVIEW_ITERATION}-attempt01")" "$PHASE1_INPUTS" null "$RESEARCH_DIR_ABS/phase1-fixer" "$REVIEW_PR_TIMEOUT" "$PHASE1_AUTHORITY_PATH" "$PHASE1_AUTHORITY_SHA256" "$PHASE1_DISPOSITION_PATH" "$PHASE1_APPLIED_CONTENT_PATH"; then :; else
+   if review_fixer_child_bound review_pr.fix.phase1 "$(uberdev_child_instance_id "review-pr-${RUN_ID}-fix-phase1-iter${REVIEW_ITERATION}-attempt01")" "$PHASE1_INPUTS" null "$RESEARCH_DIR_ABS/phase1-fixer" "$REVIEW_PR_TIMEOUT" "$PHASE1_AUTHORITY_PATH" "$PHASE1_AUTHORITY_SHA256"; then :; else
      REVIEW_FIXER_RC=$?
      review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"
      return $?
@@ -1934,28 +1936,14 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
    FIXER_HEAD_AFTER="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || {
      REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
    }
-   [ -n "${REVIEW_FIXER_TERMINAL:-}" ] || {
-     review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" 74; return $?
-   }
-   FIXER_STATUS_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["status_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
-     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
-   }
-   FIXER_RESULT_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["result_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
-     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
-   }
-   FIXER_DISPOSITION_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["disposition_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
-     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
-   }
-   FIXER_APPLIED_CONTENT_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["applied_content_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
-     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
-   }
-   PHASE1_FIXER_OUTCOME="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-review-outcome \
-     --launch-binding-json "$REVIEW_FIXER_LAUNCH_BINDING" \
-     --authority-path "$PHASE1_AUTHORITY_PATH" --authority-sha256 "$PHASE1_AUTHORITY_SHA256" \
-     --disposition-path "$PHASE1_DISPOSITION_PATH" --disposition-sha256 "$FIXER_DISPOSITION_SHA256" \
-     --applied-content-path "$PHASE1_APPLIED_CONTENT_PATH" --applied-content-sha256 "$FIXER_APPLIED_CONTENT_SHA256" \
-     --status-sha256 "$FIXER_STATUS_SHA256" --result-sha256 "$FIXER_RESULT_SHA256" \
-     --working-dir "$WORKTREE_ROOT" --head-before "$FIXER_HEAD_BEFORE" --head-after "$FIXER_HEAD_AFTER")" || {
+   # ONE call, because a returned child is in one of three states and only the
+   # branch owner knows them apart (#556). See `review_fixer_terminal_outcome`
+   # in lib/review-fences.sh for what each state means and why the failure arm
+   # below is still the fence's own.
+   PHASE1_FIXER_OUTCOME="$(review_fixer_terminal_outcome "$REVIEW_FIXER_LAUNCH_BINDING" \
+     "$PHASE1_AUTHORITY_PATH" "$PHASE1_AUTHORITY_SHA256" \
+     "$PHASE1_DISPOSITION_PATH" "$PHASE1_APPLIED_CONTENT_PATH" \
+     "$FIXER_HEAD_BEFORE" "$FIXER_HEAD_AFTER")" || {
      REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
    }
    # Promoted HERE, in the shell that computed all three values.
@@ -2060,9 +2048,12 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
    Workflow({scriptPath: "$CLAUDE_PLUGIN_ROOT/skills/review-fleet/workflow.js"}, <the JSON between the markers>)
    ```
 
-   **5w.2 — capture the terminal, validate the outcome, promote the head.** The
-   script's `fixerStatus` is a hint for logging only; the disposition artifact
-   and the head movement are the truth.
+   **5w.2 — resolve the terminal, validate the outcome, promote the head.**
+   RESOLVE, not capture: capture is only one of the three answers a returned
+   child can deserve, and which one this run gets is
+   `review_fixer_terminal_outcome`'s decision, not this fence's. The script's
+   `fixerStatus` is a hint for logging only; the disposition artifact and the
+   head movement are the truth.
 
    ```bash uberdev-executable origin=review-pr
    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
@@ -2076,31 +2067,24 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
    REVIEW_FIXER_LAUNCH_BINDING="$(review_fleet_read_sidecar "$REVIEW_FLEET_FIX_SIDECAR" binding)" || return 74
    FIXER_HEAD_BEFORE="$(review_fleet_read_sidecar "$REVIEW_FLEET_FIX_SIDECAR" head_before)" || return 74
    # Read the authority pins OUT OF THE BINDING rather than recomputing them:
-   # validate-review-outcome re-reads the authority file and requires it to
-   # match this digest, so a file swapped after the mint fails closed.
+   # whichever terminal verb `review_fixer_terminal_outcome` reaches re-reads the
+   # authority file and requires it to match this digest, so a file swapped
+   # after the mint fails closed.
    PHASE1_AUTHORITY_PATH="$(printf '%s' "$REVIEW_FIXER_LAUNCH_BINDING" | jq -er .authority_path)" || return 74
    PHASE1_AUTHORITY_SHA256="$(printf '%s' "$REVIEW_FIXER_LAUNCH_BINDING" | jq -er .authority_sha256)" || return 74
    PHASE1_APPLIED_CONTENT_PATH="$RESEARCH_DIR_ABS/review-applied-content-phase1-iter${REVIEW_ITERATION}.json"
-   REVIEW_FIXER_TERMINAL="$(python3 -I -B "$CODE_FIXER_CONTRACT" capture-review-terminal \
-     --launch-binding-json "$REVIEW_FIXER_LAUNCH_BINDING" \
-     --disposition-path "$PHASE1_DISPOSITION_PATH" \
-     --applied-content-path "$PHASE1_APPLIED_CONTENT_PATH")" || {
-     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
-   }
+   # HEAD_AFTER is read BEFORE the terminal call, not after it: the branch owner
+   # takes both heads, because the arm that publishes for a refusing child has to
+   # prove the tree did not move (#556). It used to be read after the capture,
+   # which is the same instant for this fence's purposes -- nothing between them
+   # touches the repository -- but the ordering is now load-bearing.
    FIXER_HEAD_AFTER="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || {
      REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
    }
-   FIXER_STATUS_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["status_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || return 74
-   FIXER_RESULT_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["result_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || return 74
-   FIXER_DISPOSITION_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["disposition_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || return 74
-   FIXER_APPLIED_CONTENT_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["applied_content_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || return 74
-   PHASE1_FIXER_OUTCOME="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-review-outcome \
-     --launch-binding-json "$REVIEW_FIXER_LAUNCH_BINDING" \
-     --authority-path "$PHASE1_AUTHORITY_PATH" --authority-sha256 "$PHASE1_AUTHORITY_SHA256" \
-     --disposition-path "$PHASE1_DISPOSITION_PATH" --disposition-sha256 "$FIXER_DISPOSITION_SHA256" \
-     --applied-content-path "$PHASE1_APPLIED_CONTENT_PATH" --applied-content-sha256 "$FIXER_APPLIED_CONTENT_SHA256" \
-     --status-sha256 "$FIXER_STATUS_SHA256" --result-sha256 "$FIXER_RESULT_SHA256" \
-     --working-dir "$WORKTREE_ROOT" --head-before "$FIXER_HEAD_BEFORE" --head-after "$FIXER_HEAD_AFTER")" || {
+   PHASE1_FIXER_OUTCOME="$(review_fixer_terminal_outcome "$REVIEW_FIXER_LAUNCH_BINDING" \
+     "$PHASE1_AUTHORITY_PATH" "$PHASE1_AUTHORITY_SHA256" \
+     "$PHASE1_DISPOSITION_PATH" "$PHASE1_APPLIED_CONTENT_PATH" \
+     "$FIXER_HEAD_BEFORE" "$FIXER_HEAD_AFTER")" || {
      REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
    }
    review_promote_validated_fixer_outcome "$PHASE1_FIXER_OUTCOME" "$FIXER_HEAD_BEFORE" "$FIXER_HEAD_AFTER" || {
@@ -2449,10 +2433,9 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
      authority_path "$(review_json_string "$PHASE2_AUTHORITY_PATH")" \
      authority_sha256 "$(review_json_string "$PHASE2_AUTHORITY_SHA256")")"
    FIXER_HEAD_BEFORE="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || return 74
-   REVIEW_FIXER_TERMINAL=
    # subagent_type: uberdev:code-fixer
    # builder dispatch: uberdev_dispatch_child review_pr.fix.phase2
-   if review_fixer_child_bound review_pr.fix.phase2 "$(uberdev_child_instance_id "review-pr-${RUN_ID}-fix-phase2-iter${REVIEW_ITERATION}-attempt01")" "$PHASE2_INPUTS" null "$RESEARCH_DIR_ABS/phase2-fixer" "$REVIEW_PR_TIMEOUT" "$PHASE2_AUTHORITY_PATH" "$PHASE2_AUTHORITY_SHA256" "$PHASE2_DISPOSITION_PATH" "$PHASE2_APPLIED_CONTENT_PATH"; then :; else
+   if review_fixer_child_bound review_pr.fix.phase2 "$(uberdev_child_instance_id "review-pr-${RUN_ID}-fix-phase2-iter${REVIEW_ITERATION}-attempt01")" "$PHASE2_INPUTS" null "$RESEARCH_DIR_ABS/phase2-fixer" "$REVIEW_PR_TIMEOUT" "$PHASE2_AUTHORITY_PATH" "$PHASE2_AUTHORITY_SHA256"; then :; else
      REVIEW_FIXER_RC=$?
      review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"
      return $?
@@ -2460,28 +2443,10 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
    FIXER_HEAD_AFTER="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || {
      REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
    }
-   [ -n "${REVIEW_FIXER_TERMINAL:-}" ] || {
-     review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" 74; return $?
-   }
-   FIXER_STATUS_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["status_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
-     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
-   }
-   FIXER_RESULT_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["result_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
-     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
-   }
-   FIXER_DISPOSITION_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["disposition_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
-     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
-   }
-   FIXER_APPLIED_CONTENT_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["applied_content_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
-     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
-   }
-   PHASE2_FIXER_OUTCOME="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-review-outcome \
-     --launch-binding-json "$REVIEW_FIXER_LAUNCH_BINDING" \
-     --authority-path "$PHASE2_AUTHORITY_PATH" --authority-sha256 "$PHASE2_AUTHORITY_SHA256" \
-     --disposition-path "$PHASE2_DISPOSITION_PATH" --disposition-sha256 "$FIXER_DISPOSITION_SHA256" \
-     --applied-content-path "$PHASE2_APPLIED_CONTENT_PATH" --applied-content-sha256 "$FIXER_APPLIED_CONTENT_SHA256" \
-     --status-sha256 "$FIXER_STATUS_SHA256" --result-sha256 "$FIXER_RESULT_SHA256" \
-     --working-dir "$WORKTREE_ROOT" --head-before "$FIXER_HEAD_BEFORE" --head-after "$FIXER_HEAD_AFTER")" || {
+   PHASE2_FIXER_OUTCOME="$(review_fixer_terminal_outcome "$REVIEW_FIXER_LAUNCH_BINDING" \
+     "$PHASE2_AUTHORITY_PATH" "$PHASE2_AUTHORITY_SHA256" \
+     "$PHASE2_DISPOSITION_PATH" "$PHASE2_APPLIED_CONTENT_PATH" \
+     "$FIXER_HEAD_BEFORE" "$FIXER_HEAD_AFTER")" || {
      REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
    }
    review_promote_validated_fixer_outcome "$PHASE2_FIXER_OUTCOME" "$FIXER_HEAD_BEFORE" "$FIXER_HEAD_AFTER" || {
@@ -2581,26 +2546,14 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
    PHASE2_AUTHORITY_PATH="$(printf '%s' "$REVIEW_FIXER_LAUNCH_BINDING" | jq -er .authority_path)" || return 74
    PHASE2_AUTHORITY_SHA256="$(printf '%s' "$REVIEW_FIXER_LAUNCH_BINDING" | jq -er .authority_sha256)" || return 74
    PHASE2_APPLIED_CONTENT_PATH="$RESEARCH_DIR_ABS/review-applied-content-phase2-iter${REVIEW_ITERATION}.json"
-   REVIEW_FIXER_TERMINAL="$(python3 -I -B "$CODE_FIXER_CONTRACT" capture-review-terminal \
-     --launch-binding-json "$REVIEW_FIXER_LAUNCH_BINDING" \
-     --disposition-path "$PHASE2_DISPOSITION_PATH" \
-     --applied-content-path "$PHASE2_APPLIED_CONTENT_PATH")" || {
-     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
-   }
+   # Read BEFORE the terminal call, for the reason step 5w.2 gives.
    FIXER_HEAD_AFTER="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || {
      REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
    }
-   FIXER_STATUS_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["status_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || return 74
-   FIXER_RESULT_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["result_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || return 74
-   FIXER_DISPOSITION_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["disposition_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || return 74
-   FIXER_APPLIED_CONTENT_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["applied_content_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || return 74
-   PHASE2_FIXER_OUTCOME="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-review-outcome \
-     --launch-binding-json "$REVIEW_FIXER_LAUNCH_BINDING" \
-     --authority-path "$PHASE2_AUTHORITY_PATH" --authority-sha256 "$PHASE2_AUTHORITY_SHA256" \
-     --disposition-path "$PHASE2_DISPOSITION_PATH" --disposition-sha256 "$FIXER_DISPOSITION_SHA256" \
-     --applied-content-path "$PHASE2_APPLIED_CONTENT_PATH" --applied-content-sha256 "$FIXER_APPLIED_CONTENT_SHA256" \
-     --status-sha256 "$FIXER_STATUS_SHA256" --result-sha256 "$FIXER_RESULT_SHA256" \
-     --working-dir "$WORKTREE_ROOT" --head-before "$FIXER_HEAD_BEFORE" --head-after "$FIXER_HEAD_AFTER")" || {
+   PHASE2_FIXER_OUTCOME="$(review_fixer_terminal_outcome "$REVIEW_FIXER_LAUNCH_BINDING" \
+     "$PHASE2_AUTHORITY_PATH" "$PHASE2_AUTHORITY_SHA256" \
+     "$PHASE2_DISPOSITION_PATH" "$PHASE2_APPLIED_CONTENT_PATH" \
+     "$FIXER_HEAD_BEFORE" "$FIXER_HEAD_AFTER")" || {
      REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
    }
    review_promote_validated_fixer_outcome "$PHASE2_FIXER_OUTCOME" "$FIXER_HEAD_BEFORE" "$FIXER_HEAD_AFTER" || {

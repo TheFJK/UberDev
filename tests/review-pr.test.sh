@@ -1847,6 +1847,218 @@ fi
 [ "$(cat "$FIXER_PROMOTE_LOG")" = "APPLIED|$PRE_FIX_HEAD|$PHASE1_FIX_HEAD|$PHASE1_FIX_HEAD" ] \
   || FIXER_CHAIN_OK=0
 
+# #556 — THE REFUSED TERMINAL'S RECEIPT, PROMOTED. The two documents above are
+# hand-spelled APPLIED shapes; this one is whatever `publish-unapplied-terminal`
+# ACTUALLY returns, produced by running the shipped verb against a real
+# repository. The compatibility claim -- that the controller's stand-in
+# publication yields exactly the document a fixer terminal already promoted --
+# is the whole reason both downstream consumers could be left unchanged, and a
+# hand-written sample would prove it about the sample instead of the verb.
+#
+# BOTH launch-identity shapes, because they are not interchangeable: a detached
+# outcome is tied to its dispatch receipt (`receipt_sha256`), a Workflow-native
+# one to the nonce minted before the call (`run_nonce`), and the fence admits
+# exactly one of the two. A verb that emitted the wrong key for its backend
+# would be refused here and nowhere else.
+# The scratch tree is a SHELL one, like this file's other git fixtures
+# (FIXER_FAILURE_REPO below): the suite counts PASS/FAIL by hand without `set
+# -e`, so a failing teardown cannot decide a verdict, and a python
+# `tempfile` factory here would take review-pr.test.sh into the A4 scratch-tree
+# ratchet in tests/test-harness-source-guards.test.sh for no gain.
+FIXER_UNAPPLIED_ROOT="$(mktemp -d)"
+FIXER_UNAPPLIED_RECEIPTS="$(python3 -I -B - \
+  "$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py" "$FIXER_UNAPPLIED_ROOT" 2>&1 <<'PY'
+import hashlib
+import importlib.util
+import json
+import pathlib
+import subprocess
+import sys
+
+contract_path, root = sys.argv[1:3]
+spec = importlib.util.spec_from_file_location("code_fixer_contract", contract_path)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+NONCE = "5c" * 32
+CONTRIBUTORS = (
+    "review_pr.review.correctness", "review_pr.review.silent_failures",
+    "review_pr.review.types", "review_pr.review.comments",
+    "review_pr.review.tests", "review_pr.review.general",
+    "review_pr.review.convention",
+)
+
+
+def git(repo, *argv):
+    return subprocess.run(
+        ("git", "-C", str(repo)) + argv, check=True, capture_output=True
+    ).stdout.decode().strip()
+
+
+def digest(path):
+    return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+
+
+def build(index):
+    """One complete REFUSED fixer terminal, in the state #556 left behind.
+
+    The disposition stays at exactly zero bytes and the applied-content path
+    stays absent: those two files are the verb's OUTPUT, and a fixture that
+    pre-published them could not be handed to it. Each shape therefore gets its
+    own tree.
+    """
+    repo = pathlib.Path(root) / f"repo{index}"
+    repo.mkdir(parents=True)
+    git(repo, "init", "-q")
+    git(repo, "config", "user.email", "fixture@example.invalid")
+    git(repo, "config", "user.name", "Fixture")
+    (repo / "src").mkdir()
+    (repo / "src/a.py").write_text("A = 0\n", encoding="utf-8")
+    git(repo, "add", "--", "src/a.py")
+    git(repo, "commit", "-qm", "test: refused terminal base")
+    base = git(repo, "rev-parse", "HEAD")
+    (repo / "src/a.py").write_text("A = 1\n", encoding="utf-8")
+    git(repo, "add", "--", "src/a.py")
+    git(repo, "commit", "-qm", "test: refused terminal head")
+    head = git(repo, "rev-parse", "HEAD")
+    evidence = repo / ".uberdev/research/run"
+    evidence.mkdir(parents=True)
+    payload = json.dumps({
+        "contributors": [
+            {"confidence": "high", "id": edge, "verdict": "REVISIONS_REQUIRED"
+             if edge == CONTRIBUTORS[0] else "APPROVE"}
+            for edge in CONTRIBUTORS
+        ],
+        "findings": [{
+            "detail": "bounded detail",
+            "scope": {"line": 1, "operation": "modify_existing", "path": "src/a.py"},
+            "severity": "blocker",
+            "source_edges": [CONTRIBUTORS[0]],
+            "summary": "alpha is asserted but never proved",
+        }],
+        "phase": "phase1",
+        "schema_version": 2,
+    }, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    payload = payload.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    findings = evidence / "post-impl-review-final.md"
+    findings.write_bytes((
+        '<external-untrusted-input source="post-impl-review-aggregate">\n'
+        f"{payload}\n</external-untrusted-input>\n"
+    ).encode())
+    commit_range = evidence / "commit-range.txt"
+    commit_range.write_text(f"{base}..{head}\n", encoding="ascii")
+    disposition = evidence / "phase1-disposition.json"
+    disposition.write_bytes(b"")
+    receipt = module.prepare_authority(
+        edge_id="review_pr.fix.phase1", policy_phase="review_fix",
+        findings_path=str(findings), findings_sha256=digest(findings),
+        commit_range_path=str(commit_range), commit_range_sha256=digest(commit_range),
+        working_dir=str(repo), disposition_path=str(disposition),
+    )
+    authority_path = pathlib.Path(receipt["authority_path"])
+    authority = json.loads(authority_path.read_text(encoding="utf-8"))
+    keys = authority["finding_keys"]
+    if len(keys) != 1:
+        raise SystemExit(f"fixture authority carries {len(keys)} findings, expected 1")
+    result_path = evidence / "phase1-fixer-result.md"
+    status_path = evidence / "phase1-fixer-status.json"
+    row = keys[0]
+    result_path.write_text("\n".join([
+        "```yaml", "status: REFUSED", "phase: phase1", "commits: []",
+        "findings_disposition:",
+        f"  - finding_index: {row['finding_index']}",
+        f"    location: {row['location']}",
+        f"    summary_sha256: {row['summary_sha256']}",
+        "    disposition: REFUSED",
+        "    behavior_tag: n/a",
+        "    reason: prepared and verified; publication gate refused",
+        "risks: []", "```",
+    ]) + "\n", encoding="utf-8")
+    return repo, evidence, authority_path, receipt, result_path, status_path, head, disposition
+
+
+def emit(shape, binding, extra):
+    (repo, evidence, authority_path, receipt, result_path,
+     status_path, head, disposition) = extra
+    content_path = evidence / authority_path.name.replace(
+        "code-fixer-authority-", "review-applied-content-")
+    outcome = module.publish_unapplied_terminal(
+        launch_binding=module._canonical_json(binding),
+        authority_path=str(authority_path),
+        authority_sha256=receipt["authority_sha256"],
+        disposition_path=str(disposition),
+        applied_content_path=str(content_path),
+        working_dir=str(repo), head_before=head, head_after=head,
+    )
+    print(shape + "\t" + json.dumps(outcome, sort_keys=True, separators=(",", ":")))
+
+
+workflow = build(1)
+(repo, evidence, authority_path, receipt, result_path,
+ status_path, head, disposition) = workflow
+status_path.write_text(json.dumps({
+    "backend": "workflow", "branch": "", "exit_code": 0,
+    "result": str(result_path.resolve()), "run_nonce": NONCE,
+    "state": "completed", "workspace_mode": "caller", "worktree": str(repo.resolve()),
+}, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+emit("run_nonce", module.bind_workflow_fixer_launch(
+    edge_id="review_pr.fix.phase1",
+    instance_id="review-pr-run-fix-phase1-iter02-attempt01",
+    run_nonce=NONCE, result_path=str(result_path.resolve()),
+    status_path=str(status_path.resolve()), working_dir=str(repo),
+    authority_path=str(authority_path), authority_sha256=receipt["authority_sha256"],
+), workflow)
+
+detached = build(2)
+(repo, evidence, authority_path, receipt, result_path,
+ status_path, head, disposition) = detached
+identity = "12345|12345|12345|" + "0123456789abcdef" * 4
+status_path.write_text(json.dumps({
+    "backend": "background", "branch": "", "exit_code": 0, "pid": "12345",
+    "process_identity": identity, "lease_generation": "0123456789abcdef" * 2,
+    "result": str(result_path.resolve()), "state": "completed",
+    "workspace_mode": "caller", "worktree": str(repo.resolve()),
+}, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+launch_receipt = json.dumps({
+    "schema_version": 1, "edge_id": "review_pr.fix.phase1",
+    "instance_id": "review-pr-run-fix-phase1-iter02-attempt01",
+    "backend": "background", "handle": "12345", "state": "completed",
+    "result_file": str(result_path.resolve()), "status_file": str(status_path.resolve()),
+}, sort_keys=True, separators=(",", ":")).encode()
+emit("receipt_sha256", module.bind_fixer_launch_receipt(
+    receipt=launch_receipt, edge_id="review_pr.fix.phase1",
+    instance_id="review-pr-run-fix-phase1-iter02-attempt01",
+    result_path=str(result_path.resolve()), status_path=str(status_path.resolve()),
+    working_dir=str(repo), authority_path=str(authority_path),
+    authority_sha256=receipt["authority_sha256"],
+), detached)
+PY
+)" || FIXER_UNAPPLIED_RECEIPTS="BUILD-FAILED	$FIXER_UNAPPLIED_RECEIPTS"
+rm -rf "$FIXER_UNAPPLIED_ROOT"
+FIXER_UNAPPLIED_SHAPES=0
+while IFS=$'\t' read -r unapplied_shape unapplied_receipt; do
+  [ -n "$unapplied_shape" ] || continue
+  case "$unapplied_receipt" in *"\"$unapplied_shape\""*) : ;; *) FIXER_CHAIN_OK=0 ;; esac
+  : >"$FIXER_PROMOTE_LOG"
+  if FIXER_PROMOTE_LOG="$FIXER_PROMOTE_LOG" bash -c '
+    . "$1"
+    review_track_validated_fixer_head(){ printf "%s|%s|%s|%s\n" "$@" >>"$FIXER_PROMOTE_LOG"; }
+    review_promote_validated_fixer_outcome "$2" "$3" "$4"
+  ' _ "$FIXER_PROMOTE_FIXTURE" "$unapplied_receipt" "$PHASE1_FIX_HEAD" "$PHASE1_FIX_HEAD" \
+    && [ "$(cat "$FIXER_PROMOTE_LOG")" = "REFUSED|$PHASE1_FIX_HEAD|$PHASE1_FIX_HEAD|" ]; then
+    FIXER_UNAPPLIED_SHAPES=$((FIXER_UNAPPLIED_SHAPES + 1))
+  else
+    FIXER_CHAIN_OK=0
+  fi
+done <<<"$FIXER_UNAPPLIED_RECEIPTS"
+# Two shapes, both promoted. A build that died prints a diagnostic instead of
+# two rows, which lands here rather than passing on an empty loop.
+[ "$FIXER_UNAPPLIED_SHAPES" -eq 2 ] || {
+  FIXER_CHAIN_OK=0
+  echo "        publish-unapplied-terminal receipts: $FIXER_UNAPPLIED_RECEIPTS"
+}
+
 FIXER_FAILURE_GUARD_FIXTURE="$(mktemp)"
 awk '/# BEGIN review-failed-return-guard-v1/{active=1;next} /# END review-failed-return-guard-v1/{exit} active{print}' \
   "$REVIEW_FENCES" >"$FIXER_FAILURE_GUARD_FIXTURE"
@@ -3717,7 +3929,8 @@ echo "== R47: functions cross fences too — the fence library =="
 # only the plugin root, which is the only environment a real fence ever sees.
 R47_HELPERS="review_json_string review_child_record review_child_fanout review_child_wait_all
 review_child_result_path review_child_single review_guard_failed_fixer_return
-review_fixer_child_bound review_assert_selected_pr_head review_publish_same_repo_pr_head
+review_fixer_child_bound review_fixer_terminal_outcome
+review_assert_selected_pr_head review_publish_same_repo_pr_head
 review_resolve_phase1_base review_refresh_phase1_scope review_track_validated_fixer_head
 review_promote_validated_fixer_outcome review_clear_ci_run_selection review_select_failed_ci_run
 review_capture_ci_classification_head review_ci_authority_digest review_ci_json_member
