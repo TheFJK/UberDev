@@ -1585,13 +1585,72 @@ _uberdev_child_prepare review_pr.review.correctness "$UBERDEV_CHILD_HANDOFF" \
   "$UBERDEV_CHILD_HANDOFF_SHA256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch >/dev/null
 prompt="$(dirname "$UBERDEV_CHILD_RESULT")/prompt.txt"
 python3 -I -B - "$prompt" "$contract" <<'PY'
-import pathlib,sys
+import pathlib,re,sys
 prompt=pathlib.Path(sys.argv[1]).read_bytes(); contract=pathlib.Path(sys.argv[2]).read_bytes()
 needle=b'\n\n'+contract+b'\n\n## Immutable routed execution directive\n'
 assert prompt.count(contract)==1
 assert needle in prompt
 assert b'Return only a response matching the output contract above.' in prompt
-assert b'Return completed, blocked, or refused.' not in prompt
+# The needle is whatever the OTHER arm emits, so this stays falsifiable: pinning
+# it to the sentence the composer retired in #546 would make it vacuously true
+# forever — no arm can emit that literal any more.
+# Its falsifier is NOT the obvious one. A plain arm swap never reaches this row:
+# it reds one line earlier on the positive assert above, as a bare
+# AssertionError with no message. What this row catches that the assert above
+# cannot is a PARTIAL REVERT — a bound arm emitting BOTH sentences — because
+# that assert stays green there, its substring still present. Do not delete
+# this row after watching an arm swap red above it; that is another mutation.
+# RCH-546.1's equality below does not subsume it either: that row sees only the
+# terminal line, while this one scans the WHOLE prompt, so it alone catches the
+# needle below — the contract-less delegating sentence — landing anywhere ABOVE
+# the terminal line; neutralise this row and that mutation goes fully green.
+# All three paths were confirmed by traceback line number, not by reading the
+# block.
+assert b'Return only a response matching the return contract your role card declares above.' not in prompt, \
+  ('the bound reviewer edge did not select the bound arm cleanly: its prompt '
+   'carries the contract-less sentence delegating the return shape back to the '
+   'role card, instead of pointing only at the output contract the manifest '
+   'bound to it. Either the arm selection flipped, or a partial revert left '
+   'both sentences in (#517, #546)')
+# RCH-546.1 — the BOUND arm of #546's terminal-line invariant. This block
+# prepares a real bound child (review_pr.review.correctness ->
+# phase1-reviewer-v1, i.e. shared/phase1-reviewer-output-v1.md), and it is the
+# only place the bound arm's TERMINAL LINE is pinned. That is narrower than
+# "the only bound prompt", which is false: of the other two prompt-byte suites
+# tests/child-dispatch.test.sh genuinely cannot produce one — it dispatches
+# against a fixture manifest with no output_contracts key, so its every edge
+# takes the unbound arm — but tests/sdd-child-inputs.test.sh AC-14a DOES
+# compose a bound live-manifest prompt (sdd.task.implement ->
+# sdd-implementer-v1) and read its bytes. It asserts the bound sentence as a
+# SUBSTRING only, with no last-line equality and no denylist over it, so it
+# does not cover this class. Enumerated rather than assumed:
+# grep -rn 'matching the output contract above' tests/ names that one row and
+# this block, and nothing else.
+last=prompt.rstrip(b'\n').rsplit(b'\n',1)[-1]
+bound=(b'Execute only the bounded role and inputs above. '
+  b'Return only a response matching the output contract above.')
+# EQUALITY on the whole last line, not endswith: equality also forecloses
+# anything being prepended onto the terminal sentence.
+assert last==bound, f'RCH-546.1: bound terminal line is not the contract-pointing sentence: {last!r}'
+# ANTI-VACUITY. This row guards the CLASS (the composer naming any terminal
+# vocabulary of its own), not the wording. What it constrains is what a future
+# editor may put in `bound` above: a ONE-SIDED composer reword never reaches
+# here, because the equality reds first. It fires on the TWO-SIDED edit — the
+# composer reworded AND the pinned literal updated to match — which is the edit
+# that would otherwise walk a named vocabulary back in with the suite green.
+# Scoped to the LAST LINE only — the directive above it interpolates the routing
+# context and a mktemp child path, and a scratch path containing a denylisted
+# word would make a whole-directive scan flaky.
+# `_` is a word character in Python re, so \bDONE\b does NOT match inside
+# DONE_WITH_CONCERNS; both members are required, as are timed_out and
+# NO_FIXES_NEEDED.
+DENY=('completed','blocked','refused','failed','timed_out','cancelled','running',
+  'DONE','DONE_WITH_CONCERNS','NEEDS_CONTEXT','BLOCKED','APPLIED','NO_FIXES_NEEDED',
+  'APPROVE','REVISIONS_REQUIRED','REJECT','SURVIVES','CULLED','RESOLVED','AMBIGUOUS',
+  'CLASSIFIED','REBASED','CONFLICT')
+deny=re.compile(r'\b(?:'+'|'.join(re.escape(w) for w in DENY)+r')\b',re.IGNORECASE)
+named=deny.findall(last.decode())
+assert not named, f'RCH-546.1: bound terminal line names a status vocabulary {named}: {last!r}'
 PY
 
 # Reviewer validation is bound to the exact changed-path snapshot and emits a

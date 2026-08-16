@@ -84,11 +84,15 @@ for contract_id,relative in tree['output_contracts'].items():
     assert (tree_path.parent.parent/relative).is_file(), contract_id
 # #517 -- the SDD implementer edge is the one PROVIDER edge whose card declared a
 # terminal vocabulary the controller never agreed to. Unbound, lib/child-dispatch.sh
-# appends its contract-less fallback directive ("Return completed, blocked, or
-# refused."), which overrides the card's own wording at the END of the assembled
-# prompt and makes DONE_WITH_CONCERNS / NEEDS_CONTEXT unreachable -- so
-# `context_rounds` bounded a state that could not occur. Pinned by id so the
-# binding cannot be dropped silently.
+# appended a contract-less fallback directive that NAMED a three-member vocabulary
+# of its own, which overrode the card's own wording at the END of the assembled
+# prompt and made DONE_WITH_CONCERNS / NEEDS_CONTEXT unreachable -- so
+# `context_rounds` bounded a state that could not occur. #546 retired that wording
+# composer-wide: the contract-less arm now points at the return contract the role
+# card declares and names nothing of its own, so the override is gone on every
+# edge in the SRT-546.1 set below. Delegation is not a contract, though -- the
+# binding pinned here is what puts a machine-checkable shape in front of THIS
+# child, so it stays pinned by id and cannot be dropped silently.
 assert edges['sdd.task.implement'].get('output_contract')=='sdd-implementer-v1'
 # #474 -- the fixer edges are format-bound the same way the reviewer edges are.
 # A fixer COMMITS before its result is parsed, so an unbound format is not a
@@ -97,6 +101,43 @@ assert edges['sdd.task.implement'].get('output_contract')=='sdd-implementer-v1'
 # cannot quietly ship unbound.
 fixer_edges={'review_pr.fix.phase1','review_pr.fix.phase2','simplify.fix.phase2'}
 assert {e for e,row in edges.items() if row.get('output_contract')=='code-fixer-v1'}==fixer_edges
+# SRT-546.1 (#546) -- the provider edges that carry NO output_contract. With no
+# contract to embed, lib/child-dispatch.sh's terminal directive is the LAST word
+# the child reads about what to return, so on these edges it may only POINT AT
+# the role card and must never NAME a terminal vocabulary of its own -- naming
+# one silently overrides whatever the card declared. That override was #517's
+# root cause on sdd.task.implement and #546's on the rest of this set.
+# Enumerated, never counted: this set SHRINKS as edges get bound, and a bare
+# len(...)==32 would rot the moment any new provider edge is added, because the
+# count can stay 32 while the membership silently changes. A PR that binds an
+# edge therefore deletes one obvious line below; a PR that adds an unbound
+# provider edge adds one, and has to have read this comment to do it.
+unbound_provider_edges={
+ 'brainstorm.research.codebase','brainstorm.research.library',
+ 'brainstorm.research.prior_art','orchestrator.plan.research.dependency',
+ 'orchestrator.plan.research.risks','orchestrator.plan.research.security',
+ 'orchestrator.plan.research.tests','orchestrator.plan.review',
+ 'orchestrator.plan.write','orchestrator.research.codebase',
+ 'orchestrator.research.constraints','orchestrator.research.followup',
+ 'orchestrator.research.patterns','orchestrator.research.prior_art',
+ 'orchestrator.research.security','orchestrator.research.test_coverage',
+ 'orchestrator.spec.review','orchestrator.spec.revise','orchestrator.spec.write',
+ 'review_pr.ci.classify','review_pr.ci.defer_refusal','review_pr.ci.fix_code',
+ 'review_pr.ci.rebase','review_pr.ci.resolve_conflict','review_pr.defer.findings',
+ 'review_pr.simplify.efficiency','review_pr.simplify.quality',
+ 'review_pr.simplify.reuse','sdd.premerge.test_review','sdd.task.quality_review',
+ 'sdd.task.spec_review','solve.issue.lead'
+}
+assert {edge_id for edge_id,row in edges.items()
+        if row['kind']=='provider' and row.get('output_contract') is None}==unbound_provider_edges
+# SRT-546.2 -- the one role-less member of that set, explained where it is
+# asserted so it does not read as an oversight. solve.issue.lead is the run's
+# ROOT edge: it has no role card, so _uberdev_child_prepare never composes a
+# prompt for it and it reads no terminal directive at all. It belongs to the set
+# above because it is an unbound provider edge, not because it is a child whose
+# return vocabulary is at stake -- 31 of the 32 are composable, this one is not.
+assert edges['solve.issue.lead'].get('role') is None
+assert tree['root_edge_id']=='solve.issue.lead'
 for edge_id in review_edges:
     assert edges[edge_id]['required'] is True, edge_id
     assert edges[edge_id]['retry']=={'format':1}, edge_id
