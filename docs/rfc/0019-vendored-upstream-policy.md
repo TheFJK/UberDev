@@ -1165,6 +1165,25 @@ The record is what makes that reproducible by anyone, not just here:
 register itself declares, and the record could not say so, because it named no
 revision at all.
 
+**The self-describing case, and why it is exempt (amended 2026-08-16).** That
+contract is unachievable for one shape: a change that alters a component's bytes
+AND updates its measurement in the SAME commit. The tree counted is the one that
+commit produces, and its SHA does not exist while the change is being authored.
+Naming the branch commit whose tree really was counted does not work either —
+`main` is first-parent linear, every branch lands squashed, and a branch-only SHA
+therefore ceases to exist on merge, leaving the basis citing an operand that
+cannot be resolved and turning V46 red during unrelated later work.
+
+For that shape only, `uberdev_rev` names the **base** the measurement was taken
+against and `method` states that the tree counted is that rev plus the change
+shipping alongside. `git show <uberdev_rev>:<path>` then yields the base half
+rather than the counted half, so the operand is named rather than reproducible in
+one command — which is strictly better than the alternative it replaces, a count
+whose operand cannot be named at all (the defect this whole section exists to
+close). Re-stamping the basis with the post-merge commit is a valid follow-up,
+not a requirement: the base rev already resolves on `main`, so nothing is red in
+the meantime.
+
 All six take `uberdev_rev` `9002870bbbf21dabe9cc08a81d8293495c7beb38` rather than
 the last commit to touch each file before it. Their recorded method counts the
 provenance-header line, and those headers do not exist in the earlier commits —
