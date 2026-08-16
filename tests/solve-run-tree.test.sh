@@ -189,6 +189,203 @@ grep -q 'context_sha256' "$ROOT/plugins/uberdev/lib/solve-launcher.sh"
 grep -q 'finish_branch.review_pr' "$ROOT/plugins/uberdev/skills/finish-branch/SKILL.md"
 grep -q 'review_pr.post_impl_review' "$ROOT/plugins/uberdev/commands/review-pr.md"
 
+# --- #536: every run-tree edge id the launcher names must RESOLVE -------------
+#
+# The `solve.issue.lead` grep above proves only that the id is PRESENT. It stayed
+# green for the whole life of the defect: the launcher's live assignment read
+# UBERDEV_ROOT_EDGE_ID="solve.lead.$TIER", and since the tier is one of
+# trivial|small|medium|large, EVERY value that line could produce named an edge
+# absent from the manifest -- while nothing anywhere read the variable. That is
+# the #370 shape ("one contract, N uncompared copies") on the shell-runtime side;
+# #510 closed the manifest side with tests/solve-run-tree-scope.test.sh.
+#
+# tests/launcher_edge_ids.py derives the accepted vocabulary FROM THE TREE (it
+# hardcodes no id) and refuses any token that is not a key of `edges`. Row E1
+# upgrades the presence grep above into a resolution check; the mutant rows are
+# the durable regression pins -- each re-creates one emitter IN MEMORY and
+# asserts the checker reds, so a re-introduction cannot ship green.
+#
+# Mechanics, every one of which has bitten this repo before:
+#   * `set -e` is on, so an expected-nonzero call goes through edge_check, which
+#     records the code instead of aborting the run before it can be read.
+#   * Mutants are fed on STDIN with a herestring -- never `printf | python3`
+#     (tests/epipe-guard.test.sh) -- and built by a python program writing BYTES
+#     to stdout: no temp file, no mktemp, no `sed -i`, no CRLF rewrite.
+#   * No `git show` and no SHA literal: this file also runs on the windows
+#     shape-check job, whose checkout has no history depth.
+EDGE_CHECK="$ROOT/tests/launcher_edge_ids.py"
+LAUNCHER="$ROOT/plugins/uberdev/lib/solve-launcher.sh"
+for f in "$EDGE_CHECK" "$LAUNCHER"; do
+  [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
+done
+
+# The launcher line every insertion row anchors on. Held in one variable so a
+# rewording breaks the rows loudly (mut asserts the occurrence count) instead of
+# silently turning them into no-op mutations that still pass.
+EXPORT_ANCHOR='export UBERDEV_AGENT_PREPARED_REQUEST_JSON'
+CARRIER_ANCHOR='error: failed to construct the solve.issue.lead run carrier'
+
+EDGE_ROWS=0
+EDGE_RC=0
+EDGE_ERR=''
+MUT=''
+
+# Run the checker over ($1 = tree, $2 = launcher; `-` reads stdin), recording the
+# exit code in EDGE_RC and the diagnostics in EDGE_ERR. Deliberately never
+# aborts: a row that expects a nonzero code has to be able to read it.
+edge_check() {
+  EDGE_ERR="$(python3 -I -B "$EDGE_CHECK" --tree "$1" --launcher "$2" 2>&1 >/dev/null)" && EDGE_RC=0 || EDGE_RC=$?
+}
+
+# Print the launcher into MUT with $1 replaced by $2. $3 is how many times the
+# anchor must occur ('+' = at least once, default exactly 1); a mismatch is
+# FATAL, because a mutation that no longer bites is a vacuous green.
+mut() {
+  MUT="$(python3 -I -B -c '
+import sys
+src = open(sys.argv[1], "rb").read().decode("utf-8")
+anchor, replacement, want = sys.argv[2], sys.argv[3], sys.argv[4]
+hits = src.count(anchor)
+ok = hits >= 1 if want == "+" else hits == int(want)
+if not ok:
+    raise SystemExit("mutation anchor occurs %d time(s), want %s: %s" % (hits, want, anchor))
+sys.stdout.buffer.write(src.replace(anchor, replacement).encode("utf-8"))
+' "$LAUNCHER" "$1" "$2" "${3:-1}")" || { echo "FATAL: launcher mutation failed (see the message above)" >&2; exit 2; }
+}
+
+# A replacement that inserts $1 as its own line directly above anchor $2, with
+# the anchor itself preserved.
+prepend_line() { printf '%s\n%s' "$1" "$2"; }
+
+# One DIFFERENTIAL row: the unmutated launcher must be clean AND the mutant must
+# exit with $4. Asserting only the mutant half would pass vacuously the moment
+# the baseline broke -- the convention documented at
+# tests/solve-run-tree-scope.test.sh:34-36.
+edge_differential() {
+  local row="$1" anchor="$2" replacement="$3" want_rc="$4" want_hits="${5:-1}"
+  mut "$anchor" "$anchor" "$want_hits"
+  edge_check "$TREE" - <<<"$MUT"
+  [ "$EDGE_RC" -eq 0 ] || { echo "$row: the UNMUTATED launcher is not clean (rc=$EDGE_RC): $EDGE_ERR" >&2; exit 1; }
+  mut "$anchor" "$replacement" "$want_hits"
+  edge_check "$TREE" - <<<"$MUT"
+  [ "$EDGE_RC" -eq "$want_rc" ] || {
+    echo "$row: mutant rc=$EDGE_RC, want $want_rc: ${EDGE_ERR:-(no diagnostics)}" >&2; exit 1; }
+  EDGE_ROWS=$((EDGE_ROWS + 1))
+}
+
+# E1 -- the live launcher against the live tree.
+edge_check "$TREE" "$LAUNCHER"
+[ "$EDGE_RC" -eq 0 ] || { echo "E1: the launcher names an unresolvable run-tree edge id: $EDGE_ERR" >&2; exit 1; }
+EDGE_ROWS=$((EDGE_ROWS + 1))
+
+# E2 -- the filed regression itself, verbatim.
+edge_differential E2 "$EXPORT_ANCHOR" \
+  "$(prepend_line 'UBERDEV_ROOT_EDGE_ID="solve.lead.$TIER"' "$EXPORT_ANCHOR")" 1
+
+# E3 -- one tier substituted by hand: a BARE literal, still not an edge.
+# Membership is what is checked, not merely "the right-hand side contains a $".
+edge_differential E3 "$EXPORT_ANCHOR" \
+  "$(prepend_line 'UBERDEV_ROOT_EDGE_ID="solve.lead.medium"' "$EXPORT_ANCHOR")" 1
+
+# E4 -- the second emitter the issue never mentioned: the carrier-failure string.
+edge_differential E4 "$CARRIER_ANCHOR" 'error: failed to construct solve.lead.$TIER carrier' 1
+
+# E5 -- comments and strings are in scope. The fictional id survived review for
+# months inside comment prose, so prose is exactly what must be checked.
+edge_differential E5 "$EXPORT_ANCHOR" \
+  "$(prepend_line '# Root carrier lineage `solve.lead.<tier>` (legacy catalog alias).' "$EXPORT_ANCHOR")" 1
+
+# E6 -- the guard forbids WRONG ids, not the variable. A root-edge pointer that
+# names a real edge is accepted, so this never blocks wiring one to a reader.
+edge_differential E6 "$EXPORT_ANCHOR" \
+  "$(prepend_line 'UBERDEV_ROOT_EDGE_ID="solve.issue.lead"' "$EXPORT_ANCHOR")" 0
+
+# E7 -- the anti-vacuity floor. Strip every mention of the root edge and the
+# checker must say so by name, rather than passing because nothing is left to
+# disagree with.
+edge_differential E7 'solve.issue.lead' '' 1 '+'
+case "$EDGE_ERR" in
+  *"never names the tree root edge id 'solve.issue.lead'"*) : ;;
+  *) echo "E7: the L3 floor did not name the missing root edge: ${EDGE_ERR:-(no diagnostics)}" >&2; exit 1 ;;
+esac
+case "$EDGE_ERR" in
+  *"the extractor matched nothing"*) : ;;
+  *) echo "E7: the L3 floor did not report an empty match set: ${EDGE_ERR:-(no diagnostics)}" >&2; exit 1 ;;
+esac
+
+# E8 -- the accepted vocabulary is TREE-DERIVED, not hardcoded in the checker.
+# Rename the edges KEY only, leaving root_edge_id alone: the red then comes
+# unambiguously from the membership check, not from a tree-consistency assert
+# (which belongs to the manifest block at the top of this file, not here).
+TREE_MUT="$(python3 -I -B -c '
+import json, sys
+tree = json.loads(open(sys.argv[1], "rb").read().decode("utf-8"))
+edges = tree["edges"]
+if "solve.issue.lead" not in edges:
+    raise SystemExit("mutation anchor absent: edges[solve.issue.lead]")
+edges["solve.issue.root"] = edges.pop("solve.issue.lead")
+sys.stdout.buffer.write(json.dumps(tree).encode("utf-8"))
+' "$TREE")" || { echo "FATAL: E8 tree mutation failed (see the message above)" >&2; exit 2; }
+edge_check "$TREE" "$LAUNCHER"
+[ "$EDGE_RC" -eq 0 ] || { echo "E8: the UNMUTATED tree is not clean (rc=$EDGE_RC): $EDGE_ERR" >&2; exit 1; }
+edge_check - "$LAUNCHER" <<<"$TREE_MUT"
+[ "$EDGE_RC" -eq 1 ] || { echo "E8: renaming the root edge KEY must red the launcher (rc=$EDGE_RC)" >&2; exit 1; }
+case "$EDGE_ERR" in
+  *"solve.issue.lead"*) : ;;
+  *) echo "E8: the mutant-tree diagnostics never named solve.issue.lead: ${EDGE_ERR:-(no diagnostics)}" >&2; exit 1 ;;
+esac
+EDGE_ROWS=$((EDGE_ROWS + 1))
+
+# E9 -- `commands/solve.md` is a FILENAME, not an edge id: `md` is not an area
+# of the tree, so no prefix the extractor derives from `edges` can reach it.
+# First assert the launcher really does still name it, so the row cannot pass by
+# the reference having been deleted. Then prove E1's silence about those two
+# lines is a RESULT and not a blind spot, by giving the very same references a
+# REAL area prefix: the lines are in scope, and it is the vocabulary that
+# excludes them. Reading E1's diagnostics instead could assert nothing at all --
+# E1 has already required rc=0 above, and a clean run puts its summary on
+# stdout, so the captured stderr is empty by construction.
+grep -q 'solve\.md' "$LAUNCHER" || {
+  echo "E9: the launcher no longer names commands/solve.md -- the row is vacuous" >&2; exit 1; }
+edge_differential E9 'solve.md' 'solve.issue.md' 1 2
+# The mutant's rc does NOT settle it. rc=1 is satisfied by ONE of the two
+# references being seen, so a checker blind to the first line would still red on
+# the second and pass this row -- proving only that line in scope while the
+# comment claimed both. Count the DISTINCT line anchors the diagnostics carry
+# instead: two references on two lines, so a blind spot on EITHER now reds E9.
+# (mut has already refused to run unless the anchor occurs exactly twice, so a
+# deleted reference cannot reach this count and pass it.) The `%%` strip runs to
+# end of line, so the CRLF a python-written capture carries on the windows job
+# is removed with the reason text and never leaks into a site label.
+EDGE_SITES=''
+EDGE_SITE_COUNT=0
+while IFS= read -r EDGE_DIAG; do
+  case "$EDGE_DIAG" in
+    *"unresolvable edge id 'solve.issue.md'"*) ;;
+    *) continue ;;
+  esac
+  EDGE_SITE="${EDGE_DIAG%%: unresolvable*}"
+  case "$EDGE_SITES" in
+    *"[$EDGE_SITE]"*) continue ;;
+  esac
+  EDGE_SITES="$EDGE_SITES[$EDGE_SITE]"
+  EDGE_SITE_COUNT=$((EDGE_SITE_COUNT + 1))
+done <<<"$EDGE_ERR"
+[ "$EDGE_SITE_COUNT" -eq 2 ] || {
+  echo "E9: the mutant's diagnostics name $EDGE_SITE_COUNT distinct line(s) ${EDGE_SITES:-(none)}, want 2 -- one of the two commands/solve.md lines is a blind spot, not out of vocabulary: ${EDGE_ERR:-(no diagnostics)}" >&2
+  exit 1; }
+
+# E10 -- stdin has one reader, so asking both sides to use it is a usage error
+# (exit 2), never a verdict about the launcher.
+edge_check - - </dev/null
+[ "$EDGE_RC" -eq 2 ] || { echo "E10: --tree - --launcher - must be a usage error, got rc=$EDGE_RC" >&2; exit 1; }
+EDGE_ROWS=$((EDGE_ROWS + 1))
+
+# E11 -- row-count floor, mirroring tests/solve-run-tree-scope.test.sh:490. A row
+# deleted or short-circuited out of the block must fail the file, not shrink it.
+[ "$EDGE_ROWS" -ge 10 ] || {
+  echo "FATAL: $EDGE_ROWS edge-id row(s) ran, expected at least 10 (E1-E10)" >&2; exit 2; }
+
 # Provider invocations in Group-C command/skill sources must use the routed
 # adapter. Historical discussion may name the legacy tool, but executable
 # call syntax is forbidden.
