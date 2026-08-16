@@ -234,6 +234,17 @@ non-zero rc, a missing row, 0/401/403/429/5xx) classifies `UNVERIFIED` and
 of `/goal`'s queue. A status is never *upgraded* — a non-`PR_OPENED` record
 carrying a PR number is audited, never promoted.
 
+Those are the arms the pass itself can take. One more sits outside it: a run
+that **threw before the pass ever ran**. `main()`'s outer catch still finalizes,
+so `prsOpened` is published from unproven self-reports — and a pass that never
+ran leaves every verification count at zero, which is byte-identical to a batch
+that had no PR claim to prove. So the catch runs the same two steps the pass's
+own catch runs — the coherence classification, then marking every retained claim
+`UNVERIFIED` — and audits **`pr_proof_not_run`**. `probed: 0` beside a non-zero
+`unverified` is the shape, and that audit row is the only thing telling a thrown
+run apart from one with nothing to prove: another two facts separated only by
+the audit trail. Nothing is downgraded — unproven is reported as unproven.
+
 `testsRunClaimed` is deliberately **honest, not verifiable**: nothing here can
 falsify it, so nothing reads it.
 

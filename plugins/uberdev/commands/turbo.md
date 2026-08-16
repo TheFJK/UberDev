@@ -89,7 +89,9 @@ say so explicitly and note that issues left unsolved still hold their
 
 A `disproven` or `unverified` count above zero means the fleet could not stand
 behind a solver's PR claim — say so and point the user at `return.auditEvents`,
-which names the issue and the reason for every disagreement. This matters most
+which names the issue and the reason for every disagreement. A
+`pr_proof_not_run` row there means the run threw before verification ran, so
+nothing was proved — say so even when every count reads zero. This matters most
 here: `/turbo` is unattended, so nobody else is going to notice.
 
 **No-Workflow fallback:** if the `Workflow` tool is not among your tools

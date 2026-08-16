@@ -608,6 +608,30 @@ else
   fail "G31 main()'s outer catch is missing part of the never-ran recovery (want the !prVerifyRan guard, the pr_proof_not_run row, classifyClaimCoherence() + markAllClaimsUnverified(), and the pr_proof_not_run_recovery_failed arm)"
 fi
 
+# G32 (#563) — the never-ran arm needs VOCABULARY, not just behaviour. G31 pins
+# that the script emits `pr_proof_not_run`; this row pins that all three contract
+# surfaces name it, because the COUNTS CANNOT CARRY THE FACT. A run that threw
+# before the pass ran publishes `probed: 0` and `confirmed: 0` — exactly what a
+# batch with no PR claim to prove publishes — and on the zero-claim arm (B261-
+# B263) every count matches, so the audit row is the only discriminator there
+# is. That is the same "two facts separated only by the audit trail" shape
+# SKILL.md already uses for a null relayRc. Both command files gate the reporter
+# on `disproven` or `unverified` being non-zero, so an operator who is never
+# told to read auditEvents hears silence on the one path where the published PR
+# set is entirely unproven self-report.
+#
+# Three surfaces in ONE row, not three: documenting the arm in SKILL.md while
+# either command file keeps reporting from counts alone leaves the operator
+# exactly as blind, so a partial fix must not be able to go green. Same
+# both-ends-or-neither shape as G19 directly above.
+if grep -q 'pr_proof_not_run' "$SKILL" \
+  && grep -q 'pr_proof_not_run' "$SOLVE_CMD" \
+  && grep -q 'pr_proof_not_run' "$TURBO_CMD"; then
+  pass "G32 the never-ran arm is named on all three contract surfaces — SKILL.md's cannot-speak enumeration and both command files' reporter"
+else
+  fail "G32 pr_proof_not_run is missing from at least one of SKILL.md / commands/solve.md / commands/turbo.md — a thrown run's zero counts read as 'nothing to prove' to whichever surface omits it"
+fi
+
 # ---------------------------------------------------------------------------
 # B — T3 behavioral fixtures
 # ---------------------------------------------------------------------------
