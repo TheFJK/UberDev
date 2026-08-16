@@ -1147,11 +1147,11 @@ for key in ("context_file","context_sha256","run_id"):
     if r.get(key):
         rec[key]=r[key]
 try:
-    rs=json.loads(risk_signals) if risk_signals else []
+    rs=json.loads(risk_signals) if risk_signals else None
 except ValueError:
-    rs=[]
+    sys.exit("risk_signals is not valid JSON; refusing to publish it as [] when [] is read as this issue had no risk")
 if not isinstance(rs,list):
-    rs=[]
+    sys.exit("risk_signals is not a JSON array; refusing to publish it as [] when [] is read as this issue had no risk")
 rec["risk_signals"]=[s for s in rs if isinstance(s,str)]
 print(json.dumps(rec,sort_keys=True,separators=(",",":")),end="")
 ' "$ISSUE_NUM" "${TIERS[$_midx]}" "$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt" "${ROOT_REQUESTS[$_midx]:-}" \
