@@ -584,6 +584,30 @@ else
   fail "G20 rung one is not dispatched against the stricter task-1-only schema (or S_TASK1 stopped requiring taskCount)"
 fi
 
+# G31 (#563) — the RECOVERY ARM inside main()'s outer catch, pinned structurally
+# because it cannot be pinned behaviourally: nothing the harness exposes can make
+# classifyClaimCoherence() throw, so the inner `catch (e2)` that keeps a failing
+# classification from losing the run's results has no reachable lever. Rows
+# B254-B263 cover everything around it — that the pass is audited as never having
+# run, and that every live claim comes out UNVERIFIED and retained — so this row
+# is the missing half of that pair, not a duplicate of it. Do not "simplify" the
+# two down to this grep alone, and do not relax it into a repo-wide grep for
+# markAllClaimsUnverified: five call sites inside verifyClaims() already satisfy
+# that, which is exactly the vacuous shape this file keeps filing issues about.
+# Scoped to main() for the same reason, via the G22/G26 extraction pattern.
+MAIN_BLOCK="$(sed -n '/^async function main() {/,/^}/p' "$WORKFLOW")"
+if [ -z "$MAIN_BLOCK" ]; then
+  fail "G31 could not locate main() in workflow.js — the assertion cannot be evaluated"
+elif grep -Fq '!prVerifyRan' <<<"$MAIN_BLOCK" \
+  && grep -Fq 'pr_proof_not_run' <<<"$MAIN_BLOCK" \
+  && grep -Fq 'classifyClaimCoherence();' <<<"$MAIN_BLOCK" \
+  && grep -Fq 'markAllClaimsUnverified();' <<<"$MAIN_BLOCK" \
+  && grep -Fq 'pr_proof_not_run_recovery_failed' <<<"$MAIN_BLOCK"; then
+  pass "G31 main()'s outer catch runs the never-ran recovery — guarded on !prVerifyRan (the classifier is not idempotent), audited as pr_proof_not_run, classifying then marking every live claim, with its own failure audited rather than swallowed"
+else
+  fail "G31 main()'s outer catch is missing part of the never-ran recovery (want the !prVerifyRan guard, the pr_proof_not_run row, classifyClaimCoherence() + markAllClaimsUnverified(), and the pr_proof_not_run_recovery_failed arm)"
+fi
+
 # ---------------------------------------------------------------------------
 # B — T3 behavioral fixtures
 # ---------------------------------------------------------------------------
@@ -1944,9 +1968,64 @@ function probedNums(record) {
   out.zdBlockerNames = !!(zd11 && typeof zd11.blocker === "string"
     && zd11.blocker.indexOf("the task chain committed nothing for issue #11") >= 0);
 
+  // --- Run TR: the WHOLE RUN throws with live PR claims outstanding (#563) --
+  // main()'s outer catch is the SECOND path that could reach emitResult() with
+  // every claim unproven AND unclassified. A throw anywhere in the wave loop or
+  // at the deliver boundary skips `await verifyClaims()` entirely, and
+  // finalize() then publishes prsOpened — the set /goal ingests and merges on —
+  // straight from solver self-reports while probed, confirmed, disproven,
+  // unverified and notApplicable ALL read zero: byte-identical to a batch that
+  // had no PR claim to prove. What that hides is a fabricated or mis-parsed PR
+  // number, a PR opened on a branch other than the one claimed, and the
+  // authoritative 404 that would have downgraded the record before /goal merged.
+  //
+  // The lever is the harness's `phaseThrows` (H17). It is the only one that can
+  // reach a script's run-level catch: every other seam on the whole-run path is
+  // modelled infallible — parallel() maps a throwing thunk to null and never
+  // rejects, pipeline() drops the item — which is precisely why deleting this
+  // recovery block left the whole suite green. `deliver` is the one phase()
+  // between the last wave and verifyClaims(), so both solvers have already
+  // reported their PR numbers by the time it throws.
+  const recTR = await run(buildArgs(), { agentReturns: trivialReturns(), phaseThrows: "deliver" });
+  const resTR = resultOf(recTR);
+  out.trRanThrew = !!(resTR && resTR.auditEvents.some(function (e) { return e.event === "run_threw"; }));
+  // By NAME, never by index: run_threw is pushed first and the recovery rows
+  // after it, and an index would silently re-point the moment either moves.
+  const trNotRun = resTR
+    ? resTR.auditEvents.filter(function (e) { return e.event === "pr_proof_not_run"; })[0] : null;
+  out.trNotRunReason = trNotRun ? trNotRun.reason : null;
+  out.trUnverified = resTR ? resTR.verification.unverified : null;
+  out.trProbed = resTR ? resTR.verification.probed : null;
+  // The length premise is load-bearing: every() over an empty results array is
+  // vacuously true, so the row would pass on a run that published nothing.
+  out.trAllUnverified = !!(resTR && resTR.results.length === 2
+    && resTR.results.every(function (r) { return r.prProof === "UNVERIFIED"; }));
+  out.trPrNums = resTR ? resTR.prsOpened.join(",") : null;
+  out.trRecordIntact = recTR.violations.length + "/" + recTR.phases.join(",");
+
+  // --- Run PT: the same throw path with NOTHING to prove (#563) ------------
+  // Run TR's anti-vacuity twin, and the reason the audit row cannot be keyed on
+  // "were any claims downgraded". An intake-stage budget ceiling makes the very
+  // first agent() throw (the scan-fleet-workflow.test.sh Run F precedent — no
+  // phaseThrows involved), so no solver ever runs, `solved` is empty and
+  // markAllClaimsUnverified() is a no-op. pr_proof_not_run must fire anyway: it
+  // reports that the pass never RAN, which is a fact about the run rather than
+  // about how many claims happened to be live. Keyed on the downgrade count
+  // instead, the trail would read "verification ran and found nothing" on
+  // exactly the runs where it never ran at all.
+  const recPT = await run(buildArgs(), { agentReturns: trivialReturns(), budgetTotal: 1, agentCost: 2 });
+  const resPT = resultOf(recPT);
+  out.ptObservable = !!resPT;
+  out.ptBothEvents = !!(resPT
+    && resPT.auditEvents.some(function (e) { return e.event === "run_threw"; })
+    && resPT.auditEvents.some(function (e) { return e.event === "pr_proof_not_run"; }));
+  out.ptPrNums = resPT ? resPT.prsOpened.join(",") : null;
+
   // Every run added above must also be harness-clean — an undeclared opts.phase
   // on a rung these runs are the first to reach shows up here and nowhere else.
-  out.newViolations = [recW, recX, recY, recZ, recZ4, recCF, recDS, recDA, recZC, recZD, recFW]
+  // ENUMERATED, never derived: a new run is NOT covered until it is named here.
+  out.newViolations = [recW, recX, recY, recZ, recZ4, recCF, recDS, recDA, recZC, recZD, recFW,
+                       recTR, recPT]
     .reduce(function (n, r) { return n + r.violations.length; }, 0);
 
   process.stdout.write(JSON.stringify(out));
@@ -2329,7 +2408,27 @@ else
   check zdNoDeliver true          "B192 ...and still dispatches no delivery agent — there is nothing committed to deliver"
   check zdBlockerNames true       "B193 ...and the blocker names the issue and points at the worktree, so /goal cannot read it as solved"
 
-  check newViolations 0           "B169 zero harness violations across every run added for #561 and #562"
+  # --- #563: the run-level throw path, with claims and without ---------------
+  # Run TR — the wave loop finished, two PRs were claimed, and the run threw
+  # before the proof pass. Read the rows as a set: run_threw and prsOpened were
+  # ALWAYS present and probed was ALWAYS 0, so B254/B257/B259 are premises that
+  # hold on both trees. B255, B256 and B258 are the three that go red the moment
+  # the recovery block is removed, and they are the whole point of the group.
+  check trRanThrew true           "B254 a run that threw audits run_threw (the premise the rows below stand on)"
+  check trNotRunReason '"run_threw"' "B255 ...and audits pr_proof_not_run with reason=run_threw, so \"the pass never ran\" is on the record rather than inferred from three zero counts"
+  check trUnverified 2            "B256 both live claims are classed UNVERIFIED — the one number separating a thrown run carrying claims from a batch with nothing to prove"
+  check trProbed 0                "B257 probed stays 0: no relay was dispatched and the recovery must not pretend one was"
+  check trAllUnverified true      "B258 every published record carries prProof=UNVERIFIED, so a consumer reads a proof class per record instead of null"
+  check trPrNums '"901,902"'      "B259 the claims are RETAINED, never dropped — an unprovable claim still reaches /goal, flagged as unproven"
+  check trRecordIntact '"0/intake,deliver"' "B260 the throw lever leaves the record intact: zero harness violations, and both phases still recorded"
+
+  # Run PT — the same catch with an EMPTY claim set. Without this row the
+  # audit could be keyed on "did anything get downgraded" and still look right.
+  check ptObservable true         "B261 an intake-stage throw still emits a WORKFLOW_RESULT (DR-8: the run stays observable)"
+  check ptBothEvents true         "B262 ...and audits BOTH run_threw and pr_proof_not_run — the row keys off verification never running, not off having something to downgrade"
+  check ptPrNums '""'             "B263 ...with no PR claim to retain"
+
+  check newViolations 0           "B169 zero harness violations across every run added for #561, #562 and #563"
 fi
 
 echo "== S: /goal runs ON the workflow backend — the interim demotion is GONE (RFC 0015 §5) =="
