@@ -727,12 +727,30 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   // runs W/X below drive the relayed budget past both bounds and every expected
   // total there is derived from it: a second typed copy of any of these three
   // numbers is a copy that can drift away from the fleet with no row noticing.
-  const FLEET_DESIGN_AGENTS = 6;
+  // READ OUT of the fleet script, never retyped. This mirror was a literal `6`
+  // and the fleet design base then moved to 9 when the spec-reviser, plan-
+  // reviewer and security lens were added — every expected total in this block
+  // silently became short by 3 per claimed issue, which is precisely the drift
+  // the paragraph above warns about. The base is the same single term G31 in
+  // tests/solve-fleet-workflow.test.sh pins, and it must resolve EXACTLY once:
+  // a regex that matched twice would make the extracted value arbitrary, and
+  // one that matched nothing would silently price every issue at its budget.
+  const FLEET_DESIGN_AGENTS = (function () {
+    const fleetSrc = fs.readFileSync(process.argv[3], "utf8");
+    const rx = /designCount \* \((\d+) \+ IMPLEMENT_AGENT_BUDGET/g;
+    const hits = [];
+    let m;
+    while ((m = rx.exec(fleetSrc)) !== null) hits.push(Number(m[1]));
+    if (hits.length !== 1) {
+      throw new Error("expected exactly one designCount * (N + IMPLEMENT_AGENT_BUDGET term in the fleet script, found " + hits.length);
+    }
+    return hits[0];
+  })();
   const BUDGET_FLOOR = 4;
   const BUDGET_CEILING = 96;
   const BUDGET_DEFAULT = 24;
   function perIssueCost(budget) { return FLEET_DESIGN_AGENTS + budget; }
-  const GOAL_PER_ISSUE_DEFAULT = perIssueCost(BUDGET_DEFAULT);  // the default arm: 30
+  const GOAL_PER_ISSUE_DEFAULT = perIssueCost(BUDGET_DEFAULT);  // the default arm: base + 24
   const FLEET_BATCHED_RELAYS = 2;
   const CYCLE_RELAYS = 4;
   const SPEND_CLAIMED = 2;                // the default fixture claims 11,12
@@ -947,7 +965,7 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
 })().catch(function (e) {
   process.stdout.write(JSON.stringify({ FIXTURE_ERROR: (e && e.message) ? e.message : String(e), STACK: (e && e.stack) ? e.stack : "" }));
 });
-' "$HARNESS" "$WORKFLOW" 2>&1)"
+' "$HARNESS" "$WORKFLOW" "$FLEET" 2>&1)"
 
 check() {
   local key="$1" expected="$2" label="$3" got
