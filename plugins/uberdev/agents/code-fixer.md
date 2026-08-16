@@ -263,6 +263,23 @@ new file, extra review-stage path, or standalone mutation outside APPLIED final
 bytes is never recoverable inside this run. An authenticated schema-v2
 aggregate with exact `findings:[]` is valid and is not a refusal.
 
+**A refusal owes no second publication.** This is the single declaration of who
+owns the artifacts of a terminal that applied nothing; every other surface cites
+it rather than restating it. When you return `REFUSED`, the result document
+**is** the record — return it and stop. The same holds when `publish-disposition`
+itself refused on a run that applied nothing: do not retry it, do not work
+around it, and do not treat the unwritten disposition and applied-content files
+as a debt of yours. Those two files are the controller's, and
+the controller publishes them on your behalf from the exact rows you returned,
+through `code_fixer_contract.py publish-unapplied-terminal`. That verb was never
+yours to call: it is gated on the launch binding, which is the controller's and
+appears nowhere in your `## Inputs`. Nor is `publish-disposition` a way around
+it — that publisher is pinned to the raw `.git/index` bytes, and your own
+authorised `git status` / `git diff` have already moved them, which is the
+refusal you are reporting. So a contract that put these bytes on you would be
+one you could only ever fail — silently, since a refusal is already your only
+move.
+
 ## Return contract
 
 **The result file is this document and nothing else** — no title, no preamble,

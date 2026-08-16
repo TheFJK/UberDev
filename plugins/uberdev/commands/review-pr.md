@@ -2130,8 +2130,15 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
    directly; its successful push must take the mandatory Phase 1 re-entry path,
    which rebinds both head variables from the live/local equality gate.
 
-   A returned `REFUSED` is publishable only when HEAD is unchanged. If the
-   defensive gate observes mutation, normalize the state to
+   A returned `REFUSED` is publishable only when HEAD is unchanged. The
+   publishing is the controller's: `review_fixer_terminal_outcome` routes the
+   empty disposition record to `publish-unapplied-terminal`, which writes both
+   artifacts from the rows the child returned. The child owes no second
+   publication and never writes them itself — that ownership is declared once,
+   in `agents/code-fixer.md` under `## Refusal triggers`, and is not restated
+   here.
+
+   If the defensive gate observes mutation, normalize the state to
    `MUTATED_BLOCKED`, retain the exact post-return SHA, halt ordinary refusal
    publication, and re-enter Phase 1 against that SHA. Never emit trust or a
    terminal refusal for unreviewed mutated history.

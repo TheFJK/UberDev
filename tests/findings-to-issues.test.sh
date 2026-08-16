@@ -174,6 +174,70 @@ assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
   'SKIPPED, REFUSED and DEFERRED' \
   'P12b helper comment names the three issue-eligible dispositions (#454)'
 
+# P13 (#556) — THE EMPTY STRING STAYS RESERVED FOR "NO FIXER RAN".
+#
+# A fixer that returns REFUSED writes neither of the artifacts the controller
+# binds by path, and the cheap-looking repair is to hand this agent the empty
+# string for that run. It type-checks and it never refuses — and it files every
+# BLOCKER the fixer refused as DEFERRED, which is a WRONG RECORD, not a lossy
+# one: nothing was deferred, a fixer looked at each row and declined it. The
+# real repair publishes a record whose rows say REFUSED, which P10/P12b above
+# already show is issue-eligible on its own terms.
+#
+# So the guard is the two-state binding itself, asserted as ONE row because
+# either half alone is re-interpretable: the input contract offers a path or an
+# empty string and nothing else, and the empty one means the rows DEFAULT —
+# i.e. no fixer disposition exists to read, not "a fixer said no". Re-purposing
+# the empty string for refusals cannot be done without rewriting one of these
+# two sentences, and then this row reds and asks why.
+#
+# PROSE LOCK, and deliberately only that. What stops the producer passing "" on
+# a real refusal is W-UNAP-E2E in tests/review-pr-workflow.test.sh, which drives
+# the shipped defer fences and asserts they forward the REAL disposition path.
+#
+# Both sentences are matched against a FLATTENED slice — newlines folded to
+# single spaces — because both are prose that wraps, and grep is line-based. A
+# line-anchored pattern here would red on a pure re-wrap, which is the failure
+# mode that teaches people to delete the assertion instead of reading it.
+#
+# The four heading anchors are checked FOR EXISTENCE first, not just for a
+# non-empty slice: an awk range whose END anchor was renamed runs to EOF, so the
+# slice stays fat and both greps go on matching text from sections this row
+# never meant to read. A non-empty slice is therefore no evidence the range is
+# still bounded where it claims to be.
+#
+# `tr -d '\r'` comes BEFORE the flatten, for the same reason the
+# `route_by_severity` fence slice above strips it —
+# this agent doc is outside the `plugins/uberdev/hooks/**` scope `.gitattributes`
+# pins to `eol=lf`, so the windows job checks it out CRLF. Order is the whole
+# point: flattening first turns each line-ending CR into an INTERIOR byte that
+# `tr -s ' '` cannot squeeze (it squeezes spaces, not CRs), and the Process
+# needle below spans a source line break — it would read `disposition\r path`
+# and never match. Stripping first is also why a CR-blind grep cannot make this
+# row vacuously green: there is no CR left for either grep to disagree about.
+P13_ANCHORS_OK=1
+for p13_anchor in '^## Inputs' '^## Tools authorised' '^## Process' '^## Issue body shape'; do
+  grep -qE -e "$p13_anchor" "$AGENT_MD" || P13_ANCHORS_OK=0
+done
+P13_INPUTS_SLICE="$(awk '/^## Inputs/,/^## Tools authorised/' "$AGENT_MD" | tr -d '\r' | tr '\n' ' ' | tr -s ' ')"
+P13_PROCESS_SLICE="$(awk '/^## Process/,/^## Issue body shape/' "$AGENT_MD" | tr -d '\r' | tr '\n' ' ' | tr -s ' ')"
+if [ "$P13_ANCHORS_OK" -ne 1 ] || [ -z "$P13_INPUTS_SLICE" ] || [ -z "$P13_PROCESS_SLICE" ]; then
+  echo "  FAIL  P13 could not slice the agent doc between its four heading anchors — refusing a vacuous PASS"
+  echo "        file: $AGENT_MD"
+  FAIL=$((FAIL + 1))
+elif ! grep -qE -e '`phase1_disposition_path` — Phase 1 fixer disposition path, or an empty string\.' <<<"$P13_INPUTS_SLICE"; then
+  echo "  FAIL  P13 the phase1_disposition_path binding no longer offers exactly {a path, the empty string} (#556)"
+  echo "        file: $AGENT_MD  section: ## Inputs"
+  FAIL=$((FAIL + 1))
+elif ! grep -qE -e 'An empty disposition path means all matching rows default to `DEFERRED`' <<<"$P13_PROCESS_SLICE"; then
+  echo "  FAIL  P13 the empty disposition path no longer means \"no fixer disposition to read\" (#556)"
+  echo "        file: $AGENT_MD  section: ## Process"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  P13 the empty disposition path stays reserved for \"no fixer ran\" — a refusal travels as REFUSED rows, never as DEFERRED (#556)"
+  PASS=$((PASS + 1))
+fi
+
 rm -f "$FENCE_SLICE"
 # --- end #454 ------------------------------------------------------------
 

@@ -242,7 +242,7 @@ optimisation — it is the deletion of a proof.**
 | Stage | Script dispatches | Calling-session Bash then proves |
 |---|---|---|
 | `review` | the 7 Phase-1 reviewers | per-child `capture` verbs → trusted ledger → `post_review_capture_aggregation_inputs` → `post_review_write_aggregate_v2` → `digest` → `prepare-authority` |
-| `fix` | ONE `code-fixer` child | `capture-review-terminal` → `validate-review-outcome` → `validate-residue` → `review_track_validated_fixer_head` → `review_refresh_phase1_scope` |
+| `fix` | ONE `code-fixer` child | `review_fixer_terminal_outcome` → (`capture-review-terminal` → `validate-review-outcome` \| `publish-unapplied-terminal`) → `validate-residue` → `review_track_validated_fixer_head` → `review_refresh_phase1_scope` |
 | `simplify` | the 3 `code-simplifier` lenses | canonical aggregate → `code_fixer_contract.py encode-aggregate --phase phase2` (the byte-shape oracle, `commands/simplify.md:341-348`) → `digest` → `prepare-authority` |
 | `defer` | ONE `findings-to-issues` child | halt handling (`AskUserQuestion`), then the GREEN/YELLOW/RED predicate |
 | `ci-classify` | ONE `ci-failure-classifier` child | `capture-ci-terminal` → `validate-ci-classification` (closed class enum, class/anchor pairing, anchor names a REAL repository file) → the routing scalar the mutating arm keys on |
@@ -557,8 +557,16 @@ agent-chosen location.
 3. For `fix`: mint the binding with `code_fixer_contract.py
    bind-workflow-fixer-launch` **before** the Workflow call — not
    `bind-workflow-launch`, which mints no authority pin — then
-   `capture-review-terminal` → `validate-review-outcome` →
-   `review_track_validated_fixer_head`. `fixerStatus` is a **hint for logging
+   `review_fixer_terminal_outcome` → (`capture-review-terminal` →
+   `validate-review-outcome` | `publish-unapplied-terminal`) →
+   `validate-residue` → `review_track_validated_fixer_head` →
+   `review_refresh_phase1_scope`. The branch is on the disposition record the
+   controller pre-created, and existence is read separately from size: a
+   NON-EMPTY record is a terminal to capture; an EXACTLY-EMPTY one is a child
+   that applied nothing, whose record the controller publishes on its behalf
+   from the returned rows (`agents/code-fixer.md`, "A refusal owes no second
+   publication"); an ABSENT one is workspace loss or tampering and refuses
+   without invoking any verb. `fixerStatus` is a **hint for logging
    only** — the disposition artifact and the head movement are the truth. The
    outcome carries `run_nonce` where a detached outcome carries
    `receipt_sha256`; a consumer that checks the detached key must be taught the

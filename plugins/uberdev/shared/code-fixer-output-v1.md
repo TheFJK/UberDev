@@ -57,7 +57,13 @@ Shape rules the validation boundary enforces, all of them full-file:
 - `behavior_tag` is `preserve` or `change` on an `APPLIED` row (phase2: only
   `preserve`), and exactly `n/a` on a `SKIPPED` or `REFUSED` row.
 - The last line is `risks: []`, and nothing follows it.
-- The returned rows must exactly equal the disposition artifact you published.
+- The returned rows must exactly equal the disposition artifact you published —
+  and when publication refused on a run that applied nothing, the returned rows
+  **are** that artifact. The controller publishes them verbatim on your behalf,
+  so the equality holds by construction rather than by your effort; see "A
+  refusal owes no second publication" in `agents/code-fixer.md`, which is where
+  that ownership is declared. Never hand-write the artifact to make this rule
+  true.
 
 **Redaction — secret-leak prevention.** This contract fixes the SHAPE of your
 result; it never widens what it may CONTAIN. Do not quote source code, reviewer

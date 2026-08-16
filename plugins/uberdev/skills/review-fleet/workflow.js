@@ -66,10 +66,15 @@ export const meta = { "name": "review-fleet", "description": "Shared Workflow-na
 //                   authority", skills/post-impl-review/SKILL.md:693-697;
 //                   defined at lib/review-aggregate.sh:330), then digest +
 //                   prepare-authority.
-//       fix      -> Bash runs capture-review-terminal / validate-review-outcome
-//                   (capture-review-terminal at commands/review-pr.md:1255,
-//                   validate-review-outcome at :1802) and
-//                   review_track_validated_fixer_head.
+//       fix      -> Bash runs review_fixer_terminal_outcome (defined in
+//                   lib/review-fences.sh, called by all four fixer fences),
+//                   which branches on the disposition record: capture +
+//                   validate a terminal that applied something, publish the
+//                   record itself for one that applied nothing, refuse when the
+//                   record is gone. Then review_track_validated_fixer_head.
+//                   A NAME, not a line number: the two line numbers this
+//                   comment used to carry were both stale, and a name survives
+//                   a re-flow of the file it points into.
 //       simplify -> Bash runs code_fixer_contract.py encode-aggregate
 //                   --phase phase2, the byte-shape oracle
 //                   (commands/simplify.md:341-348), then prepare-authority.
