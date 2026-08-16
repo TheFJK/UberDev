@@ -1250,6 +1250,44 @@ function probedNums(record) {
     return e.event === "pr_proof_relay_failed"; }));
   out.rRelayRc = vResR ? vResR.verification.relayRc : "MISSING";
 
+  // Run RT — the relay THROWS. Zero fixtures reach pr_proof_threw today, so the
+  // catch arm's published relayRc has never been measured. The harness resolves a
+  // function agentReturns value per call (tests/_workflow_harness.js, agentStub)
+  // and records the agent call BEFORE resolving it, so the throw is the supported
+  // way to drive a caller's catch without hiding the dispatch.
+  const vRTReturns = Object.assign({}, trivialReturns());
+  vRTReturns["verify-prs"] = function () { throw new Error("relay exploded"); };
+  const vRecRT = await run(buildArgs(), { agentReturns: vRTReturns });
+  const vResRT = resultOf(vRecRT);
+  const rtEvent = vResRT ? vResRT.auditEvents.filter(function (e) {
+    return e.event === "pr_proof_threw"; })[0] : null;
+  out.rtThrew = !!rtEvent;
+  // "MISSING", never null: null is the value under test on this run, so a null
+  // fallback would let a run that produced no result at all read as a PASS.
+  out.rtRelayRc = vResRT ? vResRT.verification.relayRc : "MISSING";
+  out.rtEventRelayRc = rtEvent ? rtEvent.relayRc : "MISSING";
+  out.rtProbed = vResRT ? vResRT.verification.probed : "MISSING";
+  out.rtProofs = vResRT ? vResRT.results.map(function (r) { return r.prProof; }).join(",") : "MISSING";
+  out.rtPrNums = vResRT ? vResRT.prsOpened.join(",") : "MISSING";
+  out.rtViolations = vRecRT.violations.length;
+
+  // Run RI — a non-zero INTEGER rc. pr_proof_relay_failed fires on prRelayRc !== 0,
+  // so this arm publishes relayRc: 1 — the event's presence is NOT the null
+  // discriminator. Every existing proof()/intake() helper hardcodes rc 0, so this
+  // arm had no coverage at all.
+  const vRIReturns = Object.assign({}, trivialReturns());
+  vRIReturns["verify-prs"] = { rc: 1 };
+  const vRecRI = await run(buildArgs(), { agentReturns: vRIReturns });
+  const vResRI = resultOf(vRecRI);
+  const riEvent = vResRI ? vResRI.auditEvents.filter(function (e) {
+    return e.event === "pr_proof_relay_failed"; })[0] : null;
+  out.riRelayFailed = !!riEvent;
+  out.riRelayRc = vResRI ? vResRI.verification.relayRc : "MISSING";
+  out.riEventRc = riEvent ? riEvent.rc : "MISSING";
+  out.riProofs = vResRI ? vResRI.results.map(function (r) { return r.prProof; }).join(",") : "MISSING";
+  out.riPrNums = vResRI ? vResRI.prsOpened.join(",") : "MISSING";
+  out.riViolations = vRecRI.violations.length;
+
   // Run P — a batch where nothing claims a PR. No relay, no agent, and NO
   // verification noise: a clean non-PR batch must read exactly as it did before
   // this change existed.
@@ -1264,6 +1302,10 @@ function probedNums(record) {
   out.pPrEvents = vResP ? vResP.auditEvents.filter(function (e) {
     return String(e.event).indexOf("pr_") === 0;
   }).length : null;
+  // The silent path's FULL published signature, not just its silence: relayRc is
+  // null here too, so null on its own cannot mean "the relay never ran".
+  out.pRelayRc = vResP ? vResP.verification.relayRc : "MISSING";
+  out.pProbed = vResP ? vResP.verification.probed : "MISSING";
 
   // Run Q — THE FALSE-DOWNGRADE WALL. 403 is GitHub declining to answer (rate
   // limit, token scope), not evidence the PR is absent. Treating it as a 404
@@ -2161,9 +2203,26 @@ else
   check rRelayFailed true         "B217 pr_proof_relay_failed fires — the ONLY thing separating a relay that never ran from one that answered unusably, since both publish relayRc null"
   check rRelayRc null             "B217b ...and the published relayRc really is null on that path, so the event is what carries the difference"
 
+  check rtThrew true              "B300 a throwing relay fires pr_proof_threw — the first fixture in the tree to reach that arm"
+  check rtRelayRc null            "B300b the published verification.relayRc is null when the throw beat the assignment"
+  check rtEventRelayRc null       "B300c the event carries the rc in its own field rather than leaving it to be inferred"
+  check rtProbed 2                "B300d the pass had reached the relay — probed separates this from the silent no-claim exit"
+  check rtProofs '"UNVERIFIED,UNVERIFIED"' "B300e fail-soft: a thrown relay classifies, it never disproves"
+  check rtPrNums '"901,902"'      "B300f fail-soft: the claims stay in prsOpened, never dropped from /goal's queue"
+  check rtViolations 0            "B300g zero harness violations on the throwing-relay path"
+
+  check riRelayFailed true        "B301 a non-zero INTEGER rc fires pr_proof_relay_failed"
+  check riRelayRc 1               "B301b ...and verification.relayRc is 1, not null — the event is NOT the null discriminator"
+  check riEventRc 1               "B301c the event's own rc field carries the value"
+  check riProofs '"UNVERIFIED,UNVERIFIED"' "B301d fail-soft: a failed relay classifies, it never disproves"
+  check riPrNums '"901,902"'      "B301e fail-soft: the claims stay in prsOpened"
+  check riViolations 0            "B301f zero harness violations on the non-zero-rc path"
+
   check pNoRelay true             "B113 a batch with no PR claim dispatches NO proof relay at all"
   check pProofs '"NOT_APPLICABLE,NOT_APPLICABLE"' "B114 non-PR records are classified NOT_APPLICABLE"
   check pPrEvents 0               "B115 a clean non-PR batch emits zero verification noise"
+  check pRelayRc null             "B302 the no-claim exit publishes relayRc null too — three distinct paths, one published value"
+  check pProbed 0                 "B302b probed 0 with no pr_ event (B115) is that path's whole signature"
 
   check qStatus '"PR_OPENED"'     "B116 a 403 does NOT disprove a PR (false-downgrade wall)"
   check qPrNums '"901,902"'       "B117 the throttled claim stays in prsOpened and in /goal's queue"
