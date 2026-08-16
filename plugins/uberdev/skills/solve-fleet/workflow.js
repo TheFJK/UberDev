@@ -1013,11 +1013,24 @@ let designedIssues = 0;
 let cb1Tripped = false;   // agent-ceiling
 let cb2Tripped = false;   // budget floor reached before the batch finished
 let prProbed = 0;         // #515: PR numbers actually sent to the proof relay
-// #515: the proof relay's rc. `null` is TWO facts, not one — the assignment in
-// verifyClaims() stores null both when the relay never ran and when it ran and
-// returned a non-integer rc, so the published verification.relayRc must not be
-// read as evidence of the first. The audit trail is what separates them: a relay
-// that ran and answered unusably emits pr_proof_relay_failed beside this value.
+// #515: the proof relay's rc. It carries a value ONLY when the relay both ran
+// and answered with an integer rc; every other exit leaves this null — no PR
+// claimed, repoSlug unusable, budget exhausted, the relay returned nothing, the
+// relay answered with a non-integer rc, the pass threw before the rc was read,
+// or the run threw before verifyClaims() was reached. So null is never evidence
+// the relay ran cleanly, and counting the null cases is not what tells them
+// apart: the audit trail is. pr_proof_skipped (reason no_repo_slug or
+// budget_exhausted), pr_proof_null, pr_proof_relay_failed, pr_proof_threw (which
+// carries its own probed and relayRc copies) and pr_proof_not_run cover every
+// exit but the no-claim one, two of them covering more than one apiece:
+// pr_proof_skipped splits on its reason, and pr_proof_relay_failed on whether an
+// integer rc came back. Two asymmetries are why the trail is read and this
+// value is not. pr_proof_relay_failed fires on ANY rc that is not 0 — a
+// non-zero rc, an integer rc included, and equally an answer carrying
+// no usable integer rc at all — so its presence does NOT imply this is null;
+// read the event's own rc field. And the no-claim exit is
+// deliberately silent, emitting nothing at all, so it is recognised by
+// probed === 0 rather than by any event.
 let prRelayRc = null;
 // #515: did the claim-verification pass RUN at all? Set the moment verifyClaims
 // is entered, so main()'s outer catch can tell "verification classified these

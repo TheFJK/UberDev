@@ -584,6 +584,182 @@ else
   fail "G20 rung one is not dispatched against the stricter task-1-only schema (or S_TASK1 stopped requiring taskCount)"
 fi
 
+# G40-G46 (#565) — one field, one meaning, on every surface that ships a
+# statement about it.
+#
+# `verification.relayRc` is published from several distinct exits, and `null`
+# is not one fact. SKILL.md's field table gave `null` an exhaustive two-case
+# meaning; the script's own declaration comment gave it two DIFFERENT cases;
+# and this suite asserted, ACROSS to the doc, that those were the only two.
+# Three shipped statements about one field, no two of them agreeing, and
+# nothing in the tree comparing them — which is why the disagreement survived
+# a review that read each surface on its own.
+#
+# Each surface therefore gets an anti-vacuity guard FIRST and its content rows
+# second. That order is the whole design: a `-F` needle over an empty capture
+# is a green that measures nothing, and an extraction anchored on a symbol that
+# has since been renamed fails OPEN by default.
+#
+# `tr -d '\r'` on every capture: the Windows job checks out with
+# `core.autocrlf=true` and grep cannot see a CR, so an untrimmed capture makes
+# every needle below miss for a reason no failure message would name.
+
+# --- the doc surface -------------------------------------------------------
+CV_SECTION="$(sed -n '/^## Claim verification/,/^## No-Workflow fallback/p' "$SKILL" | tr -d '\r')"
+CV_SECTION_LINES="$(grep -c '' <<<"$CV_SECTION" || true)"
+CV_SECTION_LAST="$(tail -n 1 <<<"$CV_SECTION")"
+
+# G40 — anti-vacuity, and it MUST run before G41/G42. The last-line check is
+# the half that carries the weight: a `sed` range whose closing anchor never
+# matches runs to EOF, and a bare non-empty guard passes on that runaway slice
+# while silently widening what G41 is allowed to match.
+if [ -z "$CV_SECTION" ]; then
+  fail "G40 the '## Claim verification' slice of SKILL.md came back empty — G41/G42 would be vacuous"
+elif [ "$CV_SECTION_LINES" -lt 15 ]; then
+  fail "G40 the claim-verification slice is only $CV_SECTION_LINES line(s) — too short to be the real section"
+elif [ "$CV_SECTION_LAST" != "## No-Workflow fallback" ]; then
+  fail "G40 the claim-verification slice ran past its closing anchor (last line: '$CV_SECTION_LAST') — G41 would be reading other sections"
+else
+  pass "G40 the claim-verification slice is the real section and stops on its own anchor (G41/G42 have something to read)"
+fi
+
+# G41 — the doc names every event that discriminates a null relayRc. Without
+# them `null` is unfalsifiable prose: a reader holding one has no way to tell
+# WHICH exit produced it, which is the defect this block exists to ratchet.
+CV_MISSING=""
+for cv_ev in pr_proof_skipped pr_proof_null pr_proof_relay_failed pr_proof_threw pr_proof_not_run; do
+  grep -qF -- "$cv_ev" <<<"$CV_SECTION" || CV_MISSING="$CV_MISSING $cv_ev"
+done
+if [ -z "$CV_MISSING" ]; then
+  pass "G41 SKILL.md's claim-verification section names all five events that discriminate a null relayRc"
+else
+  fail "G41 SKILL.md's claim-verification section names no discriminator for:$CV_MISSING"
+fi
+
+# G42 — the ratchet on the doc's retired sentence. It gave `null` an
+# EXHAUSTIVE two-case meaning, and both halves were wrong: there are more exits
+# than two, and one of the two it named — a non-zero rc — does not publish
+# `null` at all when the rc is an integer (B301b).
+if grep -qF -- 'both when no relay was dispatched' <<<"$CV_SECTION"; then
+  fail "G42 SKILL.md still gives relayRc null an exhaustive two-case meaning (the code has more exits — see B300b/B301b/B302)"
+else
+  pass "G42 SKILL.md no longer claims relayRc null means exactly two things"
+fi
+
+# G42b — the doc half of G45, and the reason the doc needs its own content row
+# at all: G41 asks only that the five names appear SOMEWHERE in the slice and
+# G42 asks only that the retired sentence be gone, so DELETING both asymmetry
+# bullets outright leaves G40, G41 and G42 all green. The three wordings below
+# are load-bearing, not decoration, and each was measured ABSENT from the
+# pre-fix section (`git show <base>:…/SKILL.md`), so none of them can be
+# satisfied by the prose this section replaced:
+#   `an integer one`     — the arm where relayRc is NOT null even though
+#                          pr_proof_relay_failed fired (B301b).
+#   `probed: 0`          — the whole signature of the one exit that emits no
+#                          pr_proof row at all (B302/B302b).
+#   `no usable integer`  — the OTHER arm of pr_proof_relay_failed. The event
+#                          fires on `prRelayRc !== 0`, and prRelayRc is null
+#                          whenever the relay's rc was not an integer (B217),
+#                          so a gloss reading only "a non-zero rc" excludes the
+#                          very exit B217 pins and re-opens this issue.
+CV_ASYM_MISSING=""
+for cv_needle in 'an integer one' 'probed: 0' 'no usable integer'; do
+  grep -qF -- "$cv_needle" <<<"$CV_SECTION" || CV_ASYM_MISSING="$CV_ASYM_MISSING [$cv_needle]"
+done
+if [ -z "$CV_ASYM_MISSING" ]; then
+  pass "G42b SKILL.md carries both asymmetries AND both firing arms of pr_proof_relay_failed (load-bearing wordings, each absent from the pre-fix section)"
+else
+  fail "G42b SKILL.md lost load-bearing claim-verification wording:$CV_ASYM_MISSING (see B217, B301b and B302/B302b)"
+fi
+
+# --- the script surface ----------------------------------------------------
+# The comment shipped beside the declaration is a shipped statement too, and it
+# is the surface this defect was BORN on: an earlier fix added a comment that
+# no row read, so it was free to contradict the doc. `awk` accumulates the
+# contiguous column-0 `//` run and prints it only once the declaration is
+# reached, so the capture can never bleed into the neighbouring prProbed /
+# prVerifyRan comments the way a `grep -B <n>` window would.
+PRRELAY_COMMENT="$(awk '/^\/\// { buf = buf $0 "\n"; next }
+                        /let prRelayRc = null;/ { printf "%s", buf; exit }
+                        { buf = "" }' "$WORKFLOW" | tr -d '\r')"
+PRRELAY_COMMENT_LINES="$(grep -c '^//' <<<"$PRRELAY_COMMENT" || true)"
+
+# G43 — anti-vacuity for the script half, symmetrical with G40. Rename
+# `prRelayRc` and the awk range matches nothing; G44 and G45 would then both
+# pass on an empty capture, because an absent comment trivially "no longer
+# says TWO facts" and trivially carries no stale wording.
+if [ -z "$PRRELAY_COMMENT" ]; then
+  fail "G43 no comment block was captured above the prRelayRc declaration — G44/G45 would be vacuous"
+elif [ "$PRRELAY_COMMENT_LINES" -lt 6 ]; then
+  fail "G43 only $PRRELAY_COMMENT_LINES comment line(s) above the prRelayRc declaration — too short to state the contract G44/G45 check"
+else
+  pass "G43 the prRelayRc declaration carries a captured comment block (G44/G45 have something to read)"
+fi
+
+# G44 — the script comment names the SAME five discriminators the doc names,
+# and has dropped the counting framing that made the two surfaces disagree.
+# Enumerating the cases is what went stale; naming the events does not.
+PRRELAY_MISSING=""
+for pr_ev in pr_proof_skipped pr_proof_null pr_proof_relay_failed pr_proof_threw pr_proof_not_run; do
+  grep -qF -- "$pr_ev" <<<"$PRRELAY_COMMENT" || PRRELAY_MISSING="$PRRELAY_MISSING $pr_ev"
+done
+if grep -qF -- 'TWO facts' <<<"$PRRELAY_COMMENT"; then
+  fail "G44 the prRelayRc comment still counts the null cases as exactly two — that is the claim the doc no longer makes"
+elif [ -n "$PRRELAY_MISSING" ]; then
+  fail "G44 the prRelayRc comment names no discriminator for:$PRRELAY_MISSING"
+else
+  pass "G44 the prRelayRc comment names the same five discriminators as SKILL.md and no longer counts the cases"
+fi
+
+# G45 — the script mirror of G42b: the same three facts a reader gets WRONG
+# from a comment that only lists exits. Every needle here is chosen so the
+# NEGATION of the fact cannot satisfy it, and every one was measured ABSENT
+# from the pre-fix comment — a needle the stale text already hits is not a
+# ratchet, it is a green that measures nothing:
+#   `an integer rc included`  — bare `integer rc` matched the retired comment's
+#                               own "returned a non-integer rc", i.e. it was
+#                               satisfied by the negation of the fact it pins.
+#   `deliberately silent`     — bare `silent` is equally satisfied by a comment
+#                               reading "not silent".
+#   `no usable integer rc`    — the second firing arm of pr_proof_relay_failed
+#                               (B217); see G42b for why it is load-bearing.
+PRRELAY_ASYM_MISSING=""
+for pr_needle in 'an integer rc included' 'deliberately silent' 'no usable integer rc'; do
+  grep -qF -- "$pr_needle" <<<"$PRRELAY_COMMENT" || PRRELAY_ASYM_MISSING="$PRRELAY_ASYM_MISSING [$pr_needle]"
+done
+if [ -z "$PRRELAY_ASYM_MISSING" ]; then
+  pass "G45 the prRelayRc comment carries both asymmetries AND both firing arms of pr_proof_relay_failed (load-bearing wordings, each absent from the pre-fix comment)"
+else
+  fail "G45 the prRelayRc comment lost load-bearing wording:$PRRELAY_ASYM_MISSING (see B217, B301b and B302/B302b)"
+fi
+
+# --- the test surface ------------------------------------------------------
+# G46 — this suite shipped the claim too, twice, and both copies asserted
+# ACROSS to SKILL.md. Fixing the doc alone would leave the repo's own
+# regression suite stating the thing the doc had just stopped saying.
+#
+# The needles are assembled from adjacent quoted fragments on purpose. Written
+# contiguously, each one matches ITSELF in this file and the row could never go
+# green — the same self-trip class as a secret-shaped fixture literal aborting
+# the pre-push scan.
+FLEET_TEST="$REPO_ROOT/tests/solve-fleet-workflow.test.sh"
+RETIRED_1="both publish ""relayRc null"
+RETIRED_2="Both publish ""verification.relayRc null"
+RETIRED_3="field table now ""says so in as many words"
+if [ ! -r "$FLEET_TEST" ]; then
+  fail "G46 cannot read $FLEET_TEST — the ratchet has nothing to scan"
+else
+  G46_HITS=""
+  for retired in "$RETIRED_1" "$RETIRED_2" "$RETIRED_3"; do
+    if grep -qF -- "$retired" "$FLEET_TEST"; then G46_HITS="$G46_HITS [$retired]"; fi
+  done
+  if [ -z "$G46_HITS" ]; then
+    pass "G46 no copy of the retired cross-file relayRc framing survives in this suite"
+  else
+    fail "G46 this suite still carries retired cross-file framing:$G46_HITS"
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # B — T3 behavioral fixtures
 # ---------------------------------------------------------------------------
@@ -1242,10 +1418,11 @@ function probedNums(record) {
   out.rProofs = vResR ? vResR.results.map(function (r) { return r.prProof; }).join(",") : null;
   out.rPrNums = vResR ? vResR.prsOpened.join(",") : null;
   out.rViolations = vRecR.violations.length;
-  // The event that separates a relay that NEVER RAN from one that ran and
-  // answered unusably. Both publish verification.relayRc null, and SKILL.md's
-  // field table now says so in as many words, so the audit trail is the ONLY
-  // thing left telling them apart — assert it, or the sentence is unbacked.
+  // This arm's own signature, not a general rule: `{}` carries no `rc`, so the
+  // non-integer branch stores null and pr_proof_relay_failed fires beside it.
+  // Read B301b before generalising — the SAME event fires with relayRc 1 when
+  // the rc is a non-zero integer, so the event's presence discriminates nothing
+  // on its own. The published value and the event's own rc field are what do.
   out.rRelayFailed = !!(vResR && vResR.auditEvents.some(function (e) {
     return e.event === "pr_proof_relay_failed"; }));
   out.rRelayRc = vResR ? vResR.verification.relayRc : "MISSING";
@@ -2200,8 +2377,8 @@ else
   check rProofs '"UNVERIFIED,UNVERIFIED"' "B111 a bodyless return classifies UNVERIFIED, claims retained"
   check rPrNums '"901,902"'       "B111b the retained claims still surface in prsOpened"
   check rViolations 0             "B112 zero harness violations on the bodyless-return path"
-  check rRelayFailed true         "B217 pr_proof_relay_failed fires — the ONLY thing separating a relay that never ran from one that answered unusably, since both publish relayRc null"
-  check rRelayRc null             "B217b ...and the published relayRc really is null on that path, so the event is what carries the difference"
+  check rRelayFailed true         "B217 pr_proof_relay_failed fires on a bodyless return — no rc is present, so the non-integer branch is taken"
+  check rRelayRc null             "B217b ...and the published relayRc is null on THIS arm — B301b pins the same event firing with relayRc 1, so the event alone discriminates nothing"
 
   check rtThrew true              "B300 a throwing relay fires pr_proof_threw — the first fixture in the tree to reach that arm"
   check rtRelayRc null            "B300b the published verification.relayRc is null when the throw beat the assignment"
