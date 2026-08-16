@@ -816,7 +816,7 @@ else
   fail "G20 rung one is not dispatched against the stricter task-1-only schema (or S_TASK1 stopped requiring taskCount)"
 fi
 
-# G31 (#532) — the escalation channel has to EXIST on the wire, and it has to be
+# G37 (#532) — the escalation channel has to EXIST on the wire, and it has to be
 # unconstrained there. Both halves are STRUCTURAL because no behavioural row can
 # reach them: the harness clones a canned return straight through and never
 # enforces `additionalProperties: false`, so every B row for the ratchet would
@@ -830,16 +830,16 @@ fi
 # costs an audit row instead of a PR number.
 SOLVE_SCHEMA_BLOCK="$(sed -n '/^  solve: {/,/^  },/p' "$WORKFLOW")"
 if [ -z "$SOLVE_SCHEMA_BLOCK" ]; then
-  fail "G31 could not locate the S.solve schema in workflow.js — the escalation-channel assertion cannot be evaluated"
+  fail "G37 could not locate the S.solve schema in workflow.js — the escalation-channel assertion cannot be evaluated"
 elif grep -qE '^[[:space:]]*escalatedTier: \{ type: "string"' <<<"$SOLVE_SCHEMA_BLOCK" \
   && grep -qE '^[[:space:]]*escalationReason: \{ type: "string"' <<<"$SOLVE_SCHEMA_BLOCK" \
   && ! grep -qE '^[[:space:]]*escalatedTier: \{[^}]*enum' <<<"$SOLVE_SCHEMA_BLOCK"; then
-  pass "G31 S.solve carries the mid-run escalation channel, and escalatedTier is deliberately NOT enum-constrained on the wire"
+  pass "G37 S.solve carries the mid-run escalation channel, and escalatedTier is deliberately NOT enum-constrained on the wire"
 else
-  fail "G31 S.solve is missing escalatedTier/escalationReason, or escalatedTier grew a wire-side enum (an illegal advisory value would cost the whole delivery record)"
+  fail "G37 S.solve is missing escalatedTier/escalationReason, or escalatedTier grew a wire-side enum (an illegal advisory value would cost the whole delivery record)"
 fi
 
-# G32 (#532) — ONE ordered spelling of the tier vocabulary in this file. The
+# G38 (#532) — ONE ordered spelling of the tier vocabulary in this file. The
 # ratchet needs an ORDER to compare against, and the obvious way to get one is a
 # second array beside the existing membership map — which is the uncompared-copies
 # shape (#370) the moment a tier is added to one and not the other. The map must
@@ -847,9 +847,9 @@ fi
 if grep -qE '^const TIER_ORDER = \[' "$WORKFLOW" \
   && grep -q 'TIER_ORDER.reduce(' "$WORKFLOW" \
   && ! grep -qE '^const TIERS = \{' "$WORKFLOW"; then
-  pass "G32 the tier vocabulary is spelled ONCE as TIER_ORDER, with TIERS derived from it"
+  pass "G38 the tier vocabulary is spelled ONCE as TIER_ORDER, with TIERS derived from it"
 else
-  fail "G32 workflow.js carries a second hand-written copy of the tier vocabulary (or lost the ordered one)"
+  fail "G38 workflow.js carries a second hand-written copy of the tier vocabulary (or lost the ordered one)"
 fi
 
 # G33 (#532) — the rejection vocabulary is spelled TWICE: the frozen map in
