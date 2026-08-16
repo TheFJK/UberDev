@@ -1712,8 +1712,9 @@ async function runTaskChain(rec, planPath) {
   // run ends with it simply open. That is strictly better than the unearned
   // auto-close it replaces — unfinished work stays visible instead of being
   // closed over — but it is not the ingesting side learning to read this flag,
-  // which remains the open half and is tracked as its own follow-up issue,
-  // filed with this change and named in the PR body.
+  // which remains the open half and is tracked as issue #592. A pointer to a
+  // filed number rather than to "a follow-up issue": an unnamed one cannot be
+  // checked, and the whole point of this note is that the gap stays legible.
   out.chainComplete = ledger.complete;
   if (!ledger.complete) {
     // The MEMBER LIST here is a published contract, joined against SKILL.md's
