@@ -55,6 +55,21 @@ The append happens **before** the dispatch, because the handoff validator requir
 
 This skill's wave-based controller-only-git approach is intentionally **not** worktree-isolated — it relies on provable file-set partitioning per wave. For any *other* parallel-agent dispatch (review fanouts, ad-hoc multi-agent edits), default to `isolation: "worktree"` on the Agent tool calls — see the `uberdev:dispatching-parallel-agents` skill.
 
+## Rulings
+
+A run of this skill never parks on a judgement call. `--turbo` is unattended by contract and `/goal` drives its own circuit breakers, so a controller that halts to consult a person is halting in front of an empty chair: nobody is reading. A call that turns out wrong costs rework a reviewer can see and undo; a parked run costs the whole run.
+
+**This adds no new stop.** The stops are the ones this skill already ships — the BLOCKED ladder in "Handling Implementer Status", the REFUSED rung beside it, and cap exhaustion (`## Loop caps`) — and every one of them *routes* rather than waits: it fixes the plan, re-scopes the task, or escalates with committed work intact. An irreversible or destructive operation, a security-sensitive action, a side effect outside the worktree, and a plan too broken to guess at are each covered by that ladder already, so none of them needs a gate of its own here.
+
+What is new is the record. A judgement the controller makes instead of stalling on it is a **ruling**, and every ruling gets one line on disk at the moment it is made:
+
+- **Where.** One append-only `rulings.md` per run, in the controller's private run directory — the same directory that holds each task's `task_path` and fix ledger. Never inside the feature worktree, for the reason `## Fix ledger` already gives: an untracked file there is exactly what `git add -A` sweeps into a task commit, and it perturbs the post-wave full-test-suite run.
+- **How.** `sdd_append_ruling <rulings_path> <decision> <why> <cost>` creates the file at mode `0600` on the first call and appends one line per call after it, never truncating and never rewriting.
+- **Shape.** `Ruling: <decision> — <why> — <cost>`: what you decided, why you decided it, and what it costs if it turns out to be wrong. All three fields are required — the helper returns rc `2` rather than writing a half-line, exactly as the fix-ledger helpers do.
+- **A decision not on disk was not made.** Rulings are no more prose the controller is asked to remember than the caps are: the file is the record, and step 5 reads it back rather than reconstructing it from memory.
+
+What counts as a ruling: overriding a step of the plan, choosing between two defensible approaches, parking a finding once a cap fires, resequencing a wave, or accepting a finding as out of scope for this run.
+
 ## When to Use
 
 ## Routed child adapter (mandatory)
@@ -234,6 +249,29 @@ import os,sys
 ledger,loop,round_no,cap=sys.argv[1:]
 entry=("## cap exhausted | loop %s | round %s | cap %s\n" % (loop,round_no,cap)).encode("utf-8")
 fd=os.open(ledger,os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW,0o600)
+with os.fdopen(fd,"ab") as stream: stream.write(entry)
+PY
+}
+
+# A decision not on disk was not made. One append-only `rulings.md` per run,
+# living beside the fix ledgers in the controller's private run directory and
+# never inside the feature worktree — the worktree is what `git add -A` sweeps
+# into the branch. O_APPEND creates it at 0600 on the first ruling and appends
+# thereafter, O_NOFOLLOW refuses a symlink, and O_WRONLY on a directory is
+# EISDIR. One line per call, never truncated and never rewritten, so the
+# end-of-run roll-up is read back from the file instead of remembered.
+sdd_append_ruling() {
+  [ "$#" -eq 4 ] || return 2
+  local rulings_path="${@:1:1}" decision="${@:2:1}" why="${@:3:1}" cost="${@:4:1}"
+  case "$rulings_path" in /*) ;; *) return 2 ;; esac
+  [ -n "$decision" ] || return 2
+  [ -n "$why" ] || return 2
+  [ -n "$cost" ] || return 2
+  python3 -I -B - "$rulings_path" "$decision" "$why" "$cost" <<'PY' || return 2
+import os,sys
+rulings,decision,why,cost=sys.argv[1:]
+entry=("Ruling: %s — %s — %s\n" % (decision,why,cost)).encode("utf-8")
+fd=os.open(rulings,os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW,0o600)
 with os.fdopen(fd,"ab") as stream: stream.write(entry)
 PY
 }
@@ -601,7 +639,7 @@ digraph when_to_use {
 2. **Create TodoWrite** with one todo per task, labeled with its wave (e.g., `[wave-2] Task 4: ...`).
 3. **Verify clean baseline:** `git status` is clean; you're on the feature branch in the feature-branch worktree. Capture `BASELINE_SHA=$(git rev-parse HEAD)` — useful only for diagnostic logging now that the post-impl-review's `commit_range` is computed independently inside `/uberdev:review-pr` Phase 1.
 4. **For each wave (sequential):**
-   a. Build every implementer handoff from `./implementer-prompt.md`, using edge `sdd.task.implement`, role `implementation-worker`, phase `implementation`, and instance stage `implement`. Prepare every handoff, preflight the complete wave, then dispatch before waiting. Each handoff carries exact manifest keys, including canonical absolute `allowed_paths` and `denied_paths`. After preparation and before launch, `sdd_launch_prepared_batch` refuses any wave whose implementers' `allowed_paths` intersect — by equality *or* directory containment — with rc `3`, and any wave whose implementer ownership is absent with rc `2`; in both cases it dispatches **nothing**. An overlap is a **plan** defect: route that wave into the BLOCKED ladder and fix the decomposition — never "dispatch anyway".
+   a. Build every implementer handoff from `./implementer-prompt.md`, using edge `sdd.task.implement`, role `implementation-worker`, phase `implementation`, and instance stage `implement`. Prepare every handoff, preflight the complete wave, then dispatch before waiting. Each handoff carries exact manifest keys, including canonical absolute `allowed_paths` and `denied_paths`. Each handoff also carries the no-subagents contract, stated on both dispatch paths so it survives either — the routed directive emits it at the wire (`lib/child-dispatch.sh`) and `./implementer-prompt.md` states it in the template the child actually reads, so it holds on the non-Workflow fallback too: an implementer does all of its own task, never dispatching a subagent to implement part of it and never a reviewer to check its work, because review arrives from this controller after the implementer reports and every reviewer a worker spawns for itself duplicates the task review this loop already dispatches — a full extra review seat per task. After preparation and before launch, `sdd_launch_prepared_batch` refuses any wave whose implementers' `allowed_paths` intersect — by equality *or* directory containment — with rc `3`, and any wave whose implementer ownership is absent with rc `2`; in both cases it dispatches **nothing**. An overlap is a **plan** defect: route that wave into the BLOCKED ladder and fix the decomposition — never "dispatch anyway".
    b. **Implementers never run git.** They edit files, run their tests, and report `Status + changed file paths + test results`.
    c. After all dispatch receipts exist, wait for all wave implementers with `uberdev_wait_child`; read each immutable result artifact only after its wait succeeds.
    d. For each completed implementer (in task ID order, sequential): controller stages **only that task's reported paths** with `git add <paths>` and commits with the task-specific message.
@@ -654,6 +692,9 @@ model_invocation: false
 ```
 
 5. Hand off to `uberdev:finish-branch` (no flag arg). The branch close-out detects unattended mode via the inherited `UBERDEV_TURBO=1` environment variable from the selected dispatch backend — under that signal, `finish-branch` auto-selects "Push and Create PR" without prompting (#97). For large tier, `pr-test-analyzer` was dispatched in Step 4.5 (above) and its findings are now on disk at `<summary_dir>/pr-test-analyzer-<plan-scope>.md`. `finish-branch` will discover and include them in the PR body's `## Reviewer findings summary` section. Post-implementation reviewer fanout is hosted by `/uberdev:review-pr` Phase 1 (chained from `finish-branch` after PR push); no reviewer *fanout* is dispatched from `subagent-driven-dev` itself (see Step 4.5 for the carve-out vs the retired `uberdev:post-impl-review` fanout).
+
+   **Rulings roll-up.** Before that handoff, read the run's `rulings.md` and emit every line it holds under a `## Rulings I made` heading, in write order, each still carrying what it costs if wrong — the roll-up is exhaustive: if the file holds a ruling, this list holds it. That is what goes in this run's final message.
+   The same `## Rulings I made` block also goes into the `## Summary` body composed for the `finish-branch` Option-2 PR, not only into the message this run ends with: `finish-branch` collects `post-impl-review-*.md` and `pr-test-analyzer*.md` from the run directory and nothing else, so `rulings.md` reaches whoever reviews the PR only because this step writes it there.
 
 ### Parallel Dispatch Pattern
 
@@ -897,6 +938,7 @@ Ownership map:
 - Let implementer self-review replace actual review (both are needed)
 - **Start a task's code quality review before that task's spec compliance is ✅** (wrong order — but the gate is per task: a spec-approved task starts quality review immediately, regardless of siblings still in their spec fix-loops)
 - Move to next task while either review has open issues
+- Accept a reviewer an implementer spawned for itself as a review seat — it duplicates the task review this loop already dispatches, so it is a defect to flag, not extra rigor
 
 **If subagent asks questions:**
 - Answer clearly and completely

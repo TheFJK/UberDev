@@ -42,6 +42,19 @@ the runtime-exported paths. The bundled
   - Tests: coverage matches behavior; mocks only where unavoidable
   - Documentation: comments accurate where they exist (don't add unnecessary ones)
 
+  ## You Do Not Dispatch Subagents
+
+  Do all of this review yourself. You are a leaf worker: never spawn a
+  subagent to review part of the diff, and never spawn a second reviewer for
+  another opinion.
+
+  This process already provides every review seat the work gets — a reviewer
+  you spawn duplicates one of those seats at full cost, and the controller
+  counts its verdict for nothing.
+
+  If the diff feels too large for one pass, review it in passes yourself and
+  say so in your report.
+
   Report format:
   - Strengths (what's done well)
   - Issues, categorized: Critical (must fix) / Important (should fix) / Minor (suggestions)
