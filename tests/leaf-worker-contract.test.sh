@@ -194,11 +194,20 @@ ANY_HEADING_RE = re.compile(r"^\s*##\s")
 # controller-facing framing ("dispatching a spec compliance reviewer subagent",
 # "dispatch the task review") does not match: it has no first-person article
 # from this set, which is why the article group is closed.
+# The verb list, the determiner list and the noun list are each OPEN to the
+# forms a worker prompt would actually use, because a closed vocabulary made
+# this row certify the opposite of what it claims. Measured on the pre-fix
+# regex: inserting "Dispatch two reviewers over the diff", "Use the Task tool to
+# start a reviewer of your own" and "Spawning a subagent for the boring half is
+# fine" into a worker region left the suite at 32 passed, 0 failed. Plural nouns
+# ("reviewers"), numeric determiners ("two"), gerunds ("Spawning") and bare tool
+# calls all evaded it, and L4.C/L4.N are built from the same closed vocabulary
+# the regex encodes, so the controls could not reveal the hole either.
 DELEGATION_RE = re.compile(
     r"\b(spawn|dispatch|launch)\s+"
-    r"(a|an|another|your own|a second|a fresh)\s+"
+    r"(a|an|another|your own|a second|a fresh|two|three|several|some|additional|extra|\d+)\s+"
     r"(\w+\s+){0,2}"
-    r"(reviewer|subagent|agent|implementer)\b",
+    r"(reviewers?|subagents?|agents?|implementers?)\b",
     re.IGNORECASE,
 )
 # The section under test necessarily QUOTES the forbidden phrasing in order to
