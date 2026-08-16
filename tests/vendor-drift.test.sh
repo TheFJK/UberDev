@@ -2036,6 +2036,108 @@ else
 fi
 
 echo
+echo "== D-REL16: the argv separator =="
+
+# D-REL16 — an upstream's clone url is REGISTER-SUPPLIED (`upstreams.<id>.url`,
+# or the default host plus its `repo` slug), and `run()` hands it to git as bare
+# argv. A url beginning with `-` is then not a repository but an OPTION: git's
+# own `--upload-pack=<cmd>` is executed on the spot, so editing one string in
+# `vendor.json` becomes code execution on whoever runs the weekly job — and the
+# job runs in CI, unattended, with a token. `--` before the url is what makes
+# that unreachable, and it has to be there in BOTH queries. `resolve_head` and
+# `resolve_tags` each hand the same register string to a separate `run()` call,
+# so a separator on one of them leaves the whole path reachable through the
+# other.
+#
+# Asserted from the stub's own LEDGER rather than by grepping the source: a
+# third ls-remote call site added later is caught by this row whether or not
+# whoever adds it remembers the row exists, which is not true of a grep for two
+# known line numbers. Nothing here is typed — the url each invocation carried is
+# matched back to the register's own derived slug list.
+run_drift "$WORK/drel16.log" ok "$WATERMARK" "" "[]" --dry-run
+DREL16_FAILS=''
+[ "$DRIFT_RC" -eq 0 ] \
+  || DREL16_FAILS="the happy-path run whose ledger this row reads exited rc=$DRIFT_RC"
+DREL16_HEADQ=0
+DREL16_TAGSQ=0
+DREL16_BARE=''
+DREL16_UNKNOWN=''
+DREL16_NOURL=''
+while IFS= read -r DREL16_LINE; do
+  case "$DREL16_LINE" in
+    "git ls-remote "*) ;;
+    *) continue ;;
+  esac
+  # Walk past the flags git itself owns. The first token that is neither a flag
+  # nor the separator is the url, and whatever sits immediately in front of it
+  # is the token under test. Reading the POSITION rather than grepping for a
+  # `--` anywhere on the line is deliberate: `--tags` also contains `--`, and a
+  # separator landing after the url protects nothing.
+  #
+  # Walked with parameter expansion rather than `read -r -a`: this file has no
+  # other array, and an array walk is the one shape here that would silently
+  # mean something else under zsh (`read -a` is not zsh's array flag, and zsh
+  # indexes from 1), so it would read as green while testing nothing. A token
+  # that comes out empty — the only way doubled spaces could reach this — falls
+  # to the `*` arm and is reported as "no url token", which is loud.
+  DREL16_REST="${DREL16_LINE#git ls-remote}"
+  DREL16_PREV=''
+  DREL16_URL=''
+  DREL16_TAGQ=0
+  while [ -n "$DREL16_REST" ]; do
+    DREL16_REST="${DREL16_REST# }"
+    DREL16_TOK="${DREL16_REST%% *}"
+    case "$DREL16_TOK" in
+      --tags) DREL16_TAGQ=1; DREL16_PREV="$DREL16_TOK" ;;
+      --)     DREL16_PREV="$DREL16_TOK" ;;
+      *)      DREL16_URL="$DREL16_TOK"; break ;;
+    esac
+    case "$DREL16_REST" in
+      *" "*) DREL16_REST="${DREL16_REST#* }" ;;
+      *)     DREL16_REST='' ;;
+    esac
+  done
+  if [ "$DREL16_TAGQ" -eq 1 ]; then
+    DREL16_TAGSQ=$((DREL16_TAGSQ + 1))
+  else
+    DREL16_HEADQ=$((DREL16_HEADQ + 1))
+  fi
+  if [ -z "$DREL16_URL" ]; then
+    [ -n "$DREL16_NOURL" ] || DREL16_NOURL="$DREL16_LINE"
+    continue
+  fi
+  # Anti-vacuity on the token itself. Whatever the walk just decided was the url
+  # has to name a registered upstream, or "the token after `--`" could be any
+  # string at all and this row would report a pass over a line it never
+  # understood. Same derivation the stub uses to answer the tag query: strip the
+  # scheme, then the host, and what is left is the `repo` slug.
+  DREL16_SLUG="${DREL16_URL#*://}"
+  DREL16_SLUG="${DREL16_SLUG#*/}"
+  grep -qxF -e "$DREL16_SLUG" "$ALL_SLUGS_FILE" \
+    || { [ -n "$DREL16_UNKNOWN" ] || DREL16_UNKNOWN="$DREL16_LINE"; }
+  [ "$DREL16_PREV" = "--" ] \
+    || { [ -n "$DREL16_BARE" ] || DREL16_BARE="$DREL16_LINE"; }
+done < "$WORK/drel16.log"
+[ -z "$DREL16_NOURL" ] \
+  || DREL16_FAILS="${DREL16_FAILS}${DREL16_FAILS:+; }an ls-remote invocation carries no url token at all: $DREL16_NOURL"
+[ -z "$DREL16_UNKNOWN" ] \
+  || DREL16_FAILS="${DREL16_FAILS}${DREL16_FAILS:+; }the token read as the url names no registered upstream: $DREL16_UNKNOWN"
+[ -z "$DREL16_BARE" ] \
+  || DREL16_FAILS="${DREL16_FAILS}${DREL16_FAILS:+; }a register-supplied url reaches git as a bare argument: $DREL16_BARE"
+# ...and the ledger has to carry BOTH shapes. A `--`-carrying HEAD query proves
+# nothing about the tag query, and an empty ledger would let every assertion in
+# the loop above never run at all.
+[ "$DREL16_HEADQ" -gt 0 ] \
+  || DREL16_FAILS="${DREL16_FAILS}${DREL16_FAILS:+; }the ledger logs no HEAD ls-remote at all"
+[ "$DREL16_TAGSQ" -gt 0 ] \
+  || DREL16_FAILS="${DREL16_FAILS}${DREL16_FAILS:+; }the ledger logs no \`--tags\` ls-remote at all"
+if [ -z "$DREL16_FAILS" ]; then
+  ok "D-REL16 both ls-remote queries pass \`--\` before the register-supplied url"
+else
+  no "D-REL16 a register-supplied url is not separated from git's own options: $DREL16_FAILS"
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

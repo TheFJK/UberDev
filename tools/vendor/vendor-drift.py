@@ -132,8 +132,16 @@ def load_register(path):
 
 
 def resolve_head(repo_url, repo_slug):
-    """Resolve a remote HEAD, failing loudly on every ambiguous outcome."""
-    rc, out, err = run(["git", "ls-remote", repo_url, "HEAD"])
+    """Resolve a remote HEAD, failing loudly on every ambiguous outcome.
+
+    `repo_url` is register-supplied, so it reaches this line as data and must
+    not be allowed to arrive as an option: `--` ends git's own option list, and
+    everything after it is a repository however it is spelled. Without the
+    separator a url beginning with `-` is parsed as a flag — `--upload-pack=`
+    names a command git runs — so one edited string in `vendor.json` would
+    execute code inside the unattended weekly job.
+    """
+    rc, out, err = run(["git", "ls-remote", "--", repo_url, "HEAD"])
     if rc != 0:
         fail("git ls-remote failed for upstream %s (rc=%d): %s"
              % (repo_slug, rc, (err or out).strip()))
@@ -259,8 +267,13 @@ def resolve_tags(repo_url, repo_slug):
     An annotated tag's `^{}` peel line OVERWRITES the tag object's own oid for
     the same name: the register records the commit a release points at, and a
     tag object's oid would never compare equal to it.
+
+    `--` separates git's options from the register-supplied url for the same
+    reason it does in `resolve_head`, and it is needed independently: the two
+    functions build their argv separately, so a separator on one of them leaves
+    the other reachable.
     """
-    rc, out, err = run(["git", "ls-remote", "--tags", repo_url])
+    rc, out, err = run(["git", "ls-remote", "--tags", "--", repo_url])
     if rc != 0:
         fail("git ls-remote --tags failed for upstream %s (rc=%d): %s"
              % (repo_slug, rc, (err or out).strip()))
