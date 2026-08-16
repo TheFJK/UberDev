@@ -876,7 +876,7 @@ else
   fail "G38 workflow.js carries a second hand-written copy of the tier vocabulary (or lost the ordered one)"
 fi
 
-# G33 (#532) — the rejection vocabulary is spelled TWICE: the frozen map in
+# G40 (#532) — the rejection vocabulary is spelled TWICE: the frozen map in
 # workflow.js and the documented list in SKILL.md. Two uncompared copies of one
 # contract is the #370 shape, and the failure is quiet — a verdict the script can
 # emit and the doc never names is a value an operator cannot look up. So join
@@ -903,29 +903,29 @@ esc_absent() {
 ESC_JS_N="$(esc_count "$ESC_JS_VERDICTS")"
 ESC_DOC_N="$(esc_count "$ESC_DOC_VERDICTS")"
 if [ "$ESC_JS_N" -ge 3 ] && [ "$ESC_DOC_N" -ge 3 ]; then
-  pass "G33.1 both rejection-verdict lists extracted (workflow.js: $ESC_JS_N, SKILL.md: $ESC_DOC_N)"
+  pass "G40.1 both rejection-verdict lists extracted (workflow.js: $ESC_JS_N, SKILL.md: $ESC_DOC_N)"
 else
-  fail "G33.1 setup error: the rejection union did not extract from both sides (workflow.js: $ESC_JS_N, SKILL.md: $ESC_DOC_N — both expected >= 3)"
+  fail "G40.1 setup error: the rejection union did not extract from both sides (workflow.js: $ESC_JS_N, SKILL.md: $ESC_DOC_N — both expected >= 3)"
 fi
 ESC_MISSING="$(esc_absent "$ESC_DOC_VERDICTS" "$ESC_JS_VERDICTS")"
 ESC_EXTRA="$(esc_absent "$ESC_JS_VERDICTS" "$ESC_DOC_VERDICTS")"
 if [ -z "$ESC_MISSING" ] && [ -z "$ESC_EXTRA" ]; then
-  pass "G33.2 SKILL.md and workflow.js agree on the closed rejection vocabulary, both directions"
+  pass "G40.2 SKILL.md and workflow.js agree on the closed rejection vocabulary, both directions"
 else
-  fail "G33.2 the rejection vocabulary has drifted — documented but never emitted:$ESC_MISSING | emitted but never documented:$ESC_EXTRA"
+  fail "G40.2 the rejection vocabulary has drifted — documented but never emitted:$ESC_MISSING | emitted but never documented:$ESC_EXTRA"
 fi
 
-# G33.3 — the two audit event names are the operator's only handle on a
+# G40.3 — the two audit event names are the operator's only handle on a
 # recorded-or-refused escalation, so both must be greppable in the doc too. An
 # event the script emits and the doc never names is an event nobody looks for.
 if grep -Fq 'tier_escalated' "$SKILL" && grep -Fq 'tier_escalation_rejected' "$SKILL" \
   && grep -Fq 'tierEscalations' "$SKILL"; then
-  pass "G33.3 SKILL.md names both escalation audit events and the accepted-escalation counter"
+  pass "G40.3 SKILL.md names both escalation audit events and the accepted-escalation counter"
 else
-  fail "G33.3 SKILL.md omits an escalation audit event or the tierEscalations counter"
+  fail "G40.3 SKILL.md omits an escalation audit event or the tierEscalations counter"
 fi
 
-# G33.4 — the two per-record fields and the counter have to be declared where an
+# G40.4 — the two per-record fields and the counter have to be declared where an
 # operator actually reads the record shape: the Return value fence. MEASURED as a
 # real hole before this row existed — deleting `escalatedTier, escalationReason`
 # from that fence reds nothing else in this file, in docs-accuracy, or in the
@@ -934,13 +934,13 @@ fi
 # Anti-vacuity first: an empty extraction would make the greps below meaningless.
 SF_RETURN_FENCE="$(awk '/^## Return value/{seen=1; next} seen && /^```/{n++; next} seen && n==1' "$SKILL")"
 if [ -z "$SF_RETURN_FENCE" ]; then
-  fail "G33.4 setup error: could not extract the Return value fence from SKILL.md"
+  fail "G40.4 setup error: could not extract the Return value fence from SKILL.md"
 elif grep -q 'escalatedTier' <<<"$SF_RETURN_FENCE" \
   && grep -q 'escalationReason' <<<"$SF_RETURN_FENCE" \
   && grep -q 'tierEscalations' <<<"$SF_RETURN_FENCE"; then
-  pass "G33.4 the Return value fence declares both per-record escalation fields and the top-level counter"
+  pass "G40.4 the Return value fence declares both per-record escalation fields and the top-level counter"
 else
-  fail "G33.4 SKILL.md's Return value fence omits escalatedTier / escalationReason / tierEscalations — the documented record shape has drifted from the one the script publishes"
+  fail "G40.4 SKILL.md's Return value fence omits escalatedTier / escalationReason / tierEscalations — the documented record shape has drifted from the one the script publishes"
 fi
 
 # G35 (#563) — the RECOVERY ARM inside main()'s outer catch, pinned structurally
@@ -3693,8 +3693,8 @@ else
   # SPEC_REVISE_ROUNDS. The cap is G14c (the constant) plus B262c (the loop
   # obeying it on an arm where the reviser never succeeds); these two rows claim
   # only what they can see.
-  check srReviseCalls 1             "B254 a REVISIONS_REQUIRED verdict dispatches a spec reviser, and stops the moment one lands usably"
-  check srNoReviseOnApprove 0       "B255 an APPROVE dispatches none — the revision round is gated, not unconditional"
+  check srReviseCalls 1             "B312 a REVISIONS_REQUIRED verdict dispatches a spec reviser, and stops the moment one lands usably"
+  check srNoReviseOnApprove 0       "B313 an APPROVE dispatches none — the revision round is gated, not unconditional"
   check srRejectSameRound true      "B256 REJECT takes the revision round on the same terms, and the reviewer is never re-run after it"
   check srPlanReadsRevision true    "B257 an accepted revision is what the planner is pointed at, never the superseded spec"
   check srPathRejected true         "B258 a revision at a different in-run-dir path is rejected (exact equality, not a prefix check) and audited"
@@ -3791,8 +3791,8 @@ else
   check qFixerDispatched true   "B59a REVISIONS_REQUIRED dispatches a fixer"
   check qNoFindingText true     "B59b reviewer-returned text NEVER reaches the fixer prompt"
   check qReviewPathInPrompt true "B59c the fixer is given the review file BY PATH"
-  check qFixCheckoutGate true   "B256 the fixer — the rung that amends an existing commit — is told never to fall back to the repository root and to report BLOCKED when the shared checkout is missing (#557)"
-  check qFixWorkspaceAsked true "B257 ...and is asked for workspaceReady, the flag B204/B205 gate its return on"
+  check qFixCheckoutGate true   "B314 the fixer — the rung that amends an existing commit — is told never to fall back to the repository root and to report BLOCKED when the shared checkout is missing (#557)"
+  check qFixWorkspaceAsked true "B315 ...and is asked for workspaceReady, the flag B204/B205 gate its return on"
   check qNoFindingInLogs true   "B59d reviewer-returned text is never logged or returned either"
 
   check rChainAgents 4       "B60a CB3 stops the task chain at the live per-issue implement budget"
@@ -4035,18 +4035,18 @@ else
   check fwStopped true            "B206 ...and the chain stops: no second fix round, no re-review of bytes nobody attributable changed"
 
   # --- #532: the one-way tier ratchet, mid-run return channel (W1-W8) -------
-  check escRecorded true          "B260 (W1) a genuine upgrade is audited as tier_escalated with BOTH ends of the move (from/to) and the issue it belongs to"
-  check escReasonKept true        "B261 (W1) ...carrying the solver's reason, so the next triage has something it can act on"
-  check escCount 1                "B262 (W1) tierEscalations counts it"
-  check escLogged true            "B263 (W1) ...and the operator gets a log line naming the issue"
-  check escDeliveryIntact true    "B264 (W1) the delivery record is untouched — an escalation is a note beside the result, never a rewrite of it"
-  check escPublished '"medium"'   "B265 (W1) the accepted tier is published on the record for the next classification to read"
-  check escNoStrayReject true     "B266 (W1) ...and no rejection row is emitted beside the acceptance"
+  check escRecorded true          "B316 (W1) a genuine upgrade is audited as tier_escalated with BOTH ends of the move (from/to) and the issue it belongs to"
+  check escReasonKept true        "B317 (W1) ...carrying the solver's reason, so the next triage has something it can act on"
+  check escCount 1                "B318 (W1) tierEscalations counts it"
+  check escLogged true            "B319 (W1) ...and the operator gets a log line naming the issue"
+  check escDeliveryIntact true    "B320 (W1) the delivery record is untouched — an escalation is a note beside the result, never a rewrite of it"
+  check escPublished '"medium"'   "B321 (W1) the accepted tier is published on the record for the next classification to read"
+  check escNoStrayReject true     "B322 (W1) ...and no rejection row is emitted beside the acceptance"
 
-  check escDownRejected true      "B267 (W2) THE RATCHET: medium -> small is refused as not-an-upgrade, recorded through the DELIVERY rung's return site"
-  check escDownCount 0            "B268 (W2) ...and a refused move never advances the counter"
-  check escDownNoUpgradeRow true  "B269 (W2) ...and emits no tier_escalated row"
-  check escDownBlanked true       "B270 (W2) the refused value is blanked off the published record — results cannot carry a yes the script said no to (it survives in the audit row)"
+  check escDownRejected true      "B323 (W2) THE RATCHET: medium -> small is refused as not-an-upgrade, recorded through the DELIVERY rung's return site"
+  check escDownCount 0            "B324 (W2) ...and a refused move never advances the counter"
+  check escDownNoUpgradeRow true  "B325 (W2) ...and emits no tier_escalated row"
+  check escDownBlanked true       "B326 (W2) the refused value is blanked off the published record — results cannot carry a yes the script said no to (it survives in the audit row)"
 
   # W2b was added after the block below, so its ids are the next free ones
   # file-wide rather than the next ones in sequence — uniqueness is what the id
@@ -4055,24 +4055,24 @@ else
   check escSameCount 0            "B292 (W2b) ...and advances no counter"
   check escSameNoUpgradeRow true  "B293 (W2b) ...and emits no tier_escalated row"
 
-  check escUnknownRejected true   "B271 (W3) an off-vocabulary tier is refused as unknown-tier, with the attempted value preserved"
-  check escUnknownKeepsPr true    "B272 (W3) ...and the delivery record SURVIVES: the wire carries no enum precisely so an illegal advisory value cannot reject an otherwise-solved issue's return"
-  check escUnknownInQueue true    "B273 (W3) ...so the PR still reaches the queue /goal ingests"
+  check escUnknownRejected true   "B327 (W3) an off-vocabulary tier is refused as unknown-tier, with the attempted value preserved"
+  check escUnknownKeepsPr true    "B328 (W3) ...and the delivery record SURVIVES: the wire carries no enum precisely so an illegal advisory value cannot reject an otherwise-solved issue's return"
+  check escUnknownInQueue true    "B329 (W3) ...so the PR still reaches the queue /goal ingests"
 
-  check escNoReasonRejected true  "B274 (W4) a whitespace-only reason is refused as no-reason — an unexplained tier bump is not a record"
-  check escNoReasonCount 0        "B275 (W4) ...and does not advance the counter"
+  check escNoReasonRejected true  "B330 (W4) a whitespace-only reason is refused as no-reason — an unexplained tier bump is not a record"
+  check escNoReasonCount 0        "B331 (W4) ...and does not advance the counter"
 
-  check escSameFleet true         "B276 (W5) CB1 INVARIANT: the escalated run dispatches exactly the same agents, in the same order, as the byte-identical non-escalated run"
-  check escNoResearch true        "B277 (W5) ...zero research agents in both — an escalation never buys THIS run a fleet nobody projected"
-  check escNoDesign true          "B278 (W5) ...and zero design agents in both"
-  check escNotDesignedCount 0     "B279 (W5) ...and the escalated issue is not counted as designed"
+  check escSameFleet true         "B332 (W5) CB1 INVARIANT: the escalated run dispatches exactly the same agents, in the same order, as the byte-identical non-escalated run"
+  check escNoResearch true        "B333 (W5) ...zero research agents in both — an escalation never buys THIS run a fleet nobody projected"
+  check escNoDesign true          "B334 (W5) ...and zero design agents in both"
+  check escNotDesignedCount 0     "B335 (W5) ...and the escalated issue is not counted as designed"
 
-  check escSanitizedOneLine true  "B280 (W6) the reason reaches the audit row as ONE line with no control characters — a raw newline in a log line forges log lines"
-  check escSanitizedClipped true  "B281 (W6) ...clipped at the named constant with the [truncated] suffix"
-  check escSanitizedAgrees true   "B282 (W6) ...and the published record carries the same sanitized text as the audit row, not a second spelling of it"
-  check escSanitizedLogOneLine true "B283 (W6) ...and the log line it produces is a single line"
+  check escSanitizedOneLine true  "B336 (W6) the reason reaches the audit row as ONE line with no control characters — a raw newline in a log line forges log lines"
+  check escSanitizedClipped true  "B337 (W6) ...clipped at the named constant with the [truncated] suffix"
+  check escSanitizedAgrees true   "B338 (W6) ...and the published record carries the same sanitized text as the audit row, not a second spelling of it"
+  check escSanitizedLogOneLine true "B339 (W6) ...and the log line it produces is a single line"
 
-  check escSilent true            "B284 (W7) the normal case is SILENT: no escalatedTier on the return emits neither event"
+  check escSilent true            "B340 (W7) the normal case is SILENT: no escalatedTier on the return emits neither event"
   check escSilentCount 0          "B285 (W7) ...and moves no counter"
   check escSilentNoField true     "B286 (W7) ...and invents no field on the record"
 
@@ -4088,7 +4088,7 @@ else
   check escRejReasonClipped true    "B298 (W9) ...and so is reason: neither key can put unbounded agent text into an audit row"
 
   check escBlankTierSilent true   "B299 (W10) a whitespace-only escalatedTier is ABSENT, not an escalation: it emits neither event rather than an audit row about a move nobody made"
-  check escBlankTierCount 0       "B300 (W10) ...and moves no counter"
+  check escBlankTierCount 0       "B341 (W10) ...and moves no counter"
   check fwDelivered true          "B207 delivery still runs on task 1's real commit"
   check fwChainComplete false     "B208 ...but the chain is not complete, so /goal cannot read the PR as covering the whole plan"
 
@@ -4111,24 +4111,24 @@ else
   # on the file, never a guard on what the delivery agent is told.
   check bChainComplete true       "B66b the B66 fixture really IS a complete chain, so its Closes-#N row means what it says"
   check bNoCommitGuard true       "B66c ...and a complete chain is NOT told to inspect its commit messages — that guard is the partial arm's alone"
-  check tmLink true               "B254 a task REJECTED at its root delivers with the non-closing UberDev-Partial link, never Closes #N"
-  check tmProhibition true        "B255 ...and the body is forbidden a closing keyword pointing at this issue, in words that never render the closing form itself"
-  check tmGuardBeforePush true    "B256 ...and the commit-message reword instruction lands BEFORE the push, where honouring it needs no force-push"
+  check tmLink true               "B342 a task REJECTED at its root delivers with the non-closing UberDev-Partial link, never Closes #N"
+  check tmProhibition true        "B343 ...and the body is forbidden a closing keyword pointing at this issue, in words that never render the closing form itself"
+  check tmGuardBeforePush true    "B344 ...and the commit-message reword instruction lands BEFORE the push, where honouring it needs no force-push"
   # B256b is a NEGATIVE control and passes vacuously on a tree with no guard at
   # all (the B234/B235 shape above); it means something only beside B256c, which
   # is what proves a range is rendered when the launcher resolved one.
   check tmGuardNoGuessedBase true "B256b ...and an UNRESOLVED base emits no ref range at all, never a guessed one (the --base rule, applied to git log)"
   check kbGuardBase true          "B256c ...while a launcher-resolved base is named literally in the range the agent reads"
   check kbViolations 0            "B256d ...and that run is harness-clean"
-  check tlLink true               "B257 an EXHAUSTED fix ladder delivers as a partial too — B52b only ever checked the label"
-  check fnAudit true              "B258 a NULL fixer is audited with its task"
-  check fnDelivered true          "B259 ...and delivery still runs on the work already committed"
-  check fnLink true               "B260 ...with the partial link: this stop path had no delivery-prompt fixture at all before now"
-  check fnViolations 0            "B261 ...and the new run is harness-clean"
-  check xLink true                "B262 a chain stopped by an unusable taskCount is linked as a partial, not just flagged chainComplete:false"
-  check cfLink true               "B263 the CB3 budget arm — documented as an intentional deliver-anyway — is still not allowed to close the issue"
-  check dsLink true               "B264 the DISPUTED bucket takes the partial link too, though it is no member of partialDelivery"
-  check daClosesKept true         "B265 ANTI-VACUITY: an AGREED no-change chain is complete and keeps Closes #N, with no partial trailer"
+  check tlLink true               "B345 an EXHAUSTED fix ladder delivers as a partial too — B52b only ever checked the label"
+  check fnAudit true              "B346 a NULL fixer is audited with its task"
+  check fnDelivered true          "B347 ...and delivery still runs on the work already committed"
+  check fnLink true               "B348 ...with the partial link: this stop path had no delivery-prompt fixture at all before now"
+  check fnViolations 0            "B349 ...and the new run is harness-clean"
+  check xLink true                "B350 a chain stopped by an unusable taskCount is linked as a partial, not just flagged chainComplete:false"
+  check cfLink true               "B351 the CB3 budget arm — documented as an intentional deliver-anyway — is still not allowed to close the issue"
+  check dsLink true               "B352 the DISPUTED bucket takes the partial link too, though it is no member of partialDelivery"
+  check daClosesKept true         "B353 ANTI-VACUITY: an AGREED no-change chain is complete and keeps Closes #N, with no partial trailer"
 
   # --- #563: the run-level throw path, with claims and without ---------------
   # Run TR — the wave loop finished, two PRs were claimed, and the run threw
@@ -4136,8 +4136,8 @@ else
   # ALWAYS present and probed was ALWAYS 0, so B301/B304/B306 are premises that
   # hold on both trees. B302, B303 and B305 are the three that go red the moment
   # the recovery block is removed, and they are the whole point of the group.
-  check trRanThrew true           "B301 a run that threw audits run_threw (the premise the rows below stand on)"
-  check trNotRunReason '"run_threw"' "B302 ...and audits pr_proof_not_run with reason=run_threw, so \"the pass never ran\" is on the record rather than inferred from three zero counts"
+  check trRanThrew true           "B354 a run that threw audits run_threw (the premise the rows below stand on)"
+  check trNotRunReason '"run_threw"' "B355 ...and audits pr_proof_not_run with reason=run_threw, so \"the pass never ran\" is on the record rather than inferred from three zero counts"
   check trUnverified 2            "B303 both live claims are classed UNVERIFIED — the one number separating a thrown run carrying claims from a batch with nothing to prove"
   check trProbed 0                "B304 probed stays 0: no relay was dispatched and the recovery must not pretend one was"
   check trAllUnverified true      "B305 every published record carries prProof=UNVERIFIED, so a consumer reads a proof class per record instead of null"
@@ -4158,7 +4158,7 @@ else
   # was actually asked about (null = never dispatched) / probed / unverified /
   # retained claims — so a break names its own half instead of printing "false".
   check x1Arm '"reason_kept/901,902/2/2/901,902"' "B311 a proof relay that THROWS is audited as pr_proof_threw carrying the throw text, probed counts the dispatch that was made, and both claims are retained as UNVERIFIED rather than dropped or downgraded"
-  check x2Arm '"budget_exhausted/null/0/2/901,902"' "B265 a relay skipped by the token ceiling audits pr_proof_skipped reason=budget_exhausted, dispatches nothing (probed stays 0), and still classes both retained claims UNVERIFIED"
+  check x2Arm '"budget_exhausted/null/0/2/901,902"' "B356 a relay skipped by the token ceiling audits pr_proof_skipped reason=budget_exhausted, dispatches nothing (probed stays 0), and still classes both retained claims UNVERIFIED"
 
   check newViolations 0           "B169 zero harness violations across every run added for #561, #562 and #563"
 fi
