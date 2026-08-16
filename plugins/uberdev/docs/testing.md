@@ -144,11 +144,25 @@ Conventions worth honouring:
 
 8. **No undeclared ripgrep dependency.** `rg` is not installed on the CI runners, so a test that shells out to it passes locally and fails — or, worse, silently misbehaves — on both shape-check jobs. Row `A2` of `tests/test-harness-source-guards.test.sh` enforces this across `tests/*.test.sh` (non-recursive; `tests/_lib_*.sh`, `tests/*.py` and `tests/manual/` are outside the corpus). Two exclusions are declared rather than accidental: a **whole-line `#` comment** is not a site, so prose about the tool stays writable, and a **`command -v` / `which` / `hash` / `type` probe** is not a site either, because guarding the call is exactly how you *declare* the dependency. A trailing comment on a live invocation does not exempt it. Use `grep -E` or `awk` instead; if a workflow genuinely needs the tool, install it there and guard the call site.
 
+9. **On `supervision-smoke-macos`, arm the exit floor.** That job runs on `macos-latest`, whose `/bin/bash` is **3.2**, and on bash 3.2 a `set -u` abort in a script that has an `EXIT` trap installed **exits zero**. So a fixture can die a third of the way in and the job's `&&` chain carries on green — which is exactly what `child-dispatch.test.sh` did for months (#551). Capturing and re-raising the status in the trap (`trap 'rc=$?; cleanup; exit $rc' EXIT`) does **not** fix it: bash 3.2 hands that trap `$? == 0` already, so the re-raise faithfully re-raises a zero. The working mechanism is a completion flag no abort path can forge:
+
+   ```bash
+   . "$ROOT/tests/_lib_exit_floor.sh" || { echo "FATAL: _lib_exit_floor.sh missing/unreadable" >&2; exit 2; }
+   TMP="$(mktemp -d)"
+   trap '_floor_rc=$?; rm -rf "$TMP"; uberdev_test_exit_floor <name> "$_floor_rc"' EXIT
+   # …the rows…
+   uberdev_test_exit_floor_reached          # last executable line
+   echo '<name>: N checks passed'
+   ```
+
+   The floor only ever turns a `0` into a `1` — it is transparent on a completed run and preserves a genuine non-zero verdict verbatim. `tests/exit-floor.test.sh` proves the mechanism against both bash majors (row `E5` reproduces the 3.2 laundering itself) and row `E6` asserts every fixture in the macOS job carries it. It composes with the executed-row floor of convention 6 rather than replacing it: this one proves the file *reached its end*, that one proves its rows *ran*.
+
 ## See also
 
 - `.github/workflows/test.yml` — the authoritative test set and the CI job layout.
 - `tests/ci-wiring.test.sh` — the wiring invariant that keeps the workflow and the on-disk test set in sync.
 - `tests/_lib_assert_structural.sh` — shared section-scoped assertion helpers.
+- `tests/_lib_exit_floor.sh` — the anti-vacuity exit floor, with the measured bash-3.2-vs-5 status table.
 - `tests/_workflow_harness.js` — the T1–T4 workflow-script harness (self-tests: `node tests/_workflow_harness.js self-test`).
 - RFC 0012 (ultracode workflow migration, `docs/rfc/`) — defines the workflow-script conventions the T1–T4 tier enforces.
 - The root `AGENTS.md` — the bump-version-everywhere ritual the version-lock tests enforce, and which commit in each lane carries the bump.

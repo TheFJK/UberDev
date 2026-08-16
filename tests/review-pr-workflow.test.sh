@@ -60,10 +60,11 @@ FAIL=0
 pass() { echo "  PASS  $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL  $1"; FAIL=$((FAIL + 1)); }
 
+. "$REPO_ROOT/tests/_lib_exit_floor.sh" || { echo "FATAL: _lib_exit_floor.sh missing/unreadable" >&2; exit 2; }
 TMP="$(mktemp -d)"
 TMP="$(cd "$TMP" && pwd -P)"
 cleanup() { rm -rf "$TMP"; }
-trap cleanup EXIT
+trap '_floor_rc=$?; cleanup; uberdev_test_exit_floor review-pr-workflow "$_floor_rc"' EXIT
 
 echo "## review-pr-workflow (#381) — the review-fleet wiring in both command files"
 
@@ -3910,5 +3911,6 @@ echo ""
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
+uberdev_test_exit_floor_reached
 [ "$FAIL" -eq 0 ] || exit 1
 exit 0

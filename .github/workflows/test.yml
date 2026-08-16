@@ -205,6 +205,7 @@ jobs:
           bash tests/dispatch-prompt-no-bare-slash.test.sh && \
           bash tests/bump-version.test.sh && \
           bash tests/test-harness-source-guards.test.sh && \
+          bash tests/exit-floor.test.sh && \
           bash tests/workflow-scripts.test.sh && \
           bash tests/workflow-args.test.sh && \
           bash tests/testers-workflow.test.sh && \
@@ -481,6 +482,7 @@ jobs:
           bash tests/dispatch-prompt-no-bare-slash.test.sh && \
           bash tests/bump-version.test.sh && \
           bash tests/test-harness-source-guards.test.sh && \
+          bash tests/exit-floor.test.sh && \
           bash tests/workflow-scripts.test.sh && \
           bash tests/workflow-args.test.sh && \
           bash tests/testers-workflow.test.sh && \
