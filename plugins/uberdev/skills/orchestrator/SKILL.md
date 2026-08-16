@@ -950,7 +950,7 @@ fi
 
 If `a3` still fails verification, fall back to **in-main plan synthesis** (do not enter the standalone write-plan workflow, whose execution handoff would duplicate Phase 5):
 1. Read the spec and all three already-validated planning_research artifacts.
-2. Synthesise the wave-decomposed plan yourself in-main, mirroring the write-plan template (For agentic workers note, Goal, Architecture, Tech Stack, Execution Waves summary, Task blocks with Depends on / Wave / Owns / Files / checkbox steps).
+2. Synthesise the wave-decomposed plan yourself in-main, mirroring the write-plan template (For agentic workers note, Goal, Architecture, Tech Stack, Spec, Execution Waves summary, Task blocks with Depends on / Wave / Owns / Files / checkbox steps).
 3. Write to $(git rev-parse --show-toplevel)/docs/uberdev/plans/$(date +%Y-%m-%d)-$topic_slug.md.
 4. Set plan_path to that ABSOLUTE file path. Log phase=plan-writer fallback=in-main.
 5. Continue to Phase 5.

@@ -761,13 +761,13 @@
       "last_reviewed_upstream_commit": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
       "last_reviewed_on": "2026-08-13",
       "stance": "fork",
-      "stance_reason": "Pinned at e7a2d16 (#503). File set is 1:1 with upstream skills/writing-plans, and the residual against that blob is 99 lines across both files. SKILL.md (84): the directory rename, the namespace rebrand, the plan-location change to docs/uberdev/plans/, and the plan FORMAT this repo owns \u2014 a MANDATORY '## Wave Decomposition' pass, the 'Depends on:' / 'Wave:' / 'Owns (file allowlist):' task headers, a required '## Execution Waves' summary, a fourth wave-correctness review item, an opt-in alternative-decomposition comparison, and an Execution Handoff rewritten from an interactive two-option prompt into a non-interactive default that hands off to uberdev:subagent-driven-dev and forwards --turbo. plan-document-reviewer-prompt.md (15): the shared-skeleton header plus the rewrite from a Task-dispatch template into an inline self-review checklist that must not create a child. Re-adjudicated track -> fork: uberdev:subagent-driven-dev parses that format, so upstream's copy is not drop-in (RFC 0019 \u00a74.1 trigger 2). The digest lock survives the flip: #503 ties it to the recorded base (\u00a72.3 as amended).",
-      "measured_diff_lines": 128,
+      "stance_reason": "Pinned at e7a2d16 (#503). File set is 1:1 with upstream skills/writing-plans. Measured at the #503 adjudication, before #531, the residual against that blob was 99 lines across both files. SKILL.md (84): the directory rename, the namespace rebrand, the plan-location change to docs/uberdev/plans/, and the plan FORMAT this repo owns \u2014 a MANDATORY '## Wave Decomposition' pass, the 'Depends on:' / 'Wave:' / 'Owns (file allowlist):' task headers, a required '## Execution Waves' summary, a fourth wave-correctness review item, an opt-in alternative-decomposition comparison, and an Execution Handoff rewritten from an interactive two-option prompt into a non-interactive default that hands off to uberdev:subagent-driven-dev and forwards --turbo. plan-document-reviewer-prompt.md (15): the shared-skeleton header plus the rewrite from a Task-dispatch template into an inline self-review checklist that must not create a child. Re-adjudicated track -> fork: uberdev:subagent-driven-dev parses that format, so upstream's copy is not drop-in (RFC 0019 \u00a74.1 trigger 2). The digest lock survives the flip: #503 ties it to the recorded base (\u00a72.3 as amended). Both figures are stale by whatever #531 then added on the SKILL.md side: the ported 6.3.0 plan-header 'Spec:' pointer plus the provenance restatement that records it, so the sha256 below is the composite rather than a clean #503 measurement. They are labelled rather than re-measured because the e7a2d16 blob is not on disk; #534 owns labelling every measurement in this register with the revision it was taken at.",
+      "measured_diff_lines": 125,
       "measured_diff_basis": {
         "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
         "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
-        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
-        "measured_on": "2026-08-14",
+        "uberdev_rev": "ffb7bbbac53c93958502e66005b6f6d1d03bdd85",
+        "measured_on": "2026-08-16",
         "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
       },
       "divergences": [
@@ -787,7 +787,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "656ab28e75c1242bfab6e1931a38a7e95d265e53ed739b5f3a4b0abe5731b80d"
+          "sha256": "ff77ce3e124bec682562ffbe16f448e1592b056a34154a4deb0fafe9ec10bff2"
         },
         {
           "path": "plan-document-reviewer-prompt.md",
@@ -806,13 +806,13 @@
       "last_reviewed_upstream_commit": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
       "last_reviewed_on": "2026-08-13",
       "stance": "track",
-      "stance_reason": "File set is 1:1 with upstream. The 6.2.0 delta is upstream's own prose compression, which UberDev wants for the session-hook token budget. Re-baseline from upstream.",
-      "measured_diff_lines": 380,
+      "stance_reason": "File set is 1:1 with upstream. The 6.2.0 delta is upstream's own prose compression, which UberDev wants for the session-hook token budget. Re-baseline from upstream. The local bytes are no longer a clean copy of any single upstream revision: they are the e7a2d16 base PLUS one adopted 6.3.0 hunk (#531) in render-graphs.js, which spawns `dot` via execFileSync instead of locating it with a `which` probe that is not a command on Windows; the CommonJS to ESM half of that same upstream diff is declined because it raises an undeclared Node floor (>= 20.19 / >= 22.7) on a tree with no `engines` field and no CI node-version pin. vendored_at_commit is deliberately left at the base \u2014 the hunk is an adoption, not a re-baseline, and the file's sha256 above is the composite.",
+      "measured_diff_lines": 373,
       "measured_diff_basis": {
         "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
         "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
-        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
-        "measured_on": "2026-08-14",
+        "uberdev_rev": "ffb7bbbac53c93958502e66005b6f6d1d03bdd85",
+        "measured_on": "2026-08-16",
         "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
       },
       "divergences": [
@@ -844,7 +844,7 @@
         },
         {
           "path": "render-graphs.js",
-          "sha256": "9204d9a389f106dfae983b0c55a7ca509ef2e9087d11dd7722aa20afec8eccc0"
+          "sha256": "a26aa839960d628069840158ad735beaf155d4b029d84787f678dc6e039a7767"
         },
         {
           "path": "testing-skills-with-subagents.md",
