@@ -327,6 +327,45 @@ assert_grep "$VENDOR_RFC" '^## Amendment \(2026-08-13, #511\) — ' "T3.6 vendor
 assert_in_section "$VENDOR_RFC" '^## Amendment \(2026-08-13, #511\)' '^### ' \
   'Status of this amendment: \*\*Accepted, implemented\.\*\*' \
   "T3.6b the #511 amendment declares its own status inside its own block"
+# §4.2 and §4.3 record a `measured_diff_lines` per component and the register
+# records the same numbers again, with nothing reconciling the two — they had
+# already drifted on two components (#534). The fix labels each table with the
+# revision, date and counting rule its numbers were taken under, and makes
+# `measured_diff_basis` a required record in the register.
+# Division of labour: the LABELS are reconciled against the register by
+# tests/vendor-provenance.test.sh (the comparator reads every `Diff lines` table
+# in this document); what these three rows own is the amendment that says what a
+# label means, why the two frozen tables keep their cells, and what the numbers
+# were measured against. Both T3.6 traps apply here verbatim:
+#   - assert_grep is `grep -qE`, so '(2026-08-14, #534)' MUST escape its parens.
+#     An unescaped form matches a heading that was never written.
+#   - the heading carries no U+2192; this file runs on ubuntu AND windows-latest.
+assert_grep "$VENDOR_RFC" '^## Amendment \(2026-08-14, #534\) — ' "T3.7 vendor RFC carries the dated #534 amendment heading"
+# Anchored to this amendment's OWN block for the T3.6b reason: three earlier
+# amendments already carry a byte-identical status line, so a whole-file
+# assert_grep would pass against #457's and never notice this one was missing.
+# The section end is '^### ', NOT '^## ' — see the awk-range note above T3.6b.
+assert_in_section "$VENDOR_RFC" '^## Amendment \(2026-08-14, #534\)' '^### ' \
+  'Status of this amendment: \*\*Accepted, implemented\.\*\*' \
+  "T3.7b the #534 amendment declares its own status inside its own block"
+# The honesty claim the 14 skill numbers rest on. They were measured against the
+# claude-plugins-official plugin cache — a repackaging of the peeled v6.3.0 tag,
+# which the #511 amendment records as corroborated rather than trusted — and NOT
+# against obra/superpowers itself. The register keeps that distinction in a field
+# (`upstream_tree`, beside `upstream_rev`) instead of a sentence; this row is
+# what stops the amendment from shipping the field while dropping the paragraph
+# that says why the two are not the same thing.
+# The end pattern is '^# ' (ONE hash), and both alternatives are wrong here:
+# '^### ' stops at the first sub-heading, and the claim lives in a sub-section
+# BELOW the blockquote; '^## ' matches the '## Amendment …' start line itself and
+# collapses the range to that one line (the awk trap T3.6b records). '^# ' can
+# match neither a two- nor a three-hash heading, so the range spans the whole
+# amendment. It over-reaches to EOF while this is the last amendment in the file,
+# which is why the pattern is a full sentence naming a field that did not exist
+# before this change rather than a generic phrase a later amendment could repeat.
+assert_in_section "$VENDOR_RFC" '^## Amendment \(2026-08-14, #534\)' '^# ' \
+  '`upstream_tree` records that the cache is a repackaging of upstream, not upstream itself\.' \
+  "T3.7c the #534 amendment states the measured tree is not upstream itself"
 
 echo
 echo "== dispatch RFC 0004: internal version refs agree on v0.30.0 =="

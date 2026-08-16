@@ -161,7 +161,14 @@
       "last_reviewed_on": "2026-08-13",
       "stance": "fork",
       "stance_reason": "Base e7a2d16 \u2014 upstream main's HEAD from 2026-04-27 21:55 PDT to 2026-05-04 15:05 PDT, the window this component's vendored_on (2026-04-27) falls in. Measured at that base on 2026-08-13: the file set is 1:1 (8/8, symmetric difference 0) and the copy diverges by 1515 changed lines (GNU diff, '<' plus '>' lines). Method, the full 83-candidate scan and the per-file residual table are in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md; no candidate in upstream history scores better on that key. Rewritten around UberDev's no-approval-gate research policy: upstream's HARD-GATE / per-section / spec-review checkpoints are deliberately absent, and the skill is driven by /uberdev:orchestrator Phase 1 rather than an interactive human loop. Upstream edits are advisory input, never a merge base.",
-      "measured_diff_lines": 2255,
+      "measured_diff_lines": 2358,
+      "measured_diff_basis": {
+        "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+        "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "measured_on": "2026-08-14",
+        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
+      },
       "divergences": [
         {
           "ref": "namespace-rebrand",
@@ -229,7 +236,14 @@
       "last_reviewed_on": "2026-08-13",
       "stance": "track",
       "stance_reason": "File set is 1:1 with upstream and SKILL.md is byte-identical to the recorded base e7a2d16 apart from the provenance header line this repo adds; there is no other local delta, and the file carries no 'superpowers:' token to rebrand. The 33 measured lines are upstream's own v6.2.0 prose compression (dispatch example rewritten, 'Key Benefits' and 'Real-World Impact' sections dropped), un-adopted here. Re-baseline from upstream.",
-      "measured_diff_lines": 33,
+      "measured_diff_lines": 34,
+      "measured_diff_basis": {
+        "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+        "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "measured_on": "2026-08-14",
+        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
+      },
       "divergences": [],
       "files": [
         {
@@ -250,7 +264,14 @@
       "last_reviewed_on": "2026-08-13",
       "stance": "fork",
       "stance_reason": "Pinned at e7a2d16 (#503). File set is 1:1 with upstream skills/executing-plans, and the residual against that blob is 42 lines: the directory rename, the namespace rebrand (superpowers:subagent-driven-development -> uberdev:subagent-driven-dev, superpowers:finishing-a-development-branch -> uberdev:finish-branch), and one behavioural rewrite \u2014 Step 2 replaces upstream's flat task list with wave-ordered execution driven by the plan's '## Execution Waves' summary, gated on the project's full test command between waves, plus an inline TDD-discipline paragraph and an Integration section that names the worktree setup instead of deferring to superpowers:using-git-worktrees. Re-adjudicated track -> fork: that wave contract is the half of a two-sided interlock skills/write-plan emits and uberdev:subagent-driven-dev parses, so upstream's copy is not drop-in (RFC 0019 \u00a74.1 trigger 2). The digest lock survives the flip: #503 ties it to the recorded base (\u00a72.3 as amended).",
-      "measured_diff_lines": 50,
+      "measured_diff_lines": 51,
+      "measured_diff_basis": {
+        "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+        "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "measured_on": "2026-08-14",
+        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
+      },
       "divergences": [
         {
           "ref": "namespace-rebrand",
@@ -280,7 +301,14 @@
       "last_reviewed_on": "2026-08-13",
       "stance": "fork",
       "stance_reason": "Base e7a2d16 \u2014 upstream main's HEAD across the 2026-04-27\u21922026-05-04 vendoring window. Measured at that base on 2026-08-13: the file set is 1:1 (1/1, symmetric difference 0) and the copy diverges by 949 changed lines (GNU diff, '<' plus '>' lines); method and the 12-candidate scan are in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md, where no candidate scores better. A heavily-modified descendant: the local copy owns the pre-push secret-scan gate, the auto-chain into /uberdev:review-pr, and the no-Co-Authored-By PR rule. Upstream's version is not drop-in.",
-      "measured_diff_lines": 734,
+      "measured_diff_lines": 1077,
+      "measured_diff_basis": {
+        "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+        "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "measured_on": "2026-08-14",
+        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
+      },
       "divergences": [
         {
           "ref": "namespace-rebrand",
@@ -334,7 +362,14 @@
       "last_reviewed_on": "2026-08-13",
       "stance": "fork",
       "stance_reason": "Pinned at e7a2d16 (#503). File set is 1:1 with upstream skills/receiving-code-review, and the residual against that blob is 29 lines in a single hunk: the appended local 'Multi-Reviewer Parallel Triage' section. Re-adjudicated track -> fork. The previous reason claimed 'the local delta is the namespace rebrand'; measured, the file contains no 'superpowers:' token and no rebrand at all, so that sentence was false in the same way #462 found it false for skills/dispatching-parallel-agents. What it does carry is a permanent local policy section (RFC 0019 \u00a74.1 trigger 2), so upstream's copy is not drop-in and 'track' \u2014 which promises a digest-locked re-baseline \u2014 would be a claim with nothing behind it. The digest lock is NOT lost by the flip: #503 ties it to the recorded base rather than to the stance (\u00a72.3 as amended).",
-      "measured_diff_lines": 41,
+      "measured_diff_lines": 42,
+      "measured_diff_basis": {
+        "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+        "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "measured_on": "2026-08-14",
+        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
+      },
       "divergences": [
         {
           "ref": "receiving-review-parallel-triage",
@@ -360,7 +395,14 @@
       "last_reviewed_on": "2026-08-13",
       "stance": "fork",
       "stance_reason": "Base e7a2d16 \u2014 upstream main's HEAD across the 2026-04-27\u21922026-05-04 vendoring window. Measured at that base on 2026-08-13: the file set is 1:1 (2/2, symmetric difference 0) and the copy diverges by only 18 changed lines (GNU diff, '<' plus '>' lines); method and the 14-candidate scan are in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md, where no candidate scores better. Carries UberDev's parallel-by-default review fanout, a permanent divergence from upstream's sequential default, so upstream's copy is not drop-in.",
-      "measured_diff_lines": 228,
+      "measured_diff_lines": 238,
+      "measured_diff_basis": {
+        "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+        "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "measured_on": "2026-08-14",
+        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
+      },
       "divergences": [
         {
           "ref": "namespace-rebrand",
@@ -414,7 +456,14 @@
       "last_reviewed_on": "2026-08-13",
       "stance": "fork",
       "stance_reason": "Base e7a2d16 \u2014 upstream main's HEAD across the 2026-04-27\u21922026-05-04 vendoring window. Measured at that base on 2026-08-13: the file set is 1:1 (4/4, symmetric difference 0 \u2014 upstream shipped code-quality-reviewer-prompt.md and spec-reviewer-prompt.md at the base) and the copy diverges by 964 changed lines (GNU diff, '<' plus '>' lines). Two later commits score one line better (f2cbfbef 2026-05-04, d7f47d35 2026-05-05) and are excluded because they postdate vendored_on, not because they scored worse; the 62-candidate scan is in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md. The file-set divergence below is measured against the WATERMARK 3dcbd5c4 (v6.2.0), not the base: at the watermark UberDev ships spec-reviewer-prompt.md and code-quality-reviewer-prompt.md while upstream ships re-review-prompt.md, task-reviewer-prompt.md and scripts/. The routed SDD lifecycle is UberDev-owned. It also carries the permanent wave-parallel implementer divergence (sdd-parallel-implementer-waves), which inverts an explicit upstream prohibition \u2014 see RFC 0019 \u00a76.",
-      "measured_diff_lines": 1064,
+      "measured_diff_lines": 1406,
+      "measured_diff_basis": {
+        "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+        "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "measured_on": "2026-08-14",
+        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
+      },
       "divergences": [
         {
           "ref": "namespace-rebrand",
@@ -460,7 +509,14 @@
       "last_reviewed_on": "2026-08-13",
       "stance": "fork",
       "stance_reason": "Carries the permanent local 'Parallel hypothesis testing' section recorded in its own in-file provenance header, so upstream's SKILL.md is not drop-in. Upstream fixes to the sibling scripts are still adopted deliberately (see #430).",
-      "measured_diff_lines": 195,
+      "measured_diff_lines": 304,
+      "measured_diff_basis": {
+        "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+        "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "measured_on": "2026-08-14",
+        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
+      },
       "divergences": [
         {
           "ref": "namespace-rebrand",
@@ -535,6 +591,13 @@
       "stance": "fork",
       "stance_reason": "File sets are now 1:1 with upstream v6.2.0, but the tree is a composite of two upstream revisions: SKILL.md is still at e7a2d16 (upstream's own v6.2.0 prose compression of \"Why Order Matters\" and the rationalisations table is un-adopted), while writing-good-tests.md was adopted whole from 3dcbd5c (v6.2.0) under #457. No single upstream commit is drop-in, so track \u2014 which promises a digest-locked re-baseline \u2014 would be a false claim. Reclassify to track when #462 genuinely re-baselines the component.",
       "measured_diff_lines": 64,
+      "measured_diff_basis": {
+        "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+        "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "measured_on": "2026-08-14",
+        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
+      },
       "divergences": [
         {
           "ref": "namespace-rebrand",
@@ -584,7 +647,14 @@
       "last_reviewed_on": "2026-08-13",
       "stance": "track",
       "stance_reason": "Pinned at e7a2d16 (#503). File set is 1:1 with upstream skills/using-git-worktrees, and the residual against that blob is 17 lines in exactly two hunks: the brand rewrite of the global worktree location ('~/.config/superpowers/worktrees' -> '~/.config/uberdev/worktrees'), and a local fix to the path-resolution 'case' in the creation snippet \u2014 quoted patterns built from ${HOME}, because a tilde expands in neither a case pattern nor a quoted RHS, plus a fail-loud '*)' arm so an unrecognised LOCATION exits 1 instead of reaching 'git worktree add' with $path unset. Nothing else differs. Stays track after re-adjudication: RFC 0019 \u00a74.1's fork trigger needs a PERMANENT local divergence or a rewritten behavioural contract, and this is neither \u2014 the snippet fix is a bounded correction inside a code example that upstream adopting an equivalent guard would retire, so re-baselining stays the plan and the digest lock stays armed. Recorded as divergences[].worktree-location-failloud with permanent: false.",
-      "measured_diff_lines": 206,
+      "measured_diff_lines": 207,
+      "measured_diff_basis": {
+        "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+        "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "measured_on": "2026-08-14",
+        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
+      },
       "divergences": [
         {
           "ref": "namespace-rebrand",
@@ -614,7 +684,14 @@
       "last_reviewed_on": "2026-08-13",
       "stance": "fork",
       "stance_reason": "Base e7a2d16 \u2014 upstream main's HEAD across the 2026-04-27\u21922026-05-04 vendoring window. Measured at that base on 2026-08-13: upstream ships references/codex-tools.md, references/copilot-tools.md and references/gemini-tools.md, so the BASE-relative divergence is exactly two files (ours-only references/configuration.md, upstream-only references/codex-tools.md) over 16 changed lines across the three shared files (GNU diff, '<' plus '>' lines); the 35-candidate scan is in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md, where no candidate scores better. references/copilot-tools.md exists at the base and was deleted upstream by the watermark, so the local copy is a base-era file rather than a local invention; references/configuration.md is absent upstream at the base, which is why the in-file witness for this pin sits on SKILL.md and never there. Measured against the WATERMARK 3dcbd5c4 (v6.2.0) instead, upstream's reference set is antigravity-tools.md, codex-tools.md, gemini-tools.md and pi-tools.md. This is UberDev's own plugin primer, injected by the session-start hook.",
-      "measured_diff_lines": 174,
+      "measured_diff_lines": 176,
+      "measured_diff_basis": {
+        "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+        "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "measured_on": "2026-08-14",
+        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
+      },
       "divergences": [
         {
           "ref": "namespace-rebrand",
@@ -652,7 +729,14 @@
       "last_reviewed_on": "2026-08-13",
       "stance": "fork",
       "stance_reason": "Pinned at e7a2d16 (#503). File set is 1:1 with upstream skills/verification-before-completion, and the residual against that blob is 30 lines in a single hunk: the appended local 'Parallel Verification Dispatch' section. Re-adjudicated track -> fork, for the same measured reason as skills/receiving-code-review \u2014 the old 'the delta is the namespace rebrand' sentence is false (the file carries no 'superpowers:' token), and what it actually carries is a permanent local policy section (RFC 0019 \u00a74.1 trigger 2) that upstream cannot supply. The digest lock survives the flip: #503 ties it to the recorded base rather than to the stance (\u00a72.3 as amended).",
-      "measured_diff_lines": 49,
+      "measured_diff_lines": 50,
+      "measured_diff_basis": {
+        "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+        "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "measured_on": "2026-08-14",
+        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
+      },
       "divergences": [
         {
           "ref": "verification-parallel-dispatch",
@@ -678,7 +762,14 @@
       "last_reviewed_on": "2026-08-13",
       "stance": "fork",
       "stance_reason": "Pinned at e7a2d16 (#503). File set is 1:1 with upstream skills/writing-plans, and the residual against that blob is 99 lines across both files. SKILL.md (84): the directory rename, the namespace rebrand, the plan-location change to docs/uberdev/plans/, and the plan FORMAT this repo owns \u2014 a MANDATORY '## Wave Decomposition' pass, the 'Depends on:' / 'Wave:' / 'Owns (file allowlist):' task headers, a required '## Execution Waves' summary, a fourth wave-correctness review item, an opt-in alternative-decomposition comparison, and an Execution Handoff rewritten from an interactive two-option prompt into a non-interactive default that hands off to uberdev:subagent-driven-dev and forwards --turbo. plan-document-reviewer-prompt.md (15): the shared-skeleton header plus the rewrite from a Task-dispatch template into an inline self-review checklist that must not create a child. Re-adjudicated track -> fork: uberdev:subagent-driven-dev parses that format, so upstream's copy is not drop-in (RFC 0019 \u00a74.1 trigger 2). The digest lock survives the flip: #503 ties it to the recorded base (\u00a72.3 as amended).",
-      "measured_diff_lines": 123,
+      "measured_diff_lines": 128,
+      "measured_diff_basis": {
+        "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+        "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "measured_on": "2026-08-14",
+        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
+      },
       "divergences": [
         {
           "ref": "namespace-rebrand",
@@ -716,7 +807,14 @@
       "last_reviewed_on": "2026-08-13",
       "stance": "track",
       "stance_reason": "File set is 1:1 with upstream. The 6.2.0 delta is upstream's own prose compression, which UberDev wants for the session-hook token budget. Re-baseline from upstream.",
-      "measured_diff_lines": 367,
+      "measured_diff_lines": 380,
+      "measured_diff_basis": {
+        "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+        "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "measured_on": "2026-08-14",
+        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
+      },
       "divergences": [
         {
           "ref": "namespace-rebrand",
@@ -794,7 +892,13 @@
       "stance": "fork",
       "stance_reason": "The frontmatter differs by exactly two lines, both of them `model: opus` -> `model: inherit` (RFC 0019 \u00a74.2); the `description` dispatch contract inside it is byte-identical to upstream at the recovered base. The BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in. The 0-100 confidence anchors are also extracted into `shared/finding-confidence-rubric-v1.md`.",
       "measured_diff_lines": 81,
-      "measured_diff_basis": "diff of upstream blob 462f2e01b89e6339994c071c765dcb4dd380c869 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines",
+      "measured_diff_basis": {
+        "upstream_rev": "4ca561fb8532594e7a5faef945e85096fcec0616",
+        "upstream_tree": "anthropics/claude-plugins-official blob 462f2e01b89e6339994c071c765dcb4dd380c869 \u2014 the single-file artifact base_evidence records for code-reviewer.md, re-derivable offline from this repository at base_evidence.vendored_ref",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "measured_on": "2026-08-14",
+        "method": "diff of upstream blob 462f2e01b89e6339994c071c765dcb4dd380c869 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines"
+      },
       "divergences": [],
       "files": [
         {
@@ -823,7 +927,13 @@
       "stance": "fork",
       "stance_reason": "The `description` frontmatter is the dispatch contract, and UberDev rewrote it into the named-lens contract driven by /uberdev:review-pr Phase 2 and /uberdev:simplify, replacing upstream's auto-trigger examples. Upstream's copy would re-enable auto-triggering, so it is not drop-in.",
       "measured_diff_lines": 154,
-      "measured_diff_basis": "diff of upstream blob 05e361b4ef1b688203251989707f8a924a9ed266 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines",
+      "measured_diff_basis": {
+        "upstream_rev": "ceb9b72b4c4c20ad39efce780edd0aabe80ebce3",
+        "upstream_tree": "anthropics/claude-plugins-official blob 05e361b4ef1b688203251989707f8a924a9ed266 \u2014 the single-file artifact base_evidence records for code-simplifier.md, re-derivable offline from this repository at base_evidence.vendored_ref",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "measured_on": "2026-08-14",
+        "method": "diff of upstream blob 05e361b4ef1b688203251989707f8a924a9ed266 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines"
+      },
       "divergences": [
         {
           "ref": "namespace-rebrand",
@@ -862,7 +972,13 @@
       "stance": "fork",
       "stance_reason": "The frontmatter \u2014 including the `description` dispatch contract \u2014 is byte-identical to upstream at the recovered base; the BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
       "measured_diff_lines": 56,
-      "measured_diff_basis": "diff of upstream blob e214620a3fa348c550bfca1f8d23ceaec39bfe57 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines",
+      "measured_diff_basis": {
+        "upstream_rev": "4ca561fb8532594e7a5faef945e85096fcec0616",
+        "upstream_tree": "anthropics/claude-plugins-official blob e214620a3fa348c550bfca1f8d23ceaec39bfe57 \u2014 the single-file artifact base_evidence records for comment-analyzer.md, re-derivable offline from this repository at base_evidence.vendored_ref",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "measured_on": "2026-08-14",
+        "method": "diff of upstream blob e214620a3fa348c550bfca1f8d23ceaec39bfe57 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines"
+      },
       "divergences": [],
       "files": [
         {
@@ -936,7 +1052,13 @@
       "stance": "fork",
       "stance_reason": "The frontmatter \u2014 including the `description` dispatch contract \u2014 is byte-identical to upstream at the recovered base; the BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
       "measured_diff_lines": 58,
-      "measured_diff_basis": "diff of upstream blob 9b2de05b90e74f828e58a8874ed17f6eb9372db3 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines",
+      "measured_diff_basis": {
+        "upstream_rev": "4ca561fb8532594e7a5faef945e85096fcec0616",
+        "upstream_tree": "anthropics/claude-plugins-official blob 9b2de05b90e74f828e58a8874ed17f6eb9372db3 \u2014 the single-file artifact base_evidence records for pr-test-analyzer.md, re-derivable offline from this repository at base_evidence.vendored_ref",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "measured_on": "2026-08-14",
+        "method": "diff of upstream blob 9b2de05b90e74f828e58a8874ed17f6eb9372db3 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines"
+      },
       "divergences": [],
       "files": [
         {
@@ -995,7 +1117,13 @@
       "stance": "fork",
       "stance_reason": "The frontmatter \u2014 including the `description` dispatch contract \u2014 is byte-identical to upstream at the recovered base; the BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
       "measured_diff_lines": 57,
-      "measured_diff_basis": "diff of upstream blob b8a8dfa41e18ef6ac801ae64be38b2508aa04f44 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines",
+      "measured_diff_basis": {
+        "upstream_rev": "4ca561fb8532594e7a5faef945e85096fcec0616",
+        "upstream_tree": "anthropics/claude-plugins-official blob b8a8dfa41e18ef6ac801ae64be38b2508aa04f44 \u2014 the single-file artifact base_evidence records for silent-failure-hunter.md, re-derivable offline from this repository at base_evidence.vendored_ref",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "measured_on": "2026-08-14",
+        "method": "diff of upstream blob b8a8dfa41e18ef6ac801ae64be38b2508aa04f44 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines"
+      },
       "divergences": [],
       "files": [
         {
@@ -1094,7 +1222,13 @@
       "stance": "fork",
       "stance_reason": "The frontmatter \u2014 including the `description` dispatch contract \u2014 is byte-identical to upstream at the recovered base; the BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
       "measured_diff_lines": 64,
-      "measured_diff_basis": "diff of upstream blob f720f0fcec856560cdddb6b030ac7e64af159438 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines",
+      "measured_diff_basis": {
+        "upstream_rev": "4ca561fb8532594e7a5faef945e85096fcec0616",
+        "upstream_tree": "anthropics/claude-plugins-official blob f720f0fcec856560cdddb6b030ac7e64af159438 \u2014 the single-file artifact base_evidence records for type-design-analyzer.md, re-derivable offline from this repository at base_evidence.vendored_ref",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "measured_on": "2026-08-14",
+        "method": "diff of upstream blob f720f0fcec856560cdddb6b030ac7e64af159438 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines"
+      },
       "divergences": [],
       "files": [
         {
