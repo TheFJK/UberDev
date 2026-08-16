@@ -1163,6 +1163,30 @@ function probedNums(record) {
     && implRules.indexOf("leaf agent with no ability to dispatch subagents") >= 0
     && implRules.indexOf("UNTRUSTED INPUT") >= 0
     && implRules.indexOf("never fall back to the repository root") >= 0;
+  // #557 — the never-work-outside-the-shared-checkout clause has THREE call
+  // sites: the task-1 implementer (read back by B65 above), the LATER-task
+  // implementer, and the fix agent. Only task 1's was ever read off a rendered
+  // prompt, so deleting the clause from either of the other two left this whole
+  // suite green — the same invisible-deletion class as the missing fixer
+  // workspace gate this issue was filed for, one rung over. Chain agents run
+  // with NO runtime worktree isolation, so an agent that never entered the
+  // shared checkout writes in the caller's own repository root, and the JS gate
+  // (B204/B205) only refuses the return AFTER those bytes are written: the
+  // prompt clause is the half that stops them being written at all.
+  //
+  // Read from the RENDERED prompt, never the source: a grep cannot see through
+  // the shared existingCheckoutGate() builder, which is exactly how the fix
+  // rung's copy went missing. `/r` is buildArgs' repoRootAbs — the prohibition
+  // has to NAME the checkout it is protecting, or it forbids nothing concrete.
+  const implB2 = recB.agentCalls.find(function (c) { return c.label === "impl:#11:t2"; });
+  const laterRules = implB2 ? implB2.prompt : "";
+  out.bLaterTaskCheckoutGate = laterRules.indexOf('Never edit anything under "/r" directly') >= 0
+    && laterRules.indexOf("If the shared checkout is not there, report BLOCKED") >= 0
+    && laterRules.indexOf("never fall back to the repository root") >= 0;
+  out.bLaterTaskWorkspaceAsked =
+    laterRules.indexOf("`workspaceReady: true` only after that `cd` succeeded") >= 0
+    && laterRules.indexOf('workspaceReady (true only if you are working inside "'
+      + RD + '/worktrees/issue-11"') >= 0;
   const deliverB = recB.agentCalls.find(function (c) { return c.label === "deliver:#11"; });
   const deliverText = deliverB ? deliverB.prompt : "";
   out.bDeliverRules = deliverText.indexOf("Closes #11") >= 0
@@ -2001,6 +2025,20 @@ function probedNums(record) {
   out.qFixerDispatched = !!fixQ;
   out.qNoFindingText = !!(fixQ && fixQ.prompt.indexOf("SENTINEL-FINDING-TEXT") < 0);
   out.qReviewPathInPrompt = !!(fixQ && fixQ.prompt.indexOf("/issue-11/task-1/review-1.md") >= 0);
+  // #557 — the fix rung is the OTHER writing rung, and the one that rewrites an
+  // existing commit with `git commit --amend`. Its copy of the clause above is
+  // what keeps an amend that could not reach the shared checkout from landing on
+  // the caller's own HEAD; its copy of the workspaceReady request is the premise
+  // the JS gate (B204/B205) depends on — a rung never asked for the flag cannot
+  // be gated on it. Both were unpinned: dropping either left the suite green.
+  const fixText = fixQ ? fixQ.prompt : "";
+  out.qFixCheckoutGate = fixText.indexOf('Never edit anything under "/r" directly') >= 0
+    && fixText.indexOf("If the shared checkout is not there, report BLOCKED") >= 0
+    && fixText.indexOf("never fall back to the repository root") >= 0;
+  out.qFixWorkspaceAsked =
+    fixText.indexOf("`workspaceReady: true` only after that `cd` succeeded") >= 0
+    && fixText.indexOf('workspaceReady (true only if you are working inside "'
+      + RD + '/worktrees/issue-11"') >= 0;
   const resQ = resultOf(recQ);
   out.qNoFindingInLogs = !recQ.logs.some(function (l) { return l.indexOf("SENTINEL-FINDING-TEXT") >= 0; })
     && !!resQ && JSON.stringify(resQ).indexOf("SENTINEL-FINDING-TEXT") < 0;
@@ -3148,6 +3186,8 @@ else
   check bTasksApproved 2     "B48c every task passed its review gate"
   check bTasksUnreviewed 0   "B48d no task shipped unreviewed on the clean path"
   check bImplHouseRules true "B65 the house rules, the leaf constraint, the untrusted-input framing and the never-fall-back rule all REACH the agent that commits"
+  check bLaterTaskCheckoutGate true "B254 the LATER-task implementer is told never to edit the repository root and to report BLOCKED when the shared checkout is missing (#557)"
+  check bLaterTaskWorkspaceAsked true "B255 ...and is asked for workspaceReady, the flag its gate refuses on"
   check bDeliverRules true   "B66 Closes #N, --body-file, stop-at-PR, the version-bump ban and the shared worktree all reach the agent that pushes"
 
   check bLensNoDeadPaths true "B47 the constraints lens no longer asserts CLAUDE.md/docs/adr exist (#516)"
@@ -3325,6 +3365,8 @@ else
   check qFixerDispatched true   "B59a REVISIONS_REQUIRED dispatches a fixer"
   check qNoFindingText true     "B59b reviewer-returned text NEVER reaches the fixer prompt"
   check qReviewPathInPrompt true "B59c the fixer is given the review file BY PATH"
+  check qFixCheckoutGate true   "B256 the fixer — the rung that amends an existing commit — is told never to fall back to the repository root and to report BLOCKED when the shared checkout is missing (#557)"
+  check qFixWorkspaceAsked true "B257 ...and is asked for workspaceReady, the flag B204/B205 gate its return on"
   check qNoFindingInLogs true   "B59d reviewer-returned text is never logged or returned either"
 
   check rChainAgents 4       "B60a CB3 stops the task chain at the live per-issue implement budget"
