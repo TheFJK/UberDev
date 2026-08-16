@@ -303,7 +303,7 @@ adjudicates, downgrades and audits.
 | `prProof` | `CONFIRMED` · `DISPROVEN` · `UNVERIFIED` · `NOT_APPLICABLE` |
 | `provenCommitCount` | commits GitHub reports on the PR (`null` when not observed) |
 | `claimedStatus` / `claimedPrNumber` / `claimedPrUrl` | present only on a downgraded record — the original claim, preserved |
-| `verification` | run totals; `relayRc` is `null` both when no relay was dispatched and when a dispatched relay answered with an unusable rc — the audit events are what tell the two apart |
+| `verification` | run totals, plus `relayRc` — the proof relay's own rc, whose `null` cases this section defines below |
 
 The rule: **the proof wins in the field that drives behaviour, the claim is
 never erased, and the disagreement is an audit event.** `status` is overwritten
@@ -327,6 +327,37 @@ own catch runs — the coherence classification, then marking every retained cla
 `unverified` is the shape, and that audit row is the only thing telling a thrown
 run apart from one with nothing to prove: another two facts separated only by
 the audit trail. Nothing is downgraded — unproven is reported as unproven.
+
+`relayRc` carries the relay's rc **only** when the relay both ran and answered
+with an integer `rc`. Every other exit publishes `null`: no PR was claimed, so
+no relay was dispatched; `repoSlug` was not an addressable `owner/name` pair;
+the budget was exhausted before the relay; the relay returned nothing; the
+relay answered with a non-integer `rc`; the pass threw before the rc was read;
+or the run threw before verification was reached at all. A `null` is therefore
+never evidence that the relay ran cleanly.
+
+Which of those exits produced it is carried by the audit trail, never inferred
+from the value: `pr_proof_skipped` (with `reason` `no_repo_slug` or
+`budget_exhausted`), `pr_proof_null` (the relay returned nothing),
+`pr_proof_relay_failed` (the relay's rc was not `0`: either a non-zero integer,
+or no usable integer `rc` at all), `pr_proof_threw` (the pass threw — it carries
+its own `probed` and `relayRc` copies) and `pr_proof_not_run` (the run threw
+before verification ran). Two of those names cover more than one exit apiece —
+`pr_proof_skipped` splits on its `reason`, `pr_proof_relay_failed` on whether an
+integer `rc` came back — so between them the five account for every exit above
+**except the first**, which audits nothing at all. Two asymmetries make that
+trail authoritative rather than merely convenient:
+
+- `pr_proof_relay_failed` fires on **any** rc that is not `0`, an integer one
+  included, so its presence does not imply `relayRc` is `null` — read the
+  event's own `rc` field, not the published one.
+- The no-claim exit is deliberately **silent**: no relay is dispatched and
+  nothing is audited, so its whole signature is `probed: 0` with no `pr_proof`
+  row at all. Silence there is the design, not a lost event.
+
+The row-level events — `pr_proof_row_unusable`, `pr_proof_duplicate_row`,
+`pr_proof_row_mismatch` — describe a relay that *did* answer, and say nothing
+about `relayRc`.
 
 `testsRunClaimed` is deliberately **honest, not verifiable**: nothing here can
 falsify it, so nothing reads it.
