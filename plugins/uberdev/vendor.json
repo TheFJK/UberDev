@@ -161,12 +161,12 @@
       "last_reviewed_on": "2026-08-13",
       "stance": "fork",
       "stance_reason": "Base e7a2d16 \u2014 upstream main's HEAD from 2026-04-27 21:55 PDT to 2026-05-04 15:05 PDT, the window this component's vendored_on (2026-04-27) falls in. Measured at that base on 2026-08-13: the file set is 1:1 (8/8, symmetric difference 0) and the copy diverges by 1515 changed lines (GNU diff, '<' plus '>' lines). Method, the full 83-candidate scan and the per-file residual table are in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md; no candidate in upstream history scores better on that key. Rewritten around UberDev's no-approval-gate research policy: upstream's HARD-GATE / per-section / spec-review checkpoints are deliberately absent, and the skill is driven by /uberdev:orchestrator Phase 1 rather than an interactive human loop. Upstream edits are advisory input, never a merge base.",
-      "measured_diff_lines": 2358,
+      "measured_diff_lines": 2365,
       "measured_diff_basis": {
         "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
         "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
-        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
-        "measured_on": "2026-08-14",
+        "uberdev_rev": "2522b1a4047b03ca81b03019a636ee70c362d3a6",
+        "measured_on": "2026-08-16",
         "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
       },
       "divergences": [
@@ -395,12 +395,12 @@
       "last_reviewed_on": "2026-08-13",
       "stance": "fork",
       "stance_reason": "Base e7a2d16 \u2014 upstream main's HEAD across the 2026-04-27\u21922026-05-04 vendoring window. Measured at that base on 2026-08-13: the file set is 1:1 (2/2, symmetric difference 0) and the copy diverges by only 18 changed lines (GNU diff, '<' plus '>' lines); method and the 14-candidate scan are in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md, where no candidate scores better. Carries UberDev's parallel-by-default review fanout, a permanent divergence from upstream's sequential default, so upstream's copy is not drop-in.",
-      "measured_diff_lines": 238,
+      "measured_diff_lines": 243,
       "measured_diff_basis": {
         "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
         "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
-        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
-        "measured_on": "2026-08-14",
+        "uberdev_rev": "2522b1a4047b03ca81b03019a636ee70c362d3a6",
+        "measured_on": "2026-08-16",
         "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
       },
       "divergences": [
@@ -456,12 +456,12 @@
       "last_reviewed_on": "2026-08-13",
       "stance": "fork",
       "stance_reason": "Base e7a2d16 \u2014 upstream main's HEAD across the 2026-04-27\u21922026-05-04 vendoring window. Measured at that base on 2026-08-13: the file set is 1:1 (4/4, symmetric difference 0 \u2014 upstream shipped code-quality-reviewer-prompt.md and spec-reviewer-prompt.md at the base) and the copy diverges by 964 changed lines (GNU diff, '<' plus '>' lines). Two later commits score one line better (f2cbfbef 2026-05-04, d7f47d35 2026-05-05) and are excluded because they postdate vendored_on, not because they scored worse; the 62-candidate scan is in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md. The file-set divergence below is measured against the WATERMARK 3dcbd5c4 (v6.2.0), not the base: at the watermark UberDev ships spec-reviewer-prompt.md and code-quality-reviewer-prompt.md while upstream ships re-review-prompt.md, task-reviewer-prompt.md and scripts/. The routed SDD lifecycle is UberDev-owned. It also carries the permanent wave-parallel implementer divergence (sdd-parallel-implementer-waves), which inverts an explicit upstream prohibition \u2014 see RFC 0019 \u00a76.",
-      "measured_diff_lines": 1406,
+      "measured_diff_lines": 1453,
       "measured_diff_basis": {
         "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
         "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
-        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
-        "measured_on": "2026-08-14",
+        "uberdev_rev": "2522b1a4047b03ca81b03019a636ee70c362d3a6",
+        "measured_on": "2026-08-16",
         "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
       },
       "divergences": [

@@ -52,9 +52,9 @@ invisible to any per-PR review:
 - **A guard from one PR catching violations added by another.** #551's exit-floor row asserts
   every fixture in the macOS job is floored; a sibling PR added two unfloored fixtures to that
   job. Neither branch is red alone.
-- **A measurement made stale by a sibling.** One PR measured every vendored component; another
-  changed the bytes of two of them. Each number was right for its own branch and wrong for the
-  merged tree, so both were re-measured against the combined tree and reconciled with RFC 0019.
+- **A measurement made stale by a sibling.** One PR measured every vendored component; sibling PRs
+  changed the bytes of five of them. Each number was right for its own branch and wrong for the
+  merged tree, so all five were re-measured against the combined tree and reconciled with RFC 0019.
 - **A typed mirror that drifted.** `goal-workflow.test.sh` held the fleet design base as a
   literal `6`; #524 moved it to 9, shorting nine expected totals by 3 per issue. The base is
   now read out of the fleet script and is mutation-proven.

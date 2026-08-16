@@ -715,14 +715,15 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   // which is also why the `agentsSpent +` term at the CB1 comparison has never
   // been exercised by anything.
   //
-  // READ-ONLY MIRROR of goal-pipeline/workflow.js: six research/design agents
-  // plus the clamped implement budget per claimed issue, the two BATCHED fleet
+  // READ-ONLY MIRROR of goal-pipeline/workflow.js: the per-issue design-agent
+  // base READ OUT of the fleet script (9 at present), plus the clamped implement
+  // budget per claimed issue, the two BATCHED fleet
   // relays (intake + PR-claim verification, #515), and the four relays the
   // driver charges one at a time per cycle (claim, one watch tick, verdicts,
   // collect). Named rather than typed, so no expected number below is a digit a
   // later reader has to re-derive by hand. The projection surface is a separate
   // formula owned by runs M/M2/S — CYCLE_PROJECTION above stays untouched.
-  // perIssueFleetCost prices ONE issue as its six research/design agents plus
+  // perIssueFleetCost prices ONE issue as that same design-agent base plus
   // clampInt(cfg.implementBudget, 4, 96, 24). The clamp triple is NAMED because
   // runs W/X below drive the relayed budget past both bounds and every expected
   // total there is derived from it: a second typed copy of any of these three

@@ -1097,13 +1097,13 @@ uncompared one.
 
 | Component | §4.2 cell | Register before | Diff lines |
 | --- | ---: | ---: | ---: |
-| `skills/brainstorm` | 2255 | 2255 | 2358 |
+| `skills/brainstorm` | 2255 | 2255 | 2365 |
 | `skills/dispatching-parallel-agents` | 33 | 33 | 34 |
 | `skills/execute-plan` | 50 | 50 | 51 |
 | `skills/finish-branch` | 734 | 734 | 1077 |
 | `skills/receiving-code-review` | 41 | 41 | 42 |
-| `skills/requesting-code-review` | 228 | 228 | 238 |
-| `skills/subagent-driven-dev` | 1064 | 1064 | 1406 |
+| `skills/requesting-code-review` | 228 | 228 | 243 |
+| `skills/subagent-driven-dev` | 1064 | 1064 | 1453 |
 | `skills/systematic-debugging` | 83 | 195 | 304 |
 | `skills/test-driven-development` | 72 | 64 | 64 |
 | `skills/using-git-worktrees` | 206 | 206 | 207 |
@@ -1117,10 +1117,10 @@ frozen cell: `systematic-debugging` reads 304 and `test-driven-development` 64,
 both at `b36e0829…`, while §4.2 keeps 83 and 72 at `v6.2.0`. Different bases,
 both labelled, correctly not compared.
 
-`write-plan` (125) and `writing-skills` (373) were **re-measured on 2026-08-16**
-against the same upstream rev. Their first figures — 128 and 380 — were taken on
-a tree that did not yet carry the two adopted 6.3.0 hunks (the plan-header
-`Spec:` pointer and the `render-graphs.js` `execFileSync` change). Those hunks
+`brainstorm` (2365), `requesting-code-review` (243), `subagent-driven-dev` (1453), `write-plan` (125) and `writing-skills` (373) were **re-measured on 2026-08-16**
+against the same upstream rev. Their first figures were taken on a tree that did not yet carry this stack
+changes to them — the two adopted 6.3.0 hunks (the plan-header `Spec:` pointer
+and the `render-graphs.js` `execFileSync` change) among them. Those hunks
 and this measurement landed in the same stack, so each figure was correct for
 the tree it was taken on and neither was correct for the combined one. The
 upstream side did not move; only the local bytes did, and the register's
