@@ -271,8 +271,13 @@ _epipe_sh_files() {
 # mandatory on the primary branch for a sharper reason than tidiness: scratch
 # checkouts on a working machine hold UNTRACKED mirrors of the very SKILL.md
 # files being counted, and a bare walk would count each of them again.
-# git's pathspec `*` crosses `/`, so the one glob covers agents/, commands/,
-# docs/, hooks/ and skills/** in a single enumeration.
+# git's pathspec `*` crosses `/`, so the one glob takes every tracked `*.md`
+# under plugins/uberdev at whatever depth it sits. Deliberately NOT written as a
+# list of the subdirectories that glob happens to reach: such a list is a second
+# description of the same set, kept in step by hand, and it drifts in both
+# directions at once — the retired form here named a directory holding no
+# markdown and omitted one that does. That is the defect this suite exists to
+# stop, so state the rule and let E4.0a report the count it measures.
 _epipe_md_files() {
   if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
     git -C "$REPO_ROOT" ls-files -- 'plugins/uberdev/*.md'
