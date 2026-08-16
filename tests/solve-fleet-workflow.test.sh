@@ -284,9 +284,15 @@ grep -q 'Co-Authored-By' "$WORKFLOW" \
 grep -q 'NOT bump the project version' "$WORKFLOW" \
   && pass "G5b the solver is told not to bump the version (parallel-batch collision guard)" \
   || fail "G5b no version-bump prohibition — parallel solvers would collide on the release surfaces"
+# G5c is a COARSE PRESENCE CHECK on the file, not a guard on the delivery
+# brief: since #554 the closing link is conditional — a complete chain gets
+# `Closes #N`, an unfinished one gets the non-closing `UberDev-Partial: #N` —
+# and a source grep through prLinkLine() cannot tell those arms apart. What the
+# delivery agent is actually told is asserted on the RENDERED prompt, per stop
+# path, by B254-B265 below.
 grep -q 'Closes #' "$WORKFLOW" \
-  && pass "G5c the PR body must carry Closes #N" \
-  || fail "G5c no Closes #N requirement in the delivery brief"
+  && pass "G5c the closing link still exists as a form the fleet can emit" \
+  || fail "G5c no Closes #N form anywhere in the fleet script"
 grep -q 'body-file' "$WORKFLOW" \
   && pass "G5d the PR body goes through --body-file (2nd-order injection guard)" \
   || fail "G5d the solver may pass an inline --body"
@@ -740,6 +746,27 @@ function probedNums(record) {
 (async function () {
   const out = {};
 
+  // ------------------------------------------------------------------- #554
+  // LINKAGE vs COMPLETENESS. Every #554 row reads the RENDERED delivery prompt,
+  // never the script source. A source grep sees `Closes #` in the file and
+  // cannot tell "mandatory on both arms" from "mandatory on the complete arm
+  // only" — that blindness is why a chain which stopped at task 2 of 5 shipped
+  // a PR body asserting completeness and auto-closing the issue on merge.
+  //
+  // The `< 0` half is load-bearing: it forces the prohibition sentence to be
+  // written WITHOUT interpolating the closing form. A sentence reading "must
+  // not contain `Closes #11`" would satisfy a naive presence check and rebuild
+  // the exact vacuity this row exists to close.
+  const deliverTextOf = function (record) {
+    const c = record.agentCalls.find(function (x) { return x.label === "deliver:#11"; });
+    return c ? c.prompt : "";
+  };
+  const partialLinkOk = function (t) {
+    return t.indexOf("Closes #11") < 0             // the closing token is absent outright
+      && t.indexOf("UberDev-Partial: #11") >= 0    // the non-closing linkage is mandated
+      && t.indexOf("STOPPED EARLY") >= 0;          // anti-vacuity: this really IS the partial arm
+  };
+
   // Run A — trivial/small tiers: solver only, NO research/design agents.
   const recA = await run(buildArgs(), { agentReturns: trivialReturns() });
   const resA = resultOf(recA);
@@ -794,6 +821,15 @@ function probedNums(record) {
     && deliverText.indexOf("do NOT chain into a review command") >= 0
     && deliverText.indexOf("Do NOT bump the project version") >= 0
     && deliverText.indexOf(RD + "/worktrees/issue-11") >= 0;
+  // #554 — B66 above only means "the COMPLETE arm still carries the closing
+  // link" if this fixture really is a complete chain; without this row it would
+  // stay green against a ledger that wrongly reported the run partial.
+  const b11 = resB ? resB.results.filter(function (r) { return r.issue === 11; })[0] : null;
+  out.bChainComplete = b11 ? b11.chainComplete : null;
+  // The commit-message guard belongs to the partial arm ALONE: a chain that
+  // finished every task has nothing to reword, and telling it to inspect its
+  // own history would be noise the complete path never earned.
+  out.bNoCommitGuard = deliverText.indexOf("git log --format=%B") < 0;
 
   // #516 — the constraints lens must DISCOVER which rule documents exist rather
   // than assert a fixed path list. Read from the RENDERED prompt, not the source:
@@ -1045,6 +1081,10 @@ function probedNums(record) {
   out.lNoT2 = labels(recTL).indexOf("impl:#11:t2") < 0;
   out.lDelivered = labels(recTL).indexOf("deliver:#11") >= 0;
   out.lBlocked = resL ? resL.tasksBlocked : null;
+  // #554 — until now only the LABEL was checked here: the prompt that delivery
+  // agent reads was never read back, so the PR it opens over an exhausted
+  // ladder carried the same closing link as a finished chain.
+  out.tlLink = partialLinkOk(deliverTextOf(recTL));
 
   // Run M — REJECT means "wrong at the root": the ladder stops immediately
   // instead of burning three fix rounds on a task that cannot be saved.
@@ -1055,6 +1095,45 @@ function probedNums(record) {
   out.mNoFixers = !labels(recTM).some(function (l) { return /^fix:#11/.test(l || ""); });
   out.mRejectAudit = !!(resM && resM.auditEvents.some(function (e) { return e.event === "task_review_rejected"; }));
   out.mNoT2 = labels(recTM).indexOf("impl:#11:t2") < 0;
+  // #554 — a task rejected at its ROOT is the loudest partial there is, and it
+  // is the path the issue was filed against.
+  const deliverTMText = deliverTextOf(recTM);
+  out.tmLink = partialLinkOk(deliverTMText);
+  out.tmProhibition = deliverTMText.indexOf("must not close an issue it did not finish") >= 0;
+  // ORDER, not merely presence. A reword instruction issued AFTER the push is
+  // worthless: the branch is already public, so honouring it would need a
+  // force-push, which the house rules in this very prompt forbid. GitHub
+  // honours a closing keyword in a COMMIT MESSAGE that lands on the default
+  // branch, so the PR-body rule alone does not cover it.
+  out.tmGuardBeforePush = deliverTMText.indexOf("git log --format=%B") >= 0
+    && deliverTMText.indexOf("git log --format=%B") < deliverTMText.indexOf("Push the branch.");
+  // The base-AGNOSTIC arm (buildArgs resolves no base): the guard must name no
+  // ref range at all rather than guess one, the same rule baseInstruction()
+  // follows for --base. A guessed `main..HEAD` reads every commit of the branch
+  // point's own history on a stacked run.
+  out.tmGuardNoGuessedBase = deliverTMText.indexOf("..HEAD") < 0;
+
+  // Run KB — the same partial arm with a base the launcher DID resolve. Without
+  // it the base-aware half of the guard is written and never rendered, which is
+  // how a two-armed builder ships with one arm untested.
+  const recKB = await run(buildArgs(null, { baseBranch: "feat/parent" }), { agentReturns: tmReturns });
+  const deliverKBText = deliverTextOf(recKB);
+  out.kbGuardBase = deliverKBText.indexOf("git log --format=%B feat/parent..HEAD") >= 0
+    && deliverKBText.indexOf("over the commits step 1 had you enumerate") < 0;
+  out.kbViolations = recKB.violations.length;
+
+  // Run FN — the FIXER-NULL arm. It sets stopLoop exactly like a REJECT or an
+  // exhausted ladder, and it is the only such path with no delivery-prompt
+  // fixture in this file at all: nothing proved the PR it opens is linked as a
+  // partial, or even that delivery is reached.
+  const fnReturns = Object.assign({}, ladderReturns(null), { "fix:#11:t1:r1": null });
+  const recFN = await run(buildArgs(), { agentReturns: fnReturns });
+  const resFN = resultOf(recFN);
+  out.fnAudit = !!(resFN && resFN.auditEvents.some(function (e) {
+    return e.event === "task_fixer_null" && e.issue === 11 && e.task === 1; }));
+  out.fnDelivered = labels(recFN).indexOf("deliver:#11") >= 0;
+  out.fnLink = partialLinkOk(deliverTextOf(recFN));
+  out.fnViolations = recFN.violations.length;
 
   // Run N — SEQUENTIALITY, proven by interleaving rather than by label order
   // (label order cannot distinguish sequential from parallel). While task 1s
@@ -1605,6 +1684,9 @@ function probedNums(record) {
   out.tcAbsentBlockedTold = deliverXText.indexOf("BLOCKED task(s): 1.") >= 0
     && deliverXText.indexOf("Committed but NEVER REVIEWED (task(s)): 1.") >= 0;
   out.tcAbsentChainComplete = x11 ? x11.chainComplete : null;
+  // #554 — chainComplete:false is only half the fix: /goal reads that field,
+  // but GitHub reads the PR body, and it is the body that closes the issue.
+  out.xLink = partialLinkOk(deliverXText);
 
   // Run Y2 — NON-INTEGER. A stringified count is what a return that evaded
   // schema enforcement actually looks like. It takes the SAME stop, and the raw
@@ -1796,6 +1878,11 @@ function probedNums(record) {
   out.cfPartialTold = deliverCFText.indexOf("PARTIAL implementation of 2 planned task(s)") >= 0
     && deliverCFText.indexOf("BLOCKED task(s): 2.") >= 0
     && deliverCFText.indexOf("The implementation is DONE and reviewed") < 0;
+  // #554 — the CB3 budget arm is the ONE partial path SKILL.md documents as an
+  // intentional deliver-anyway, which makes it the likeliest to be excused from
+  // the linkage rule. It is not: an unfinished chain is unfinished however it
+  // came to stop.
+  out.cfLink = partialLinkOk(deliverCFText);
 
   // --- Run DS: the FOURTH ledger state — committed nothing while claiming DONE
   // A rung that commits nothing is rewritten to NO_CHANGES and skips the review
@@ -1842,6 +1929,10 @@ function probedNums(record) {
   const deliverDSText = deliverDS ? deliverDS.prompt : "";
   out.dsToldWhich = deliverDSText.indexOf("Committed NOTHING while reporting otherwise (task(s)): 1.") >= 0
     && deliverDSText.indexOf("The implementation is DONE and reviewed") < 0;
+  // #554 — the FOURTH ledger state takes the partial linkage too. `disputed` is
+  // not a member of partialDelivery, so a linkage keyed off that object rather
+  // than off ledger.complete would close the issue on this arm alone.
+  out.dsLink = partialLinkOk(deliverDSText);
 
   // --- Run DA: the AGREED no-change, which must NOT be disputed -------------
   // The anti-vacuity half of Run DS. Identical shape except task 1 SAYS
@@ -1858,6 +1949,12 @@ function probedNums(record) {
   const da11 = resDA ? resDA.results.filter(function (r) { return r.issue === 11; })[0] : null;
   out.daChainComplete = da11 ? da11.chainComplete : null;
   out.daNoPartial = !!(da11 && !da11.partialDelivery);
+  // #554 — the SECOND negative control (B66 is the first), on a fixture that
+  // reaches completeness through the disputed predicate rather than through a
+  // clean 2-task run. "Delete the closing line everywhere" cannot pass both.
+  const deliverDAText = deliverTextOf(recDA);
+  out.daClosesKept = deliverDAText.indexOf("Closes #11") >= 0
+    && deliverDAText.indexOf("UberDev-Partial") < 0;
 
   // --- Run FW: the FIX rung's shared-worktree gate --------------------------
   // The suite's only workspace fixture bends workspaceReady on the task-1
@@ -2328,6 +2425,36 @@ else
   check zdStatus '"FAILED"'       "B191 the SAME chain whose tasks claimed DONE while committing nothing is FAILED, never no-change-needed"
   check zdNoDeliver true          "B192 ...and still dispatches no delivery agent — there is nothing committed to deliver"
   check zdBlockerNames true       "B193 ...and the blocker names the issue and points at the worktree, so /goal cannot read it as solved"
+
+  # ------------------------------------------------------------------- #554
+  # The delivery PROMPT's linkage, read back per stop-path. Row ids start at
+  # B254 rather than at the plan's B209: B209-B216 are already taken by the
+  # delivery-workspace gate above, and two rows answering to one id is how a
+  # failure gets read as its neighbour.
+  #
+  # Every row keys off the RENDERED prompt. G5c further up greps the source for
+  # `Closes #` and passes on both arms by construction — it is a presence check
+  # on the file, never a guard on what the delivery agent is told.
+  check bChainComplete true       "B66b the B66 fixture really IS a complete chain, so its Closes-#N row means what it says"
+  check bNoCommitGuard true       "B66c ...and a complete chain is NOT told to inspect its commit messages — that guard is the partial arm's alone"
+  check tmLink true               "B254 a task REJECTED at its root delivers with the non-closing UberDev-Partial link, never Closes #N"
+  check tmProhibition true        "B255 ...and the body is forbidden a closing keyword pointing at this issue, in words that never render the closing form itself"
+  check tmGuardBeforePush true    "B256 ...and the commit-message reword instruction lands BEFORE the push, where honouring it needs no force-push"
+  # B256b is a NEGATIVE control and passes vacuously on a tree with no guard at
+  # all (the B234/B235 shape above); it means something only beside B256c, which
+  # is what proves a range is rendered when the launcher resolved one.
+  check tmGuardNoGuessedBase true "B256b ...and an UNRESOLVED base emits no ref range at all, never a guessed one (the --base rule, applied to git log)"
+  check kbGuardBase true          "B256c ...while a launcher-resolved base is named literally in the range the agent reads"
+  check kbViolations 0            "B256d ...and that run is harness-clean"
+  check tlLink true               "B257 an EXHAUSTED fix ladder delivers as a partial too — B52b only ever checked the label"
+  check fnAudit true              "B258 a NULL fixer is audited with its task"
+  check fnDelivered true          "B259 ...and delivery still runs on the work already committed"
+  check fnLink true               "B260 ...with the partial link: this stop path had no delivery-prompt fixture at all before now"
+  check fnViolations 0            "B261 ...and the new run is harness-clean"
+  check xLink true                "B262 a chain stopped by an unusable taskCount is linked as a partial, not just flagged chainComplete:false"
+  check cfLink true               "B263 the CB3 budget arm — documented as an intentional deliver-anyway — is still not allowed to close the issue"
+  check dsLink true               "B264 the DISPUTED bucket takes the partial link too, though it is no member of partialDelivery"
+  check daClosesKept true         "B265 ANTI-VACUITY: an AGREED no-change chain is complete and keeps Closes #N, with no partial trailer"
 
   check newViolations 0           "B169 zero harness violations across every run added for #561 and #562"
 fi
