@@ -566,7 +566,7 @@ Tell the user the URL ONCE on first use. The server stays alive across turns —
 
 **Dispatching to `spec-writer`.** The structured `qa_answers` shape is orchestrator-internal bookkeeping; when dispatched to `spec-writer`, serialise to markdown bullets matching `agents/spec-writer.md:30`'s input contract (the `source` field is advisory and not consumed by spec-writer today).
 
-**Unloading between visual and terminal questions.** When the next question is conceptual (terminal), `Write` a `waiting.html` (or `waiting-2.html`, etc.) fragment to `$SCREEN_DIR` BEFORE switching to `AskUserQuestion`, so the user does not stare at a stale resolved mockup. Verbatim fragment from `skills/brainstorm/visual-companion.md:118-127`:
+**Unloading between visual and terminal questions.** When the next question is conceptual (terminal), `Write` a `waiting.html` (or `waiting-2.html`, etc.) fragment to `$SCREEN_DIR` BEFORE switching to `AskUserQuestion`, so the user does not stare at a stale resolved mockup. Verbatim fragment from the "Unload when returning to terminal" step of `skills/brainstorm/visual-companion.md`:
 
 ```html
 <!-- filename: waiting.html (or waiting-2.html, etc.) -->

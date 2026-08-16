@@ -2229,6 +2229,97 @@ assert_grep "$SOLVE_FLEET_JS" 'chainComplete' \
   "T16.9b the chainComplete symbol resolves in the fleet script"
 
 echo
+echo "== T17: the brainstorm launcher is invoked through bash, with the reason recorded (#533) =="
+# WHY THIS SECTION EXISTS. visual-companion.md prescribed `scripts/start-server.sh` bare — an
+# invocation that only runs where the exec bit survived the distribution path AND the shell honours
+# the shebang. Neither holds on the marketplace copy or on Windows, and the file had ZERO test
+# coverage, so the shape was unfalsifiable and a future editor could "simplify" the prefix back out
+# with nothing noticing. Two halves are locked here:
+#   (a) the shape — every documented launch goes through `bash`, and NO bare form survives at any
+#       indentation, plus the reason recorded where the next editor reads it (the Windows block);
+#   (b) the cross-file citation — orchestrator/SKILL.md quotes a fragment OUT of this file, and it
+#       used to name a LINE RANGE (`visual-companion.md:118-127`). Editing (a) shifted those lines
+#       and silently invalidated it. Same class as #349 / T9: anchor on a SYMBOL that resolves.
+#
+# FLOOR, NOT AN EXACT COUNT (deliberate, see #533 review finding 4). The absence row forbids ANY bare
+# invocation, whitespace-tolerantly — that alone fully enforces "every invocation is prefixed". The
+# companion count row is purely an ANTI-VACUITY floor: it proves the corpus did not shrink to
+# nothing. Pinning it to exactly 7 would red CI the day an eighth launch block is legitimately
+# documented, for no detection gain.
+#
+# CHANGELOG.md:2859 carries the same `:118-127` literal and is deliberately NOT guarded: it is a
+# frozen record of what a past release shipped, and it is a forbidden version surface in the fleet
+# lane (skills/solve-fleet/workflow.js).
+VC_MD="$REPO_ROOT/plugins/uberdev/skills/brainstorm/visual-companion.md"
+ORCH_SKILL="$REPO_ROOT/plugins/uberdev/skills/orchestrator/SKILL.md"
+if [ ! -r "$VC_MD" ] || [ ! -r "$ORCH_SKILL" ]; then
+  echo "  FAIL  T17.0 corpus missing or unreadable — every row below would pass vacuously"
+  echo "        visual-companion: $VC_MD"
+  echo "        orchestrator:     $ORCH_SKILL"
+  FAIL=$((FAIL + 10))
+else
+  assert_absent_fixed "$ORCH_SKILL" 'visual-companion.md:' \
+    "T17.1 the orchestrator's cross-file citation carries no line-number anchor"
+  assert_grep "$ORCH_SKILL" 'Unload when returning to terminal' \
+    "T17.2a the orchestrator anchors on the step's heading text instead"
+  assert_grep "$VC_MD" 'Unload when returning to terminal' \
+    "T17.2b that heading still resolves in the file it cites"
+  assert_grep "$VC_MD" 'Continuing in terminal' \
+    "T17.3 the waiting.html fragment the orchestrator quotes verbatim still exists there"
+  T17_BASH_N="$(grep -cE '^bash scripts/(start|stop)-server\.sh' "$VC_MD")"
+  if [ "${T17_BASH_N:-0}" -ge 7 ] 2>/dev/null; then
+    echo "  PASS  T17.4 every documented launcher call goes through bash ($T17_BASH_N sites, floor 7)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T17.4 only ${T17_BASH_N:-0} bash-prefixed launcher calls, floor is 7 — a launch block was deleted or un-prefixed"
+    echo "        file: $VC_MD"
+    FAIL=$((FAIL + 1))
+  fi
+  # Whitespace-tolerant on purpose: a column-0 anchor is blind to `  scripts/start-server.sh`
+  # written one space in, which is the exact "simplified it back" regression this row exists for.
+  # Measured: this ERE matches the 7 invocation lines and NOT the prose mentions (the `start-server.sh`
+  # reference inside an indented list item, and the two `- Frame template …` reference bullets).
+  T17_BARE_N="$(grep -cE '^[[:space:]]*scripts/(start|stop)-server\.sh' "$VC_MD")"
+  if [ "${T17_BARE_N:-0}" -eq 0 ] 2>/dev/null; then
+    echo "  PASS  T17.5 no bare launcher invocation survives at any indentation"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T17.5 ${T17_BARE_N} bare launcher invocation(s) survive — the exec-bit/shebang dependency is back"
+    grep -nE '^[[:space:]]*scripts/(start|stop)-server\.sh' "$VC_MD" | sed 's/^/        /'
+    FAIL=$((FAIL + 1))
+  fi
+  # The reason must live IN the Windows block — the platform where the hazard bites — not merely
+  # somewhere in the file. Sliced by the two platform headings; no fence delimiter is matched, so no
+  # backtick-run escaping is involved. Herestring readers only: epipe-guard.test.sh E1 scans this
+  # file (it sets pipefail) and a `awk … | grep -q` here would red both CI jobs.
+  T17_WIN="$(awk '/^\*\*Claude Code \(Windows\):\*\*/{f=1} f && /^\*\*Codex:\*\*/{exit} f' "$VC_MD")"
+  T17_WIN_N="$(grep -c . <<<"$T17_WIN")"
+  if [ "${T17_WIN_N:-0}" -ge 8 ] 2>/dev/null; then
+    echo "  PASS  T17.6 Windows block sliced ($T17_WIN_N lines) — the token rows below are scoped, not vacuous"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T17.6 Windows block slice is empty or too small (${T17_WIN_N:-0} lines) — a platform heading was renamed"
+    echo "        file: $VC_MD"
+    FAIL=$((FAIL + 1))
+  fi
+  # Durable tokens, not a sentence: `shebang`, `exec bit` and `bash.exe` survive rewording, whereas a
+  # whole-sentence literal invites satisfying the test with prose that no longer matches the code.
+  for t17_probe in 'shebang|T17.7 the Windows block names the shebang dependency the prefix removes' \
+                   'exec bit|T17.8 the Windows block names the exec-bit dependency the prefix removes' \
+                   'bash\.exe|T17.9 the Windows block names Git Bash bash.exe for the PowerShell tool'; do
+    t17_re="${t17_probe%%|*}"; t17_desc="${t17_probe#*|}"
+    if grep -qE -e "$t17_re" <<<"$T17_WIN"; then
+      echo "  PASS  $t17_desc"; PASS=$((PASS + 1))
+    else
+      echo "  FAIL  $t17_desc"
+      echo "        file: $VC_MD (Windows block slice)"
+      echo "        pattern: $t17_re"
+      FAIL=$((FAIL + 1))
+    fi
+  done
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
