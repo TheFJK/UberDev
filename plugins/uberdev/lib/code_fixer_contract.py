@@ -110,6 +110,7 @@ __all__ = (
     "prepare_standalone_authority",
     "publish_disposition",
     "publish_review_only_disposition",
+    "publish_unapplied_terminal",
     "count_phase2_deferred_blockers",
     "project_verification_claims",
     "publish_verification",
@@ -3495,6 +3496,228 @@ def publish_review_only_disposition(
         if not completed:
             _rollback_publications(
                 rollbacks, reason="review_only_transaction_recovery_failed"
+            )
+
+
+def publish_unapplied_terminal(
+    *,
+    launch_binding: bytes,
+    authority_path: str,
+    authority_sha256: str,
+    disposition_path: str,
+    applied_content_path: str,
+    working_dir: str,
+    head_before: str,
+    head_after: str,
+) -> dict[str, Any]:
+    """Publish AND validate the review fixer terminal that applied nothing.
+
+    A refusing child leaves no bytes behind by design: it restores the worktree
+    to HEAD and stops. It cannot write the disposition or the applied-content
+    plan through `publish_disposition`, because that publisher is gated on the
+    raw `.git/index` byte pin -- and the child's own authorised `git status` /
+    `git diff` has already moved those bytes, which is the refusal it reported.
+    Without this verb neither artifact ever exists, the terminal cannot be
+    captured at all, and every finding the child refused is dropped on the floor
+    instead of deferred to an issue (#556). A refusal is the one terminal where
+    the findings most need to survive, because nothing was applied and every
+    finding is still outstanding.
+
+    Publisher and validator are therefore one call: the same process that proves
+    nothing was applied is the one that writes the evidence of it. The receipt is
+    the document `validate_review_outcome` returns for a non-APPLIED terminal, so
+    the fence that promotes an outcome promotes this one unchanged.
+    """
+    binding = _load_review_fixer_binding(launch_binding)
+    canonical_authority = _absolute_input(authority_path, "authority_path_invalid")
+    authority = _load_authority(canonical_authority, authority_sha256)
+    authority["authority_path"] = canonical_authority
+    if authority["edge_id"] not in {
+        "review_pr.fix.phase1",
+        "review_pr.fix.phase2",
+    }:
+        # Not independently drivable, and backstopped rather than
+        # load-bearing. `_load_review_fixer_binding` already pins the
+        # binding to a fix edge and `_load_fixer_launch_binding` already
+        # pins the binding's OWN authority to that edge, so an authority
+        # carrying any other edge is necessarily a different file at a
+        # path the binding does not name -- the authority-path clause
+        # below refuses it regardless. Deleting this arm would degrade
+        # the token an operator reads to `validation_authority_mismatch`;
+        # it would not open a publication path. The refusal is kept
+        # because it names the actual problem.
+        fail("review_authority_required")
+    canonical_working = _absolute_input(working_dir, "working_dir_invalid")
+    canonical_disposition = _absolute_input(
+        disposition_path, "disposition_path_invalid"
+    )
+    canonical_content = _absolute_input(
+        applied_content_path, "applied_content_path_invalid"
+    )
+    expected_content = os.path.join(
+        os.path.dirname(authority["findings_path"]),
+        os.path.basename(canonical_authority).replace(
+            "code-fixer-authority-", "review-applied-content-"
+        ),
+    )
+    # Four of these six are drivable from a caller -- the authority path, the
+    # working dir, the disposition path and the applied-content path -- and
+    # each is covered by a row. The authority path is drivable because
+    # `_load_authority` accepts any `code-fixer-authority-<phase>(-iterN)?`
+    # name in the evidence dir, so a byte-identical copy under a second
+    # accepted name satisfies every other clause and leaves this one alone to
+    # refuse it.
+    #
+    # The other two are mirrors of equalities their loaders already enforce,
+    # unreachable in a fixture by construction rather than rot:
+    # `_load_authority` verifies the caller's digest against the bytes at the
+    # caller's path, so once the two authority paths agree their digests
+    # cannot disagree; and `_load_fixer_launch_binding` already refuses a
+    # binding whose `worktree` is not its own authority's `working_dir`, which
+    # with the two clauses above is `canonical_working`.
+    if (
+        canonical_authority != binding["authority_path"]
+        or authority_sha256 != binding["authority_sha256"]
+        or canonical_working != authority["working_dir"]
+        or canonical_disposition != authority["disposition_path"]
+        or canonical_content != expected_content
+        or binding["worktree"] != canonical_working
+    ):
+        fail("validation_authority_mismatch")
+    _recapture_sources(authority, expected_range_head=authority["parent_sha"])
+    status_payload, _status_identity = _capture_regular(
+        binding["status_path"], 1, 65_536
+    )
+    result_payload, _result_identity = _capture_regular(
+        binding["result_path"], 1, DISPOSITION_LIMIT
+    )
+    _validate_bound_child_status(binding, status_payload)
+    parsed_result = _parse_fixer_result(
+        result_payload, authority["phase"], authority["commit_type"]
+    )
+    if parsed_result["commits"]:
+        fail("fixer_result_commit_mismatch")
+    dispositions = [row["disposition"] for row in parsed_result["rows"]]
+    derived_status = "REFUSED" if "REFUSED" in dispositions else "NO_FIXES_NEEDED"
+    if "APPLIED" in dispositions or parsed_result["status"] != derived_status:
+        fail("fixer_result_status_mismatch")
+    _empty, empty_identity = _capture_regular(canonical_disposition, 0, 0)
+    if (
+        SHA1.fullmatch(head_before or "") is None
+        or SHA1.fullmatch(head_after or "") is None
+    ):
+        fail("commit_identity_invalid")
+    # The unapplied-state proof, and deliberately NOT the applied one. It omits
+    # the raw `.git/index` byte pin -- `index_sha256`, `index_size`,
+    # `index_mode` -- that the APPLIED and commit paths keep untouched. There
+    # are no applied bytes on this terminal whose provenance that pin protects;
+    # an equal index tree, an empty tracked set and an equal untracked set
+    # already prove nothing is staged and nothing is modified; and the pin is
+    # invalidated by the child's own authorised `git status` / `git diff`
+    # (agents/code-fixer.md), which is why the refusal happened at all.
+    current = _capture_repo_state(
+        authority["working_dir"], os.path.dirname(authority["findings_path"])
+    )
+    if (
+        head_before != authority["parent_sha"]
+        or head_after != head_before
+        or current["head_sha"] != authority["parent_sha"]
+        or current["head_tree_sha"] != authority["parent_tree_sha"]
+        # A mirror of the identical clause in the applied path's edit-state
+        # predicate -- described rather than named, because the suite asserts
+        # this function's source never mentions the two gates it must not
+        # re-run. Like the loader-enforced equalities above, it is not
+        # independently reachable from a fixture: the index path is derived
+        # from the same working dir the authority pins, which the block above
+        # already requires the caller to match.
+        or current["index_path"] != authority["index_path"]
+        or current["index_tree_sha"] != authority["index_tree_sha"]
+        or current["tracked"] != []
+        or current["untracked"] != authority["untracked"]
+    ):
+        fail("unapplied_terminal_state_invalid")
+    disposition = {
+        "schema_version": 1,
+        "phase": authority["phase"],
+        "aggregate_sha256": authority["findings_sha256"],
+        # Verbatim from the parsed result. `validate_review_outcome` refuses
+        # `fixer_result_disposition_mismatch` when the result rows and the
+        # disposition rows differ; publishing FROM the parsed rows makes that
+        # equality true by construction, because there is no second copy to
+        # drift. `_validate_disposition` below still pins every row to the
+        # authority's immutable (finding_index, location, summary_sha256)
+        # triple, so a forged result cannot invent, reorder or drop a finding.
+        "findings_disposition": parsed_result["rows"],
+    }
+    # Called for its OTHER checks -- schema, phase, aggregate digest, and the
+    # authority's immutable finding triples -- which must all hold before the
+    # write. Its applied set is empty while the guard above stands, since both
+    # read the same rows; the refusal is kept so a future loosening of that
+    # guard cannot publish an APPLIED row as an unapplied terminal.
+    if _validate_disposition(disposition, authority):
+        fail("fixer_result_status_mismatch")
+    payload = (
+        json.dumps(
+            disposition, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode()
+        + b"\n"
+    )
+    rollbacks: list[_ArtifactRollback] = []
+    completed = False
+    try:
+        published_path, disposition_digest, disposition_identity = (
+            _replace_empty_exact_record(
+                canonical_disposition, empty_identity, payload
+            )
+        )
+        rollbacks.append(
+            _ArtifactRollback(published_path, disposition_identity, b"")
+        )
+        content_plan = {
+            "schema_version": 1,
+            "authority_sha256": authority_sha256,
+            "disposition_sha256": disposition_digest,
+            "applied": [],
+        }
+        published_content_path, content_digest, content_identity = (
+            _publish_new_exact_record(
+                canonical_content, _canonical_json(content_plan) + b"\n"
+            )
+        )
+        rollbacks.append(
+            _ArtifactRollback(published_content_path, content_identity, None)
+        )
+        status_digest = hashlib.sha256(status_payload).hexdigest()
+        result_digest = hashlib.sha256(result_payload).hexdigest()
+        capture_expected(binding["status_path"], status_digest, 1, 65_536)
+        capture_expected(
+            binding["result_path"], result_digest, 1, DISPOSITION_LIMIT
+        )
+        capture_expected(published_path, disposition_digest, 1, DISPOSITION_LIMIT)
+        capture_expected(
+            published_content_path,
+            content_digest,
+            1,
+            APPLIED_CONTENT_PLAN_LIMIT,
+        )
+        _recapture_sources(authority, expected_range_head=authority["parent_sha"])
+        receipt = {
+            "status": derived_status,
+            "declared_tip": "",
+            **_launch_identity(binding),
+            "status_sha256": status_digest,
+            "result_sha256": result_digest,
+            "disposition_sha256": disposition_digest,
+            "applied_content_sha256": content_digest,
+            "commit": None,
+        }
+        completed = True
+        return receipt
+    finally:
+        if not completed:
+            _rollback_publications(
+                rollbacks,
+                reason="unapplied_terminal_transaction_recovery_failed",
             )
 
 
@@ -10040,6 +10263,17 @@ def _parser() -> argparse.ArgumentParser:
     review_terminal.add_argument("--launch-binding-json", required=True)
     review_terminal.add_argument("--disposition-path", required=True)
     review_terminal.add_argument("--applied-content-path", required=True)
+    unapplied_terminal = commands.add_parser(
+        "publish-unapplied-terminal", add_help=False
+    )
+    unapplied_terminal.add_argument("--launch-binding-json", required=True)
+    unapplied_terminal.add_argument("--authority-path", required=True)
+    unapplied_terminal.add_argument("--authority-sha256", required=True)
+    unapplied_terminal.add_argument("--disposition-path", required=True)
+    unapplied_terminal.add_argument("--applied-content-path", required=True)
+    unapplied_terminal.add_argument("--working-dir", required=True)
+    unapplied_terminal.add_argument("--head-before", required=True)
+    unapplied_terminal.add_argument("--head-after", required=True)
     persistence_terminal = commands.add_parser(
         "capture-persistence-terminal", add_help=False
     )
@@ -10592,6 +10826,19 @@ def main() -> int:
                     applied_content_sha256=arguments.applied_content_sha256,
                     status_sha256=arguments.status_sha256,
                     result_sha256=arguments.result_sha256,
+                    working_dir=arguments.working_dir,
+                    head_before=arguments.head_before,
+                    head_after=arguments.head_after,
+                )
+            )
+        elif arguments.command == "publish-unapplied-terminal":
+            output = _compact(
+                publish_unapplied_terminal(
+                    launch_binding=arguments.launch_binding_json.encode("utf-8"),
+                    authority_path=arguments.authority_path,
+                    authority_sha256=arguments.authority_sha256,
+                    disposition_path=arguments.disposition_path,
+                    applied_content_path=arguments.applied_content_path,
                     working_dir=arguments.working_dir,
                     head_before=arguments.head_before,
                     head_after=arguments.head_after,

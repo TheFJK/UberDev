@@ -125,6 +125,7 @@ for name in (
     "prepare_standalone_authority",
     "publish_disposition",
     "publish_review_only_disposition",
+    "publish_unapplied_terminal",
     "count_phase2_deferred_blockers",
     "project_verification_claims",
     "publish_verification",
@@ -144,7 +145,7 @@ assert module.__all__ == (
     "route_authority", "beneath", "capture_standalone_snapshot",
     "capture_standalone_terminal", "capture_review_terminal", "capture_persistence_terminal", "capture_bound_child", "capture_expected", "consume_authority", "encode_aggregate", "parse_finding_keys",
     "prepare_authority", "prepare_standalone_authority", "publish_disposition",
-    "publish_review_only_disposition",
+    "publish_review_only_disposition", "publish_unapplied_terminal",
     "count_phase2_deferred_blockers", "project_verification_claims",
     "publish_verification", "validate_persistence_result",
     "commit_review", "commit_standalone", "validate_commit", "validate_failed_return", "validate_residue", "validate_standalone_outcome", "validate_review_outcome",
@@ -187,6 +188,14 @@ assert tuple(inspect.signature(module.publish_disposition).parameters) == (
 assert tuple(inspect.signature(module.publish_review_only_disposition).parameters) == (
     "findings_path", "findings_sha256", "snapshot_path", "snapshot_sha256",
     "working_dir", "disposition_path",
+)
+# #556 U1. `validate_review_outcome`'s argument list MINUS the four digests --
+# this verb computes them, because it is the process that writes the two
+# artifacts they cover. A digest taken as input here could only have been
+# computed by the refusing child, which is the party whose claim is in doubt.
+assert tuple(inspect.signature(module.publish_unapplied_terminal).parameters) == (
+    "launch_binding", "authority_path", "authority_sha256", "disposition_path",
+    "applied_content_path", "working_dir", "head_before", "head_after",
 )
 assert tuple(inspect.signature(module.count_phase2_deferred_blockers).parameters) == (
     "findings_path", "findings_sha256", "disposition_path", "disposition_sha256",
@@ -7357,6 +7366,922 @@ with scratch_dir("code-fixer-verify-cli-") as temporary:
     ])))
     assert verification_receipt["culled"] == 1, verification_receipt
     assert verification_receipt["threshold"] == 80
+
+# === #556: the fixer terminal that applies NOTHING publishes its own evidence =
+#
+# Observed on the consolidated review of PR #553 (run 20260814-074622, iter 2).
+# The Phase 1 code-fixer returned `status: REFUSED`: it had prepared and
+# verified fixes, its own publication step refused `review_index_mismatch`, and
+# it correctly restored the worktree to HEAD. A textbook clean refusal -- and it
+# wrote NEITHER of the two artifacts the controller binds by path. The
+# applied-content document was never created and the disposition was left at
+# ZERO bytes, so `capture-review-terminal` could not freeze the terminal at all
+# (`--applied-content-path` is required and the file did not exist) and Phase
+# 2.5 refused `input-malformed` on the zero-byte disposition. Six BLOCKER rows
+# were consequently never filed as issues.
+#
+# A refusal is the one terminal where the findings most need to survive:
+# nothing was applied, so every finding is still outstanding.
+# `publish_unapplied_terminal` is the missing publisher. It proves nothing was
+# applied, then writes the disposition -- every row exactly as the child
+# declared it -- plus an empty applied-content plan, which is the shape both
+# consumers already expect, so neither consumer changes.
+
+UNAPPLIED_NONCE = "5c" * 32
+assert re.fullmatch(r"[0-9a-f]{64}", UNAPPLIED_NONCE)
+UNAPPLIED_FINDING_POOL = (
+    ("code-reviewer", "src/a.py", "alpha is asserted but never proved"),
+    ("silent-failure-hunter", "src/b.py", "beta swallows the decode error"),
+)
+UNAPPLIED_LENS_POOL = ("quality", "reuse")
+# The receipt `review_promote_validated_fixer_outcome` accepts -- spelled as
+# the fence spells it, plus the launch identity every bound verb returns. The
+# rows below assert against this one set instead of re-spelling it, so there is
+# no second copy to drift out of agreement with the fence.
+UNAPPLIED_RECEIPT_KEYS = {
+    "status", "declared_tip", "status_sha256", "result_sha256",
+    "disposition_sha256", "applied_content_sha256", "commit",
+} | {"run_nonce"}
+
+
+def unapplied_row_block(row):
+    """The six result lines one findings row renders to -- the ONE renderer.
+
+    `build_unapplied` emits its rows through this, and the forgery rows below
+    substitute whole blocks through it, so there is no second copy of the layout
+    to drift: a change here moves the fixture and the forgeries together, and a
+    forgery that no longer matches fails its own `in text` assertion loudly
+    instead of silently rewriting nothing.
+    """
+    return "".join(f"{line}\n" for line in (
+        f"  - finding_index: {row['finding_index']}",
+        f"    location: {row['location']}",
+        f"    summary_sha256: {row['summary_sha256']}",
+        f"    disposition: {row['disposition']}",
+        f"    behavior_tag: {row['behavior_tag']}",
+        f"    reason: {row['reason']}",
+    ))
+
+
+def build_unapplied(temporary, *, edge="review_pr.fix.phase1", rows=None,
+                    status=None, commits_line="commits: []", nonce=None):
+    """One complete REFUSED fixer terminal, in the state #556 left behind.
+
+    Everything the verb READS and nothing it WRITES: the disposition is left at
+    exactly zero bytes and the applied-content path is left absent, because
+    those two files are this verb's output. `publish_disposition` is
+    deliberately never called -- it consumes the same zero-byte seed, so a
+    fixture that called it could not then be handed to the verb under test.
+    That is why every row below builds its own fixture instead of sharing one.
+
+    `rows` sizes the aggregate as well as the result: `len(rows)` findings are
+    taken from the pool, so `rows=[]` builds the zero-finding authority.
+    """
+    phase = "phase1" if edge == "review_pr.fix.phase1" else "phase2"
+    policy_phase = "review_fix" if phase == "phase1" else "simplify_fix"
+    nonce = nonce or UNAPPLIED_NONCE
+    repo = pathlib.Path(temporary) / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    git(repo, "config", "user.email", "fixture@example.invalid")
+    git(repo, "config", "user.name", "Fixture")
+    (repo / "src").mkdir()
+    (repo / "src/a.py").write_text("A = 0\n", encoding="utf-8")
+    (repo / "src/b.py").write_text("B = 0\n", encoding="utf-8")
+    git(repo, "add", "--", "src/a.py", "src/b.py")
+    git(repo, "commit", "-qm", "test: unapplied terminal base")
+    base = git(repo, "rev-parse", "HEAD").stdout.decode().strip()
+    (repo / "src/a.py").write_text("A = 1\n", encoding="utf-8")
+    (repo / "src/b.py").write_text("B = 1\n", encoding="utf-8")
+    git(repo, "add", "--", "src/a.py", "src/b.py")
+    git(repo, "commit", "-qm", "test: unapplied terminal head")
+    head = git(repo, "rev-parse", "HEAD").stdout.decode().strip()
+    evidence = repo / ".uberdev/research/20260814-074622-b2421484c09"
+    evidence.mkdir(parents=True)
+    if rows is None:
+        rows = [
+            {"disposition": "REFUSED", "behavior_tag": "n/a",
+             "reason": "prepared and verified; publication gate refused"}
+            for _entry in UNAPPLIED_FINDING_POOL
+        ]
+    pool = UNAPPLIED_FINDING_POOL[:len(rows)]
+    if phase == "phase1":
+        findings = evidence / "post-impl-review-final.md"
+        findings.write_bytes(phase1_table([
+            (agent, "blocker", path, "1", "DEFERRED", summary, "bounded detail")
+            for agent, path, summary in pool
+        ]))
+    else:
+        findings = evidence / "simplify-final.md"
+        findings.write_bytes(phase2_table([
+            (lens, "blocker", path, "1", "DEFERRED", summary)
+            for lens, (_agent, path, summary) in zip(
+                UNAPPLIED_LENS_POOL, pool, strict=False)
+        ]))
+    commit_range = evidence / "commit-range.txt"
+    commit_range.write_text(f"{base}..{head}\n", encoding="ascii")
+    disposition = evidence / f"{phase}-disposition.json"
+    disposition.write_bytes(b"")
+    receipt = prepare(
+        repo, findings, digest(findings), commit_range, digest(commit_range),
+        disposition, edge=edge, policy_phase=policy_phase,
+    )
+    authority_path = pathlib.Path(receipt["authority_path"])
+    authority = json.loads(authority_path.read_text(encoding="utf-8"))
+    authority["authority_path"] = str(authority_path)
+    full_rows = [
+        {**finding, **row}
+        for finding, row in zip(authority["finding_keys"], rows, strict=True)
+    ]
+    if status is None:
+        status = (
+            "REFUSED"
+            if any(row["disposition"] == "REFUSED" for row in full_rows)
+            else "NO_FIXES_NEEDED"
+        )
+    lines = ["```yaml", f"status: {status}", f"phase: {phase}"]
+    lines.extend(commits_line.format(head=head).split("\n"))
+    if full_rows:
+        lines.append("findings_disposition:")
+        for row in full_rows:
+            lines.extend(unapplied_row_block(row).splitlines())
+    else:
+        lines.append("findings_disposition: []")
+    lines.extend(["risks: []", "```"])
+    result_path = evidence / f"{phase}-fixer-result.md"
+    result_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    status_path = evidence / f"{phase}-fixer-status.json"
+    binding = module.bind_workflow_fixer_launch(
+        edge_id=edge,
+        instance_id=f"review-pr-run-fix-{phase}-iter02-attempt01",
+        run_nonce=nonce, result_path=str(result_path),
+        status_path=str(status_path), working_dir=str(repo),
+        authority_path=str(authority_path),
+        authority_sha256=receipt["authority_sha256"],
+    )
+    status_path.write_text(json.dumps({
+        "backend": "workflow", "branch": "", "exit_code": 0,
+        "result": binding["result_path"], "run_nonce": nonce,
+        "state": "completed", "workspace_mode": "caller",
+        "worktree": binding["worktree"],
+    }, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    content_path = evidence / authority_path.name.replace(
+        "code-fixer-authority-", "review-applied-content-")
+    assert not content_path.exists(), content_path
+    assert disposition.stat().st_size == 0
+    return {
+        "repo": repo, "evidence": evidence, "findings": findings,
+        "commit_range": commit_range, "disposition": disposition,
+        "authority_path": authority_path, "authority": authority,
+        "authority_sha256": receipt["authority_sha256"],
+        "result_path": result_path, "status_path": status_path,
+        "binding": binding, "binding_bytes": module._canonical_json(binding),
+        "content_path": content_path, "rows": full_rows, "phase": phase,
+        "base": base, "head": head, "nonce": nonce,
+    }
+
+
+def call_unapplied(fixture, **overrides):
+    arguments = {
+        "launch_binding": fixture["binding_bytes"],
+        "authority_path": str(fixture["authority_path"]),
+        "authority_sha256": fixture["authority_sha256"],
+        "disposition_path": str(fixture["disposition"]),
+        "applied_content_path": str(fixture["content_path"]),
+        "working_dir": str(fixture["repo"]),
+        "head_before": fixture["head"],
+        "head_after": fixture["head"],
+    }
+    arguments.update(overrides)
+    return module.publish_unapplied_terminal(**arguments)
+
+
+def assert_nothing_published(fixture):
+    assert fixture["disposition"].stat().st_size == 0
+    assert not fixture["content_path"].exists(), fixture["content_path"]
+
+
+# U1. Reachable as a module attribute, as an exported name, and -- the half
+# #381 found dead the first time -- through the shipped CLI.
+assert callable(getattr(module, "publish_unapplied_terminal", None))
+assert "publish_unapplied_terminal" in module.__all__
+assert module._parser().parse_args([
+    "publish-unapplied-terminal",
+    "--launch-binding-json", "{}",
+    "--authority-path", "/authority.json",
+    "--authority-sha256", "0" * 64,
+    "--disposition-path", "/phase1-disposition.json",
+    "--applied-content-path", "/review-applied-content.json",
+    "--working-dir", "/repo",
+    "--head-before", "0" * 40,
+    "--head-after", "0" * 40,
+]).command == "publish-unapplied-terminal"
+
+# U2. The refusal happy path, and its receipt.
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    fixture = build_unapplied(temporary)
+    outcome = call_unapplied(fixture)
+    assert set(outcome) == UNAPPLIED_RECEIPT_KEYS, outcome
+    assert outcome["status"] == "REFUSED", outcome
+    assert outcome["declared_tip"] == "", outcome
+    assert outcome["commit"] is None, outcome
+    assert outcome["run_nonce"] == fixture["nonce"], outcome
+    for key, on_disk in (
+        ("status_sha256", fixture["status_path"]),
+        ("result_sha256", fixture["result_path"]),
+        ("disposition_sha256", fixture["disposition"]),
+        ("applied_content_sha256", fixture["content_path"]),
+    ):
+        assert outcome[key] == hashlib.sha256(
+            on_disk.read_bytes()).hexdigest(), key
+
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    # The CLI arm is the same call. It cannot be driven against the fixture
+    # above -- the verb consumes that fixture's zero-byte seed -- so the two
+    # documents are compared on every member that is not derived from the
+    # scratch path, and the CLI's four digests are re-proved against its own
+    # bytes on disk.
+    fixture = build_unapplied(temporary)
+    cli_outcome = json.loads(run([
+        "publish-unapplied-terminal",
+        "--launch-binding-json", fixture["binding_bytes"].decode(),
+        "--authority-path", str(fixture["authority_path"]),
+        "--authority-sha256", fixture["authority_sha256"],
+        "--disposition-path", str(fixture["disposition"]),
+        "--applied-content-path", str(fixture["content_path"]),
+        "--working-dir", str(fixture["repo"]),
+        "--head-before", fixture["head"],
+        "--head-after", fixture["head"],
+    ]))
+    assert set(cli_outcome) == UNAPPLIED_RECEIPT_KEYS, cli_outcome
+    for key in ("status", "declared_tip", "commit", "run_nonce"):
+        assert cli_outcome[key] == outcome[key], key
+    for key, on_disk in (
+        ("status_sha256", fixture["status_path"]),
+        ("result_sha256", fixture["result_path"]),
+        ("disposition_sha256", fixture["disposition"]),
+        ("applied_content_sha256", fixture["content_path"]),
+    ):
+        assert cli_outcome[key] == hashlib.sha256(
+            on_disk.read_bytes()).hexdigest(), key
+    # The result and the disposition carry no scratch path, so their digests
+    # are fixture-independent: the two runs published byte-identical rows.
+    assert cli_outcome["result_sha256"] == outcome["result_sha256"]
+    assert cli_outcome["disposition_sha256"] == outcome["disposition_sha256"]
+
+# U3. The two published shapes, checked by the consumers that read them.
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    fixture = build_unapplied(temporary)
+    outcome = call_unapplied(fixture)
+    disposition_bytes = fixture["disposition"].read_bytes()
+    published = json.loads(disposition_bytes)
+    assert published == {
+        "schema_version": 1,
+        "phase": "phase1",
+        "aggregate_sha256": fixture["authority"]["findings_sha256"],
+        "findings_disposition": fixture["rows"],
+    }, published
+    assert disposition_bytes == json.dumps(
+        published, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode() + b"\n"
+    # Publishing FROM the parsed result rows is what makes
+    # `fixer_result_disposition_mismatch` true by construction: there is no
+    # second copy of the rows to drift.
+    parsed_rows = module._parse_fixer_result(
+        fixture["result_path"].read_bytes(),
+        fixture["authority"]["phase"],
+        fixture["authority"]["commit_type"],
+    )["rows"]
+    assert published["findings_disposition"] == parsed_rows, parsed_rows
+    assert module._validate_disposition(published, fixture["authority"]) == ()
+    content_bytes = fixture["content_path"].read_bytes()
+    assert json.loads(content_bytes) == {
+        "applied": [],
+        "authority_sha256": fixture["authority_sha256"],
+        "disposition_sha256": outcome["disposition_sha256"],
+        "schema_version": 1,
+    }, content_bytes
+    assert fixture["content_path"].parent == fixture["findings"].parent
+    assert fixture["content_path"].name == fixture["authority_path"].name.replace(
+        "code-fixer-authority-", "review-applied-content-")
+    assert module._load_applied_content_plan(
+        str(fixture["content_path"]),
+        outcome["applied_content_sha256"],
+        fixture["authority"],
+        fixture["authority_sha256"],
+        outcome["disposition_sha256"],
+        (),
+    ) == json.loads(content_bytes)
+
+# U4. The status line is DERIVED from the rows, exactly as
+# `validate_review_outcome` derives it; a result whose own `status:` disagrees
+# is refused, and so is a row claiming APPLIED on a terminal that applied
+# nothing. (A result that declares `status: APPLIED` cannot reach this arm:
+# `_parse_fixer_result` couples that status to a commit row, so it is U5's
+# fixture, not this one's.)
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    fixture = build_unapplied(
+        temporary,
+        rows=[
+            {"disposition": "REFUSED", "behavior_tag": "n/a",
+             "reason": "publication gate refused"},
+            {"disposition": "SKIPPED", "behavior_tag": "n/a",
+             "reason": "deferred to a durable issue"},
+        ],
+        status="NO_FIXES_NEEDED",
+    )
+    expect_contract_reason(
+        lambda: call_unapplied(fixture), "fixer_result_status_mismatch")
+    assert_nothing_published(fixture)
+
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    fixture = build_unapplied(
+        temporary,
+        rows=[
+            {"disposition": "APPLIED", "behavior_tag": "change",
+             "reason": "rewrote the guard"},
+            {"disposition": "REFUSED", "behavior_tag": "n/a",
+             "reason": "publication gate refused"},
+        ],
+        status="REFUSED",
+    )
+    # The derived value AGREES with the declared one here, so only the explicit
+    # "no row is APPLIED" guard can catch it.
+    expect_contract_reason(
+        lambda: call_unapplied(fixture), "fixer_result_status_mismatch")
+    assert_nothing_published(fixture)
+
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    # The aggregate the authority was minted over is re-read before anything is
+    # published, so rewriting the findings after the mint cannot re-point the
+    # rows at other findings. The refusal is the DIGEST one, not
+    # `findings_authority_mismatch`: `_recapture_sources` pins the bytes first,
+    # so its finding-key comparison is only reachable for bytes that hash to
+    # the authority's own digest -- which cannot carry different findings.
+    fixture = build_unapplied(temporary)
+    fixture["findings"].write_bytes(phase1_table([
+        ("code-reviewer", "blocker", "src/a.py", "1", "DEFERRED",
+         "a different alpha claim", "bounded detail"),
+        ("silent-failure-hunter", "blocker", "src/b.py", "1", "DEFERRED",
+         "beta swallows the decode error", "bounded detail"),
+    ]))
+    expect_contract_reason(
+        lambda: call_unapplied(fixture), "artifact_digest_mismatch")
+    assert_nothing_published(fixture)
+
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    # And the sources are re-read BEFORE the first byte is written, not only
+    # after. The closing bookend (U20) sees this same drift and rolls the
+    # records back, so both calls end on the same token and the same clean
+    # tree -- a token assertion cannot tell them apart, which is why deleting
+    # the pre-write re-read leaves the suite green and makes it read as
+    # redundant. What separates them is whether any byte was written at all,
+    # so this row counts the publisher's calls instead of reading its token.
+    fixture = build_unapplied(temporary)
+    fixture["findings"].write_bytes(phase1_table([
+        ("code-reviewer", "blocker", "src/a.py", "1", "DEFERRED",
+         "a different alpha claim", "bounded detail"),
+        ("silent-failure-hunter", "blocker", "src/b.py", "1", "DEFERRED",
+         "beta swallows the decode error", "bounded detail"),
+    ]))
+    original_replace_empty = module._replace_empty_exact_record
+    writes = {"count": 0}
+
+    def count_replace_empty(*arguments, _writes=writes,
+                            _original=original_replace_empty):
+        _writes["count"] += 1
+        return _original(*arguments)
+
+    module._replace_empty_exact_record = count_replace_empty
+    try:
+        expect_contract_reason(
+            lambda: call_unapplied(fixture), "artifact_digest_mismatch")
+    finally:
+        module._replace_empty_exact_record = original_replace_empty
+    assert writes["count"] == 0, writes
+    assert_nothing_published(fixture)
+
+# U5. A commit row is a claim that something WAS applied. `_parse_fixer_result`
+# admits one only under `status: APPLIED`, so this single fixture is both the
+# "declares APPLIED" and the "carries a commit" shape.
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    fixture = build_unapplied(
+        temporary,
+        status="APPLIED",
+        commits_line=(
+            "commits:\n"
+            "  - sha: {head}\n"
+            "    type: fix\n"
+            "    summary: bounded authenticated correction"
+        ),
+    )
+    expect_contract_reason(
+        lambda: call_unapplied(fixture), "fixer_result_commit_mismatch")
+    assert_nothing_published(fixture)
+
+# U6. HEAD moved -- by a real commit, or by the caller's own claim about it.
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    fixture = build_unapplied(temporary)
+    (fixture["repo"] / "src/c.py").write_text("C = 0\n", encoding="utf-8")
+    git(fixture["repo"], "add", "--", "src/c.py")
+    git(fixture["repo"], "commit", "-qm", "test: an extra commit")
+    moved = git(
+        fixture["repo"], "rev-parse", "HEAD").stdout.decode().strip()
+    assert moved != fixture["head"]
+    expect_contract_reason(
+        lambda: call_unapplied(fixture, head_before=moved, head_after=moved),
+        "unapplied_terminal_state_invalid",
+    )
+    assert_nothing_published(fixture)
+
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    # An EMPTY commit moves HEAD and nothing else: same tree, same index tree,
+    # nothing tracked, nothing untracked. The only clause that can see it is
+    # the live `head_sha` read -- so this row is what proves the verb reads git
+    # rather than believing the caller's `head_before` / `head_after` claim.
+    fixture = build_unapplied(temporary)
+    git(fixture["repo"], "commit", "-q", "--allow-empty", "-m", "test: empty")
+    empty_head = git(
+        fixture["repo"], "rev-parse", "HEAD").stdout.decode().strip()
+    current = module._capture_repo_state(
+        str(fixture["repo"]), str(fixture["evidence"]))
+    assert empty_head != fixture["head"]
+    assert current["head_tree_sha"] == fixture["authority"]["parent_tree_sha"]
+    assert current["index_tree_sha"] == fixture["authority"]["index_tree_sha"]
+    assert current["tracked"] == [] and current["untracked"] == (
+        fixture["authority"]["untracked"])
+    expect_contract_reason(
+        lambda: call_unapplied(fixture), "unapplied_terminal_state_invalid")
+    assert_nothing_published(fixture)
+
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    fixture = build_unapplied(temporary)
+    expect_contract_reason(
+        lambda: call_unapplied(fixture, head_after=fixture["base"]),
+        "unapplied_terminal_state_invalid",
+    )
+    expect_contract_reason(
+        lambda: call_unapplied(
+            fixture, head_before=fixture["base"], head_after=fixture["base"]),
+        "unapplied_terminal_state_invalid",
+    )
+    # A malformed pair is an argument fault, not a state fault.
+    expect_contract_reason(
+        lambda: call_unapplied(fixture, head_after="not-a-sha"),
+        "commit_identity_invalid",
+    )
+    assert_nothing_published(fixture)
+
+# U7. A target left modified in the worktree is exactly what a refusal must
+# NOT leave behind.
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    fixture = build_unapplied(temporary)
+    (fixture["repo"] / "src/a.py").write_text("A = 2\n", encoding="utf-8")
+    current = module._capture_repo_state(
+        str(fixture["repo"]), str(fixture["evidence"]))
+    assert [row["path"] for row in current["tracked"]] == ["src/a.py"], current
+    assert current["index_tree_sha"] == fixture["authority"]["index_tree_sha"]
+    expect_contract_reason(
+        lambda: call_unapplied(fixture), "unapplied_terminal_state_invalid")
+    assert_nothing_published(fixture)
+
+# U8. An untracked file OUTSIDE the evidence dir is residue too. Inside it is
+# not: the child's own status and result live there.
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    fixture = build_unapplied(temporary)
+    (fixture["repo"] / "src/leftover.py").write_text("L = 0\n", encoding="utf-8")
+    current = module._capture_repo_state(
+        str(fixture["repo"]), str(fixture["evidence"]))
+    assert current["untracked"] != fixture["authority"]["untracked"], current
+    expect_contract_reason(
+        lambda: call_unapplied(fixture), "unapplied_terminal_state_invalid")
+    assert_nothing_published(fixture)
+
+# U9. Staged bytes with a clean worktree. The `tracked` set alone would not be
+# enough here on every git; `index_tree_sha` is the clause that names it.
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    fixture = build_unapplied(temporary)
+    (fixture["repo"] / "src/a.py").write_text("A = 2\n", encoding="utf-8")
+    git(fixture["repo"], "add", "--", "src/a.py")
+    (fixture["repo"] / "src/a.py").write_text("A = 1\n", encoding="utf-8")
+    assert module._index_tree_sha(
+        str(fixture["repo"])) != fixture["authority"]["index_tree_sha"]
+    expect_contract_reason(
+        lambda: call_unapplied(fixture), "unapplied_terminal_state_invalid")
+    assert_nothing_published(fixture)
+
+# U10. The disposition seed is consumed, exactly as `publish_disposition`
+# consumes it: a file that already carries bytes is not a seed.
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    fixture = build_unapplied(temporary)
+    fixture["disposition"].write_bytes(b"{}\n")
+    expect_contract_reason(
+        lambda: call_unapplied(fixture), "artifact_size_invalid")
+    assert fixture["disposition"].read_bytes() == b"{}\n"
+    assert not fixture["content_path"].exists()
+
+# U11. An absent seed is not a seed either.
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    fixture = build_unapplied(temporary)
+    fixture["disposition"].unlink()
+    expect_contract_reason(
+        lambda: call_unapplied(fixture), "artifact_capture_failed")
+    assert not fixture["disposition"].exists()
+    assert not fixture["content_path"].exists()
+
+# U12. The two writes are ONE transaction. A pre-existing applied-content path
+# refuses the second write after the first has landed, and the rollback arm
+# puts the disposition back to the zero-byte seed it started from.
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    fixture = build_unapplied(temporary)
+    squatter = b'{"applied":"squatter"}\n'
+    fixture["content_path"].write_bytes(squatter)
+    expect_contract_reason(
+        lambda: call_unapplied(fixture), "authority_preexists")
+    # The restored seed is asserted by SHAPE, not by (device, inode) identity:
+    # rollback goes through `_restore_replaced_artifact`, which publishes a
+    # fresh temporary and `os.replace`s it, so a new inode is the correct
+    # outcome here and pinning the old one would assert the opposite.
+    restored = os.lstat(fixture["disposition"])
+    assert fixture["disposition"].read_bytes() == b""
+    assert restored.st_size == 0 and restored.st_nlink == 1
+    assert stat.S_ISREG(restored.st_mode)
+    # The squatter is untouched: rollback removes only what this call published.
+    assert fixture["content_path"].read_bytes() == squatter
+
+# U13. The child's identity is proved before any of its claims are read. A
+# status document that does not echo the minted nonce is not this child's.
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    fixture = build_unapplied(temporary)
+    forged = json.loads(fixture["status_path"].read_text(encoding="utf-8"))
+    forged["run_nonce"] = "a1" * 32
+    assert forged["run_nonce"] != fixture["nonce"]
+    fixture["status_path"].write_text(
+        json.dumps(forged, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8")
+    expect_contract_reason(
+        lambda: call_unapplied(fixture), "child_status_invalid")
+    assert_nothing_published(fixture)
+
+# U14. THE INCIDENT, reproduced. The child is authorised to run `git status` /
+# `git diff` while it works; doing so rewrites `.git/index` without touching
+# HEAD, the index tree, the tracked set or the untracked set. That is what
+# refused the child's own publication -- and this verb must survive it, or the
+# refusal terminal is unreachable for exactly the reason it was reached.
+#
+# Both halves are asserted. Half (i) is the control: if the raw index-byte pin
+# no longer fires, the row FAILS rather than passing on half (ii) alone.
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    fixture = build_unapplied(temporary)
+    baseline_index = pathlib.Path(fixture["authority"]["index_path"]).read_bytes()
+    assert hashlib.sha256(baseline_index).hexdigest() == (
+        fixture["authority"]["index_sha256"])
+    # Content untouched; only the stat data moves. The mtime is set BACKWARDS
+    # an hour rather than to "now": git's index stores whole-second mtimes
+    # unless it was built with USE_NSEC (macOS builds are not), so a same-second
+    # touch is invisible to `ce_match_stat` and refreshes nothing, while a
+    # future mtime makes the entry racily clean and git declines to cache the
+    # new stat. An hour in the past is a plain, deterministic stat miss.
+    target = fixture["repo"] / "src/a.py"
+    target_before = target.read_bytes()
+    target_stat = os.stat(target)
+    os.utime(target, (target_stat.st_atime - 3600, target_stat.st_mtime - 3600))
+    git(fixture["repo"], "status", "--porcelain")
+    assert target.read_bytes() == target_before
+    drifted_index = pathlib.Path(fixture["authority"]["index_path"]).read_bytes()
+    assert drifted_index != baseline_index, (
+        "U14 vacuity: the stat-only edit plus git status did not rewrite "
+        ".git/index, so the refusal this row reproduces cannot occur"
+    )
+    assert len(drifted_index) == fixture["authority"]["index_size"], (
+        "U14: the index SIZE moved, so half (i) would refuse "
+        "artifact_size_invalid rather than review_index_mismatch -- "
+        "investigate this git build before relaxing the row"
+    )
+    # (i) the control: the pinned raw index bytes still refuse the applied path.
+    expect_contract_reason(
+        lambda: module.publish_disposition(
+            authority_path=str(fixture["authority_path"]),
+            authority_sha256=fixture["authority_sha256"],
+            disposition_path=str(fixture["disposition"]),
+            candidate=json.dumps(candidate(fixture["authority"], [
+                {**finding, "disposition": "SKIPPED", "behavior_tag": "n/a",
+                 "reason": "deferred to a durable issue"}
+                for finding in fixture["authority"]["finding_keys"]
+            ])).encode(),
+        ),
+        "review_index_mismatch",
+    )
+    assert_nothing_published(fixture)
+    # (ii) the unapplied terminal publishes anyway.
+    outcome = call_unapplied(fixture)
+    assert outcome["status"] == "REFUSED", outcome
+    assert fixture["disposition"].stat().st_size > 0
+    assert fixture["content_path"].exists()
+
+# U15. NO_FIXES_NEEDED is the other unapplied terminal: every row skipped, or
+# no findings at all.
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    fixture = build_unapplied(temporary, rows=[
+        {"disposition": "SKIPPED", "behavior_tag": "n/a",
+         "reason": "deferred to a durable issue"},
+        {"disposition": "SKIPPED", "behavior_tag": "n/a",
+         "reason": "out of the reviewed range"},
+    ])
+    outcome = call_unapplied(fixture)
+    assert outcome["status"] == "NO_FIXES_NEEDED", outcome
+    assert outcome["declared_tip"] == "" and outcome["commit"] is None, outcome
+    assert json.loads(
+        fixture["disposition"].read_bytes())["findings_disposition"] == (
+            fixture["rows"])
+
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    fixture = build_unapplied(temporary, rows=[])
+    outcome = call_unapplied(fixture)
+    assert outcome["status"] == "NO_FIXES_NEEDED", outcome
+    assert json.loads(
+        fixture["disposition"].read_bytes())["findings_disposition"] == []
+    assert json.loads(fixture["content_path"].read_bytes())["applied"] == []
+
+# U16. Phase 2 is covered by construction: the binding loader accepts both fix
+# edges, so the `review_pr.fix.phase2` refusal takes the same path.
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    fixture = build_unapplied(temporary, edge="review_pr.fix.phase2")
+    outcome = call_unapplied(fixture)
+    assert outcome["status"] == "REFUSED", outcome
+    published = json.loads(fixture["disposition"].read_bytes())
+    assert published["phase"] == "phase2", published
+    assert published["findings_disposition"] == fixture["rows"]
+    assert json.loads(fixture["content_path"].read_bytes())["applied"] == []
+
+# U17. The gate that refused the child is never re-run here. This is a source
+# assertion on purpose: it fails the moment somebody "hardens" the new verb
+# back into the hole #556 was, which no behavioural row can detect until a
+# child happens to have run `git status`.
+unapplied_source = inspect.getsource(module.publish_unapplied_terminal)
+for banned in ("_require_review_index_current", "_require_review_edit_state"):
+    assert banned not in unapplied_source, banned
+
+# U18. The rows are published VERBATIM from the child's own result, so the pin
+# to the authority's immutable (finding_index, location, summary_sha256)
+# triples is the only thing between a forged result and the record
+# `findings-to-issues` reads afterwards. `_parse_fixer_result` never sees the
+# authority; `_validate_disposition` is where the triples are checked, and
+# without it a child could invent, reorder or drop a finding and have the
+# invention stamped into the disposition. Each forgery below is a WELL-FORMED
+# result -- it has to be, or the parser refuses first and the row proves
+# nothing about the pin.
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    # Invent: a digest that is syntactically perfect and simply is not the
+    # authority's, which is precisely what the parser cannot detect.
+    fixture = build_unapplied(temporary, rows=[
+        {"disposition": "REFUSED", "behavior_tag": "n/a",
+         "reason": "publication gate refused", "summary_sha256": "b" * 64},
+        {"disposition": "REFUSED", "behavior_tag": "n/a",
+         "reason": "publication gate refused"},
+    ])
+    assert fixture["rows"][0]["summary_sha256"] == "b" * 64
+    assert fixture["rows"][0]["summary_sha256"] != (
+        fixture["authority"]["finding_keys"][0]["summary_sha256"])
+    assert module._parse_fixer_result(
+        fixture["result_path"].read_bytes(),
+        fixture["authority"]["phase"],
+        fixture["authority"]["commit_type"],
+    )["rows"][0]["summary_sha256"] == "b" * 64
+    expect_contract_reason(
+        lambda: call_unapplied(fixture), "disposition_finding_mismatch")
+    assert_nothing_published(fixture)
+
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    # Reorder: the two findings swap their (location, summary_sha256) pairs
+    # while `finding_index` stays 1, 2 -- the parser requires that sequence, so
+    # a renumbered result never reaches the pin, but a re-POINTED one does.
+    fixture = build_unapplied(temporary)
+    first, second = fixture["rows"]
+    assert first["location"] != second["location"]
+    text = fixture["result_path"].read_text(encoding="utf-8")
+    honest = unapplied_row_block(first) + unapplied_row_block(second)
+    assert honest in text
+    swapped = text.replace(honest, (
+        unapplied_row_block({**first, "location": second["location"],
+                             "summary_sha256": second["summary_sha256"]})
+        + unapplied_row_block({**second, "location": first["location"],
+                               "summary_sha256": first["summary_sha256"]})
+    ))
+    assert swapped != text
+    fixture["result_path"].write_text(swapped, encoding="utf-8")
+    expect_contract_reason(
+        lambda: call_unapplied(fixture), "disposition_finding_mismatch")
+    assert_nothing_published(fixture)
+
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    # Drop: the second finding is deleted from the result. Nothing else in the
+    # verb counts the rows, so a dropped finding would otherwise be published
+    # as a complete disposition and silently lost -- which is #556's own harm.
+    fixture = build_unapplied(temporary)
+    text = fixture["result_path"].read_text(encoding="utf-8")
+    dropped = text.replace(unapplied_row_block(fixture["rows"][1]), "")
+    assert dropped != text
+    fixture["result_path"].write_text(dropped, encoding="utf-8")
+    assert len(module._parse_fixer_result(
+        fixture["result_path"].read_bytes(),
+        fixture["authority"]["phase"],
+        fixture["authority"]["commit_type"],
+    )["rows"]) == 1 < len(fixture["authority"]["finding_keys"])
+    expect_contract_reason(
+        lambda: call_unapplied(fixture), "disposition_finding_mismatch")
+    assert_nothing_published(fixture)
+
+# U19. Every path this verb touches is DERIVED from the authority, never taken
+# from the caller. It needs that harder than `capture_review_terminal` does:
+# the sibling only READS the applied-content path, while this verb CREATES a
+# file there, so an accepted caller path would write a
+# `review-applied-content-*.json` wherever the process can reach and point the
+# disposition at any unrelated zero-byte file.
+#
+# The four drivable clauses are below. The other two cannot be isolated in a
+# fixture, and are mirrors rather than rot: `_load_fixer_launch_binding`
+# already refuses a binding whose `worktree` is not its own authority's
+# `working_dir`, and `_load_authority` verifies the caller's digest against the
+# bytes at the caller's path -- so once the two authority PATHS agree, the two
+# digests cannot disagree either.
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    fixture = build_unapplied(temporary)
+    forged_content = fixture["evidence"] / "review-applied-content-forged.json"
+    expect_contract_reason(
+        lambda: call_unapplied(
+            fixture, applied_content_path=str(forged_content)),
+        "validation_authority_mismatch",
+    )
+    assert not forged_content.exists(), forged_content
+    assert_nothing_published(fixture)
+
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    # A sibling phase's disposition is a seed of exactly the right shape --
+    # zero bytes, same directory -- and still not the one the authority names.
+    fixture = build_unapplied(temporary)
+    foreign_disposition = fixture["evidence"] / "phase2-disposition.json"
+    foreign_disposition.write_bytes(b"")
+    assert foreign_disposition != fixture["disposition"]
+    expect_contract_reason(
+        lambda: call_unapplied(
+            fixture, disposition_path=str(foreign_disposition)),
+        "validation_authority_mismatch",
+    )
+    assert foreign_disposition.read_bytes() == b""
+    assert_nothing_published(fixture)
+
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    fixture = build_unapplied(temporary)
+    elsewhere = pathlib.Path(temporary) / "elsewhere"
+    elsewhere.mkdir()
+    expect_contract_reason(
+        lambda: call_unapplied(fixture, working_dir=str(elsewhere)),
+        "validation_authority_mismatch",
+    )
+    assert_nothing_published(fixture)
+
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    # The authority path itself -- the clause a caller can reach with every
+    # other clause of the six satisfied. `_load_authority` accepts ANY
+    # `code-fixer-authority-<phase>(-iterN)?.json` sitting in the evidence
+    # dir, so a BYTE-IDENTICAL copy under a second accepted name loads with
+    # the same digest (the digest clause cannot fire) and derives an
+    # applied-content path that matches it (the content clause cannot fire
+    # either). Only the binding's own `authority_path` is left to refuse it,
+    # and without that clause the verb publishes the content plan under a name
+    # nothing binds while `review-applied-content-phase1.json` -- the path the
+    # controller binds and `capture_review_terminal` derives -- never exists:
+    # #556 in mirror image, with the disposition already written over.
+    fixture = build_unapplied(temporary)
+    # Derived from the AUTHORITY's own path, not from `fixture["evidence"]`:
+    # the authority is stored canonicalised and the scratch tree is not (on
+    # macOS `/var/folders` is a symlink to `/private/var/folders`), so a copy
+    # built the other way sits in a directory `_load_authority` reads as
+    # foreign and the row would prove `authority_path_invalid` instead.
+    copied_authority = fixture["authority_path"].with_name(
+        "code-fixer-authority-phase1-iter2.json")
+    copied_authority.write_bytes(fixture["authority_path"].read_bytes())
+    assert copied_authority != fixture["authority_path"]
+    assert copied_authority.parent == fixture["authority_path"].parent
+    # Both controls, or the row silently proves a different clause: the copy
+    # is a fully-valid authority in its own right (so the refusal cannot be
+    # `authority_path_invalid` from the loader) and it carries the binding's
+    # digest unchanged (so it cannot be the digest clause).
+    assert digest(copied_authority) == fixture["authority_sha256"]
+    assert module._load_authority(
+        str(copied_authority), fixture["authority_sha256"]
+    ) == module._load_authority(
+        str(fixture["authority_path"]), fixture["authority_sha256"])
+    matching_content = copied_authority.with_name(
+        "review-applied-content-phase1-iter2.json")
+    expect_contract_reason(
+        lambda: call_unapplied(
+            fixture, authority_path=str(copied_authority),
+            applied_content_path=str(matching_content)),
+        "validation_authority_mismatch",
+    )
+    assert not matching_content.exists(), matching_content
+    assert_nothing_published(fixture)
+
+# U20. The transaction is bookended: once both artifacts have landed, the
+# child's status and result, the two records just published, and the
+# authority's own sources are all re-captured against the digests this call
+# already pinned. Without that, anything that moved DURING the publish is
+# published over and the receipt attests to bytes that are no longer there.
+#
+# Every statement of the bookend is driven separately, each by a shim around
+# `_publish_new_exact_record` that performs the real write and then moves one
+# file behind the verb's back -- the suite's established monkeypatch idiom
+# (`module._capture_regular = ...` at the rows above), always restored in a
+# `finally`. Whole-bookend coverage would leave four of the five statements
+# individually deletable, which is the very shape #556 was filed about.
+unapplied_drift_cases = (
+    # (key in the fixture, whether the drifting file is one this call
+    #  published, and therefore whether rollback can still undo it)
+    ("status_path", False),
+    ("result_path", False),
+    ("disposition", True),
+    ("content_path", True),
+)
+for drift_key, drift_is_published in unapplied_drift_cases:
+    with scratch_dir("code-fixer-unapplied-") as temporary:
+        fixture = build_unapplied(temporary)
+        original_publish_new = module._publish_new_exact_record
+        drift = {"count": 0}
+
+        def drift_after_publish(path, payload, _key=drift_key,
+                                _published=drift_is_published,
+                                _fixture=fixture, _drift=drift,
+                                _original=original_publish_new):
+            published = _original(path, payload)
+            _drift["count"] += 1
+            target = _fixture[_key]
+            drifted = target.read_bytes() + b"\n"
+            if _published:
+                # A published record is read-only, so a concurrent writer
+                # cannot rewrite it in place -- it REPLACES it, which needs
+                # only the directory. The replacement carries the record's own
+                # mode, so the drift is purely in the bytes and the digest
+                # clause is unambiguously what refuses it.
+                replacement = target.with_name(f"{target.name}.concurrent")
+                replacement.write_bytes(drifted)
+                os.chmod(replacement, stat.S_IMODE(os.lstat(target).st_mode))
+                os.replace(replacement, target)
+            else:
+                target.write_bytes(drifted)
+            return published
+
+        module._publish_new_exact_record = drift_after_publish
+        try:
+            expect_contract_reason(
+                lambda: call_unapplied(fixture),
+                # A drifting INPUT is caught by the bookend and undone
+                # cleanly. A drifting OUTPUT cannot be undone -- rollback
+                # refuses to restore bytes it no longer recognises -- so the
+                # call fails LOUDLY on the recovery token instead of returning
+                # a receipt over a record somebody else rewrote.
+                "unapplied_terminal_transaction_recovery_failed"
+                if drift_is_published else "artifact_digest_mismatch",
+            )
+        finally:
+            module._publish_new_exact_record = original_publish_new
+        assert drift["count"] == 1, (drift_key, drift)
+        if drift_is_published:
+            # Rollback declines to overwrite bytes it no longer recognises, so
+            # the drifted record is still on disk -- untouched, and reported.
+            assert fixture[drift_key].read_bytes().endswith(b"\n\n"), drift_key
+        else:
+            assert_nothing_published(fixture)
+
+with scratch_dir("code-fixer-unapplied-") as temporary:
+    # The fifth statement: the aggregate the authority was minted over drifts
+    # after the write, and the closing `_recapture_sources` is what sees it.
+    # The forgery is byte-length preserving, so the refusal comes from the
+    # digest clause rather than from the size clause.
+    fixture = build_unapplied(temporary)
+    original_publish_new = module._publish_new_exact_record
+    findings_drift = {"count": 0}
+    honest_findings = fixture["findings"].read_bytes()
+    drifted_findings = honest_findings.replace(
+        b"bounded detail", b"bounded detaiL", 1)
+    assert drifted_findings != honest_findings
+    assert len(drifted_findings) == len(honest_findings)
+
+    def drift_findings_after_publish(path, payload):
+        published = original_publish_new(path, payload)
+        findings_drift["count"] += 1
+        fixture["findings"].write_bytes(drifted_findings)
+        return published
+
+    module._publish_new_exact_record = drift_findings_after_publish
+    try:
+        expect_contract_reason(
+            lambda: call_unapplied(fixture), "artifact_digest_mismatch")
+    finally:
+        module._publish_new_exact_record = original_publish_new
+    assert findings_drift["count"] == 1, findings_drift
+    assert_nothing_published(fixture)
 
 print("code-fixer-contract: authority, disposition, and staged-set closure passed")
 PY
