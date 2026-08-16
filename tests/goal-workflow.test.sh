@@ -237,11 +237,17 @@ function buildArgs(cfgExtra) {
     plugin_root: "/p", repo_root: "/r", cwd: "/r", pipeline: "goal", config: cfg };
 }
 
-function fleetEnvelope(issues) {
+// The optional second parameter merges extra keys into the envelope CONFIG. The
+// driver reads that config back out (implementBudget, #564), so a run has to be
+// able to relay a budget the operator raised — the envelope is the only channel
+// carrying it. Defaulted, so every call site passing an issue list alone still
+// produces byte-identical JSON.
+function fleetEnvelope(issues, cfgExtra) {
   return JSON.stringify({ v: 1, run_id: "RID", now_epoch: 1767225600,
     now_iso: "2026-01-01T00:00:00Z", plugin_root: "/p", repo_root: "/r", cwd: "/r",
     pipeline: "solve-fleet",
-    config: { runId: "RID", issues: (issues === undefined ? "11,12" : issues), concurrency: 6 } });
+    config: Object.assign({ runId: "RID", issues: (issues === undefined ? "11,12" : issues),
+      concurrency: 6 }, cfgExtra || {}) });
 }
 // A healthy claim relay returns an envelope whose issue set IS the claimed set —
 // that is the invariant `--force` arming depends on, so the default fixture
@@ -704,7 +710,17 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   // collect). Named rather than typed, so no expected number below is a digit a
   // later reader has to re-derive by hand. The projection surface is a separate
   // formula owned by runs M/M2/S — CYCLE_PROJECTION above stays untouched.
-  const GOAL_PER_ISSUE_DEFAULT = 6 + 24;  // default arm of clampInt(cfg.implementBudget, 4, 96, 24)
+  // perIssueFleetCost prices ONE issue as its six research/design agents plus
+  // clampInt(cfg.implementBudget, 4, 96, 24). The clamp triple is NAMED because
+  // runs W/X below drive the relayed budget past both bounds and every expected
+  // total there is derived from it: a second typed copy of any of these three
+  // numbers is a copy that can drift away from the fleet with no row noticing.
+  const FLEET_DESIGN_AGENTS = 6;
+  const BUDGET_FLOOR = 4;
+  const BUDGET_CEILING = 96;
+  const BUDGET_DEFAULT = 24;
+  function perIssueCost(budget) { return FLEET_DESIGN_AGENTS + budget; }
+  const GOAL_PER_ISSUE_DEFAULT = perIssueCost(BUDGET_DEFAULT);  // the default arm: 30
   const FLEET_BATCHED_RELAYS = 2;
   const CYCLE_RELAYS = 4;
   const SPEND_CLAIMED = 2;                // the default fixture claims 11,12
@@ -766,6 +782,57 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
     if (String(threw.reason || "").indexOf(THROW_MSG) < 0) return "reason " + threw.reason;
     return "ok";
   })();
+
+  // Runs W/X (#564) — the per-issue term is READ OUT of the relayed envelope.
+  //
+  // Run U pins the total at the DEFAULT budget, and at the default the shipped
+  // derivation
+  //     2 + (rec.claimed.length * perIssueFleetCost(fleetArgs))
+  // and the hardcoded `* 30` it replaced produce the SAME number, so no row
+  // above can tell them apart. G16 in tests/solve-fleet-workflow.test.sh does
+  // red on that exact textual revert — but it is a grep, and a grep cannot see a
+  // VALUE. Measured: making perIssueFleetCost read `{}` in place of
+  // fleetArgs.config leaves every token G16 matches on exactly where it was,
+  // keeps that suite GREEN at rc=0, and silently prices every issue at the
+  // default again. Only the rows below red on it. The budget is operator-set
+  // through UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET, which
+  // lib/solve-launcher.sh plumbs into the very envelope the claim relay hands
+  // back and this driver relays verbatim; at the ceiling one issue costs more
+  // than three times the literal, so an accumulator reading 30 hands CB1 a
+  // spend that is threefold short and the only NAMED halt never fires. These
+  // rows are the only place in the repo where the two can be told apart at
+  // runtime.
+  //
+  // Identical to run U in every other respect — same relays, same clean
+  // converged cycle, same claimed set — so the only thing any delta below can
+  // be attributed to is the config the claim relay put in the envelope.
+  async function spendAtBudget(cfgExtra, expectedPerIssue) {
+    const returns = spendReturns();
+    returns["goal-claim:c1"] = claim({ fleetArgsJson: fleetEnvelope("11,12", cfgExtra) });
+    const rec = await run(buildArgs(), { agentReturns: returns });
+    const res = resultOf(rec);
+    return spendMatch(res ? res.agentsSpent : null, cycleTotal(SPEND_CLAIMED, expectedPerIssue));
+  }
+
+  // Run W — a budget the operator raised to the top of the supported range.
+  out.wRaised = await spendAtBudget({ implementBudget: BUDGET_CEILING },
+    perIssueCost(BUDGET_CEILING));
+
+  // Runs X — budgets the FLEET itself would refuse to run with. clampInt is what
+  // it applies to this key, so charging a relayed budget as typed would overcount
+  // as wrongly as the literal undercounts, and the ledger has to clamp the same
+  // way. Probed just OUTSIDE each bound rather than far outside: that reds both
+  // a missing clamp and a clamp whose boundary moved, which a distant value
+  // cannot tell apart.
+  out.xFloor = await spendAtBudget({ implementBudget: BUDGET_FLOOR - 1 },
+    perIssueCost(BUDGET_FLOOR));
+  out.xCeiling = await spendAtBudget({ implementBudget: BUDGET_CEILING + 1 },
+    perIssueCost(BUDGET_CEILING));
+  // A value that cannot be read as a number is not a budget of zero: it falls to
+  // the fleet default, exactly as a missing key does. Charging zero would be the
+  // same silent undercount by another route.
+  out.xUnreadable = await spendAtBudget({ implementBudget: "abc" }, GOAL_PER_ISSUE_DEFAULT);
+  out.xAbsent = await spendAtBudget(undefined, GOAL_PER_ISSUE_DEFAULT);
 
   process.stdout.write(JSON.stringify(out));
 })().catch(function (e) {
@@ -903,6 +970,12 @@ else
   check uSpend '"match"'                  "B91 the per-cycle spend accumulator is charged for the fleet it ran: agentsSpent is the four driver relays plus the two batched fleet relays plus the per-issue fleet cost at the DEFAULT budget (nothing in tests/ read agentsSpent at all before this row; at the default this total cannot tell the envelope-derived per-issue term from a literal, which needs a raised-budget row of its own)"
   check vParity '"match"'                 "B92 a fleet that THREW is charged the same estimate as a fleet that ran — the catch arm is not free, and CB1 is never handed a ceiling to compare against a spend that never happened"
   check vLedger '"ok"'                    "B93 the unmeasurable cycle is NAMED, not inferred from a total that is quietly short: fleet=threw on the cycle, fleet_spend_unmeasured carries the estimate actually charged and the claimed count, and fleet_threw carries the cause"
+
+  check wRaised '"match"'                 "B94 the per-issue fleet term is DERIVED from the relayed envelope, not typed: a raised implementBudget is charged at the raised budget — the only assertion in the repo that separates the shipped derivation from the hardcoded 30 it replaced, because at the default budget the two agree exactly and every other row here runs at the default"
+  check xFloor '"match"'                  "B95a a relayed budget BELOW the fleet floor is charged at the floor the fleet would clamp it to, not as relayed"
+  check xCeiling '"match"'                "B95b a relayed budget ABOVE the fleet ceiling is charged at the ceiling, so reading the envelope cannot make the ledger overcount either"
+  check xUnreadable '"match"'             "B95c a non-numeric implementBudget is charged the fleet default, not read as a budget of zero"
+  check xAbsent '"match"'                 "B95d an envelope carrying no implementBudget at all is charged the fleet default"
 fi
 
 echo ""
