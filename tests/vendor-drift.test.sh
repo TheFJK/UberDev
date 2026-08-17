@@ -2645,6 +2645,692 @@ else
 fi
 
 echo
+echo "== D-REL17: the citations the pre-release prose is built on =="
+
+# ROW NUMBERING, once, for the three rows below and the fixture row after them.
+# The plan for #604 names this row D-REL13; that id was taken by the shipped
+# prose row above, and the module's own prose CITES it — `D-REL13(e)` appears in
+# two docstring/comment sites, and D-REL13(g) executes that citation against
+# this file. Renaming the shipped row to free the id would red the row whose job
+# is catching exactly that rot, so the new rows take the next free ids instead:
+# D-REL17 (citations), D-REL18 (bounds and shape), D-REL19 (precedence), and
+# D-REL14 (the monorepo arm end to end).
+#
+# D-REL17 — defect 4, the half D-REL13 does not reach. D-REL13 executes the RULE
+# each prose site states; this row executes the VOCABULARY the sites are allowed
+# to state it in. The pre-#604 return value was a five-tuple, and it is
+# describable in exactly three spellings: `0 if sep else 1` (a field expression
+# no body ever contained), `pre_nums` (a component that is gone), and the
+# trailing raw-name tiebreak, which moved out of the precedence key into
+# `release_sort_key`. A copy of the old shape that somebody forgot to update has
+# to use one of the three, so their JOINT absence is what a stale copy cannot
+# survive — strictly stronger than grepping for the one phantom literal, which
+# a copy spelling the other two would sail past.
+#
+# The behavioural half is the example the prose is built on: `v6.4.0+build-7` is
+# the name for which a `-` substring test and `is_prerelease` really disagree,
+# and it has to keep being a name for which they disagree, or the sentence that
+# cites it is decoration again.
+DREL17_OUT="$(python3 - "$DRIFT" <<'PY'
+import importlib.util
+import sys
+
+drift = sys.argv[1]
+modspec = importlib.util.spec_from_file_location("vendor_drift", drift)
+vendor_drift = importlib.util.module_from_spec(modspec)
+modspec.loader.exec_module(vendor_drift)
+
+problems = []
+# Hardcoded, never derived from `is_prerelease` itself: a table built by asking
+# the function under test what it thinks would agree with any answer it gave.
+for name, want in (("v6.4.0+build-7", False),
+                   ("release-1.2.3", False),
+                   ("v6.4.0-rc1", True)):
+    got = vendor_drift.is_prerelease(name)
+    if got is not want:
+        problems.append("is_prerelease(%r) is %r, want %r" % (name, got, want))
+# Anti-vacuity: the two final releases above are only WITNESSES to the
+# over-report claim while they carry the `-` a substring test trips on.
+for name in ("v6.4.0+build-7", "release-1.2.3"):
+    if "-" not in name:
+        problems.append("%r carries no `-`, so it witnesses no disagreement "
+                        "between a substring test and is_prerelease" % (name,))
+print("; ".join(problems) if problems else "D-REL17-OK")
+PY
+)"
+DREL17_RC=$?
+DREL17_FAILS=''
+[ "$DREL17_RC" -eq 0 ] \
+  || DREL17_FAILS="the probe itself exited rc=$DREL17_RC — a traceback is not a pass"
+case "$DREL17_OUT" in
+  D-REL17-OK) ;;
+  '') DREL17_FAILS="${DREL17_FAILS}${DREL17_FAILS:+; }the probe printed nothing at all" ;;
+  *)  DREL17_FAILS="${DREL17_FAILS}${DREL17_FAILS:+; }$DREL17_OUT" ;;
+esac
+# The positive control comes FIRST: three of the four greps below are absence
+# assertions, and a mistyped `grep` invocation that matches nothing at all would
+# satisfy every one of them. A pattern known to be present has to be found
+# before an absence means anything.
+grep -qF -e 'def release_key(' "$DRIFT" \
+  || DREL17_FAILS="${DREL17_FAILS}${DREL17_FAILS:+; }the control grep finds no \`def release_key(\` in $DRIFT, so the absence greps below assert nothing"
+for DREL17_GONE in '0 if sep else 1' 'pre_nums' 'trailing `name`'; do
+  if grep -qF -e "$DREL17_GONE" "$DRIFT"; then
+    DREL17_FAILS="${DREL17_FAILS}${DREL17_FAILS:+; }the module still spells the pre-#604 five-tuple: '$DREL17_GONE'"
+  fi
+done
+grep -qF -e 'v6.4.0+build-7' "$DRIFT" \
+  || DREL17_FAILS="${DREL17_FAILS}${DREL17_FAILS:+; }the prose no longer cites the one name for which a \`-\` substring test and is_prerelease disagree"
+if [ -z "$DREL17_FAILS" ]; then
+  ok "D-REL17 the pre-release prose cites a live example and no vocabulary of the retired tuple"
+else
+  no "D-REL17 the pre-release prose cites something the module does not do: $DREL17_FAILS"
+fi
+
+echo
+echo "== D-REL18: the parse's bounds, and the key's shape =="
+
+# D-REL18 — two failure shapes that look like style points and are not.
+#
+# BOUNDS. Every quantifier the parse admits feeds an `int()`, and CPython
+# refuses `int()` on a digit run past `sys.get_int_max_str_digits()` (4300 by
+# default). An unbounded quantifier anywhere upstream of one is therefore an
+# uncaught `ValueError` wearing `fail()`'s "upstream unreachable" exit code — a
+# tag name read as an outage. Bounding it is only half the job: a bound spelled
+# twice (a constant, plus a literal inside the pattern) is a bound that can be
+# raised in one place and not the other, which is how the constant becomes
+# decorative. So the row asserts both directions — each constant is READ at
+# least once, and no repetition bound is spelled as a digit inside a pattern
+# literal at all.
+#
+# SHAPE. The tuple `release_key` returns is stated in exactly one place now
+# (its own docstring). A single statement is only worth having while something
+# reds when the code drifts from it, so the shape itself is pinned here: arity,
+# the type of each element, the rank field's membership, and — the one that
+# matters — that NO element of the key equals the input name. That last
+# assertion is what reds if the raw-name tiebreak is ever smuggled back into the
+# precedence key, which is the drift a shape-describing comment licensed once
+# already.
+DREL18_FAILS=''
+for DREL18_CONST in MAX_TAG_NAME_CHARS MAX_VERSION_COMPONENT_DIGITS \
+                    MAX_PRERELEASE_IDENT_CHARS MAX_DOTTED_TAIL_COMPONENTS; do
+  DREL18_HITS="$(grep -cF -e "$DREL18_CONST" "$DRIFT" || true)"
+  [ "${DREL18_HITS:-0}" -ge 2 ] \
+    || DREL18_FAILS="${DREL18_FAILS}${DREL18_FAILS:+; }$DREL18_CONST occurs on ${DREL18_HITS:-0} line(s), want >=2 (its definition plus at least one read) — a bound nothing reads is decoration"
+done
+# Each entry is `<negative ERE>|<a string it MUST match>`. The control is not
+# optional and it is not ceremony: it caught this pair being written as
+# `\d\{1,[0-9]` first, which finds nothing under a `grep` that reads `\d` as a
+# digit class (ugrep does; GNU grep reads it as a literal `d`) — an absence
+# assertion that can never fire, on one of the two CI-relevant greps, reading
+# exactly like the green this row is looking for. The brace is spelled as the
+# bracket expression `[{]` for the same reason: inside a bracket it is literal
+# under every implementation, with no escape to disagree about. The pattern is
+# also deliberately WIDER than the two forms the parse uses today — any literal
+# repetition bound in any pattern is the failure, not just those two.
+for DREL18_SPEC in '[{]1,[0-9]|{1,18}' \
+                   '[{]0,[0-9]|{0,8}'; do
+  DREL18_PAT="${DREL18_SPEC%%|*}"
+  DREL18_CTL="${DREL18_SPEC#*|}"
+  grep -qE "$DREL18_PAT" <<<"$DREL18_CTL" \
+    || { DREL18_FAILS="${DREL18_FAILS}${DREL18_FAILS:+; }the negative pattern '$DREL18_PAT' does not even match '$DREL18_CTL', so its absence from $DRIFT proves nothing"; continue; }
+  if grep -qE "$DREL18_PAT" "$DRIFT"; then
+    DREL18_FAILS="${DREL18_FAILS}${DREL18_FAILS:+; }a repetition bound is spelled as a literal inside a pattern ('$DREL18_PAT'), so the named constant is not its only spelling"
+  fi
+done
+DREL18_OUT="$(python3 - "$DRIFT" <<'PY'
+import importlib.util
+import sys
+
+drift = sys.argv[1]
+modspec = importlib.util.spec_from_file_location("vendor_drift", drift)
+vendor_drift = importlib.util.module_from_spec(modspec)
+modspec.loader.exec_module(vendor_drift)
+
+problems = []
+missing = [n for n in ("MAX_VERSION_COMPONENT_DIGITS",
+                       "MAX_PRERELEASE_IDENT_CHARS", "VERSION_RE",
+                       "PRERELEASE_RANK", "FINAL_RANK",
+                       "RELEASE_KEY_PRERELEASE_FIELD")
+           if not hasattr(vendor_drift, n)]
+if missing:
+    problems.append("the module declares no %s" % ", ".join(missing))
+else:
+    # The pattern is DERIVED from the constants, not merely accompanied by them.
+    pattern = vendor_drift.VERSION_RE.pattern
+    for const in ("MAX_VERSION_COMPONENT_DIGITS", "MAX_PRERELEASE_IDENT_CHARS"):
+        bound = "{1,%d}" % getattr(vendor_drift, const)
+        if bound not in pattern:
+            problems.append("VERSION_RE.pattern carries no %r, so %s is not the "
+                            "bound it enforces: %r" % (bound, const, pattern))
+
+    # AC 22 — the two claims the comment run above PRERELEASE_RANK still makes,
+    # over the exact pair it names.
+    rank_field = vendor_drift.RELEASE_KEY_PRERELEASE_FIELD
+    pre_key = vendor_drift.release_key("v6.4.0-rc1")
+    final_key = vendor_drift.release_key("v6.4.0")
+    if pre_key is None or final_key is None:
+        problems.append("the comment's own pair keys to None (%r, %r)"
+                        % (pre_key, final_key))
+    else:
+        if not pre_key < final_key:
+            problems.append("`v6.4.0-rc1` does not sort under `v6.4.0`: %r vs %r"
+                            % (pre_key, final_key))
+        if pre_key[rank_field] != vendor_drift.PRERELEASE_RANK:
+            problems.append("`v6.4.0-rc1` does not carry PRERELEASE_RANK at "
+                            "field %d: %r" % (rank_field, pre_key))
+        if final_key[rank_field] != vendor_drift.FINAL_RANK:
+            problems.append("`v6.4.0` does not carry FINAL_RANK at field %d: %r"
+                            % (rank_field, final_key))
+
+    # AC 23 — the shape, over a battery covering every branch of the parse: a
+    # plain final, a dotted pre-release, a word-separator stem, a monorepo
+    # prefix, and a `v`-less spelling.
+    ranks = (vendor_drift.PRERELEASE_RANK, vendor_drift.FINAL_RANK)
+    for name in ("v1.0.0", "v1.0.0-rc.1", "release-1.2.3", "pkg-v1.3.0-rc1",
+                 "6.3.0"):
+        key = vendor_drift.release_key(name)
+        if key is None:
+            problems.append("release_key(%r) is None, so the shape battery "
+                            "asserts nothing about it" % (name,))
+            continue
+        if len(key) != 3:
+            problems.append("release_key(%r) has arity %d, want 3: %r"
+                            % (name, len(key), key))
+            continue
+        nums, rank, pre_ids = key
+        if not isinstance(nums, tuple) or not nums \
+                or not all(isinstance(n, int) for n in nums):
+            problems.append("release_key(%r)[0] is not a non-empty tuple of "
+                            "int: %r" % (name, nums))
+        if rank not in ranks:
+            problems.append("release_key(%r)[1] is %r, want one of %r"
+                            % (name, rank, ranks))
+        if not isinstance(pre_ids, tuple):
+            problems.append("release_key(%r)[2] is not a tuple: %r"
+                            % (name, pre_ids))
+        # The raw name is a TIEBREAK, not precedence. It lives in
+        # `release_sort_key`; smuggling it back in here is what makes
+        # `v6.4.0+build1 > v6.4.0` true again, against SemVer 10.
+        if name in key:
+            problems.append("release_key(%r) carries the raw name as an "
+                            "element: %r" % (name, key))
+print("; ".join(problems) if problems else "D-REL18-OK")
+PY
+)"
+DREL18_RC=$?
+[ "$DREL18_RC" -eq 0 ] \
+  || DREL18_FAILS="${DREL18_FAILS}${DREL18_FAILS:+; }the probe itself exited rc=$DREL18_RC — a traceback is not a pass"
+case "$DREL18_OUT" in
+  D-REL18-OK) ;;
+  '') DREL18_FAILS="${DREL18_FAILS}${DREL18_FAILS:+; }the probe printed nothing at all" ;;
+  *)  DREL18_FAILS="${DREL18_FAILS}${DREL18_FAILS:+; }$DREL18_OUT" ;;
+esac
+if [ -z "$DREL18_FAILS" ]; then
+  ok "D-REL18 every parse bound is a named constant read by the pattern, and the key's shape is pinned"
+else
+  no "D-REL18 a bound or the key's shape is not what the module says it is: $DREL18_FAILS"
+fi
+
+echo
+echo "== D-REL19: release precedence, totality, and the sort key =="
+
+# D-REL19 — defect 1, asserted as LITERALS. The fixture builders above check
+# their orderings with `release_key` itself, which is right for a fixture and
+# useless as a test of the ordering: a wrong fix moves the expectation with the
+# code and every one of those preconditions still holds. So every expected
+# answer below is written out, and none of them is computed from the function
+# under test.
+#
+# What the row pins, and why each is a real failure rather than a curiosity:
+#
+#   * a pre-release must sort UNDER its own final release, in every spelling an
+#     upstream really publishes — `release-1.2.3-rc1` (the stem carries no
+#     digit) and `<plugin>-v1.3.0-rc1` (a monorepo tag, which is what
+#     `anthropics/claude-plugins-official` publishes). Ranked above, the rc wins
+#     `max()` and the weekly job tells the maintainer to adjudicate a release
+#     candidate, every week, with no permitted action behind it;
+#   * SemVer 10 — build metadata is not precedence, so `v6.4.0+build1` and
+#     `v6.4.0` are the same release and neither is `>` the other;
+#   * SemVer 11 — numeric pre-release identifiers compare numerically, so
+#     `rc.2` sorts under `rc.10` rather than over it;
+#   * TOTALITY, over the three shapes that can carry an unbounded run: a long
+#     version core, a long numeric pre-release identifier, and a long chain of
+#     hyphenated prefixes. Each of the first two is an `int()` site, and the
+#     third is the retry loop. `release_key` answers None — "this name carries
+#     no version", the same branch `latest` already takes — and never raises,
+#     because a raise here surfaces as rc 1 from a job whose rc 1 means "an
+#     upstream could not be reached";
+#   * `release_sort_key` is total for EVERY name, not merely at the two call
+#     sites that happen to pre-filter today. A helper whose totality lives in
+#     its callers is the same partial-function bug one indirection out.
+DREL19_OUT="$(python3 - "$DRIFT" <<'PY'
+import importlib.util
+import sys
+import time
+
+drift = sys.argv[1]
+modspec = importlib.util.spec_from_file_location("vendor_drift", drift)
+vendor_drift = importlib.util.module_from_spec(modspec)
+modspec.loader.exec_module(vendor_drift)
+
+problems = []
+RAISED = object()
+
+
+def guard(label, fn, *args):
+    """Call `fn`, reporting a raise as a row failure instead of aborting.
+
+    Not a swallowed error: the exception is the finding. An uncaught one would
+    abort the probe at the first bad answer and hide every later assertion,
+    which is precisely how the totality bug this row exists for stayed
+    invisible — it raised inside a job that reads a raise as an outage.
+    """
+    try:
+        return fn(*args)
+    except Exception as exc:  # noqa: BLE001 - a raise IS this row's finding
+        problems.append("%s: %s raised %s: %s"
+                        % (label, getattr(fn, "__name__", fn),
+                           type(exc).__name__, exc))
+        return RAISED
+
+
+def key(name):
+    return guard("release_key(%.40r)" % (name,), vendor_drift.release_key, name)
+
+
+def keys(a, b):
+    ka, kb = key(a), key(b)
+    if ka is RAISED or kb is RAISED:
+        return None, None
+    if ka is None or kb is None:
+        problems.append("%r or %r names no version (%r, %r), so the ordering "
+                        "claim about them asserts nothing" % (a, b, ka, kb))
+        return None, None
+    return ka, kb
+
+
+def below(a, b):
+    ka, kb = keys(a, b)
+    if ka is None:
+        return
+    if not ka < kb:
+        problems.append("release_key(%r) does not sort below release_key(%r): "
+                        "%r vs %r" % (a, b, ka, kb))
+
+
+def equal_precedence(a, b):
+    ka, kb = keys(a, b)
+    if ka is None:
+        return
+    if ka > kb or kb > ka:
+        problems.append("%r and %r are the same release under SemVer 10, but "
+                        "one outranks the other: %r vs %r" % (a, b, ka, kb))
+
+
+# AC 1 — the inversion the whole defect is about, in both reachable spellings.
+below("release-1.2.3-rc1", "release-1.2.3")
+below("pkg-v1.3.0-rc1", "pkg-v1.3.0")
+below("pkg-v1.2.0", "pkg-v1.3.0-rc1")
+for name, want in (("release-1.2.3-rc1", True), ("release-1.2.3", False),
+                   ("pkg-v1.3.0-rc1", True)):
+    got = guard("is_prerelease(%r)" % (name,), vendor_drift.is_prerelease, name)
+    if got is not RAISED and got is not want:
+        problems.append("is_prerelease(%r) is %r, want %r" % (name, got, want))
+
+# AC 2 — and therefore the `allow_pre` filter stops being a no-op for exactly
+# the names that need it.
+cands = guard("release_candidates", vendor_drift.release_candidates,
+              ["release-1.2.3", "release-1.2.3-rc1"], "release-1.2.3")
+if cands is not RAISED and list(cands) != ["release-1.2.3"]:
+    problems.append("release_candidates kept a pre-release against a final "
+                    "review point: %r" % (cands,))
+
+# AC 3 — SemVer 10, in both directions of the old raw-name tiebreak.
+equal_precedence("v6.4.0+build1", "v6.4.0")
+equal_precedence("v6.3.0", "6.3.0")
+
+# AC 4 — SemVer 11 identifier order, alphanumeric and numeric.
+below("v1.0.0-alpha", "v1.0.0-beta.2")
+below("v1.0.0-beta.2", "v1.0.0-rc.1")
+below("v1.0.0-rc.2", "v1.0.0-rc.10")
+
+# AC 5 — totality over the three shapes that can carry an unbounded run. The
+# wall clock is part of the assertion: a quadratic regression in the retry loop
+# must fail this row rather than hang the suite.
+started = time.monotonic()
+for label, name in (("long version core", "v" + "9" * 5000 + ".0.0"),
+                    ("long numeric pre-release identifier",
+                     "v1.0.0-" + "9" * 5000),
+                    ("long hyphenated prefix chain", "a-" * 5000 + "1.0.0")):
+    got = key(name)
+    if got is not RAISED and got is not None:
+        # Truncated: the offending name is 5000 characters long, and a row
+        # failure nobody can read is one nobody acts on.
+        problems.append("release_key on a %s answers %.60r..., want None"
+                        % (label, got))
+elapsed = time.monotonic() - started
+if elapsed > 5.0:
+    problems.append("the three over-long names took %.2fs to answer, so the "
+                    "parse's cost is a function of an untrusted string's length"
+                    % elapsed)
+# A non-string is a strictly wider contract than any caller needs, and answering
+# it is what keeps `release_sort_key` total below.
+got = key(3.0)
+if got is not RAISED and got is not None:
+    problems.append("release_key on a non-string answers %r, want None" % (got,))
+
+# AC 6 — the newest is COMPUTED, never taken from the order `ls-remote` printed.
+# Asserted over two names of EQUAL precedence, because that is the only case in
+# which the iteration order could decide the answer at all.
+pair = ["v6.4.0+build1", "v6.4.0"]
+try:
+    winner_a = max(pair, key=vendor_drift.release_sort_key)
+    winner_b = max(list(reversed(pair)), key=vendor_drift.release_sort_key)
+except Exception as exc:  # noqa: BLE001 - a raise IS this row's finding
+    problems.append("max(..., key=release_sort_key) raised %s: %s"
+                    % (type(exc).__name__, exc))
+else:
+    if winner_a != winner_b:
+        problems.append("max() over two equal-precedence names depends on the "
+                        "order they were iterated in: %r vs %r"
+                        % (winner_a, winner_b))
+
+# AC 7 — the public contract the two importers of this module rely on.
+for name in ("release_key", "is_prerelease", "release_sort_key"):
+    if not callable(getattr(vendor_drift, name, None)):
+        problems.append("the module exposes no callable %r" % (name,))
+if guard("release_key('latest')", vendor_drift.release_key, "latest") not in (
+        None, RAISED):
+    problems.append("release_key('latest') is not None, so a moving pointer is "
+                    "ordered as a release")
+
+# AC 20 — `release_sort_key` is total, and the flag really is what makes it so.
+mixed = ["latest", "v1.0.0", "nightly", "v0.9.0"]
+unkeyed = [n for n in mixed if vendor_drift.release_key(n) is None]
+keyed = [n for n in mixed if vendor_drift.release_key(n) is not None]
+if not unkeyed or not keyed:
+    problems.append("the mixed list is homogeneous (unkeyed=%r keyed=%r), so "
+                    "totality is asserted over nothing" % (unkeyed, keyed))
+try:
+    if max(["latest", "v1.0.0", "nightly"],
+           key=vendor_drift.release_sort_key) != "v1.0.0":
+        problems.append("max() over a mixed set does not pick the only name "
+                        "that carries a version")
+    max(["latest", "nightly"], key=vendor_drift.release_sort_key)
+    order = sorted(mixed, key=vendor_drift.release_sort_key)
+except Exception as exc:  # noqa: BLE001 - a raise IS this row's finding
+    problems.append("release_sort_key is partial after all: %s: %s"
+                    % (type(exc).__name__, exc))
+else:
+    if set(order[:len(unkeyed)]) != set(unkeyed):
+        problems.append("sorted() does not place every unkeyed name below every "
+                        "keyed one: %r" % (order,))
+
+print("; ".join(problems) if problems else "D-REL19-OK")
+PY
+)"
+DREL19_RC=$?
+DREL19_FAILS=''
+[ "$DREL19_RC" -eq 0 ] \
+  || DREL19_FAILS="the probe itself exited rc=$DREL19_RC — a traceback is not a pass"
+case "$DREL19_OUT" in
+  D-REL19-OK) ;;
+  '') DREL19_FAILS="${DREL19_FAILS}${DREL19_FAILS:+; }the probe printed nothing at all" ;;
+  *)  DREL19_FAILS="${DREL19_FAILS}${DREL19_FAILS:+; }$DREL19_OUT" ;;
+esac
+
+# AC 6, END TO END. The probe above proves `release_sort_key` is
+# order-independent; it cannot prove the TOOL calls it, and that half is not
+# free. Under SemVer 10 the two spellings of one release key EQUALLY, so
+# `max(..., key=release_key)` returns whichever the iteration reached first —
+# and the iteration is over the dict `resolve_tags` built from `ls-remote`
+# output, i.e. the order the remote happened to print. The whole point of
+# computing an order here is that nothing downstream depends on that. So the
+# same tag SET is published twice in two different ORDERS, and the newest tag
+# the report names has to be the same name both times.
+DREL19_TBL_A="$WORK/tags-order-a.tbl"
+DREL19_TBL_B="$WORK/tags-order-b.tbl"
+python3 - "$TAGS_DEFAULT" "$DREL19_TBL_A" "$DREL19_TBL_B" "$LEAD_SLUG" \
+         "$NEWER_LABEL" "$BUILDMETA_LABEL" "$DRIFT" \
+         <<'PY' || { echo "  ABORT — could not derive the iteration-order tables"; exit 99; }
+import hashlib
+import importlib.util
+import sys
+
+(default_tbl, tbl_a, tbl_b, lead_slug, newer_label, buildmeta_label,
+ drift) = sys.argv[1:8]
+
+modspec = importlib.util.spec_from_file_location("vendor_drift", drift)
+vendor_drift = importlib.util.module_from_spec(modspec)
+modspec.loader.exec_module(vendor_drift)
+
+# Both preconditions hold on either side of the fix, so a wrong answer reds the
+# ROW rather than aborting the file: the two names must be distinct strings, and
+# both must name a version, or the observation this arm reads would not carry
+# them at all. That they are the SAME release is asserted as a literal by the
+# probe above, never re-derived here.
+if newer_label == buildmeta_label:
+    raise SystemExit("the two spellings are one string, so no iteration order "
+                     "could tell them apart")
+for label in (newer_label, buildmeta_label):
+    if vendor_drift.release_key(label) is None:
+        raise SystemExit("%r names no version, so it is filtered out of the "
+                         "observation this arm reads" % (label,))
+
+rows = [line.rstrip("\n").split("\t")
+        for line in open(default_tbl, encoding="utf-8") if line.strip()]
+
+
+def synthetic_sha(label):
+    # Not a security primitive — a deterministic id derived from the register.
+    return hashlib.sha1(("order|%s|%s" % (lead_slug, label)).encode("utf-8"),
+                        usedforsecurity=False).hexdigest()
+
+
+pair = [[lead_slug, synthetic_sha(newer_label), "refs/tags/%s" % newer_label],
+        [lead_slug, synthetic_sha(buildmeta_label),
+         "refs/tags/%s" % buildmeta_label]]
+for path, table in ((tbl_a, rows + pair), (tbl_b, rows + pair[::-1])):
+    open(path, "w", encoding="utf-8").write(
+        "".join("%s\t%s\t%s\n" % tuple(r) for r in table))
+PY
+# Anti-vacuity: two identical tables would model no reordering at all, and the
+# comparison below would be a body against itself.
+if cmp -s "$DREL19_TBL_A" "$DREL19_TBL_B"; then
+  DREL19_FAILS="${DREL19_FAILS}${DREL19_FAILS:+; }the two published-tag tables are byte-identical, so neither run reorders anything"
+fi
+# BOTH `max()` sites are read, because they answer two different questions off
+# the same published set and each has its own call: the neutral tag OBSERVATION
+# in `build_report`, and the newest CANDIDATE the adjudication finding names in
+# `release_verdict`. A finding whose named release follows `ls-remote` order
+# also moves the fingerprint between two runs with identical inputs, which is
+# the comment nobody asked for landing on every subscriber.
+DREL19_TAG_A=''
+DREL19_TAG_B=''
+DREL19_REL_A=''
+DREL19_REL_B=''
+for DREL19_ARM in "a|$DREL19_TBL_A" "b|$DREL19_TBL_B"; do
+  TAGS_TABLE="${DREL19_ARM#*|}"
+  run_drift "$WORK/drel19-order-${DREL19_ARM%%|*}.log" ok "$WATERMARK" "" "[]" --dry-run
+  TAGS_TABLE=""
+  [ "$DRIFT_RC" -eq 0 ] \
+    || DREL19_FAILS="${DREL19_FAILS}${DREL19_FAILS:+; }the ${DREL19_ARM%%|*} ordering run exited rc=$DRIFT_RC"
+  DREL19_SEEN_TAG="$(grep -F -e "- \`$LEAD_SLUG\`: " <<<"$DRIFT_OUT" \
+                     | sed -n 's/.*newest `\([^`]*\)`.*/\1/p')"
+  DREL19_SEEN_REL="$(sed -n 's/.*newest published release: `\([^`]*\)`.*/\1/p' \
+                     <<<"$DRIFT_OUT")"
+  case "${DREL19_ARM%%|*}" in
+    a) DREL19_TAG_A="$DREL19_SEEN_TAG"; DREL19_REL_A="$DREL19_SEEN_REL" ;;
+    *) DREL19_TAG_B="$DREL19_SEEN_TAG"; DREL19_REL_B="$DREL19_SEEN_REL" ;;
+  esac
+done
+for DREL19_PAIR in "the newest published tag|$DREL19_TAG_A|$DREL19_TAG_B" \
+                   "the release the finding names|$DREL19_REL_A|$DREL19_REL_B"; do
+  DREL19_WHAT="${DREL19_PAIR%%|*}"
+  DREL19_REST="${DREL19_PAIR#*|}"
+  DREL19_LHS="${DREL19_REST%%|*}"
+  DREL19_RHS="${DREL19_REST#*|}"
+  if [ -z "$DREL19_LHS" ] || [ -z "$DREL19_RHS" ]; then
+    DREL19_FAILS="${DREL19_FAILS}${DREL19_FAILS:+; }$DREL19_WHAT is empty in one of the two runs (a='$DREL19_LHS' b='$DREL19_RHS'), so the comparison asserts nothing"
+  elif [ "$DREL19_LHS" != "$DREL19_RHS" ]; then
+    DREL19_FAILS="${DREL19_FAILS}${DREL19_FAILS:+; }$DREL19_WHAT follows the order the remote printed: '$DREL19_LHS' one way, '$DREL19_RHS' the other"
+  fi
+done
+if [ -z "$DREL19_FAILS" ]; then
+  ok "D-REL19 a pre-release sorts under its own release, build metadata is not precedence, and both keys are total"
+else
+  no "D-REL19 release precedence is wrong: $DREL19_FAILS"
+fi
+
+echo
+echo "== D-REL14: the monorepo release vocabulary, end to end =="
+
+# D-REL14 — the same defect as D-REL19's first arm, driven through the whole
+# tool instead of through its key. `anthropics/claude-plugins-official` is a
+# REGISTERED upstream and it tags `<plugin>-vN.N.N`, so a monorepo release
+# candidate is not a hypothetical: published over a recorded `<plugin>-vN.N.N`
+# it is what the weekly job would demand adjudication of, unclearably, until
+# the final lands.
+#
+# The monorepo spelling has to be SYNTHESIZED — no upstream in the committed
+# register carries one today (the lead's label is a bare `vN.N.N`), so there is
+# nothing to copy. It is still never TYPED: both halves are read out of the
+# register and the fixture aborts unless they really compose into the shape
+# this row claims to be testing — a non-numeric plugin prefix in front of the
+# recorded version, keying to the same version core as the plain spelling.
+#
+# The anti-vacuity is the PAIR of assertions, not either one alone: the fixture
+# proves the candidate really outranks the recorded review point, and the row
+# then demands a `level` verdict for it. A name that outranks the review point
+# and owes no adjudication can only be one the parse classified as a
+# pre-release, so the row cannot pass by the candidate being mis-parsed into
+# something harmless. It deliberately does NOT assert `is_prerelease(mono_rc)`
+# in the fixture: that precondition is false on the unfixed tree, so it would
+# abort the whole file at exit 99 instead of letting this row red.
+MONO_ROOT="$WORK/monorepo-review-point"
+MONO_ENV="$WORK/tags-mono.env"
+TAGS_MONO="$WORK/tags-mono.tbl"
+mkdir -p "$MONO_ROOT/plugins/uberdev"
+python3 - "$REGISTER" "$TAGS_DEFAULT" "$TAGS_MONO" \
+         "$MONO_ROOT/plugins/uberdev/vendor.json" "$MONO_ENV" \
+         "$LEAD_ID" "$LEAD_SLUG" "$LEAD_LABEL" "$RC_LABEL" "$DRIFT" \
+         <<'PY' || { echo "  ABORT — could not derive the monorepo release fixture"; exit 99; }
+import hashlib
+import json
+import importlib.util
+import re
+import shlex
+import sys
+
+(reg, default_tbl, mono_tbl, mono_register, envfile, lead_id, lead_slug,
+ lead_label, rc_label, drift) = sys.argv[1:11]
+
+modspec = importlib.util.spec_from_file_location("vendor_drift", drift)
+vendor_drift = importlib.util.module_from_spec(modspec)
+modspec.loader.exec_module(vendor_drift)
+release_key = vendor_drift.release_key
+
+d = json.load(open(reg, encoding="utf-8"))
+meta = d["upstreams"][lead_id]
+recorded_commit = meta["last_reviewed_commit"]
+
+if re.search(r"\d", lead_id):
+    raise SystemExit("the lead upstream id %r carries a digit, so `<id>-<label>` "
+                     "would not be a plugin PREFIX in front of a version and "
+                     "this fixture would model some other shape" % lead_id)
+mono_label = "%s-%s" % (lead_id, lead_label)
+mono_rc = "%s-%s" % (lead_id, rc_label)
+if mono_rc == mono_label:
+    raise SystemExit("the release candidate and the recorded review point are "
+                     "the same name, so this row would model nothing")
+
+plain_key, mono_key, rc_key = (release_key(lead_label), release_key(mono_label),
+                               release_key(mono_rc))
+if plain_key is None or mono_key is None or rc_key is None:
+    raise SystemExit("one of %r / %r / %r names no version at all (%r, %r, %r)"
+                     % (lead_label, mono_label, mono_rc, plain_key, mono_key,
+                        rc_key))
+# The prefix has to be a PREFIX: the monorepo spelling must carry the same
+# version core as the plain one, or `<id>-` is contributing digits of its own
+# and the row would be about some other name shape. Compared on the version
+# component alone so the precondition holds on both sides of the fix and the
+# ROW is what reds, rather than the fixture aborting the whole suite at exit 99.
+if mono_key[0] != plain_key[0]:
+    raise SystemExit("the monorepo spelling %r does not carry the same version "
+                     "core as the plain %r (%r vs %r)"
+                     % (mono_label, lead_label, mono_key[0], plain_key[0]))
+if not mono_key < rc_key:
+    raise SystemExit("%r does not rank above the recorded %r, so there would be "
+                     "no candidate to adjudicate and this row would pass for "
+                     "the wrong reason" % (mono_rc, mono_label))
+
+rows = [line.rstrip("\n").split("\t")
+        for line in open(default_tbl, encoding="utf-8") if line.strip()]
+if not [r for r in rows if r[0] == lead_slug]:
+    raise SystemExit("the default table publishes nothing for the lead slug %r, "
+                     "so replacing its rows would model no change" % lead_slug)
+# The lead slug's whole tag set is REPLACED: the recorded label is the monorepo
+# one now, and leaving the plain `vN.N.N` tags published would make it a label
+# that is not published at all — the `vanished` verdict, which is a different
+# row's subject.
+rc_sha = hashlib.sha1(("monorepo-rc|%s|%s" % (lead_slug, mono_rc)).encode("utf-8"),
+                      usedforsecurity=False).hexdigest()
+if rc_sha[:12] == recorded_commit[:12]:
+    raise SystemExit("the derived release-candidate commit collides with the "
+                     "recorded one in the first 12 hex, which is what the report "
+                     "renders")
+mono_rows = [r for r in rows if r[0] != lead_slug]
+mono_rows.append([lead_slug, recorded_commit, "refs/tags/%s" % mono_label])
+mono_rows.append([lead_slug, rc_sha, "refs/tags/%s" % mono_rc])
+open(mono_tbl, "w", encoding="utf-8").write(
+    "".join("%s\t%s\t%s\n" % tuple(r) for r in mono_rows))
+
+reg_copy = json.load(open(reg, encoding="utf-8"))
+lead_meta = reg_copy["upstreams"][lead_id]
+lead_meta["last_reviewed_release"] = mono_label
+# Fixture register-copy invariant: an upstream this copy GIVES a label to must
+# not also carry the HEAD-only opt-out, which is a contradiction a register
+# declaring both is refused for. Written unconditionally so the fixture is
+# correct whichever order the two halves of #604 land in.
+lead_meta.pop("head_only", None)
+json.dump(reg_copy, open(mono_register, "w", encoding="utf-8"), indent=2,
+          ensure_ascii=False)
+
+open(envfile, "w", encoding="utf-8").write(
+    "".join("%s=%s\n" % (k, shlex.quote(v))
+            for k, v in sorted({"MONO_LABEL": mono_label,
+                                "MONO_RC": mono_rc}.items())))
+PY
+. "$MONO_ENV"
+
+TAGS_TABLE="$TAGS_MONO"
+DRIFT_ROOT="$MONO_ROOT"
+run_drift "$WORK/drel14.log" ok "$WATERMARK" "" "[]" --dry-run
+DRIFT_ROOT="$REPO_ROOT"
+TAGS_TABLE=""
+DREL14_FAILS=''
+[ "$DRIFT_RC" -eq 0 ] || DREL14_FAILS="rc=$DRIFT_RC"
+if grep -qF -e "$ADJUDICATION_HEADING" <<<"$DRIFT_OUT"; then
+  DREL14_FAILS="${DREL14_FAILS}${DREL14_FAILS:+; }a monorepo-shaped release candidate was reported as a release awaiting adjudication"
+fi
+# Quoted back with the recorded label, which is also what proves the run read
+# the register COPY: the committed register records the plain spelling and would
+# reach a verdict of its own for a different reason.
+grep -qF -e "recorded \`$MONO_LABEL\`; level with the newest published release" <<<"$DRIFT_OUT" \
+  || DREL14_FAILS="${DREL14_FAILS}${DREL14_FAILS:+; }the monorepo review point is not reported level with the newest published release"
+# ...while the neutral tag OBSERVATION still names the candidate as the newest
+# published tag. The two lines look contradictory read quickly, and that seam is
+# the point: a later "fix" that made them agree would pick one policy for both
+# questions.
+grep -qF -e "newest \`$MONO_RC\`" <<<"$DRIFT_OUT" \
+  || DREL14_FAILS="${DREL14_FAILS}${DREL14_FAILS:+; }the tag observation stopped reporting the monorepo release candidate as the newest published tag"
+if [ -z "$DREL14_FAILS" ]; then
+  ok "D-REL14 a monorepo release candidate is observed, but is not an adjudication finding"
+else
+  no "D-REL14 the monorepo release vocabulary is mishandled: $DREL14_FAILS"
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

@@ -83,6 +83,31 @@ SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
 # output, DROPS that line entirely, which is why the query below deliberately
 # does not pass it.
 TAG_REF_RE = re.compile(r"^refs/tags/(.+?)(\^\{\})?$")
+# Bounds on an UNTRUSTED tag name. Each exists because the parse does ARITHMETIC
+# on what it matches: CPython refuses `int()` on a digit run past
+# `sys.get_int_max_str_digits()` (4300 by default since 3.11), so an unbounded
+# quantifier anywhere upstream of an `int()` is an uncaught ValueError wearing
+# `fail()`'s "an upstream could not be resolved" exit code — a malformed tag
+# name reported as an outage, weekly, until somebody mutes the job. The
+# whole-name cap also bounds the prefix-stripping retry loop, which is
+# O(hyphens). Each bound has exactly ONE spelling: the pattern is BUILT from
+# these constants, never from a literal that could be raised in one place and
+# left behind in the other.
+MAX_TAG_NAME_CHARS = 256
+MAX_VERSION_COMPONENT_DIGITS = 18
+MAX_PRERELEASE_IDENT_CHARS = 32
+MAX_DOTTED_TAIL_COMPONENTS = 8
+_NUMERIC = r"\d{1,%d}" % MAX_VERSION_COMPONENT_DIGITS
+_IDENT = r"[0-9A-Za-z-]{1,%d}" % MAX_PRERELEASE_IDENT_CHARS
+_TAIL = r"{0,%d}" % MAX_DOTTED_TAIL_COMPONENTS
+# `[v]<core>[-<pre>]`, anchored at both ends. No quantifier is ambiguous with
+# its neighbour — `.` is in neither `\d` nor the identifier class — so there is
+# no catastrophic-backtracking shape here, and the whole-name cap bounds the
+# worst case regardless.
+VERSION_RE = re.compile(
+    r"^[vV]?(?P<core>%(n)s(?:\.%(n)s)%(t)s)"
+    r"(?:-(?P<pre>%(i)s(?:\.%(i)s)%(t)s))?$"
+    % {"n": _NUMERIC, "i": _IDENT, "t": _TAIL})
 # `release_key`'s pre-release field, named at both ends so the rule it encodes
 # stays legible: SemVer §11 ranks a pre-release BELOW the release it precedes,
 # so `v6.4.0-rc1` sorts under `v6.4.0`. `is_prerelease` reads the same field
@@ -96,7 +121,9 @@ TAG_REF_RE = re.compile(r"^refs/tags/(.+?)(\^\{\})?$")
 # Landing on the recorded review point, it turns `allow_pre` ON — that flag is
 # computed by this very test — and the genuine pre-releases the flag exists to
 # exclude are admitted instead, one of which wins `max()`. D-REL13(e) executes
-# both.
+# both. What the key those ranks sit inside LOOKS like is stated once, in
+# `release_key`'s own docstring; restating it here is how a third copy of the
+# shape came to describe a tuple the module had stopped returning.
 PRERELEASE_RANK = 0
 FINAL_RANK = 1
 RELEASE_KEY_PRERELEASE_FIELD = 1
@@ -164,33 +191,104 @@ def resolve_head(repo_url, repo_slug):
     return sha
 
 
+def _pre_ids(pre):
+    """SemVer §11 identifier order for one pre-release string.
+
+    A numeric identifier compares numerically and ranks BELOW an alphanumeric
+    one, so a numeric identifier becomes `(0, <int>, "")` and any other becomes
+    `(1, 0, <text>)`. A shorter identifier list ranks below a longer one whose
+    earlier identifiers are equal, which tuple comparison already gives.
+    """
+    ids = []
+    for ident in pre.split("."):
+        if ident.isdigit():
+            ids.append((0, int(ident), ""))
+        else:
+            ids.append((1, 0, ident))
+    return tuple(ids)
+
+
 def release_key(name):
-    """A SemVer-ish ordering key for a tag name, or None if it names no version.
+    """A tag name's precedence, or None if it names no version at all.
+
+    THE ONLY statement of the returned shape; every other site in this module
+    defers here. It is the triple `(nums, rank, pre_ids)`: `nums` is the dotted
+    version core as ints, `rank` is `PRERELEASE_RANK` for a pre-release and
+    `FINAL_RANK` otherwise, and `pre_ids` orders the pre-release identifiers per
+    SemVer §11 — empty for a final release, whose rank field has already decided
+    the comparison.
+
+    The parse, stated once: strip build metadata at the first `+` (SemVer §10 —
+    it is not part of the version, so it cannot decide precedence); then read
+    what remains as `[v]<core>[-<pre>]`, and while that fails drop everything up
+    to and including the first `-` and try again. That retry is what reads
+    `release-1.2.3` and `pr-review-toolkit-v1.2.0`, whose leading words are a
+    NAME: the `-` in front of the digits separates words, not a pre-release. A
+    name no attempt parses carries no version — the same answer `latest` gets.
+
+    Precedence ONLY. `v6.4.0+build1` and `v6.4.0` are one release under §10, so
+    neither outranks the other here, and choosing deterministically between two
+    names of equal precedence is `release_sort_key`'s job. A tiebreak carried
+    inside this key would be a tiebreak that outranks, which is the §10
+    violation itself.
 
     The shape exists to prevent one specific inversion, so do not "simplify" it
-    into the digits alone: `v6.4.0-rc1` yields the digit run (6, 4, 0, 1), which
+    into the digits alone: read as digits, `v6.4.0-rc1` yields (6, 4, 0, 1) and
     sorts ABOVE its own final release `v6.4.0` at (6, 4, 0) — `max()` would then
-    report a release CANDIDATE as the newest release. SemVer §11 ranks a
-    pre-release BELOW the version it precedes, and the
-    `PRERELEASE_RANK if sep else FINAL_RANK` field is what encodes that.
+    report a release CANDIDATE as the newest release, and the weekly job would
+    demand adjudication of something RFC 0019 §7 gives nobody a way to clear.
+    SemVer §11 ranks a pre-release BELOW the version it precedes, and the rank
+    field is what encodes that.
+
+    TOTAL over every input, by construction rather than by example: a non-`str`
+    and an over-long name are refused up front, and every `int()` below consumes
+    a group `VERSION_RE` has already bounded to `MAX_VERSION_COMPONENT_DIGITS`
+    or `MAX_PRERELEASE_IDENT_CHARS` characters, so no `int()` here can reach
+    CPython's conversion limit. A name that breaches a bound fails the parse and
+    answers None rather than raising inside a job whose non-zero exit means "an
+    upstream could not be resolved".
 
     `ls-remote` prints tags in lexical refname order, where `v6.0.10` precedes
     `v6.0.2`; ordering is therefore always computed here, never taken from the
     order the remote happened to print.
     """
-    # SemVer §10: build metadata is not part of the version, so it is stripped
-    # before comparison. The trailing `name` field below is only a deterministic
-    # tiebreak, so `max()` over two names that differ ONLY in build metadata is
-    # still stable rather than arbitrary.
-    core = name.split("+", 1)[0]
-    stem, sep, pre = core.partition("-")
-    if not re.search(r"\d", stem):         # e.g. `release-1.2.3`: that "-" is a
-        stem, sep, pre = core, "", ""      # word separator, not a pre-release one
-    nums = tuple(int(n) for n in re.findall(r"\d+", stem))
-    if not nums:
+    if not isinstance(name, str) or len(name) > MAX_TAG_NAME_CHARS:
         return None
-    pre_nums = tuple(int(n) for n in re.findall(r"\d+", pre))
-    return (nums, PRERELEASE_RANK if sep else FINAL_RANK, pre_nums, pre, name)
+    rest = name.split("+", 1)[0]           # SemVer §10
+    while True:
+        match = VERSION_RE.match(rest)
+        if match:
+            nums = tuple(int(n) for n in match.group("core").split("."))
+            pre = match.group("pre")
+            if pre is None:
+                return (nums, FINAL_RANK, ())
+            return (nums, PRERELEASE_RANK, _pre_ids(pre))
+        if "-" not in rest:
+            return None
+        rest = rest.split("-", 1)[1]
+
+
+def release_sort_key(name):
+    """A TOTAL order over tag names, for `max()` and `sorted()`.
+
+    SemVer §10 leaves two spellings of one release EQUAL under `release_key`,
+    and `max()` over an equal pair would otherwise fall back to the order
+    `ls-remote` printed — the one thing `release_key` is written to never take
+    an answer from. The raw name breaks that tie, and it lives here rather than
+    inside the precedence key, so breaking a tie can never become outranking.
+
+    Total for every name, including one carrying no version: the leading flag
+    decides before the key tuple is reached, so None never meets a tuple under
+    `<`, and every unkeyed name sorts below every keyed one. The
+    `() if key is None else key` spelling tests presence against `None` rather
+    than truthiness, matching the rest of this module — and `()` is a legitimate
+    key component that happens to be falsy. Both call sites do pre-filter on
+    `release_key(n) is not None`; this function does not rely on their
+    remembering to, because a helper whose totality lives in its callers is the
+    same partial-function bug one indirection out.
+    """
+    key = release_key(name)
+    return (key is not None, () if key is None else key, name)
 
 
 def is_prerelease(name):
@@ -384,7 +482,7 @@ def release_verdict(upstream_id, meta, published):
     """
     recorded = meta.get("last_reviewed_release")
     candidates = release_candidates(published, recorded)
-    newest = max(candidates, key=release_key) if candidates else None
+    newest = max(candidates, key=release_sort_key) if candidates else None
 
     if recorded is None:
         state, actionable = "head-only", False
@@ -745,7 +843,7 @@ def build_report(register, heads, tags, verdicts, changes):
             lines.append("- `%s`: %d published tag(s); none of them names a "
                          "version" % (slug, len(published)))
         else:
-            newest = max(named, key=release_key)
+            newest = max(named, key=release_sort_key)
             lines.append("- `%s`: %d published tag(s); newest `%s` (`%s`)"
                          % (slug, len(published), newest, published[newest][:12]))
     lines.append("")
