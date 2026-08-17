@@ -563,4 +563,37 @@ if grep -qE 'TRIAGE_FILES=.*grep -oE|files_mentioned=' "$LAUNCHER"; then
 fi
 PASS=$((PASS+1))
 
+# S11 -- WRITER/READER DRIFT. The scope block is one contract written in three
+# places: the regex here, and the literal each issue writer ships. Nothing
+# compares them, which is the #370/#371 class -- and the failure is silent by
+# construction, because an unparseable block is indistinguishable from no block
+# at all: triage just falls back to the heuristic and prices the issue the old
+# way. So parse every literal the writers ship THROUGH the reader, with the
+# writer's own placeholder filled in.
+python3 -I - "$TRIAGE" "$ROOT/plugins/uberdev/commands/issue.md" \
+  "$ROOT/plugins/uberdev/agents/findings-to-issues.md" <<'PY'
+import importlib.util, pathlib, re, sys
+spec = importlib.util.spec_from_file_location("solve_triage_under_test", sys.argv[1])
+st = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(st)
+# Whole-line literals only: the prose in both files also names the block, and a
+# sentence about it is not a thing any writer emits into an issue body.
+line_re = re.compile(r"^<!-- uberdev-scope .*-->$", re.M)
+found = 0
+for path in sys.argv[2:]:
+    for line in line_re.findall(pathlib.Path(path).read_text(encoding="utf-8")):
+        found += 1
+        # `{file_path}` is findings-to-issues' binding, substituted per row.
+        parsed = st.declared_scope(line.replace("{file_path}", "lib/real.sh"))
+        assert parsed, (
+            f"{pathlib.Path(path).name} ships a scope block the reader does not "
+            f"parse: {line!r} -> {parsed!r}. Triage would silently fall back to "
+            "the prose heuristic.")
+# 3 templates in commands/issue.md (bug / feat / chore) + 1 body shape in
+# agents/findings-to-issues.md. A drop below that means an emitter was deleted
+# and this guard stopped covering it.
+assert found >= 4, f"only {found} scope-block literals found — the guard is vacuous"
+PY
+PASS=$((PASS+1))
+
 echo "solve-triage: $PASS passed"
