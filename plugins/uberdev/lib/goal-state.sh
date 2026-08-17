@@ -2705,7 +2705,7 @@ _uberdev_goal_fetch_pr_body() {
 # + UBERDEV_TMPDIR). Do NOT call print_summary from a block that has not run that
 # rehydration — it is never called from Phase 0.
 print_summary() {
-  local cycles="$1" prs_merged prs_held_lines prs_held_count issues_resolved wall_secs
+  local cycles="$1" prs_merged prs_held_lines prs_held_count issues_resolved prs_partial wall_secs
   prs_merged="$(uberdev_goal_list_prs_in_state "$GOAL_ID" merged | grep -c . || true)"
   # Build a `<state>\t<pr>` stream so the per-row printf below can emit the
   # `state=` field promised at line ~466 ("each row pr=<num> state=<yellow-held
@@ -2716,10 +2716,17 @@ print_summary() {
     uberdev_goal_list_prs_in_state "$GOAL_ID" red-held    | sed 's/^/red-held\t/' )"
   prs_held_count="$(printf '%s\n' "$prs_held_lines" | grep -c . || true)"
   issues_resolved="$(uberdev_goal_count_resolved_issues "$GOAL_ID")"
+  # #592 — a PR whose solver chain stopped short still merges and its issue
+  # still stays OPEN, so PR/issue counters alone describe that run as clean.
+  # This is the only line an unattended /goal leaves the operator, so the
+  # partial-chain ledger is reported here beside the other terminal counters.
+  # Reads as exactly `0` when the ledger is absent (a run with no partial
+  # chains, or a --resume from before the ledger existed) — never empty.
+  prs_partial="$(uberdev_goal_count_partial_prs "$GOAL_ID")"
   wall_secs="$(( $(date +%s) - watch_start ))"
-  printf 'goal %s: cycles=%s/%s prs_merged=%s prs_held=%s issues_resolved=%s wall_secs=%s\n' \
+  printf 'goal %s: cycles=%s/%s prs_merged=%s prs_held=%s issues_resolved=%s prs_partial=%s wall_secs=%s\n' \
     "$GOAL_ID" "$cycles" "$MAX_CYCLES" "$prs_merged" "$prs_held_count" \
-    "$issues_resolved" "$wall_secs"
+    "$issues_resolved" "$prs_partial" "$wall_secs"
   printf '%s\n' "$prs_held_lines" | while IFS=$'\t' read -r state p; do
     [ -z "$p" ] && continue
     body="$(_uberdev_goal_fetch_pr_body "$p")"

@@ -299,8 +299,26 @@ terminal_count="$(printf '%s\n' "$terminal_prs" | grep -c . || true)"
 # the v0.34.0 rollover-WIPE fix — the wipe was fixed; convergence-evaluates-
 # first-and-ignores-the-queue was not.)
 if [ "${#new_candidates[@]}" = "0" ] && [ "$terminal_count" = "$all_pr_count" ] && [ "${#queue[@]}" -eq 0 ]; then
+  # Issue #592 — convergence here is measured purely on PR terminal states, and
+  # a PR whose solver chain stopped short reaches a terminal state exactly like
+  # a complete one. The partial-chain count rides on the SAME row as the
+  # convergence claim, so a reader can never see the claim without the caveat.
+  # The re-validation is not theatre: it is the only thing between a future
+  # change in the counter and an unparseable audit row (the repo's own
+  # `jq length … || echo 0` lesson — a count read with no shape check maps a
+  # crashed producer to a plausible number). Here a non-numeric or empty value
+  # degrades to 0 AND the row stays parseable JSON — but it says so on stderr
+  # first, because "the counter broke" and "nothing was partial" print the same
+  # `0` and that collapse is the entire bug this issue exists to fix.
+  partial_count="$(uberdev_goal_count_partial_prs "$GOAL_ID")" || partial_count=""
+  case "$partial_count" in
+    ''|*[!0-9]*)
+      printf 'goal-phase3: partial-chain count unusable (%s) — reporting 0 in goal_converged\n' \
+        "${partial_count:-<empty>}" >&2
+      partial_count=0 ;;
+  esac
   uberdev_goal_audit goal_converged \
-    "{\"cycle\":$cycle,\"prs\":$all_pr_count}"
+    "{\"cycle\":$cycle,\"prs\":$all_pr_count,\"partial\":$partial_count}"
   print_summary "$cycle"
   uberdev_goal_cleanup_run_state || true   # #171 — reap run-state sidecars on terminal exit
   exit 0

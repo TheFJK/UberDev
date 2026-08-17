@@ -406,6 +406,52 @@ else
   fail "P3b: convergence path wrong (rc=$C_RC, out=[$C_OUT], audit=[$(tr -d '\n' < "$(audit_for "$G_C")" 2>/dev/null)])"
 fi
 
+# --- P3b.partial-field: the converged row carries the partial-chain count (#592).
+# /goal's terminal audit row is what a later reader (and the operator) uses to
+# decide whether the run actually finished the work. Convergence measured purely
+# on PR terminal states cannot see a solver whose task chain stopped short, so
+# the count rides ALONG on the same row rather than in a separate stream that a
+# consumer has to know to join. Asserted ON THE ROW, not on the file: a stray
+# `partial` anywhere else in the jsonl must not be able to satisfy it.
+# The run above (G_C) has NO partial ledger on disk — the absent-file path — so
+# the honest value is a literal 0, never an empty interpolation.
+conv_row_for() { grep 'goal_converged' "$(audit_for "$1")" 2>/dev/null | tail -n 1; }
+C_CONV_ROW="$(conv_row_for "$G_C")"
+if [ -n "$C_CONV_ROW" ] && grep -q '"partial":0' <<<"$C_CONV_ROW"; then
+  pass "P3b.partial-field: the goal_converged row reports partial:0 with no ledger on disk (#592)"
+else
+  fail "P3b.partial-field: goal_converged row missing/wrong partial field (#592 — row=[$C_CONV_ROW])"
+fi
+
+# --- P3b.partial-nonzero: two ledger rows -> partial:2, row still parses (#592).
+# Same convergence path, with the ledger seeded BEFORE the phase-3 run — this is
+# the shape the watch lane leaves behind when a fleet reported an incomplete
+# chain. The JSON re-parse is the second half of the assertion and not decorum:
+# an empty or non-numeric count interpolates into `"partial":` and takes the
+# WHOLE audit row out of the format every downstream reader assumes.
+G_CP="pipeconvp01"
+printf '100\tmerged\t10\n200\tyellow-held\t20\n' > "$WORK/state/goal-$G_CP-pr-states.tsv"
+: > "$(audit_for "$G_CP")"; : > "$WORK/state/goal-$G_CP-issue-states.tsv"
+printf '100\t1\t10\n200\t1\t20\n' > "$WORK/state/goal-$G_CP-partial-prs.tsv"
+DRV_CP="$WORK/drv_term_conv_partial.zsh"; write_term_driver "$DRV_CP" "$G_CP" conv
+CP_OUT="$("$ZSH_BIN" -f "$DRV_CP" 2>&1)"
+CP_RC=$?
+CP_CONV_ROW="$(conv_row_for "$G_CP")"
+if [ "$CP_RC" -eq 0 ] && [ -n "$CP_CONV_ROW" ] && grep -q '"partial":2' <<<"$CP_CONV_ROW"; then
+  pass "P3b.partial-nonzero: a two-row partial ledger surfaces as partial:2 on the converged row (#592)"
+else
+  fail "P3b.partial-nonzero: partial count did not reach the converged row (#592 — rc=$CP_RC, out=[$CP_OUT], row=[$CP_CONV_ROW])"
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+  # Never a silent skip: python3 is already a hard CI dependency here
+  # (tests/contract_markers.py), so its absence is a broken host, not a pass.
+  fail "P3b.partial-json: python3 not on PATH — cannot verify the audit row still parses (#592)"
+elif [ -n "$CP_CONV_ROW" ] && python3 -m json.tool >/dev/null 2>&1 <<<"$CP_CONV_ROW"; then
+  pass "P3b.partial-json: the goal_converged row (payload included) still parses as JSON with the new field (#592)"
+else
+  fail "P3b.partial-json: the goal_converged row is not parseable JSON (#592 — row=[$CP_CONV_ROW])"
+fi
+
 # --- P3c: queue empty + a NON-terminal PR -> queue_empty_not_converged, exit 1.
 G_S="pipestuck01"
 printf '100\tpushed-reviewing\t10\n' > "$WORK/state/goal-$G_S-pr-states.tsv"

@@ -169,7 +169,7 @@ Z3_OUT="$(
   uberdev_goal_state_init "$GOAL_ID" >/dev/null 2>&1
   print_summary 3 2>&1
 )"
-if grep -qE '^goal goal-z3abcd01: cycles=3/8 prs_merged=0 prs_held=0 issues_resolved=0 wall_secs=3600$' <<<"$Z3_OUT"; then
+if grep -qE '^goal goal-z3abcd01: cycles=3/8 prs_merged=0 prs_held=0 issues_resolved=0 prs_partial=0 wall_secs=3600$' <<<"$Z3_OUT"; then
   pass "Z3d: print_summary emits the mandated operator summary line under $RUN_SHELL"
 else
   fail "Z3d: print_summary summary line malformed/missing (got: [$Z3_OUT])"
@@ -779,6 +779,35 @@ case "$Z18_OUT" in
     fail "Z18a: absent-ledger count wrong under $RUN_SHELL (#592 — got: [$Z18_OUT]; expect rc=0 out=[0])" ;;
 esac
 rm -rf "$Z18_TMP" 2>/dev/null || true
+
+echo
+echo "== Z19: print_summary reports the partial-chain count from the ledger (#592) =="
+# The ONE line an unattended /goal leaves behind is print_summary's. Recording a
+# partial chain in the sidecar buys the operator nothing if the summary still
+# reads like a clean run, so the count has to reach THIS line — Z3d above pins
+# the zero case (and is the ratchet that reds if the field is dropped again);
+# this row proves the number is actually READ from the ledger rather than
+# hardcoded. Under zsh because print_summary runs in whichever shell the
+# goal-pipeline fence gets, and its `$(uberdev_goal_count_partial_prs …)`
+# capture is the same dual-shell surface as the rest of this fixture.
+Z19_TMP="$(mktemp -d)"
+Z19_OUT="$(
+  GOAL_ID="goal-z19abcd1"
+  export GOAL_ID UBERDEV_GOAL_ID="$GOAL_ID"
+  export UBERDEV_TMPDIR="$Z19_TMP"
+  MAX_CYCLES=8
+  watch_start=1729000000
+  date() { case "${1:-}" in +%s) printf '%s\n' 1729003600;; *) command date "$@";; esac; }
+  uberdev_goal_state_init "$GOAL_ID" >/dev/null 2>&1
+  uberdev_goal_record_partial_prs "$GOAL_ID" "901,902" 1 >/dev/null 2>&1
+  print_summary 3 2>&1
+)"
+if grep -qE '^goal goal-z19abcd1: cycles=3/8 prs_merged=0 prs_held=0 issues_resolved=0 prs_partial=2 wall_secs=3600$' <<<"$Z19_OUT"; then
+  pass "Z19a: print_summary reports prs_partial=2 off a two-row ledger under $RUN_SHELL (#592)"
+else
+  fail "Z19a: print_summary partial count wrong under $RUN_SHELL (#592 — got: [$Z19_OUT]; expect prs_partial=2)"
+fi
+rm -rf "$Z19_TMP" 2>/dev/null || true
 
 # Cleanup
 rm -rf "$Z2_TMP" "$Z3_TMP" "$Z4_TMP" 2>/dev/null || true
