@@ -43,7 +43,7 @@ leaf agent cannot do that, so **the orchestration moved into the script**:
 | Tier | What the fleet runs |
 |---|---|
 | `trivial`, `small` | ONE solver agent (`isolation:"worktree"`). Unchanged from the detached-session behaviour — those tiers were always a single session. |
-| `medium`, `large` (`--full`) | `parallel()` research fan-out (codebase / constraints / test-coverage — plus a fourth **`security` lens** on any issue whose relayed triage `risk_signals` hold at least one non-blank entry; absent and empty alike buy the 3-lens fan-out) → spec writer → spec reviewer (its blocking findings are forwarded to the plan writer inside an untrusted-input envelope, #507 — and to the reviser below, in the same envelope, whenever one runs) → on any non-`APPROVE` verdict, **one** spec-revision round and never more — the #308 class; the reviser writes a sibling `spec-r1.md` rather than rewriting `spec.md` in place, so a half-written revision degrades to the original spec, and it is not re-reviewed → plan writer, pointed at the revision when it lands at exactly that path and at the original otherwise → **plan reviewer** — the plan is never rewritten, so its blocking findings ARE its output and they are forwarded, in the same envelope, to all three rungs that read the plan: the implementer, task reviewer and fixer (a finding reaching only the implementer would have the task reviewer report a correct deviation as scope creep) → a **sequential per-task loop** (implementer → reviewer → bounded fix ladder, at most `FIX_ROUNDS` = 3 fixes and 4 reviews per task) in ONE script-named worktree at `<runDirAbs>/worktrees/issue-<N>` → one delivery agent (full suite, push, PR). |
+| `medium`, `large` (`--full`) | `parallel()` research fan-out (codebase / constraints / test-coverage — plus a fourth **`security` lens** on any issue whose relayed triage `risk_signals` hold at least one non-blank entry; absent and empty alike buy the 3-lens fan-out), each lens fed by the **run-shared repo profile** and asked only for its delta → spec writer → spec reviewer (its blocking findings are forwarded to the plan writer inside an untrusted-input envelope, #507 — and to the reviser below, in the same envelope, whenever one runs) → on any non-`APPROVE` verdict, **one** spec-revision round and never more — the #308 class; the reviser writes a sibling `spec-r1.md` rather than rewriting `spec.md` in place, so a half-written revision degrades to the original spec, and it is not re-reviewed → plan writer, pointed at the revision when it lands at exactly that path and at the original otherwise → **plan reviewer** — the plan is never rewritten, so its blocking findings ARE its output and they are forwarded, in the same envelope, to all three rungs that read the plan: the implementer, task reviewer and fixer (a finding reaching only the implementer would have the task reviewer report a correct deviation as scope creep) → a **sequential per-task loop** (implementer → reviewer → bounded fix ladder, at most `FIX_ROUNDS` = 3 fixes and 4 reviews per task) in ONE script-named worktree at `<runDirAbs>/worktrees/issue-<N>` → one delivery agent (full suite, push, PR). |
 | any tier with **no usable plan** | falls back to the single solver above — no plan means no tasks, so there is no boundary a **review gate** could sit on. |
 
 Only the **solver** is worktree-isolated. The research and design agents are
@@ -77,6 +77,77 @@ through a prompt. Reviewer findings travel **on disk only**
 (`<runDirAbs>/issue-<N>/task-<k>/review-<r>.md`); the fixer is given those paths,
 never the text, which is what keeps this script free of the `SHARED:envelope`
 block.
+
+## The run-shared repo profile (#615)
+
+Three of the four research lenses carry a half that is a property of **this
+repository** and not of any issue: `constraints` re-read the whole rule corpus,
+`test-coverage` re-detected the test runner, `security` re-identified the stack.
+Dispatched per issue, that is one ~742 KB rulebook read independently up to seven
+times in a single run, with nothing changing between the readings.
+
+The lenses stay **four**. They ask genuinely different questions and collapsing
+them would trade four focused answers for one shallow one. What moves is the
+invariant half: **one** `repo-profile` agent per run derives it once — the rule
+digest with `path:line` for every mandate, the test runner and suite map, the
+stack inventory — and each lens is handed that artifact
+(`<runDirAbs>/repo-profile.md`) and asked for its **delta**: which of those
+repo-wide facts bind *this* issue's surface, plus anything local the profile
+could not know. `codebase` has no invariant half and is left untouched.
+
+Quality goes **up**, not just cost down: the shared rulebook gets one careful
+derivation instead of N hurried ones.
+
+The agent is dispatched once, before the admission window opens, and only when
+the run has a design-tier issue — with no lens to feed there is nothing to
+derive. CB1 charges it under exactly that gate.
+
+**The cache, and the trap it has to clear.** Reuse across runs is keyed by a
+**content hash** of the rule corpus plus the test/stack configuration. The key
+*is* the freshness rule and there is deliberately nothing else: change any of
+those files and the key changes, so a stale entry becomes unreachable rather than
+wrong. That is what replaces the ~200-line freshness predicate #308 retired — not
+a smaller predicate.
+
+RFC 0012 §3.5 retired the previous research cache after finding it had **zero
+writers**, and named the exact mistake that produces one: a write-back agent
+must resolve the main repository through `git rev-parse --git-common-dir`,
+because under a worktree `--show-toplevel` returns the *worktree* top and a cache
+written there dies with the worktree. This fleet cuts a worktree per issue, so
+that is not hypothetical. The profile agent is therefore told to use
+`--git-common-dir`, told that `--show-toplevel` is forbidden and why, and told to
+read the entry back afterwards — because the script cannot `stat`, so
+"was anything actually written" has to arrive as a reported observation.
+
+| Event | When |
+|---|---|
+| `repo_profile_ready` | accepted — carries `reused` and `cached` |
+| `repo_profile_not_cached` | **derived and never written back**: a cache with a reader and no writer, the #308 shape made observable instead of inferred. The profile is still used this run; the failure is about the next one. |
+| `repo_profile_null` | the agent returned nothing |
+| `repo_profile_unusable` | non-zero `rc`, or a path that is not exactly the script-chosen one (a prefix check would accept a sibling and point every lens at a file no rung was told to write) |
+| `repo_profile_skipped` | `reason: budget_exhausted` — the rung guards itself, because `agent()` throws on a ceiling and this dispatch sits in `main()`'s try: unguarded it would take the whole run into `run_threw` and strand every claim, instead of letting the window report CB2 |
+
+Every one of those arms degrades to the **pre-#615 behaviour** — each lens
+derives its own invariant half from the full brief it always had. A missing
+profile costs tokens, never correctness.
+
+## How issues are admitted — a sliding window, not waves (#615)
+
+`concurrency` bounds how many per-issue chains are **in flight at once**. It is
+not a batch size: the run does not chunk the issue list into waves and await
+each wave whole. That shape made every wave barrier on its **slowest** chain — a
+2-task issue idled until the 15-task issue beside it had finished research →
+design → implement → deliver — and the barrier was carrying nothing. Each chain
+owns its own worktree, branch and PR; no chain reads another's result; the one
+run-level consumer (the batched PR proof) runs after every chain either way.
+
+So the loop is `concurrency` lanes pulling from one shared cursor. A lane takes
+the next issue, runs that chain to completion, then comes back for another. At
+most `concurrency` chains — and therefore worktrees — exist at any instant, which
+is the barrier's one real job, and a lane freed early admits the next issue
+straight away. Results are written into a slot indexed by **admission order**, so
+the published `results` array stays in manifest order and never leaks which chain
+happened to finish first.
 
 ## What you give up (RFC 0015 §6 — say these out loud, never silently)
 
@@ -128,7 +199,7 @@ Workflow({scriptPath: "$CLAUDE_PLUGIN_ROOT/skills/solve-fleet/workflow.js"}, <th
 | `issues` | comma-joined issue numbers — cross-checked against the manifest |
 | `issueCount` | declared count; a mismatch is recorded as an audit event |
 | `riskIssueCount` | how many of those issues carry non-blank triage `risk_signals`, derived from the manifest the launcher just wrote. The script re-counts the relayed records and audits `risk_signals_relay_mismatch` / `risk_signals_absent` on a disagreement — counts only, never signal text. Absent on a pre-#524 envelope, and then neither check runs. |
-| `concurrency` | wave size (`fanout_concurrency.solve_bg`, default 6) |
+| `concurrency` | how many per-issue chains may be in flight at once — a **sliding window**, not a batch size (`fanout_concurrency.solve_bg`, default 6) |
 | `autoMode` | true for `/turbo` (unattended) |
 | `runDirAbs` | where prompts, contexts and per-issue design artifacts live |
 | `repoRootAbs`, `pluginRootAbs`, `repoSlug`, `branchPrefix` | script-derived prompt inputs |
@@ -140,8 +211,8 @@ Workflow({scriptPath: "$CLAUDE_PLUGIN_ROOT/skills/solve-fleet/workflow.js"}, <th
 
 | ID | Guard |
 |---|---|
-| CB1 | projected agents (`2 + issues + (9 + implementBudget − 1) × design-tier issues`) over `maxAgents` → abort **before** any dispatch. The leading 2 is the intake relay plus the batched PR-verification relay (#515); the per-issue term is the #508 per-task chain, bounded by CB3's `implementBudget` (default 24). `T` is unknowable before the plan is written, so the projection uses the live cap — deliberately pessimistic, and the same way about the two other conditional rungs: the spec-revision round (no verdict exists yet at projection time) and the risk-gated `security` research lens — whose gate IS readable by then, but whose cost is a per-design-issue constant shared with `/goal`'s own cycle projection, which runs before any manifest exists. The plan review needs no such allowance: every accepted plan is reviewed. |
-| CB2 | runtime `budget` exhausted between waves → stop, report, leave remaining claims intact |
+| CB1 | projected agents (`2 + issues + (9 + implementBudget − 1) × design-tier issues + 1 repo-profile agent when the run has one`) over `maxAgents` → abort **before** any dispatch. The leading 2 is the intake relay plus the batched PR-verification relay (#515); the trailing 1 is the run-shared repo profile (#615), charged under the same `design-tier issues > 0` gate it actually runs under — a run-level term, which is the whole point of hoisting it, and charged at all for the reason the proof relay is: a ceiling that under-projects is not a ceiling. **RFC 0015's copy of this row predates that term and is one agent short; this row is the current reading.** The per-issue term is the #508 per-task chain, bounded by CB3's `implementBudget` (default 24). `T` is unknowable before the plan is written, so the projection uses the live cap — deliberately pessimistic, and the same way about the two other conditional rungs: the spec-revision round (no verdict exists yet at projection time) and the risk-gated `security` research lens — whose gate IS readable by then, but whose cost is a per-design-issue constant shared with `/goal`'s own cycle projection, which runs before any manifest exists. The plan review needs no such allowance: every accepted plan is reviewed. |
+| CB2 | runtime `budget` exhausted, checked once per **admission** → the window stops taking work, chains already in flight finish, every issue never admitted keeps its claim. Audited once per run, not once per lane. |
 | CB3 | a **live** counter of implement-phase agents per issue against `implementBudget`. On exhaustion the task loop stops, the remaining tasks are recorded `SKIPPED`, `implement_budget_exhausted` is audited — and delivery still runs on what is already committed (the one dispatch deliberately exempt, so reviewed commits never strand in a worktree). |
 | — | a per-issue chain that throws is caught and recorded as `FAILED` for that issue only; one bad issue never takes the batch down |
 

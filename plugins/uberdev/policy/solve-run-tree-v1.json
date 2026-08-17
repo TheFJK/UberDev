@@ -15,7 +15,7 @@
         "source": "plugins/uberdev/skills/solve-fleet/workflow.js",
         "reason": "RFC 0015 made this the DEFAULT /solve + /turbo route. A Workflow script has no filesystem (tests/workflow-scripts.test.sh T1 forbids fs./process.), so it cannot read this manifest and no edge here can constrain it. The gap is real and tracked; it is recorded here so it is visible and machine-checked rather than inferred from a name.",
         "reserved_edge_prefix": "solve_fleet.",
-        "dispatch_sites": 13,
+        "dispatch_sites": 14,
         "agent_kinds": [
           "deliver",
           "fix.tN.rN",
@@ -23,6 +23,7 @@
           "manifest_intake",
           "plan",
           "plan_review",
+          "repo_profile",
           "research.codebase",
           "research.constraints",
           "research.security",
@@ -37,7 +38,8 @@
         "tracking_issues": [
           507,
           508,
-          524
+          524,
+          615
         ]
       }
     ]
