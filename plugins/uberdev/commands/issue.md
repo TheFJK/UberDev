@@ -75,6 +75,7 @@ Parse both YAML returns from Phase 2 and:
 5. Set `--label` flags on `gh issue create` from `triage-scout.valid_labels`.
 6. Use `triage-scout.valid_scope` in the title's `<type(scope):>` prefix.
 7. **Do not** include the deprecated "Current ecosystem", "Constraints", or "Security signals" headings — they are removed from the templates entirely (see Phase 4 templates below).
+8. Emit the **scope declaration** as the last line of the body: `<!-- uberdev-scope v=1 files=<comma-joined paths> -->`. List the files a fix is expected to **change** — never the files cited as evidence. `lib/solve_triage.py` reads this block as fact and sizes the solver fleet off it (1 agent vs 33), falling back to a prose heuristic only when it is absent, so the declaration is the cheapest accuracy in the pipeline. When the scouts return nothing concrete enough to name, emit `files=` with an empty value: that is a recorded "scope not known yet", and it is always better than a guess. Being an HTML comment it renders invisibly, so it costs a human reader nothing.
 
 If any blocking concern surfaces (e.g. an open duplicate match), raise it to the user **before** drafting Phase 4.
 
@@ -134,6 +135,8 @@ Show the user a complete draft BEFORE creating.
 - [Any closed/open issues from `triage-scout.duplicates`, else "none"]
 
 **Triage hint:** <trivial|small|medium>
+
+<!-- uberdev-scope v=1 files=path/to/one.ts,path/to/two.ts -->
 ```
 
 ### Feature (`feat`) — covers enhancements
@@ -163,6 +166,8 @@ Show the user a complete draft BEFORE creating.
 - [Prior issues, if any]
 
 **Triage hint:** <trivial|small|medium>
+
+<!-- uberdev-scope v=1 files=path/to/one.ts,path/to/two.ts -->
 ```
 
 ### Chore (`chore`) / Refactor (`refactor`)
@@ -180,6 +185,8 @@ Show the user a complete draft BEFORE creating.
 - `path/to/File` — [context]
 
 **Triage hint:** <trivial|small|medium>
+
+<!-- uberdev-scope v=1 files=path/to/one.ts,path/to/two.ts -->
 ```
 
 ## Phase 5: Confirm
@@ -231,6 +238,7 @@ Next step: /solve $ISSUE_NUM
 - **Conventional commit titles only** — `feat`/`fix`/`chore`/`refactor` (plus `docs`/`test`/`perf`/`style` if appropriate). `enhancement` is a **label**, never a type.
 - **Severity mandatory on bugs** — default P2; surface on-call concerns early.
 - **Triage hint mandatory in every issue body** — `/solve` parses it to pick the tier without redoing classification.
+- **Scope declaration mandatory in every issue body** — the trailing `<!-- uberdev-scope v=1 files=… -->` block names the files a fix is expected to CHANGE, and `lib/solve_triage.py` reads it as fact rather than scraping paths out of the prose. Left off, triage falls back to a heuristic and this repo's `path:line` evidence style makes every well-evidenced issue look bigger than it is (#614). A file list here is a size signal, not an implementation plan — it does not breach the WHAT/HOW boundary below, which is about the prose. When the change set is genuinely unknown, `files=` empty is the honest answer.
 - **Always confirm** — show the full draft, wait for explicit approval before `gh issue create`.
 - **No screenshots section** — user adds those manually after creation if needed.
 - **WHAT/HOW boundary enforced** — issue body never contains an implementation checklist or fix design; that work belongs in `/uberdev:brainstorm`. Bug template's `## Likely root cause` is a causal triple (symptom/mechanism/owning code), not a file list. Feat template's `## What changes` describes externally visible result, not implementation strategy.

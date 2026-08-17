@@ -27,6 +27,12 @@ FILE_RE = re.compile(
     r"(?:sh|md|ts|tsx|js|jsx|py|json|ya?ml|go|rs|java|rb|c|h|cpp|css|html)\b",
     re.IGNORECASE,
 )
+# Fenced blocks are QUOTATION, not prose: repro transcripts, pasted diffs, and
+# format examples all live there. Both readers below strip them, so one literal
+# governs — markdown_text() for the length signal, declared_scope() for the
+# marker (an issue documenting the scope block must not declare a scope by
+# showing one).
+FENCE_RE = re.compile(r"```.*?```", re.S)
 STACK_RE = re.compile(
     r"Traceback \(most recent call last\)|^\s+at .+\(.+:\d+|^\s*File \"|"
     r"panic:|stack[ -]?trace",
@@ -160,7 +166,7 @@ def load_snapshot(path: str, secure_root: str | None = None) -> dict[str, Any]:
 
 
 def markdown_text(body: str) -> str:
-    body = re.sub(r"```.*?```", " ", body, flags=re.S)
+    body = FENCE_RE.sub(" ", body)
     body = re.sub(r"`([^`]*)`", r"\1", body)
     body = re.sub(r"!?(?:\[([^]]*)\])\([^)]*\)", r"\1", body)
     body = re.sub(r"<[^>]+>", " ", body)
@@ -205,18 +211,149 @@ def validate_snapshot(value: dict[str, Any]) -> tuple[int, str, str, list[str]]:
 FILES_TOKEN_RE = re.compile(r"[a-z0-9_.][a-z0-9_./-]{0,255}")
 
 
-def named_files(body: str) -> list[str]:
-    # Drop anything the schema would refuse rather than emit a token that
-    # refuses the dispatch: losing one filename from a triage heuristic is
-    # strictly better than declining to work the issue — and its siblings.
-    files = sorted({
-        token for token in (
-            match.group(0).strip("./").casefold() for match in FILE_RE.finditer(body)
-        ) if FILES_TOKEN_RE.fullmatch(token)
-    })
+# ---------------------------------------------------------------------------
+# SCOPE, NOT CITATION DENSITY (#614)
+#
+# This used to be `named_files()`: scrape every filename-shaped token out of the
+# issue prose and call the count the size of the work. It could not tell a file
+# cited as EVIDENCE from a file the fix will edit, and three of them is the
+# `large` threshold — which gates a 33x cost difference (1 solver vs 33).
+#
+# That is not an edge case here, it is the house style. Every writer that files
+# issues into this repo (`/uberscan`, `findings-to-issues`, `/issue` plus the
+# codebase scout) is REQUIRED to anchor its claims with `path:line` evidence, so
+# the better-evidenced an issue was, the larger it was priced. Measured against
+# the live backlog the rule returned `large` for EVERY open issue — 40 of 40
+# when #614 was filed, 43 of 43 when this landed: a cost gate with no
+# discriminating power, and one that taxed exactly the issues that did their
+# homework. Re-measured on the same corpus, this file returns
+# 10 small / 13 medium / 20 large.
+#
+# The replacement asks a different question — not "which files does this text
+# mention" but "which files is this issue going to CHANGE":
+#
+#   1. A producer-declared scope block is read as FACT. The agent that writes
+#      the issue already knows what it intends to touch, so it says so, and
+#      triage stops guessing. Declaration always wins, INCLUDING an empty one —
+#      `files=` with nothing after it is a recorded "no scope declared yet",
+#      never a licence to fall back to the guess (the `edges=` convention in
+#      agents/findings-to-issues.md, one marker over).
+#   2. Absent a declaration, only paths a clause MARKS as a change target
+#      count. A `path:line` citation is evidence; "update lib/a.sh" is scope.
+#      An explicit exclusion clause ("do not touch lib/b.sh") suppresses its own
+#      paths, because a bare verb scan reads "do not touch" as change intent.
+#
+# The heuristic under-counts by design: an issue whose prose marks nothing lands
+# on `medium` — the fallback rung — rather than on `large`. `large` is still
+# reachable four other ways (the large labels, refactor plus two components, a
+# risk signal across components, and now a declared three-file scope), so the
+# rung is sharpened rather than gutted; tests/solve-triage.test.sh S7 pins that
+# with a positive control.
+# ---------------------------------------------------------------------------
+
+# Clause, not sentence: an exclusion rides in on `but` far more often than after
+# a full stop ("fix lib/a.sh but leave lib/b.sh alone"). `:` is deliberately NOT
+# a boundary — "files to change: a.sh, b.sh" would lose its verb to the split.
+CLAUSE_SPLIT_RE = re.compile(
+    r"(?<=[.!?;])\s+|\s+(?:but|however|though|although|whereas)\s+", re.IGNORECASE
+)
+# Spelled out rather than stem-matched: `alter\w*` also swallows "alternative",
+# and `add\w*` swallows "address" — both of which appear in ordinary bug prose
+# and would quietly restore the citation-counting behaviour.
+_CHANGE_VERBS = (
+    "add", "adds", "added", "adding",
+    "change", "changes", "changed", "changing",
+    "delete", "deletes", "deleted", "deleting",
+    "drop", "drops", "dropped", "dropping",
+    "edit", "edits", "edited", "editing",
+    "extend", "extends", "extended", "extending",
+    "fix", "fixes", "fixed", "fixing",
+    "implement", "implements", "implemented", "implementing",
+    "introduce", "introduces", "introduced", "introducing",
+    "migrate", "migrates", "migrated", "migrating",
+    "modify", "modifies", "modified", "modifying",
+    "move", "moves", "moved", "moving",
+    "patch", "patches", "patched", "patching",
+    "refactor", "refactors", "refactored", "refactoring",
+    "remove", "removes", "removed", "removing",
+    "rename", "renames", "renamed", "renaming",
+    "replace", "replaces", "replaced", "replacing",
+    "rewrite", "rewrites", "rewrote", "rewriting",
+    "rework", "reworks", "reworked", "reworking",
+    "touch", "touches", "touched", "touching",
+    "update", "updates", "updated", "updating",
+    "wire", "wires", "wired", "wiring",
+)
+CHANGE_INTENT_RE = re.compile(r"\b(?:" + "|".join(_CHANGE_VERBS) + r")\b", re.IGNORECASE)
+# Only phrasings that are unambiguously about NOT changing something. A bare
+# "unchanged" or a generic negation is deliberately absent: "update lib/a.sh so
+# the output does not truncate" is a change target, and suppressing it would
+# under-price real work — the one direction this heuristic must never move in.
+EXCLUSION_RE = re.compile(
+    r"\b(?:"
+    r"(?:do(?:es)?\s+not|don'?t|doesn'?t|must\s+not|mustn'?t|should\s+not|shouldn'?t"
+    r"|cannot|can'?t|no\s+need\s+to|never)\s+(?:be\s+)?"
+    r"(?:touch|chang|modif|edit|alter|updat|patch|rewrit)\w*"
+    r"|without\s+(?:touching|changing|modifying|editing|altering|updating)"
+    r"|(?:fine|safe|ok|okay|happy)\s+to\s+leave"
+    r"|leave\s+(?:\w+\s+){0,3}?(?:alone|as[- ]is|unchanged|untouched)"
+    r"|(?:out\s+of|not\s+in)\s+scope"
+    r"|no\s+changes?\s+(?:needed|required)"
+    r"|not\s+to\s+be\s+(?:touched|changed|modified|edited)"
+    r"|for\s+reference\s+only"
+    r")\b", re.IGNORECASE
+)
+# The producer-declared scope block. Same shape as the `uberdev-finding-meta`
+# trailer this repo's issue writers already emit: an HTML comment, a version, a
+# comma-joined value. HTML comments survive `gh issue view --json body` and
+# render invisibly, so the declaration costs the reader nothing.
+SCOPE_BLOCK_RE = re.compile(r"<!--\s*uberdev-scope\s+v=1\s+files=([^>]*?)\s*-->", re.IGNORECASE)
+
+
+def _schema_safe_files(tokens: set[str]) -> list[str]:
+    # Drop anything the routing-context schema would refuse rather than emit a
+    # token that refuses the dispatch: losing one filename from a triage signal
+    # is strictly better than declining to work the issue — and its siblings.
+    files = sorted(token for token in tokens if FILES_TOKEN_RE.fullmatch(token))
     if len(files) > MAX_FILES:
         fail("triage_limit_files")
     return files
+
+
+def declared_scope(body: str) -> list[str] | None:
+    """The producer's own change set, or None when the body declares nothing.
+
+    Returns a list — possibly EMPTY — whenever any scope block is present, so
+    the caller can tell "declared nothing" from "declared no scope".
+    """
+    matches = SCOPE_BLOCK_RE.findall(FENCE_RE.sub(" ", body))
+    if not matches:
+        return None
+    # Two blocks are a producer bug, and the two ways to resolve it are not
+    # symmetric: taking the first can silently HALVE a declared scope, while the
+    # union only ever over-prices. Union, for the same reason the heuristic
+    # refuses to under-count.
+    return _schema_safe_files({
+        token for raw in matches
+        for token in (piece.strip("`'\"").strip("./").casefold()
+                      for piece in re.split(r"[,\s]+", raw))
+        if token
+    })
+
+
+def scope_files(body: str) -> list[str]:
+    """Files this issue says it will change — declaration first, prose second."""
+    declared = declared_scope(body)
+    if declared is not None:
+        return declared
+    tokens: set[str] = set()
+    for clause in CLAUSE_SPLIT_RE.split(markdown_text(body)):
+        if not clause or EXCLUSION_RE.search(clause) or not CHANGE_INTENT_RE.search(clause):
+            continue
+        tokens.update(
+            match.group(0).strip("./").casefold() for match in FILE_RE.finditer(clause)
+        )
+    return _schema_safe_files(tokens)
 
 
 # A component token is embedded in the routing-context metadata, which validates
@@ -241,7 +378,7 @@ def component_tokens(files: list[str]) -> list[str]:
     for name in files:
         head = name.split("/", 1)[0] if "/" in name else name.split(".", 1)[0]
         # Leading punctuation is not a legal first character (`_workflow_harness`,
-        # and any dot-segment `named_files` did not already strip).
+        # and any dot-segment `scope_files` did not already strip).
         head = head.lstrip("._-")
         # Drop anything still non-conforming rather than emitting a token that
         # would fail the schema: losing one coarse component from a heuristic
@@ -287,7 +424,7 @@ def classify(value: dict[str, Any], floor: str | None, ceiling: str | None, over
     number, title, body, labels = validate_snapshot(value)
     if expected_issue is not None and number != expected_issue:
         fail("triage_issue_mismatch")
-    files = named_files(body)
+    files = scope_files(body)
     # `components` has TWO producers — component_tokens (already filtered) and
     # named_modules (was NOT). Filtering at the UNION means exactly one choke
     # point governs the field however many producers ever feed it; filtering

@@ -541,9 +541,28 @@ Explicit forbidden patterns:
 ---
 *To resolve: address the finding in code and close this issue. Future `/uberdev:review-pr` runs see `state==closed` for this fingerprint and skip. Before closing, apply `finding:true-positive` if it was a real defect or `finding:false-positive` if it was not — that label is the eval ground truth (RFC 0018).*
 
+<!-- uberdev-scope v=1 files={file_path} -->
 <!-- uberdev:{finding_marker_slug}-finding fingerprint={16-char-hex} -->
 <!-- uberdev-finding-meta v=1 slug={finding_marker_slug} edges={comma-joined edges} severity={severity} tier={BLOCKER|CRITICAL|MAJOR} -->
 ```
+
+**The `<!-- uberdev-scope -->` block (#614).** One finding is one file, and this
+agent already knows which one — it is the same `{file_path}` the `**File:**`
+line renders, with the `:{line}` suffix dropped. Declaring it turns the largest
+cost decision in `/solve` from a guess into a fact: `lib/solve_triage.py` reads
+the block and sizes the solver fleet off it, and falls back to scraping paths
+out of the prose only when it is absent. That fallback is what this agent's own
+output used to defeat — a finding body is a wall of `path:line` evidence, so
+every issue filed here scraped three or more paths and priced as `large` (33
+solvers) whatever the finding was. Emit it **immediately before** the
+fingerprint marker, never between the marker and its meta trailer: the
+precision miner reads that pair positionally. `{file_path}` is already
+path-shaped and sanitised; if it is somehow empty, emit `files=` empty rather
+than guessing a path. Forgery from the finding prose needs no new sanitiser
+rule: that prose ships inside the four-backtick `finding` fence, and the reader
+strips fenced blocks before it looks for the marker, so a scope block written by
+a reviewer agent is inert — the same property that makes a documented example
+inert. `tests/solve-triage.test.sh` S9 pins it against this exact body shape.
 
 The `{mention_line}` (when present) and `{backref_line}` placeholders are tier-driven from the per-row bindings in process Step 8c.5. BLOCKER/CRITICAL tier rows render a top-of-body `@author` notification + `Blocks:` backref so the PR author is paged on the filed issue; MAJOR tier rows omit the `@mention` line (silent file) and render `Related:` instead of `Blocks:` (cross-reference without implying a hard gate).
 
