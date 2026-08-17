@@ -20,6 +20,9 @@
 #   uberdev_goal_pr_ts_in_state                GOAL_ID PR STATE
 #   uberdev_goal_pr_first_ts_in_state          GOAL_ID PR STATE
 #   uberdev_goal_batch_has_pr                  GOAL_ID PR
+#   uberdev_goal_record_partial_prs            GOAL_ID CSV [CYCLE]   (issue #592)
+#   uberdev_goal_pr_is_partial                 GOAL_ID PR            (issue #592)
+#   uberdev_goal_count_partial_prs             GOAL_ID               (issue #592)
 #   uberdev_goal_count_distinct_prs            GOAL_ID
 #   uberdev_goal_count_resolved_issues         GOAL_ID
 #   uberdev_goal_count_failed_issues           GOAL_ID
@@ -69,6 +72,7 @@
 #   _uberdev_goal_dispatch_review_pr       PR_NUM
 #   _uberdev_goal_dispatch_merge           PR_NUM
 #   _uberdev_goal_check_unblock            HELD_PR_NUM
+#   _uberdev_goal_batch_issue_for_pr       GOAL_ID PR             (issue #592)
 #   _uberdev_goal_set_batch_terminal_state GOAL_ID PR STATE       (issue #211)
 #   _uberdev_goal_batch_green_prs_ordered  GOAL_ID                (issue #211)
 #   _uberdev_goal_rebase_collision_chain   GOAL_ID JUST_MERGED_PR (issue #211)
@@ -593,8 +597,8 @@ _uberdev_goal_persist_fp() {
 # ---------------------------------------------------------------------------
 
 # uberdev_goal_state_init GOAL_ID
-# D4 + T4 — Refuse unsafe $UBERDEV_TMPDIR; truncate-create the 8 per-goal
-# state files (jsonl + 7 TSVs) — enumerated in the inline comment below.
+# D4 + T4 — Refuse unsafe $UBERDEV_TMPDIR; truncate-create the 9 per-goal
+# state files (jsonl + 8 TSVs) — enumerated in the inline comment below.
 uberdev_goal_state_init() {
   local goal_id="$1"
   # #156 — refuse an unsafe goal_id before it reaches any path interpolation.
@@ -620,7 +624,7 @@ uberdev_goal_state_init() {
   # passes the mkdir -p above (the dir already exists) yet cannot accept new
   # files; the bare `: > "$f"` writes used to fail one-by-one with raw
   # "Permission denied" noise and a confusing partial-state. Fail fast on the
-  # first unwritable file with a clean diagnostic. The 8 state files:
+  # first unwritable file with a clean diagnostic. The 9 state files:
   #   jsonl                  — per-goal audit stream
   #   pr-states.tsv          — PR state-machine transitions
   #   issue-states.tsv       — issue state-machine transitions
@@ -632,6 +636,10 @@ uberdev_goal_state_init() {
   #                            latest row per pr wins (get_last_held_audit tail)
   #   batch-prs.tsv          — issue #211 batch registry (one row per dispatched
   #                            PR; cols: pr<TAB>issue<TAB>dispatch_ts<TAB>terminal_state)
+  #   partial-prs.tsv        — issue #592 partial-chain ledger (cols:
+  #                            pr<TAB>cycle<TAB>ts; run-lifetime, never truncated
+  #                            mid-run — a cycle-1 row must still be readable by
+  #                            the gate that merges that PR three cycles later)
   local f
   for f in "$tmpdir/goal-$goal_id.jsonl" \
            "$tmpdir/goal-$goal_id-pr-states.tsv" \
@@ -640,7 +648,8 @@ uberdev_goal_state_init() {
            "$tmpdir/goal-$goal_id-merge-attempts.tsv" \
            "$tmpdir/goal-$goal_id-review-pr-attempts.tsv" \
            "$tmpdir/goal-$goal_id-held-audits.tsv" \
-           "$tmpdir/goal-$goal_id-batch-prs.tsv"; do
+           "$tmpdir/goal-$goal_id-batch-prs.tsv" \
+           "$tmpdir/goal-$goal_id-partial-prs.tsv"; do
     if ! : > "$f"; then
       printf 'goal-state: cannot create state file %s (unwritable UBERDEV_TMPDIR?)\n' "$f" >&2
       return 1
@@ -1353,6 +1362,133 @@ uberdev_goal_batch_has_pr() {
   local f="$tmpdir/goal-$goal_id-batch-prs.tsv"
   [ -f "$f" ] || return 1
   awk -F'\t' -v p="$pr" '$1==p {found=1; exit} END {exit !found}' "$f"
+}
+
+# _uberdev_goal_batch_issue_for_pr GOAL_ID PR
+# The PR -> issue direction of the batch registry, keyed on the SAME 4-column
+# layout uberdev_goal_batch_has_pr reads (pr<TAB>issue<TAB>ts<TAB>state — see the
+# column-contract NOTE above; it differs from the 3-column pr-states /
+# issue-states contract, which is why this belongs here beside its sibling
+# rather than inlined at a call site where the layout would have to be
+# re-derived).
+# ALWAYS prints an integer, so a caller interpolating it into a JSON payload
+# cannot produce a syntactically broken row: `0` on a PR that was never
+# registered, on an absent/unreadable registry, and on invalid input.
+# rc 0 IFF the printed value is a real issue number — the printed `0` is a safe
+# placeholder, never a claim that issue 0 exists, so a caller that cares can
+# tell the two apart instead of having to guess from the value.
+# Scans to EOF and takes the LAST matching row, where uberdev_goal_batch_has_pr
+# short-circuits on the first: a duplicate PR row cannot arise today (registration
+# is idempotent, _uberdev_goal_set_batch_terminal_state rewrites rather than
+# appends, and goal-phase3.sh truncates the registry per cycle), and last-wins is
+# the safer reading if one ever did.
+_uberdev_goal_batch_issue_for_pr() {
+  local goal_id="$1" pr="$2"
+  _uberdev_goal_validate_id "$goal_id" || { printf '0\n'; return 1; }   # #156
+  _uberdev_goal_validate_int "$pr"     || { printf '0\n'; return 1; }
+  local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+  local f="$tmpdir/goal-$goal_id-batch-prs.tsv"
+  [ -r "$f" ] || { printf '0\n'; return 1; }
+  # `i+0` coerces an absent or malformed issue column to 0 rather than letting
+  # it reach the caller as text; the digits-only re-test is what the rc reports,
+  # so "row exists but its issue column is junk" is an error, not a silent 0.
+  awk -F'\t' -v p="$pr" \
+    '$1==p {i=$2} END {print i+0; exit (i ~ /^[0-9]+$/ ? 0 : 1)}' "$f"
+}
+
+# ---------------------------------------------------------------------------
+# Partial-chain ledger (issue #592) — goal-<id>-partial-prs.tsv.
+#
+# WHY A FILE. The solver fleet knows whether an issue's task chain ran to
+# completion; the merge gate does not. lib/goal-watch.sh re-discovers PRs from
+# GitHub on every pass and never sees the fleet's return value, and the fleet's
+# own driver is forbidden to touch the filesystem (RFC 0012 §2.2, constraint 6).
+# So the fact has to travel on an on-disk carrier the shell lane owns. This is
+# that carrier: columns pr<TAB>cycle<TAB>ts, one row per partial-chain PR.
+#
+# RUN-LIFETIME, never truncated. A PR recorded partial in cycle 1 can still be
+# green when the cycle-3 fleet returns an entirely different set, and the gate
+# that finally merges it must still find the cycle-1 row. Reaped once per goal
+# by uberdev_goal_cleanup_run_state.
+#
+# FAIL-SOFT BY DESIGN. Every helper here is called from inside the watch loop,
+# where a fail-loud write stalls the whole goal (uniform with the writes at
+# goal-watch.sh:628-643 and :673-674). A bad input is skipped with a stderr
+# breadcrumb; a missing file reads as "nothing recorded", never as an error.
+# ---------------------------------------------------------------------------
+
+# uberdev_goal_record_partial_prs GOAL_ID CSV [CYCLE]
+# Append one row per DISTINCT PR in CSV, creating the ledger if it is absent.
+# Idempotent across ticks and across a resume: a PR already on file is skipped,
+# so re-recording the same set every pass leaves the row count unchanged.
+# rc 0 on success (including an empty CSV, which is what a healthy cycle
+# returns); rc 1 only when the goal id is unsafe or an append genuinely failed.
+#
+# CYCLE is optional and resolves argument -> ambient `cycle` -> 0, matching the
+# explicit-parameter shape of _uberdev_goal_persist_fp and
+# uberdev_goal_check_fingerprint_repeat. The watch lane alone may omit it and
+# ride the ambient scalar uberdev_goal_read_run_state rehydrates (goal-watch.sh
+# uses bare `$cycle` throughout for the same reason); any caller OUTSIDE that
+# lane must pass it, or it silently records 0 into a column the operator reads
+# as a diagnostic.
+uberdev_goal_record_partial_prs() {
+  local goal_id="$1" csv="${2:-}"
+  _uberdev_goal_validate_id "$goal_id" || return 1   # #156
+  [ -n "$csv" ] || return 0
+  local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+  local f="$tmpdir/goal-$goal_id-partial-prs.tsv"
+  # The cycle is a DIAGNOSTIC column, never a key — the gate keys on the PR — so
+  # an unset or garbage value degrades to 0 rather than refusing a row the merge
+  # gate needs. The nested default also keeps the helper usable from a `set -u`
+  # caller that has neither the argument nor a cycle in scope.
+  local cyc="${3:-${cycle:-0}}"
+  _uberdev_goal_validate_int "$cyc" || cyc=0
+  local ts; ts="$(_uberdev_goal_now_secs)"
+  local n row rc=0
+  # Split with `tr`, fed through a HERESTRING rather than a pipe: `for n in $csv`
+  # iterates once over the whole string under zsh (this lib is sourced under both
+  # shells), and a `... | while read` loop would run the body in a subshell where
+  # the rc below could never escape.
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    if ! _uberdev_goal_validate_int "$n"; then
+      printf 'goal-state: record_partial_prs: skipping non-numeric PR %s\n' "$n" >&2
+      continue
+    fi
+    uberdev_goal_pr_is_partial "$goal_id" "$n" && continue
+    printf -v row '%s\t%s\t%s' "$n" "$cyc" "$ts"
+    _uberdev_goal_append "$f" "$row" || rc=1
+  done <<<"$(printf '%s\n' "$csv" | tr ',' '\n')"
+  return "$rc"
+}
+
+# uberdev_goal_pr_is_partial GOAL_ID PR
+# rc 0 iff PR was recorded as a partial-chain delivery. rc 1 on an unrecorded
+# PR, an absent or unreadable ledger, and invalid input — never a `set -u` /
+# `set -e` abort, because the merge gate branches on this predicate directly.
+uberdev_goal_pr_is_partial() {
+  local goal_id="$1" pr="$2"
+  _uberdev_goal_validate_id "$goal_id" || return 1   # #156
+  _uberdev_goal_validate_int "$pr" || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+  local f="$tmpdir/goal-$goal_id-partial-prs.tsv"
+  [ -r "$f" ] || return 1
+  awk -F'\t' -v p="$pr" '$1==p {found=1; exit} END {exit !found}' "$f"
+}
+
+# uberdev_goal_count_partial_prs GOAL_ID
+# Count of DISTINCT partial-chain PRs, for the run summary and the
+# goal_converged payload. On an absent, empty or unreadable ledger it prints
+# exactly `0` and returns rc 0 — NEVER an empty string, which is what would make
+# a `"partial":$count` audit row unparseable. An unsafe goal id still prints `0`
+# (so the payload survives) but returns rc 1, so the caller can see it happened.
+uberdev_goal_count_partial_prs() {
+  local goal_id="$1"
+  _uberdev_goal_validate_id "$goal_id" || { printf '0\n'; return 1; }   # #156
+  local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+  local f="$tmpdir/goal-$goal_id-partial-prs.tsv"
+  [ -r "$f" ] || { printf '0\n'; return 0; }
+  awk -F'\t' '$1 != "" && !seen[$1]++ {n++} END {print n+0}' "$f"
 }
 
 # uberdev_goal_count_distinct_prs GOAL_ID
@@ -3774,7 +3910,13 @@ uberdev_goal_cleanup_run_state() {
   local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
   _uberdev_goal_validate_id "${GOAL_ID:-}" || return 0
   local sc="$tmpdir/goal-$GOAL_ID-runstate"
-  rm -f "$sc" "${sc}.queue" "${sc}.active" "${sc}.candidates" "$tmpdir/goal-$GOAL_ID-batch-prs.tsv" 2>/dev/null
+  # The #592 partial-chain ledger is reaped here beside the batch registry.
+  # Read-before-reap is safe by inspection: the only call site that runs on a
+  # converged goal is lib/goal-phase3.sh:305, which is AFTER print_summary at
+  # :304. Leaving it behind would strand one file per goal in $UBERDEV_TMPDIR.
+  rm -f "$sc" "${sc}.queue" "${sc}.active" "${sc}.candidates" \
+        "$tmpdir/goal-$GOAL_ID-batch-prs.tsv" \
+        "$tmpdir/goal-$GOAL_ID-partial-prs.tsv" 2>/dev/null
   # Remove the fixed-path pointer only if it still names THIS goal, so a
   # concurrent goal's pointer is never clobbered.
   local aid="$tmpdir/goal-active-id.txt"

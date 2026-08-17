@@ -303,12 +303,20 @@ overflow_detected=0; MAX_CYCLES=5; UBERDEV_RESOLVED_BACKEND="wezterm"
 queue=(1 2); active_issues=(3)
 uberdev_goal_write_run_state
 sc="$UBERDEV_TMPDIR/goal-$GOAL_ID-runstate"
+# #592 — the partial-chain ledger is a per-goal sidecar too, and leaving it
+# behind strands one file per goal in $UBERDEV_TMPDIR forever. Seeded BEFORE the
+# reap so the assertion below is about cleanup, not about a file that was never
+# there. Safe by inspection: the converged call site (goal-phase3.sh:305) runs
+# AFTER print_summary at :304, so the count is read before the file is removed.
+partial_tsv="$UBERDEV_TMPDIR/goal-$GOAL_ID-partial-prs.tsv"
+printf '901\t1\t1700000000\n' > "$partial_tsv"
 uberdev_goal_cleanup_run_state
 assert_eq "$?" "0" "cleanup returns 0"
 assert_absent "$sc"          "runstate sidecar removed"
 assert_absent "${sc}.queue"  "queue sidecar removed"
 assert_absent "${sc}.active" "active sidecar removed"
 assert_absent "${sc}.candidates" "candidates sidecar removed (#301)"
+assert_absent "$partial_tsv" "partial-chain ledger removed (#592)"
 assert_absent "$UBERDEV_TMPDIR/goal-active-id.txt" "active-id pointer removed (names this goal)"
 uberdev_goal_cleanup_run_state   # second call on already-gone files
 assert_eq "$?" "0" "cleanup idempotent (non-fatal when absent)"

@@ -2378,6 +2378,24 @@ fi
 assert_eq "$(uberdev_goal_get_last_held_audit test-bt55 1)" "" \
   "BT55.fresh-goal-empty-held-audit-read"
 
+# BT88 — state_init creates the partial-chain ledger TSV (issue #592). Same
+# contract BT55 locks for held-audits, for the same reason: the readers
+# (uberdev_goal_pr_is_partial / uberdev_goal_count_partial_prs) run inside the
+# watch loop and must be callable on a fresh goal, before anything has been
+# recorded, without an unreadable-file diagnostic or an empty count.
+uberdev_goal_state_init test-bt88
+_bt88_tsv="$UBERDEV_TMPDIR/goal-test-bt88-partial-prs.tsv"
+if [ -f "$_bt88_tsv" ]; then
+  PASS=$((PASS + 1))
+  printf '  PASS  %s\n' "BT88.partial-prs-tsv-created-on-init"
+else
+  FAIL=$((FAIL + 1))
+  printf '  FAIL  %s\n' "BT88.partial-prs-tsv-created-on-init" >&2
+  printf '        expected file: %s\n' "$_bt88_tsv" >&2
+fi
+assert_eq "$(uberdev_goal_count_partial_prs test-bt88)" "0" \
+  "BT88.fresh-goal-counts-zero-partial-prs"
+
 # BT56 — uberdev_goal_locate_review_pr_audit (issue-keyed) still works after
 # refactor (delegates to _by_pr). Regression guard: refactor must preserve
 # the existing issue → PR → audit chain used by Phase 2 step 2a.

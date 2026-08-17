@@ -706,6 +706,80 @@ case "$Z16_OUT" in
 esac
 rm -rf "$Z16_TMP" 2>/dev/null || true
 
+echo
+echo "== Z17: the partial-chain ledger records ONE ROW PER CSV MEMBER (#592) =="
+# The repo's recurring zsh field-splitting bug, in a new place: `for n in $csv`
+# iterates ONCE over the whole string under zsh (it killed EFFORT_FLAG in
+# v0.22.1 and the #470 exclusion vocabulary). uberdev_goal_record_partial_prs is
+# written from the watch lane, which runs under whichever shell the goal-pipeline
+# fence gets — so a bash-only split records one garbage row, every
+# uberdev_goal_pr_is_partial lookup then misses, and the merge gate flags
+# nothing while looking entirely healthy.
+Z17_TMP="$(mktemp -d)"
+Z17_OUT="$(
+  export UBERDEV_TMPDIR="$Z17_TMP" UBERDEV_GOAL_ID="goaltestz17"
+  cycle=2
+  uberdev_goal_state_init "goaltestz17" >/dev/null 2>&1
+  uberdev_goal_record_partial_prs "goaltestz17" "901,902,903" >/dev/null 2>&1
+  Z17_RC=$?
+  Z17_TSV="$Z17_TMP/goal-goaltestz17-partial-prs.tsv"
+  printf 'rc=%s rows=%s prs=%s\n' "$Z17_RC" \
+    "$(awk 'END{print NR+0}' "$Z17_TSV" 2>/dev/null)" \
+    "$(awk -F'\t' '{printf "%s|", $1}' "$Z17_TSV" 2>/dev/null)"
+)"
+case "$Z17_OUT" in
+  *"rc=0 rows=3 prs=901|902|903|"*)
+    pass "Z17a: CSV split yields one row per member under $RUN_SHELL (#592)" ;;
+  *)
+    fail "Z17a: CSV split wrong under $RUN_SHELL (#592 — got: [$Z17_OUT]; expect rc=0 rows=3 prs=901|902|903|)" ;;
+esac
+
+# The cycle column resolves through a NESTED default (`${3:-${cycle:-0}}`): the
+# explicit argument first, the watch lane's ambient scalar second, 0 last. Both
+# halves need a cross-shell guard — the fallback is what keeps the helper usable
+# from a `set -u` caller with no cycle in scope, and the argument is what a
+# caller outside the watch lane uses instead of hoping one is ambient.
+Z17B_TMP="$(mktemp -d)"
+Z17B_OUT="$(
+  export UBERDEV_TMPDIR="$Z17B_TMP" UBERDEV_GOAL_ID="goaltestz17b"
+  cycle=2
+  uberdev_goal_state_init "goaltestz17b" >/dev/null 2>&1
+  uberdev_goal_record_partial_prs "goaltestz17b" "911" 5 >/dev/null 2>&1
+  uberdev_goal_state_init "goaltestz17c" >/dev/null 2>&1
+  ( unset cycle; uberdev_goal_record_partial_prs "goaltestz17c" "912" >/dev/null 2>&1 )
+  printf 'arg=%s ambient_absent=%s\n' \
+    "$(awk -F'\t' 'NR==1{print $2}' "$Z17B_TMP/goal-goaltestz17b-partial-prs.tsv" 2>/dev/null)" \
+    "$(awk -F'\t' 'NR==1{print $2}' "$Z17B_TMP/goal-goaltestz17c-partial-prs.tsv" 2>/dev/null)"
+)"
+case "$Z17B_OUT" in
+  *"arg=5 ambient_absent=0"*)
+    pass "Z17b: cycle resolves argument-then-ambient-then-0 under $RUN_SHELL (#592)" ;;
+  *)
+    fail "Z17b: cycle resolution wrong under $RUN_SHELL (#592 — got: [$Z17B_OUT]; expect arg=5 ambient_absent=0)" ;;
+esac
+rm -rf "$Z17_TMP" "$Z17B_TMP" 2>/dev/null || true
+
+echo
+echo "== Z18: count_partial_prs prints exactly 0 with no ledger on disk (#592) =="
+# The count is interpolated straight into the goal_converged audit payload, so
+# an EMPTY value there is an unparseable JSON row, not a cosmetic zero. The
+# absent-file path is live rather than theoretical: lib/goal-phase0.sh:307 skips
+# uberdev_goal_state_init on --resume, so a goal started before this ledger
+# existed reaches the counter with every other sidecar present and this one not.
+Z18_TMP="$(mktemp -d)"
+Z18_OUT="$(
+  export UBERDEV_TMPDIR="$Z18_TMP" UBERDEV_GOAL_ID="goaltestz18"
+  Z18_VAL="$(uberdev_goal_count_partial_prs "goaltestz18" 2>/dev/null)"
+  printf 'rc=%s out=[%s]\n' "$?" "$Z18_VAL"
+)"
+case "$Z18_OUT" in
+  *"rc=0 out=[0]"*)
+    pass "Z18a: absent ledger counts as exactly 0, rc 0, under $RUN_SHELL (#592)" ;;
+  *)
+    fail "Z18a: absent-ledger count wrong under $RUN_SHELL (#592 — got: [$Z18_OUT]; expect rc=0 out=[0])" ;;
+esac
+rm -rf "$Z18_TMP" 2>/dev/null || true
+
 # Cleanup
 rm -rf "$Z2_TMP" "$Z3_TMP" "$Z4_TMP" 2>/dev/null || true
 
