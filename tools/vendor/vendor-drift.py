@@ -87,8 +87,16 @@ TAG_REF_RE = re.compile(r"^refs/tags/(.+?)(\^\{\})?$")
 # stays legible: SemVer §11 ranks a pre-release BELOW the release it precedes,
 # so `v6.4.0-rc1` sorts under `v6.4.0`. `is_prerelease` reads the same field
 # back out, which is what keeps "is this a pre-release?" from becoming a second
-# answer — spelled, inevitably, as a substring test for `-` that disagrees with
-# this one on names upstreams really publish.
+# answer — spelled, inevitably, as a substring test for `-`. That test can only
+# ever OVER-report against this one: every name ranked here as a pre-release
+# carries a hyphen anyway, so the substring test never misses one. It only
+# invents extras, and WHERE an invented one lands decides which way the answer
+# then goes wrong. Landing on a candidate, with `allow_pre` off, it is filtered
+# out of a set it belongs in and an upstream's newest release goes unreported.
+# Landing on the recorded review point, it turns `allow_pre` ON — that flag is
+# computed by this very test — and the genuine pre-releases the flag exists to
+# exclude are admitted instead, one of which wins `max()`. D-REL13(e) executes
+# both.
 PRERELEASE_RANK = 0
 FINAL_RANK = 1
 RELEASE_KEY_PRERELEASE_FIELD = 1
@@ -163,8 +171,8 @@ def release_key(name):
     into the digits alone: `v6.4.0-rc1` yields the digit run (6, 4, 0, 1), which
     sorts ABOVE its own final release `v6.4.0` at (6, 4, 0) — `max()` would then
     report a release CANDIDATE as the newest release. SemVer §11 ranks a
-    pre-release BELOW the version it precedes, and the `0 if sep else 1` field
-    is what encodes that.
+    pre-release BELOW the version it precedes, and the
+    `PRERELEASE_RANK if sep else FINAL_RANK` field is what encodes that.
 
     `ls-remote` prints tags in lexical refname order, where `v6.0.10` precedes
     `v6.0.2`; ordering is therefore always computed here, never taken from the
@@ -189,12 +197,25 @@ def is_prerelease(name):
     """True when `name` names a version that PRECEDES its own final release.
 
     Delegates the parse to `release_key` rather than testing the raw string for
-    a `-`, because the two disagree in BOTH directions on names upstreams
-    really publish: `release-1.2.3` carries a hyphen that is a word separator,
-    and SemVer §10 puts build metadata outside the version, so `v6.4.0+build`
-    is a final release. A substring test calls both of those pre-releases and
-    then quietly drops them from the candidate set — an upstream whose newest
-    release is invisible to the control that exists to notice it.
+    a `-`, because the substring test OVER-reports and cannot under-report:
+    every name this function calls a pre-release already carries a hyphen in
+    its version core, so the two answers only ever disagree in the one
+    direction. Both of these are final releases the substring test misreads —
+    `release-1.2.3`, whose hyphen is a word separator, and `v6.4.0+build-7`,
+    where SemVer §10 puts the build metadata outside the version entirely.
+
+    WHERE a misread name lands is what decides how `release_candidates` then
+    goes wrong, and the two landings fail differently. Misread as a CANDIDATE
+    it is dropped from a set it belongs in, leaving an upstream whose newest
+    release is invisible to the control that exists to notice it. Misread as
+    the RECORDED review point it turns `allow_pre` on — that flag is computed
+    by the very test being hypothesised about — so the genuine pre-releases the
+    flag exists to exclude are admitted instead, and one of them wins `max()`
+    and is reported as the newest release: the inversion `release_key`'s
+    pre-release field exists to prevent. Note it is not the misread name itself
+    that is reported there; it is a real pre-release the misreading let in.
+    D-REL13(e) executes both directions, each against the answer the real rule
+    gives for the same upstream.
     """
     key = release_key(name)
     return key is not None and key[RELEASE_KEY_PRERELEASE_FIELD] == PRERELEASE_RANK

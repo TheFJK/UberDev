@@ -2036,6 +2036,513 @@ else
 fi
 
 echo
+echo "== D-REL13: the prose that explains the pre-release rule =="
+
+# D-REL13 — the release rule is explained in three prose sites (`release_key`'s
+# docstring, `is_prerelease`'s docstring, and the `#` comment run above
+# `PRERELEASE_RANK`), and every one of them was making a claim the module does
+# not implement. Prose that contradicts the code is worse than no prose: the
+# next reader "simplifies" the function to match the comment, and the inversion
+# this whole block exists to prevent comes back. So each claim is turned into a
+# predicate and executed here.
+#
+# Six arms, each scoped to the claim ITS site makes — deliberately not one
+# blanket rule, because the two docstrings cite different KINDS of example and
+# one predicate cannot be right for both. `is_prerelease.__doc__` cites
+# OVER-REPORT examples (names where a `-` substring test and `is_prerelease`
+# disagree); the `PRERELEASE_RANK` comment cites a RANKING pair (`v6.4.0-rc1`
+# under `v6.4.0`) where the two AGREE. Applying arm (a)'s predicate to the
+# comment's pair would red on `v6.4.0-rc1` — a correct claim failing a
+# mis-scoped test.
+#
+# Arms (c) and (d) exist because the third site is a COMMENT, and `ast` cannot
+# see comments: a docstring-only predicate would leave it exactly as unguarded
+# as it was. They read the `tokenize.COMMENT` stream instead.
+#
+#   (a) *pre-fix RED* — the docstring cited `v6.4.0+build`, which carries no
+#       `-` at all, so it is not an example of the two answers disagreeing.
+#   (b) *pre-fix RED* — the docstring cited a `0 if sep else 1` field that no
+#       function body contains.
+#   (c) DECLARED REGRESSION GUARD — green on both trees. Falsified by editing
+#       the comment's example pair to two names that do not rank that way.
+#   (d) DECLARED REGRESSION GUARD — green on both trees. Falsified by replacing
+#       `is_prerelease`'s body with `return "-" in name`: the witness arm
+#       empties and the row reds.
+#   (e) DECLARED REGRESSION GUARD — green on both trees. Falsified two ways,
+#       and the second is the one that matters: pinning `allow_pre = False` in
+#       `release_candidates` reds the allow_pre-ON direction, and DELETING the
+#       substring test itself (`substring_mod.is_prerelease =
+#       vendor_drift.is_prerelease`) reds BOTH directions — which is the
+#       property that says this arm is about the substring test rather than
+#       about whatever the correct rule happens to do.
+#   (f) DECLARED REGRESSION GUARD — green on both trees. Falsified by pointing
+#       `release_candidates.__doc__`'s "no version at all" list at a label that
+#       DOES key (`nightly` -> `v6.4.0`): the arm reds naming it. The
+#       code-side mutations (dropping `release_key`'s `if not nums: return
+#       None`, or its `name.split("+", 1)[0]`) were tried first and are NOT
+#       usable as the declared mutation: both kill the `buildmeta`
+#       release-register fixture builder, which surfaces as the suite-wide
+#       `ABORT … exit 99` long before this row runs and so cannot be read as
+#       "this arm reds". The `+` half was falsified out-of-suite instead —
+#       against `core = name` it names `stable+2026`, clean on HEAD.
+#
+# Arms (a)-(d) execute what the prose says the RULE is; (e) executes what it
+# says the CONSEQUENCE of getting it wrong is, (f) the DOMAIN the rule is
+# stated over, and (g) the prose's citations of this row itself. An unexecuted
+# consequence is how this row's own drafts shipped two false sentences in a
+# row: first that an invented pre-release is "silently dropped" (true only
+# while the recorded review point carries no hyphen), then that the invented
+# name is the one KEPT and winning `max()` — which is what the CORRECT rule
+# does with it, since an invented pre-release is a final release. Both were
+# written as prose and believed; (e) is where such a sentence now has to
+# survive being run against the real rule's answer.
+#
+# The (b) rule is NARROW on purpose — a backticked token carrying both ` if `
+# and ` else `, i.e. a quoted conditional EXPRESSION. The obvious wider rule
+# ("any backticked token with whitespace and a Python keyword") was executed
+# against this tree and reds a CORRECT one: it also collects `recorded in
+# candidates` and `recorded in published` from `release_verdict.__doc__`, which
+# are English statements about a relation, not quotations of source, and appear
+# in no body. Narrower and true beats wider and false.
+#
+# The stripper the (b) rule compares against deletes docstring LINE SPANS and
+# comment TAIL SPANS. It deliberately does NOT round-trip the source through
+# `tokenize.untokenize()` and then `str.replace(docstring, "")`: the round-trip
+# reformats the source, the replace silently misses, the docstring survives, and
+# the arm answers "the citation is present" on a tree where it is absent — a
+# vacuous green inside the row whose whole job is to catch vacuous prose.
+# Arm (g) reads this file, so it needs this file's own path — resolved here,
+# absolutely, rather than left as whatever `$0` was spelled as on the command
+# line, so the arm cannot be turned vacuous by the invocation.
+DREL13_SELF="$(cd "$(dirname "$0")" && pwd)/${0##*/}"
+DREL13_OUT="$(python3 - "$DRIFT" "$REGISTER" "$DREL13_SELF" <<'PY'
+import ast
+import importlib.util
+import json
+import re
+import sys
+import tokenize
+
+drift, register, testfile = sys.argv[1], sys.argv[2], sys.argv[3]
+
+modspec = importlib.util.spec_from_file_location("vendor_drift", drift)
+vendor_drift = importlib.util.module_from_spec(modspec)
+modspec.loader.exec_module(vendor_drift)
+
+with open(drift, encoding="utf-8") as fh:
+    source = fh.read()
+# `split("\n")`, never `splitlines()`: this list is indexed by `tokenize` row
+# numbers, and `tokenize` counts `\n` alone while `splitlines()` also breaks on
+# `\f`, `\x0b`, `\x1c`-`\x1e` and `\x85`. One of those anywhere in the module
+# desyncs the two numberings, and the stripper below then truncates the WRONG
+# line — a vacuous green inside the arm whose job is catching vacuous prose.
+srclines = source.split("\n")
+tree = ast.parse(source)
+with open(drift, "rb") as fh:
+    comments = [t for t in tokenize.tokenize(fh.readline)
+                if t.type == tokenize.COMMENT]
+
+CITED = re.compile(r"`([^`\n]+)`")
+VERSIONISH = re.compile(r"^v?\d+(\.\d+)*(-[0-9A-Za-z.]+)?$")
+SCOPES = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+problems = []
+
+
+def stripped_source():
+    """The module with every docstring and comment removed, code intact.
+
+    Line spans for docstrings (an `Expr` holding a `Constant` string is alone on
+    its lines), tail spans for comments (a trailing `#` shares its line with the
+    code the arm is looking for). Never `untokenize` + `str.replace`.
+    """
+    kept = list(srclines)
+    for tok in comments:
+        row, col = tok.start
+        kept[row - 1] = kept[row - 1][:col]
+    drop = set()
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if not isinstance(node, SCOPES) or not body:
+            continue
+        head = body[0]
+        if (isinstance(head, ast.Expr)
+                and isinstance(getattr(head, "value", None), ast.Constant)
+                and isinstance(head.value.value, str)):
+            drop.update(range(head.lineno, head.end_lineno + 1))
+    return "\n".join(t for i, t in enumerate(kept, 1) if i not in drop)
+
+
+def over_reports(name):
+    """True when a `-` substring test and `is_prerelease` disagree about `name`.
+
+    The one-directional claim itself, in one predicate, so arms (d) and (e)
+    cannot drift apart about what "an invented pre-release" means.
+    """
+    return "-" in name and not vendor_drift.is_prerelease(name)
+
+
+def prose():
+    """Every docstring plus every comment — the module's whole claim surface."""
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, SCOPES):
+            doc = ast.get_docstring(node, clean=False)
+            if doc:
+                out.append(doc)
+    out.extend(t.string for t in comments)
+    return "\n".join(out)
+
+
+# (a) the over-report claim, scoped to `is_prerelease.__doc__`.
+doc = vendor_drift.is_prerelease.__doc__ or ""
+cited = [t for t in CITED.findall(doc) if "-" in t or "+" in t]
+if len(cited) < 2:
+    problems.append("(a) is_prerelease.__doc__ cites %d token(s) carrying `-` or "
+                    "`+`, want >=2: %r" % (len(cited), cited))
+if not any("+" in t for t in cited):
+    problems.append("(a) no cited token carries build metadata (`+`), so SemVer "
+                    "10 is claimed and never shown: %r" % (cited,))
+# The count alone is a soft floor: the docstring also mentions the bare `-` it
+# is talking ABOUT, which keys to None and so satisfies the over-report
+# predicate trivially, without being an example of anything. Require two cited
+# tokens that actually NAME a version, so the arm cannot be satisfied by
+# incidental punctuation.
+versioned_cited = [t for t in cited if vendor_drift.release_key(t) is not None]
+if len(versioned_cited) < 2:
+    problems.append("(a) only %d cited token(s) name a version, want >=2 — the "
+                    "rest are incidental mentions, not examples: %r"
+                    % (len(versioned_cited), cited))
+for tok in cited:
+    if not ("-" in tok and not vendor_drift.is_prerelease(tok)):
+        problems.append("(a) cited token %r is not an over-report example "
+                        "('-' in it: %s, is_prerelease: %s)"
+                        % (tok, "-" in tok, vendor_drift.is_prerelease(tok)))
+
+# (b) every cited conditional expression is really in the module's EXECUTABLE
+# source. The haystack is the whole module with docstrings and comments removed
+# — not function bodies alone — because a module-level constant is quotable
+# source too, and the claim under test is "this prose quotes something that
+# exists", not "…something inside a def".
+conditionals = sorted({t for t in CITED.findall(prose())
+                       if " if " in t and " else " in t})
+if not conditionals:
+    problems.append("(b) no conditional expression is cited anywhere in the "
+                    "module's docstrings or comments, so this arm asserts "
+                    "nothing")
+body_source = stripped_source()
+for tok in conditionals:
+    if tok not in body_source:
+        problems.append("(b) the cited conditional expression %r occurs nowhere "
+                        "in the module's executable source" % (tok,))
+
+# (c) the ranking claim the `PRERELEASE_RANK` comment run makes, over its own
+# cited pair. `release_precedence` is what will own precedence once it exists;
+# until then the same answer comes off `release_key`, so this arm is stable
+# across that refactor rather than pinned to it.
+assign_row = None
+for node in tree.body:
+    if isinstance(node, ast.Assign):
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == "PRERELEASE_RANK":
+                assign_row = node.lineno
+whole_line = {t.start[0]: t.string for t in comments
+              if srclines[t.start[0] - 1].lstrip().startswith("#")}
+run = []
+if assign_row is None:
+    problems.append("(c) no module-level `PRERELEASE_RANK` assignment to anchor "
+                    "the comment run on")
+else:
+    row = assign_row - 1
+    while row in whole_line:
+        run.append(whole_line[row])
+        row -= 1
+    run.reverse()
+versioned = [t for t in CITED.findall("\n".join(run)) if VERSIONISH.match(t)]
+precedence = getattr(vendor_drift, "release_precedence", vendor_drift.release_key)
+if len(versioned) != 2:
+    problems.append("(c) the comment run above PRERELEASE_RANK cites %d "
+                    "version-shaped token(s), want exactly 2: %r"
+                    % (len(versioned), versioned))
+else:
+    pre = [t for t in versioned if vendor_drift.is_prerelease(t)]
+    final = [t for t in versioned if not vendor_drift.is_prerelease(t)]
+    if len(pre) != 1:
+        problems.append("(c) the comment's cited pair is not one pre-release and "
+                        "one final: pre=%r final=%r" % (pre, final))
+    else:
+        pre_key, final_key = precedence(pre[0]), precedence(final[0])
+        if pre_key is None or final_key is None:
+            problems.append("(c) %s answers None for the comment's own pair "
+                            "(%r -> %r, %r -> %r)"
+                            % (precedence.__name__, pre[0], pre_key,
+                               final[0], final_key))
+        elif not pre_key < final_key:
+            problems.append("(c) the comment's own example does not rank: %r does "
+                            "not sort below %r" % (pre[0], final[0]))
+
+# (d) the one-directional property itself, module-wide. The corpus is the
+# shipped register's own labels plus a pinned adversarial list — pinned rather
+# than generated because a generator built from `release_key` would agree with
+# whatever `release_key` does.
+with open(register, encoding="utf-8") as fh:
+    registered = json.load(fh)
+corpus = [meta.get("last_reviewed_release")
+          for _, meta in sorted(registered.get("upstreams", {}).items())]
+corpus = [n for n in corpus if isinstance(n, str) and n]
+registered_labels = list(corpus)
+corpus += ["v6.4.0-rc1", "release-1.2.3", "release-1.2.3-rc1",
+           "pr-review-toolkit-v1.2.0", "pr-review-toolkit-v1.3.0-rc1",
+           "v6.4.0+build", "v6.4.0+build-7", "latest", "stable+2026",
+           "stable-nightly", "6.3.0", "v6.4.0+build1", ""]
+under = [n for n in corpus if vendor_drift.is_prerelease(n) and "-" not in n]
+witness = [n for n in corpus if over_reports(n)]
+if under:
+    problems.append("(d) is_prerelease answers True for a name carrying no `-`, "
+                    "so the substring test UNDER-reports after all and the prose "
+                    "is wrong again: %r" % (under,))
+if not witness:
+    problems.append("(d) no name in the corpus over-reports, so the claim all "
+                    "three prose sites make is asserted over nothing")
+
+# (e) the CONSEQUENCE clause the two prose sites state, in both of its
+# directions. The clause needs its own arm because the obvious one-line version
+# of it ("an invented pre-release is silently dropped from the candidate set")
+# is only half the story, and the missing half is the dangerous one.
+#
+# WHERE the misread name lands is what decides which way the answer goes wrong,
+# and the two landings are different failures, not one failure twice:
+#
+#   * as a CANDIDATE — the substring test invents a pre-release out of a
+#     genuinely FINAL release, `allow_pre` is off because the recorded label
+#     carries no hyphen, and the invention is filtered out of a candidate set it
+#     belongs in. The newest release goes unreported;
+#   * as the RECORDED review point — a final label whose hyphen is a word
+#     separator is read as a pre-release, so `allow_pre`, which is computed by
+#     the very test being hypothesised about, turns ON. The GENUINE
+#     pre-releases that flag exists to exclude are then admitted, and one wins
+#     `max()`: the `v6.4.0-rc1` > `v6.4.0` inversion itself.
+#
+# Both are executed against a SECOND module instance whose `is_prerelease` is
+# the substring test, so arms (a)-(d) keep reading the real one and nothing
+# here leaks into them — and both halves assert the DIFFERENTIAL, i.e. that the
+# real rule answers something else. Asserting only the substring instance's
+# answer is what an earlier draft of this arm did, and it guarded nothing:
+# "a final release is kept in the candidate set" is what the CORRECT rule does
+# too, so the half passed unchanged with the substring test deleted outright.
+#
+# The pairs are DERIVED from the same corpus, never typed. The candidate-side
+# name is one the real classifier calls final while the substring test calls it
+# a pre-release; the recorded-side name in the ON direction is the same kind of
+# over-report, and what it wrongly admits is read off `is_prerelease` itself —
+# so both track any change to what counts as a pre-release instead of silently
+# changing meaning under it.
+substrspec = importlib.util.spec_from_file_location("vendor_drift_substring", drift)
+substring_mod = importlib.util.module_from_spec(substrspec)
+substrspec.loader.exec_module(substring_mod)
+substring_mod.is_prerelease = lambda name: "-" in name
+
+# Two distinct synthetic 40-hex commits: the pair only has to differ and to
+# satisfy SHA40_RE, so that `release_verdict` reaches the ranking branch rather
+# than reporting `moved`.
+SHA_RECORDED, SHA_OTHER = "a" * 40, "b" * 40
+keyed = sorted({n for n in corpus if vendor_drift.release_key(n) is not None})
+over_report = [n for n in keyed if over_reports(n)]
+hyphen_free = [n for n in keyed if "-" not in n]
+genuine_pre = [n for n in keyed if vendor_drift.is_prerelease(n)]
+
+
+def outranking_pair(lows, highs):
+    """The first (low, high) drawn from these pools that really ranks that way."""
+    for high in highs:
+        for low in lows:
+            if low == high:
+                continue
+            low_key, high_key = precedence(low), precedence(high)
+            if low_key is not None and high_key is not None and low_key < high_key:
+                return low, high
+    return None, None
+
+
+def readings(recorded, other):
+    """Both classifiers on the same two-tag upstream: (candidates, verdict) each.
+
+    Returned substring-first, real-second — the arm compares the two, because
+    an assertion about the substring instance ALONE is satisfied by whatever
+    the correct rule already does.
+    """
+    published = {recorded: SHA_RECORDED, other: SHA_OTHER}
+    meta = {"last_reviewed_release": recorded,
+            "last_reviewed_commit": SHA_RECORDED}
+    return [(mod.release_candidates(published, recorded),
+             mod.release_verdict("d-rel13e", meta, published))
+            for mod in (substring_mod, vendor_drift)]
+
+
+# (e1) the misread name lands on a CANDIDATE. `allow_pre` is off on both sides,
+# so the only difference is the invention itself.
+plain_recorded, invented = outranking_pair(hyphen_free, over_report)
+if plain_recorded is None:
+    problems.append("(e) the corpus offers no pair with a hyphen-free recorded "
+                    "label outranked by an over-reported name, so the DROPPED "
+                    "direction asserts nothing")
+else:
+    (sub_cands, sub_verdict), (real_cands, real_verdict) = \
+        readings(plain_recorded, invented)
+    if invented in sub_cands:
+        problems.append("(e) with recorded %r carrying no hyphen the substring "
+                        "test should drop %r from the candidate set, but kept "
+                        "it: %r" % (plain_recorded, invented,
+                                    sorted(sub_cands)))
+    elif sub_verdict["actionable"]:
+        problems.append("(e) dropping %r still left an actionable verdict (%r), "
+                        "so the prose's 'invisible to the control that exists to "
+                        "notice it' is not what happens"
+                        % (invented, sub_verdict["state"]))
+    elif invented not in real_cands or not real_verdict["actionable"]:
+        problems.append("(e) dropping %r is no differential: the REAL rule also "
+                        "fails to report it (candidates %r, state %r, actionable "
+                        "%s), so this direction indicts nothing"
+                        % (invented, sorted(real_cands), real_verdict["state"],
+                           real_verdict["actionable"]))
+
+# (e2) the misread name lands on the RECORDED review point, so `allow_pre`
+# turns on and admits a GENUINE pre-release the real rule filters out. Note the
+# admitted name is NOT the over-report: an over-report is a final release, and
+# keeping a final release is exactly what the correct rule does — which is why
+# this half has to be selected off `is_prerelease` instead.
+hyphen_recorded, admitted = outranking_pair(over_report, genuine_pre)
+if hyphen_recorded is None:
+    problems.append("(e) the corpus offers no over-reported recorded label "
+                    "outranked by a genuine pre-release, so the allow_pre-ON "
+                    "direction asserts nothing")
+else:
+    (sub_cands, sub_verdict), (real_cands, real_verdict) = \
+        readings(hyphen_recorded, admitted)
+    if admitted in real_cands:
+        problems.append("(e) the REAL rule already admits %r for recorded %r "
+                        "(candidates %r), so allow_pre is not off and this "
+                        "direction indicts nothing"
+                        % (admitted, hyphen_recorded, sorted(real_cands)))
+    elif real_verdict["actionable"]:
+        problems.append("(e) with %r excluded the REAL rule already calls this "
+                        "upstream actionable (%r), so the substring test's "
+                        "finding is not a false one to begin with"
+                        % (admitted, real_verdict["state"]))
+    elif admitted not in sub_cands:
+        problems.append("(e) the substring test reads recorded %r as a "
+                        "pre-release, so it must turn allow_pre ON and admit "
+                        "%r; the candidate set is %r"
+                        % (hyphen_recorded, admitted, sorted(sub_cands)))
+    elif sub_verdict["newest"] != admitted:
+        problems.append("(e) admitted %r did not win max(): newest is %r"
+                        % (admitted, sub_verdict["newest"]))
+    elif sub_verdict["state"] != "newer":
+        problems.append("(e) %r was reported as newest without the `newer` "
+                        "verdict the prose names: state is %r"
+                        % (admitted, sub_verdict["state"]))
+
+# (f) the ordering DOMAIN the three prose sites rest on. Two more claims the
+# module states in prose and nothing executed, plus the one the register itself
+# stands on:
+#   * `release_candidates.__doc__` names the labels that "name no version at
+#     all" — they must key to None, or the first filter it describes is fiction;
+#   * `release_key`'s SemVer 10 comment says build metadata is stripped before
+#     comparison, so what follows a `+` cannot decide whether a name IS a
+#     version at all;
+#   * `validate_release_metadata` refuses any recorded label `release_key`
+#     cannot order, so every label the shipped register declares must key.
+# The label list is read out of the docstring rather than typed, so the arm
+# tracks the prose it is executing. The register half is empty-tolerant on
+# purpose: RFC 0019's #511 amendment lets a monorepo plugin declare no release
+# label at all, and this row must not pressure the register into inventing one.
+unversioned = []
+scoped = re.search(r"names no version at all \(([^)]*)\)",
+                   vendor_drift.release_candidates.__doc__ or "")
+if scoped is None:
+    problems.append("(f) release_candidates.__doc__ no longer names the labels "
+                    "it calls no version at all, so this arm asserts nothing")
+else:
+    unversioned = CITED.findall(scoped.group(1))
+    if len(unversioned) < 2:
+        problems.append("(f) release_candidates.__doc__ cites %d unorderable "
+                        "label(s), want >=2: %r"
+                        % (len(unversioned), unversioned))
+for name in unversioned:
+    if vendor_drift.release_key(name) is not None:
+        problems.append("(f) release_candidates.__doc__ calls %r no version at "
+                        "all, but release_key orders it as %r"
+                        % (name, vendor_drift.release_key(name)))
+metadata_bearing = [n for n in corpus if "+" in n]
+if not metadata_bearing:
+    problems.append("(f) no name in the corpus carries build metadata, so "
+                    "SemVer 10 is asserted over nothing")
+elif not any(vendor_drift.release_key(n) is not None for n in metadata_bearing):
+    # The equivalence below is symmetric, so a corpus where every `+`-bearing
+    # name keys to None on BOTH sides satisfies it while proving the opposite of
+    # what SemVer 10 says. One positive witness is what makes it a claim.
+    problems.append("(f) no name carrying build metadata names a version at "
+                    "all, so SemVer 10 holds here only vacuously: %r"
+                    % (sorted(metadata_bearing),))
+for name in metadata_bearing:
+    core = name.split("+", 1)[0]
+    if (vendor_drift.release_key(name) is None) \
+            != (vendor_drift.release_key(core) is None):
+        problems.append("(f) build metadata decides whether %r names a version "
+                        "at all (core %r keys %s, the full name keys %s), but "
+                        "SemVer 10 puts it outside the version"
+                        % (name, core,
+                           vendor_drift.release_key(core) is not None,
+                           vendor_drift.release_key(name) is not None))
+for label in registered_labels:
+    if vendor_drift.release_key(label) is None:
+        problems.append("(f) the register declares %r, which release_key cannot "
+                        "order — validate_release_metadata promises it refuses "
+                        "exactly that label" % (label,))
+
+# (g) the prose's citations OF THIS ROW. Two sites now end "D-REL13(e) executes
+# both directions", which is itself an unexecuted claim — and it rots the same
+# way every claim arms (a)-(f) execute rots: rename the row or drop the arm and
+# the sentence quietly points at nothing. Reintroducing the defect one level up
+# from where it was fixed is not a trade this row gets to make, so the citation
+# is executed too: every `D-REL<n>(<arm>)` the module's prose names must be a
+# row this file declares and an arm it really implements.
+with open(testfile, encoding="utf-8") as fh:
+    test_source = fh.read()
+ROW_CITE = re.compile(r"\bD-REL(\d+)\(([a-z])\)")
+cited_rows = sorted(set(ROW_CITE.findall(prose())))
+if not cited_rows:
+    problems.append("(g) the module's prose cites no test row of this file, so "
+                    "this arm asserts nothing")
+for row, arm in cited_rows:
+    if ("== D-REL%s:" % row) not in test_source:
+        problems.append("(g) the module's prose cites row D-REL%s(%s), but %s "
+                        "declares no such row" % (row, arm, testfile))
+    elif ("\n# (%s) " % arm) not in test_source:
+        problems.append("(g) the module's prose cites arm (%s) of D-REL%s, but "
+                        "%s implements no arm by that letter" % (arm, row, testfile))
+
+print("; ".join(problems) if problems else "D-REL13-OK")
+PY
+)"
+DREL13_RC=$?
+DREL13_FAILS=''
+[ "$DREL13_RC" -eq 0 ] \
+  || DREL13_FAILS="the probe itself exited rc=$DREL13_RC — a traceback is not a pass"
+# A silent probe is read as a FAILURE, never as "no problems": an empty capture
+# is what a killed interpreter and a clean tree look like alike, so the clean
+# tree has to say so out loud.
+case "$DREL13_OUT" in
+  D-REL13-OK) ;;
+  '') DREL13_FAILS="${DREL13_FAILS}${DREL13_FAILS:+; }the probe printed nothing at all" ;;
+  *)  DREL13_FAILS="${DREL13_FAILS}${DREL13_FAILS:+; }$DREL13_OUT" ;;
+esac
+if [ -z "$DREL13_FAILS" ]; then
+  ok "D-REL13 every claim the module's prose makes about release names is executable and true"
+else
+  no "D-REL13 the module's prose claims something it does not do: $DREL13_FAILS"
+fi
+
+echo
 echo "== D-REL16: the argv separator =="
 
 # D-REL16 — an upstream's clone url is REGISTER-SUPPLIED (`upstreams.<id>.url`,
