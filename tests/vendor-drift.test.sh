@@ -1039,7 +1039,7 @@ echo "== D-REL5: a broken release review point is a malformed register, not an o
 # as D13's missing component field and must land on the same verdict: rc 2, the
 # offending upstream id and field named, before the first subprocess.
 #
-# Three of the six sub-cases are not hypothetical. A label that is not a string,
+# Three of the eleven sub-cases are not hypothetical. A label that is not a string,
 # or one that names no version, would pass any presence-only check, survive the
 # whole tag resolution, and only THEN reach the ordering comparison — where
 # `release_key` has returned None and `None` is not orderable against another
@@ -1056,6 +1056,19 @@ echo "== D-REL5: a broken release review point is a malformed register, not an o
 # found — so a `field`-only assertion passes while the WRONG clause fires, and
 # the sub-cases stop distinguishing anything. Same reason the id is pinned as
 # `upstream <id>`: the bare id is a substring of the slug that carries it.
+#
+# The last five sub-cases are the OTHER half of the same register contract
+# (#604 defect 3). Until it existed, "no release vocabulary" was inferred from
+# an ABSENT key, so deleting `last_reviewed_release` from a used upstream did
+# not break anything visible: the verdict degraded to the non-actionable
+# `head-only`, the report attributed its own silence to a declaration nobody had
+# made, and every other check in the repo stayed green because none of them
+# reads the field. `head_only` makes the decision a positive declaration and the
+# check a biconditional, and these arms are what keep both halves honest —
+# deleting a label reds (`droplabel`), deleting the opt-out reds
+# (`strip_headonly`), declaring both reds (`bothdeclared`), and an opt-out that
+# is merely truthy rather than JSON `true` reds twice over, once for a string
+# and once for the `1` a hand-edit leaves behind.
 #
 # Every sub-case runs in BOTH modes. The guard sits on the same side of the
 # `--verify-bases` return as the component-key loop precisely so the two modes
@@ -1092,7 +1105,12 @@ for spec in "empty|last_reviewed_release|names a version this tool can order|a p
             "unversioned|last_reviewed_release|names a version this tool can order|a label that names no version" \
             "buildmeta|last_reviewed_release|names a version this tool can order|a label whose only digits are build metadata" \
             "halfpoint|last_reviewed_commit|no 40-hex last_reviewed_commit|a label with no commit beside it" \
-            "shortsha|last_reviewed_commit|no 40-hex last_reviewed_commit|a label beside a short sha"; do
+            "shortsha|last_reviewed_commit|no 40-hex last_reviewed_commit|a label beside a short sha" \
+            "droplabel|head_only|declares neither last_reviewed_release nor head_only|a review point deleted from a used upstream" \
+            "bothdeclared|head_only|declares both last_reviewed_release|a review point and the HEAD-only opt-out on one upstream" \
+            "headonly_string|head_only|must be exactly JSON true|the HEAD-only opt-out spelled as a string" \
+            "headonly_number|head_only|must be exactly JSON true|the HEAD-only opt-out spelled as JSON 1" \
+            "strip_headonly|head_only|declares neither last_reviewed_release nor head_only|the HEAD-only opt-out removed from a label-free upstream"; do
   IFS='|' read -r mutation field clause desc <<<"$spec"
   # The mutated upstream id is DERIVED and echoed back, so the assertion below
   # pins the id the tool names against the id the fixture actually broke — a
@@ -1116,15 +1134,24 @@ ups = d.get("upstreams", {})
 used = sorted({c["upstream"] for c in d.get("components", [])
                if c.get("origin") == "third-party"})
 labelled = [u for u in used if ups.get(u, {}).get("last_reviewed_release")]
+unlabelled = [u for u in used if not ups.get(u, {}).get("last_reviewed_release")]
 # Anti-vacuity. Mutating an upstream no component uses would exercise nothing —
 # validation walks the USED set — and a register recording no release label at
 # all has nothing here to break.
 if not labelled:
     raise SystemExit("no USED upstream declares last_reviewed_release — every "
                      "sub-case would mutate a field the tool never reads")
-target = labelled[0]
+if not unlabelled:
+    raise SystemExit("every USED upstream declares last_reviewed_release — the "
+                     "HEAD-only arms below would have no opt-out to corrupt")
+# Which side of the register each mutation breaks. The label arms need an
+# upstream that HAS a review point; the opt-out arms need one that deliberately
+# does not. Both are DERIVED, and `main()` dies at the first offender in
+# `sorted(used)` order, which is why the id is printed rather than assumed.
+LABEL_FREE_MUTATIONS = ("headonly_string", "headonly_number", "strip_headonly")
+target = (unlabelled if mutation in LABEL_FREE_MUTATIONS else labelled)[0]
 meta = ups[target]
-label = meta["last_reviewed_release"]
+label = meta.get("last_reviewed_release")
 
 if mutation == "empty":
     meta["last_reviewed_release"] = ""
@@ -1190,6 +1217,59 @@ elif mutation == "shortsha":
         raise SystemExit("a truncated commit must still be a non-empty string, "
                          "else the type half of the clause answers this "
                          "sub-case and the 40-hex half stays untested")
+elif mutation == "droplabel":
+    # The defect-3 shape, exactly: one line deleted from the register. The
+    # commit is deliberately LEFT in place, so the upstream still looks
+    # half-reviewed — before the biconditional this degraded to a silent
+    # non-actionable `head-only` and disabled the whole release control for
+    # this upstream with nothing anywhere reporting it.
+    if meta.pop("last_reviewed_release", None) is None:
+        raise SystemExit("the labelled upstream carries no last_reviewed_release "
+                         "to delete — this sub-case would assert nothing")
+    if "last_reviewed_commit" not in meta:
+        raise SystemExit("the labelled upstream carries no last_reviewed_commit "
+                         "to leave behind, so this sub-case could not tell a "
+                         "DELETED review point from half a review point")
+elif mutation == "bothdeclared":
+    # The contradiction. A HEAD-only upstream is one with no release vocabulary
+    # to record, so a label beside the opt-out is two register entries claiming
+    # opposite things; picking either silently is how a real review point gets
+    # ignored.
+    if "last_reviewed_release" not in meta:
+        raise SystemExit("the labelled upstream carries no last_reviewed_release "
+                         "for the opt-out to contradict")
+    if "head_only" in meta:
+        raise SystemExit("the labelled upstream ALREADY declares head_only, so "
+                         "this sub-case would add nothing and the contradiction "
+                         "clause would be reached by the committed register")
+    meta["head_only"] = True
+elif mutation in ("headonly_string", "headonly_number"):
+    # Truthy is not the same as declared. `is True` is what rejects these; an
+    # `if meta.get("head_only")` test accepts both and lets a typo stand in for
+    # a decision. JSON `1` is the one a hand-edit actually leaves behind, and it
+    # is the value a `==`-based check cannot tell from `true`.
+    if meta.get("head_only") is not True:
+        raise SystemExit("the label-free upstream %r carries no `head_only: "
+                         "true` to corrupt — the register half of #604 is "
+                         "missing, so this sub-case would assert nothing"
+                         % target)
+    meta["head_only"] = "yes" if mutation == "headonly_string" else 1
+    if meta["head_only"] is True:
+        raise SystemExit("the corrupted opt-out is still JSON true, so this "
+                         "sub-case models no corruption at all")
+elif mutation == "strip_headonly":
+    # The mirror of `droplabel`, and the arm that makes the register edit
+    # itself load-bearing: removing the positive declaration from an upstream
+    # that has no label leaves it declaring nothing, which is the state the
+    # biconditional exists to refuse.
+    if meta.pop("head_only", None) is None:
+        raise SystemExit("the label-free upstream %r carries no head_only to "
+                         "strip — either the register edit missed it or this "
+                         "sub-case is mutating the wrong upstream" % target)
+    if "last_reviewed_release" in meta:
+        raise SystemExit("the upstream this sub-case stripped also carries a "
+                         "label, so it would land on the contradiction clause "
+                         "rather than the 'declares neither' one")
 else:
     raise SystemExit("unknown mutation %r" % mutation)
 
@@ -1789,6 +1869,15 @@ for uid in labelfree:
     naming = [ln for ln in lines if "`%s`" % uid in ln]
     if not any("HEAD-only" in ln for ln in naming):
         problems.append("%s is not described as a HEAD-only upstream" % uid)
+    # ...and the sentence must be EARNED. "HEAD-only, as the register declares"
+    # was derived from an ABSENT key: the report affirmed a decision nobody had
+    # made, and would go on affirming it after the review point was deleted by
+    # accident (#604 defect 3). Naming `head_only` binds the sentence to the key
+    # that actually declares it — a substring distinct from the rendered
+    # `HEAD-only`, so this cannot be satisfied by the older wording.
+    if not any("HEAD-only" in ln and "head_only" in ln for ln in naming):
+        problems.append("%s is described as HEAD-only without naming the "
+                        "`head_only` register key that declares it" % uid)
     for ln in naming:
         if recorded in ln:
             problems.append("%s carries another upstream's recorded release "
@@ -3328,6 +3417,72 @@ if [ -z "$DREL14_FAILS" ]; then
   ok "D-REL14 a monorepo release candidate is observed, but is not an adjudication finding"
 else
   no "D-REL14 the monorepo release vocabulary is mishandled: $DREL14_FAILS"
+fi
+
+echo
+echo "== D-REL15: the committed register declares a release standing for every used upstream =="
+
+# ---------------------------------------------------------------------------
+# D-REL15 — the register half of the biconditional, over the COMMITTED
+# vendor.json rather than a fixture.
+#
+# WHY A ROW OF ITS OWN, when the anti-vacuity preflight already runs the tool
+# against the committed register and would exit 2 on a register that declares
+# neither key: because that failure arrives as `exit 2` with every row below it
+# unexecuted, and the next editor reads a suite that stopped rather than a
+# claim about the register. This row names the offending upstream and says
+# which side it declared, in the report, next to every other row.
+#
+# The used set is RECOMPUTED with the tool's own selector rather than restated:
+# a typed list of upstream ids is the thing that goes stale the day one is
+# added, and an upstream added with neither key is exactly the mistake the row
+# exists to catch. Presence is tested with `in`, never truthiness, so a
+# present-but-empty label is reported by the tool's orderability clause (D-REL5
+# `empty`) rather than misreported here as an absence.
+# ---------------------------------------------------------------------------
+DREL15_MSG="$(python3 - "$REGISTER" 2>&1 <<'PY'
+import json, sys
+
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+ups = d.get("upstreams", {})
+used = sorted({c["upstream"] for c in d.get("components", [])
+               if c.get("origin") == "third-party"})
+assert used, ("the register declares no third-party components, so the loop "
+              "below would iterate over nothing")
+
+problems = []
+has_label = has_optout = False
+for uid in used:
+    meta = ups.get(uid, {})
+    label = "last_reviewed_release" in meta
+    optout = "head_only" in meta
+    has_label = has_label or label
+    has_optout = has_optout or optout
+    if label and optout:
+        problems.append("upstream %s declares BOTH last_reviewed_release and "
+                        "head_only" % uid)
+    elif not label and not optout:
+        problems.append("upstream %s declares NEITHER last_reviewed_release "
+                        "nor head_only" % uid)
+    if optout and meta["head_only"] is not True:
+        problems.append("upstream %s declares head_only %r, which is not JSON "
+                        "true" % (uid, meta["head_only"]))
+# Printed BEFORE the anti-vacuity gate so a register that really is broken is
+# named, rather than being hidden behind the gate that fires for the same edit.
+print("; ".join(problems))
+# Anti-vacuity, both arms. A register where every used upstream is labelled
+# never exercises the opt-out; one where none is never exercises the label.
+assert has_label, ("no used upstream declares last_reviewed_release — the "
+                   "labelled side of this row covers nothing")
+assert has_optout, ("no used upstream declares head_only — the HEAD-only side "
+                    "of this row covers nothing")
+PY
+)"
+DREL15_RC=$?
+if [ "$DREL15_RC" -eq 0 ] && [ -z "$DREL15_MSG" ]; then
+  ok "D-REL15 every used upstream declares exactly one of last_reviewed_release / head_only, and the opt-out is JSON true"
+else
+  no "D-REL15 the committed register's release standings are incomplete: ${DREL15_MSG:-probe exited $DREL15_RC with no output}"
 fi
 
 echo

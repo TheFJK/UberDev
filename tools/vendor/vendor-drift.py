@@ -336,12 +336,57 @@ def validate_release_metadata(upstream_id, upstream):
     outage's exit code. Demanding a KEY up front — from `release_key` itself,
     never from a restatement of what it accepts — is what makes
     `release_key(recorded)` total by the time any comparison runs.
+
+    The check is a BICONDITIONAL over every used upstream: exactly one of
+    `last_reviewed_release` and `head_only` must be declared. The two halves are
+    not symmetric in how they used to fail, which is why both are checked here.
+    A label without a commit already died at rc 2. Its mirror image — no label
+    at all — returned silently and rendered as a non-actionable `head-only`, so
+    deleting one line from the register disabled the release control for that
+    upstream while every other check in the repo stayed green, and the report
+    went on attributing its own silence to a declaration nobody had made (#604
+    defect 3). "No release vocabulary" is a DECISION, and a decision inferred
+    from an absent key is indistinguishable from an accident.
+
+    `head_only` must be exactly JSON `true`, by identity rather than by
+    truthiness: a placeholder, a `"yes"`, or the `1` a hand-edit leaves behind
+    would otherwise stand in for the decision. Presence is tested with `in` for
+    the same reason the label's own clauses are — a present-but-empty label is a
+    BROKEN review point and must reach the orderability clause below, never be
+    read here as an upstream that declared nothing.
     """
-    if "last_reviewed_release" not in upstream:
-        # A missing label is not an error. An upstream can be a plugin inside a
-        # monorepo with no release vocabulary at all (RFC 0019, the #511
-        # amendment), and inventing a label for it would be exactly the
-        # fabrication this register exists to prevent.
+    label_declared = "last_reviewed_release" in upstream
+    optout_declared = "head_only" in upstream
+
+    if optout_declared and upstream["head_only"] is not True:
+        die_usage("upstream %s declares head_only %r — the HEAD-only opt-out "
+                  "records a decision, not a note, so it must be exactly JSON "
+                  "true. Accepting any truthy value would let a placeholder or "
+                  "a typo stand in for the decision, and this tool would go on "
+                  "reporting the upstream as deliberately release-free on the "
+                  "strength of it" % (upstream_id, upstream["head_only"]))
+    if label_declared and optout_declared:
+        die_usage("upstream %s declares both last_reviewed_release %r and "
+                  "head_only — a HEAD-only upstream is one with no release "
+                  "vocabulary to record, so the two declarations contradict "
+                  "each other and nothing here can decide which one the "
+                  "register meant"
+                  % (upstream_id, upstream["last_reviewed_release"]))
+    if not label_declared and not optout_declared:
+        die_usage("upstream %s declares neither last_reviewed_release nor "
+                  "head_only — every used upstream must state its release "
+                  "standing positively: either the release review point that "
+                  "was adjudicated, or head_only: true to record that this "
+                  "upstream publishes no releases to adjudicate. Silence is "
+                  "indistinguishable from a review point deleted by accident, "
+                  "and this tool would report the deletion as a settled "
+                  "decision" % upstream_id)
+    if not label_declared:
+        # Declared HEAD-only, positively. `release_verdict` renders it as
+        # `head-only` and not actionable — RFC 0019's #511 amendment: a plugin
+        # inside a monorepo with no release vocabulary has no tag to name, and
+        # inventing a label for it would be exactly the fabrication this
+        # register exists to prevent.
         return
     label = upstream["last_reviewed_release"]
     # The predicate IS the function whose totality it guarantees. Any restatement
@@ -450,7 +495,10 @@ def release_verdict(upstream_id, meta, published):
       1. no `last_reviewed_release`      -> `head-only`, not actionable. RFC
          0019's #511 amendment: a plugin inside a monorepo with no release
          vocabulary has no tag to name, and inventing one is the fabrication
-         the register exists to prevent.
+         the register exists to prevent. The absence reaching here is a
+         DECLARED one: `validate_release_metadata` refuses any used upstream
+         that does not carry `head_only: true` beside it, so this branch can no
+         longer be reached by a review point somebody deleted by accident.
       2. the recorded label is not published (INCLUDING an empty published set)
          -> `vanished`, actionable.
       3. it is published, at a different commit -> `moved`, actionable.
@@ -699,8 +747,13 @@ def release_summary(verdict):
     """One upstream's standing, for the per-id block. Every state renders."""
     state = verdict["state"]
     if state == "head-only":
-        return ("no recorded release; HEAD-only upstream, as the register "
-                "declares")
+        # Points at its evidence. The older wording — "as the register declares"
+        # — was derived from an ABSENT key, so it affirmed a decision nobody had
+        # made and read identically whether the upstream had opted out or had
+        # its review point deleted by accident (#604 defect 3). Naming the key
+        # makes the sentence earned.
+        return ("no recorded release; HEAD-only upstream, as `head_only` in "
+                "the register declares")
     recorded = "recorded `%s`" % verdict["recorded"]
     if state == "level":
         return "%s; level with the newest published release" % recorded
