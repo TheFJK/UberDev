@@ -664,7 +664,7 @@ uberdev_goal_audit() {
   local event="$1" payload="$2"
   # CONTRACT: goal-audit-event !case-arm
   case "$event" in
-    goal_dispatched|goal_pr_transition|goal_unblock_triggered|goal_cycle_completed|goal_converged|goal_circuit_breaker|goal_merge_deferred|goal_review_pr_deferred|goal_review_grace|goal_reaper_kill|goal_reaper_skipped|goal_issue_closed_without_pr|goal_version_bumped|goal_partial_chain) ;;
+    goal_dispatched|goal_pr_transition|goal_unblock_triggered|goal_cycle_completed|goal_converged|goal_circuit_breaker|goal_merge_deferred|goal_review_pr_deferred|goal_review_grace|goal_reaper_kill|goal_reaper_skipped|goal_issue_closed_without_pr|goal_version_bumped|goal_partial_chain|goal_partial_delivery) ;;
     *) printf 'goal-state: unknown event %s\n' "$event" >&2; return 1 ;;
   esac
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"

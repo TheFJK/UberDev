@@ -15,7 +15,7 @@
 #   G8   Circuit breaker: stuck_loop (4h wall-clock)
 #   G9   Circuit breaker: merge_failed
 #   G10  Convergence happy-path (goal_converged + exit 0)
-#   G11  Every GOAL_AUDIT_EVENT_ENUM member (14) is declared in lib/goal-state.sh
+#   G11  Every GOAL_AUDIT_EVENT_ENUM member (15) is declared in lib/goal-state.sh
 #   G12  Alias provisioning across 5 surfaces (T5 — see notes)
 #   G13  claim_collision soft-fail
 #   G14  Blocker overflow (red-held + first-10 truncation, no goal halt)
@@ -234,7 +234,7 @@ assert_grep "$GOAL_P3"    'queue.*empty|new_candidates'   "G10.empty-queue-predi
 assert_grep "$GOAL_P3"    '^[[:space:]]*exit 0[[:space:]]*$' "G10.zero-exit"
 
 echo
-echo "== G11: every GOAL_AUDIT_EVENT_ENUM member is declared in lib/goal-state.sh (14) =="
+echo "== G11: every GOAL_AUDIT_EVENT_ENUM member is declared in lib/goal-state.sh (15) =="
 # #592 — this row used to iterate a HARDCODED 12-name list and grep $GOAL_SKILL.
 # Both halves were wrong. The hardcoded list silently fell behind the enum
 # (`goal_version_bumped`, issue #364, was never added to it), and the grep target
@@ -274,7 +274,7 @@ else
   FAIL=$((FAIL+1)); echo "  FAIL  G11.anti-vacuity (extracted ZERO members — GOAL_AUDIT_EVENT_ENUM moved or renamed in $GOAL_SKILL)" >&2
 fi
 # Exact count, so a member REMOVED from both sites in lockstep still reds here.
-assert_eq "$_g11_count" "14" "G11.member-count-is-14"
+assert_eq "$_g11_count" "15" "G11.member-count-is-15"
 
 echo
 echo "== G12: alias provisioning across 5 surfaces (T5 — partially pre-T5) =="
