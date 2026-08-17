@@ -3550,11 +3550,175 @@ function probedNums(record) {
     resX2.prsOpened.join(","),
   ].join("/") : "no_result";
 
+  // ------------------------------------------------------------------- #592
+  // prsPartial — the PARTIAL SUBSET of the list /goal ingests. `chainComplete`
+  // has been script-derived and correct since #554, and it reached no consumer:
+  // goal-pipeline reads prsOpened through a shape-only digit filter and merges
+  // on the numbers, so a PR opened over a chain that STOPPED SHORT arrived at
+  // the merge gate byte-identical to one opened over a finished chain.
+  //
+  // Published as a SIBLING LIST rather than left for /goal to re-derive from
+  // results[]: prsOpened already decides which record OWNS a number, and only
+  // that record may speak for it. Two derivations of one rule are two copies
+  // that can disagree (#370), and the collision rows below are the disagreement.
+
+  // ONE medium-tier chain, at a chosen PR number and completeness. The
+  // incomplete arm is the ABSENT-taskCount stop (Run X above): the rung is
+  // recorded BLOCKED, the chain stops, and delivery still runs — the shape that
+  // opens a PR over an unfinished chain, which is the whole subject here. Built
+  // BESIDE mediumReturns() rather than by editing it: ~30 call sites key off
+  // that helper's canonical shape.
+  const chainFor = function (issue, pr, complete, deliverOver) {
+    const D = RD + "/issue-" + issue;
+    const o = {};
+    o["research:#" + issue + ":codebase"] = { artifactPath: D + "/research-codebase.md", rc: 0, headline: "h" };
+    o["research:#" + issue + ":constraints"] = { artifactPath: D + "/research-constraints.md", rc: 0, headline: "h" };
+    o["research:#" + issue + ":test-coverage"] = { artifactPath: D + "/research-test-coverage.md", rc: 0, headline: "h" };
+    o["spec:#" + issue] = { path: D + "/spec.md", rc: 0, headline: "h" };
+    o["spec-review:#" + issue] = approve();
+    o["plan:#" + issue] = { path: D + "/plan.md", rc: 0, headline: "h" };
+    o["impl:#" + issue + ":t1"] = complete ? task(1, { taskCount: 2 }) : task(1);
+    if (complete) {
+      o["review:#" + issue + ":t1:r1"] = approve();
+      o["impl:#" + issue + ":t2"] = task(2);
+      o["review:#" + issue + ":t2:r1"] = approve();
+    }
+    o["deliver:#" + issue] = delivered(issue, pr, deliverOver || {});
+    return o;
+  };
+  // TWO chains in ONE run, so the subset relation is read off a single
+  // published pair instead of being inferred across two runs.
+  const twoChains = function (a, b, rows) {
+    const o = { "manifest-intake": intake([rec(a.issue, "medium"), rec(b.issue, "medium")]) };
+    Object.assign(o, chainFor(a.issue, a.pr, a.complete, a.over));
+    Object.assign(o, chainFor(b.issue, b.pr, b.complete, b.over));
+    o["verify-prs"] = proof(rows);
+    return o;
+  };
+  // JSON, not join(","): an EMPTY list and a missing key both render as "" under
+  // join, and "the field is not published at all" is precisely the state these
+  // rows have to be able to fail on. The NO-FIELD sentinel is what makes that
+  // state say so by name — JSON.stringify(undefined) returns undefined, which
+  // would drop the key out of the fixture's own output and report as a parse
+  // failure rather than as a missing contract.
+  const listOf = function (res, field) {
+    if (!res) return "NO-RESULT";
+    return res[field] === undefined ? "NO-FIELD" : JSON.stringify(res[field]);
+  };
+  const openedOf = function (res) { return listOf(res, "prsOpened"); };
+  const partialOf = function (res) { return listOf(res, "prsPartial"); };
+  const flagsOf = function (res) {
+    return res ? res.results.map(function (r) {
+      return r.issue + ":" + String(r.chainComplete); }).join(",") : "NO-RESULT";
+  };
+
+  // Run PS — the SUBSET. One finished chain, one that stopped short, both
+  // delivering a PR. prsOpened carries both numbers; prsPartial carries exactly
+  // the incomplete one.
+  const recPS = await run(buildArgs(), { agentReturns: twoChains(
+    { issue: 11, pr: 901, complete: true }, { issue: 12, pr: 902, complete: false },
+    [proofRow(901, "fix/11-x"), proofRow(902, "fix/12-x")]) });
+  const resPS = resultOf(recPS);
+  // PREMISE, asserted rather than assumed: the two records really do disagree
+  // about completeness. Without it every row below could pass on a run where
+  // both chains finished and prsPartial was empty for the wrong reason.
+  out.psFlags = flagsOf(resPS);
+  out.psOpened = openedOf(resPS);
+  out.psPartial = partialOf(resPS);
+
+  // Run PN — NO CHAIN AT ALL. The single-solver path attaches `chainComplete`
+  // nowhere, and an ABSENT flag is not an incomplete chain: a record that ran no
+  // task chain cannot have stopped one short. This is the row that separates
+  // `=== false` from `!r.chainComplete`, which would put every trivial-tier PR
+  // in the partial list.
+  const recPN = await run(buildArgs(), { agentReturns: trivialReturns() });
+  const resPN = resultOf(recPN);
+  out.pnFlags = flagsOf(resPN);
+  out.pnOpened = openedOf(resPN);
+  out.pnPartial = partialOf(resPN);
+
+  // Run PX — DISPROVEN. The incomplete chain's PR claim names a branch the relay
+  // contradicts, so #515 downgrades it to PUSHED_NO_PR with prNumber 0. It must
+  // appear in NEITHER list: prsPartial is a subset of prsOpened, and a claim
+  // that verification removed from one cannot survive in the other.
+  const recPX = await run(buildArgs(), { agentReturns: twoChains(
+    { issue: 11, pr: 901, complete: true }, { issue: 12, pr: 902, complete: false },
+    [proofRow(901, "fix/11-x"), proofRow(902, "someone/elses-branch")]) });
+  const resPX = resultOf(recPX);
+  const px12 = resPX ? resPX.results.filter(function (r) { return r.issue === 12; })[0] : null;
+  // PREMISE: the downgrade really happened, and the chain really was incomplete
+  // — so the number's absence below is the subset rule and not a fixture that
+  // never opened a PR.
+  out.pxDowngraded = px12 ? (px12.status + "/" + px12.prNumber + "/" + px12.prProof
+    + "/" + String(px12.chainComplete)) : "NO-RECORD";
+  out.pxOpened = openedOf(resPX);
+  out.pxPartial = partialOf(resPX);
+
+  // Runs PC1 / PC2 — ONE pull request, TWO claimants that DISAGREE about
+  // completeness. This is the pair that separates a list derived from the
+  // collision WINNER from a union over records: a union answers "partial" in
+  // both directions, while prsOpened has already decided that the first record
+  // owns the number and the repeat's per-record facts went with its discarded
+  // claim. The repeat reports an EMPTY branch for the same reason B142's does —
+  // an empty ref cannot be compared, so neither record is disproven and the
+  // collision actually reaches finalize.
+  const collisionChains = function (firstComplete, secondComplete) {
+    return twoChains(
+      { issue: 11, pr: 902, complete: firstComplete },
+      { issue: 12, pr: 902, complete: secondComplete, over: { branch: "" } },
+      [proofRow(902, "fix/11-x")]);
+  };
+  const recPC1 = await run(buildArgs(), { agentReturns: collisionChains(true, false) });
+  const resPC1 = resultOf(recPC1);
+  out.pc1Flags = flagsOf(resPC1);
+  // PREMISE: both records survived verification as live PR claims, so it is the
+  // collision arm that settled the number and not an earlier downgrade.
+  out.pc1Confirmed = resPC1 ? resPC1.verification.confirmed : null;
+  out.pc1Collisions = resPC1 ? resPC1.auditEvents.filter(function (e) {
+    return e.event === "pr_number_collision"; }).length : null;
+  out.pc1Opened = openedOf(resPC1);
+  out.pc1Partial = partialOf(resPC1);
+
+  const recPC2 = await run(buildArgs(), { agentReturns: collisionChains(false, true) });
+  const resPC2 = resultOf(recPC2);
+  out.pc2Flags = flagsOf(resPC2);
+  out.pc2Confirmed = resPC2 ? resPC2.verification.confirmed : null;
+  out.pc2Collisions = resPC2 ? resPC2.auditEvents.filter(function (e) {
+    return e.event === "pr_number_collision"; }).length : null;
+  out.pc2Opened = openedOf(resPC2);
+  out.pc2Partial = partialOf(resPC2);
+
+  // Run PV — the REQUEST-side caller is UNCHANGED. prNumbersToVerify() calls the
+  // same pass with three arguments, and the fourth must be a no-op for it. Run
+  // on a fixture carrying BOTH arms that make the request set differ from the
+  // published one — a claim the ceiling drops and a collision — so a change that
+  // let the new callback disturb the pass shows up in the probe list, not only
+  // in the published one.
+  const pvReturns = {
+    "manifest-intake": intake([rec(11, "trivial"), rec(12, "small"), rec(13, "trivial")]),
+    "solve:#11 (trivial)": claimed(11, 10000001),
+    "solve:#12 (small)": solved(12, 902),
+    "solve:#13 (trivial)": claimed(13, 902, { branch: "" }),
+    "verify-prs": proof([proofRow(902, "fix/12-x")]),
+  };
+  const recPV = await run(buildArgs(null, { issues: "11,12,13", issueCount: 3 }),
+    { agentReturns: pvReturns });
+  const resPV = resultOf(recPV);
+  out.pvProbed = probedNums(recPV);
+  // PREMISE: both arms really fired on this fixture.
+  out.pvArms = resPV ? [
+    resPV.auditEvents.filter(function (e) { return e.event === "pr_claim_above_ceiling"; }).length,
+    resPV.auditEvents.filter(function (e) { return e.event === "pr_number_collision"; }).length,
+  ].join("/") : "NO-RESULT";
+  out.pvOpened = openedOf(resPV);
+  out.pvPartial = partialOf(resPV);
+
   // Every run added above must also be harness-clean — an undeclared opts.phase
   // on a rung these runs are the first to reach shows up here and nowhere else.
   // ENUMERATED, never derived: a new run is NOT covered until it is named here.
   out.newViolations = [recW, recX, recY, recZ, recZ4, recCF, recDS, recDA, recZC, recZD, recFW,
-                       recTR, recPT, recX1, recX2]
+                       recTR, recPT, recX1, recX2,
+                       recPS, recPN, recPX, recPC1, recPC2, recPV]
     .reduce(function (n, r) { return n + r.violations.length; }, 0);
 
   process.stdout.write(JSON.stringify(out));
@@ -4160,7 +4324,40 @@ else
   check x1Arm '"reason_kept/901,902/2/2/901,902"' "B311 a proof relay that THROWS is audited as pr_proof_threw carrying the throw text, probed counts the dispatch that was made, and both claims are retained as UNVERIFIED rather than dropped or downgraded"
   check x2Arm '"budget_exhausted/null/0/2/901,902"' "B356 a relay skipped by the token ceiling audits pr_proof_skipped reason=budget_exhausted, dispatches nothing (probed stays 0), and still classes both retained claims UNVERIFIED"
 
-  check newViolations 0           "B169 zero harness violations across every run added for #561, #562 and #563"
+  # --- #592: prsPartial, the partial subset of the list /goal merges on -------
+  check psFlags '"11:true,12:false"' "B357 PREMISE: the two chains really disagree about completeness, so the rows below are not passing on a run where both finished"
+  check psOpened '"[901,902]"'    "B358 both delivered PRs reach prsOpened — the partial one is published, never withheld"
+  check psPartial '"[902]"'       "B359 prsPartial names exactly the PR whose task chain stopped short — the fact /goal's merge gate had no way to read"
+
+  check pnFlags '"11:undefined,12:undefined"' "B360 PREMISE: the single-solver path attaches no chainComplete at all"
+  check pnOpened '"[901,902]"'    "B361 a record that ran NO task chain is still published in prsOpened"
+  # No backticks in this label: `check` interpolates it inside a double-quoted
+  # string, where a backtick pair is COMMAND SUBSTITUTION — it silently ate the
+  # words between them and ran the contents as a command.
+  check pnPartial '"[]"'          "B362 ...and is ABSENT from prsPartial: an absent flag is not an incomplete chain (the row that separates an equals-false test from a falsy test)"
+
+  check pxDowngraded '"PUSHED_NO_PR/0/DISPROVEN/false"' "B363 PREMISE: the incomplete chain's PR claim really was disproven and downgraded to prNumber 0"
+  check pxOpened '"[901]"'        "B364 a disproven claim leaves prsOpened"
+  check pxPartial '"[]"'          "B365 ...and cannot survive in prsPartial: the partial list is a subset of the published one, never a second opinion about it"
+
+  check pc1Flags '"11:true,12:false"' "B366 PREMISE: one pull request, two claimants, and they DISAGREE about completeness"
+  check pc1Confirmed 2            "B367 PREMISE: both claimants survive verification (an empty branch cannot be disproven), so the collision really does reach finalize"
+  check pc1Collisions 1           "B368 the collision is audited exactly once"
+  check pc1Opened '"[902]"'       "B369 the collided number is emitted exactly once"
+  check pc1Partial '"[]"'         "B370 the WINNER's completeness decides: the first record finished its chain, so the repeat's partial flag goes with its discarded claim"
+
+  check pc2Flags '"11:false,12:true"' "B371 the same fixture with the flags swapped"
+  check pc2Confirmed 2            "B372 PREMISE: both claimants survive here too"
+  check pc2Collisions 1           "B373 one collision event in this direction as well"
+  check pc2Opened '"[902]"'       "B374 ...and the number is still emitted exactly once"
+  check pc2Partial '"[902]"'      "B375 ...and NOW the number is partial, because the winner is the incomplete one — a union over records answers the same in both directions and cannot pass B370 and B375 together"
+
+  check pvProbed '"902"'          "B376 the proof request set is unchanged by the new callback: the ceiling drop is not probed and the collision is asked about once"
+  check pvArms '"1/1"'            "B377 PREMISE: this fixture really does fire BOTH arms — one above-ceiling drop and one collision"
+  check pvOpened '"[10000001,902]"' "B378 finalize still imposes no ceiling, so the dropped claim is published all the same"
+  check pvPartial '"[]"'          "B379 ...and no record on this single-solver fixture is partial"
+
+  check newViolations 0           "B169 zero harness violations across every run added for #561, #562, #563 and #592"
 fi
 
 echo "== S: /goal runs ON the workflow backend — the interim demotion is GONE (RFC 0015 §5) =="

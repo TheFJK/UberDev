@@ -1504,9 +1504,35 @@ function finalize() {
   // the claim-side call in prNumbersToVerify asks it with a ceiling and no
   // audit. No ceiling here: a number this pass dropped would be one /goal never
   // sees at all.
+  //
+  // #592 — prsPartial is the PARTIAL SUBSET of that same list, derived INSIDE
+  // this one pass through onAccept. `chainComplete` has been script-derived and
+  // correct since #554 and reached no consumer: /goal ingests prsOpened through
+  // a shape-only digit filter and merges on the numbers, so a PR opened over a
+  // chain that stopped short arrived at the merge gate byte-identical to one
+  // opened over a finished chain.
+  //
+  // NOT a second filter over `solved`. That would be a second, uncompared copy
+  // of the collision rule (#370): when two records claim ONE number and
+  // disagree about completeness, a union answers "partial" in both directions
+  // while prsOpened has already decided that the FIRST record owns the number
+  // and the repeat's per-record facts went with its discarded claim. Keyed off
+  // the winner, the two lists cannot disagree.
+  //
+  // `=== false`, never `!r.chainComplete`. An ABSENT chainComplete means the
+  // record ran no task chain at all — the single-solver path attaches the field
+  // nowhere — and a record with no chain cannot have an incomplete one; the
+  // falsy test would put every trivial-tier PR in the partial list.
+  const partialSet = {};
   const prsOpened = distinctClaimedPrNumbers(0, function (r, n) {
     auditEvents.push({ event: "pr_number_collision", issue: r.issue, pr: n, ts: nowIso });
+  }, null, function (r, n) {
+    if (r.chainComplete === false) partialSet[String(n)] = 1;
   });
+  // A filter OF prsOpened, so subset-ness is structural rather than asserted:
+  // every member is a number prsOpened emitted, in the same order. Subset twice
+  // over, in fact — partialSet only ever receives numbers this pass emitted.
+  const prsPartial = prsOpened.filter(function (n) { return partialSet[String(n)] === 1; });
   return {
     runId: runId,
     repoSlug: repoSlug,
@@ -1518,6 +1544,7 @@ function finalize() {
     researchArtifacts: researchArtifacts,
     results: solved,
     prsOpened: prsOpened,
+    prsPartial: prsPartial,
     counts: {
       prOpened: opened.length,
       pushedNoPr: solved.filter(function (r) { return r && r.status === "PUSHED_NO_PR"; }).length,
@@ -2261,7 +2288,16 @@ function isPosInt(n) { return Number.isInteger(n) && n > 0; }
 //                 CLAIM: the request-side caller cannot address it, but it is
 //                 published to /goal all the same, so the caller that imposes a
 //                 ceiling has to say what became of it.
-function distinctClaimedPrNumbers(ceiling, onCollision, onCeiling) {
+//   `onAccept`    called with (record, number) for the record that WINS the
+//                 number — exactly once per emitted element, immediately after
+//                 it is pushed — or null to skip it. THE WINNER IS THE ONLY
+//                 RECORD THAT MAY SPEAK FOR THE NUMBER: a repeat's prNumber is
+//                 discarded above, so every per-record fact that hangs off that
+//                 number goes with it. A caller deriving a second list keyed on
+//                 the emitted numbers has to read it HERE rather than re-filter
+//                 `solved` itself, or the two lists disagree exactly when two
+//                 records claim one number and disagree about the fact.
+function distinctClaimedPrNumbers(ceiling, onCollision, onCeiling, onAccept) {
   const seen = {};
   const nums = [];
   solved.forEach(function (r) {
@@ -2279,6 +2315,7 @@ function distinctClaimedPrNumbers(ceiling, onCollision, onCeiling) {
     }
     seen[key] = 1;
     nums.push(n);
+    if (onAccept) onAccept(r, n);
   });
   return nums;
 }
