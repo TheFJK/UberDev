@@ -2593,6 +2593,207 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# T16.12–T16.15 (#592) — the REGISTER ENTRY the completeness flag carried, and
+# its discharge. `chainComplete` shipped under a comment that DECLARED, in as
+# many words, that no production code read it. That was an honest register entry
+# for a known gap while the gap was real. #592 closes it: finalize() publishes
+# `prsPartial`, the partial subset of the very list /goal ingests, so the
+# ingesting side has something to read. The declaration is therefore now a FALSE
+# statement about this tree — and a stale "nobody reads this" note is worse than
+# no note at all, because it tells the next reader not to go looking for the
+# consumers that now exist.
+#
+# The four rows hold both halves of the discharge at once, so neither can be
+# done without the other:
+#   - the field is published on BOTH sides of the contract, doc fence and script
+#     (T16.12/T16.13) — the same both-directions join T16.2/T16.3 use, because a
+#     documented field nothing writes and a written field nothing documents are
+#     the same drift with opposite signs;
+#   - every retired SPELLING of the declaration is gone from BOTH copies AND the
+#     marker that replaced it is present (T16.14) — a one-string absence row, or
+#     a one-file one, would be a predicate disjoint from the drift it must find,
+#     and an absence-only row cannot tell a discharged register entry from a
+#     deleted one;
+#   - and the residual it used to carry — the issue behind a partial-chain PR is
+#     FLAGGED, never re-queued — still points at a FILED number (T16.15). The
+#     note made that rule itself: "a pointer to a filed number rather than to 'a
+#     follow-up issue': an unnamed one cannot be checked". T16.15 is what makes
+#     it checkable, and without it the pointer can be dropped silently.
+#
+# Scoped slices, not whole-file greps: SKILL.md spells these symbols in the
+# normative fence AND in the prose that explains them, so a whole-file grep is a
+# predicate on a different surface than the contract it guards — exactly the
+# #558 defect T16.9 was added to remove.
+T16_RETURN_FENCE="$(tr -d '\r' < "$SOLVE_FLEET_SKILL" | awk '
+  /^## Return value/ { sec = 1; next }
+  sec && /^```/      { if (infence) exit; infence = 1; next }
+  infence            { print }
+')"
+T16_FENCE_N="$(grep -c . <<<"$T16_RETURN_FENCE")"
+# T16.12 — doc side. The anchor guard rides in the same row rather than in a
+# separate anti-vacuity one: `prsOpened: [<int>]` is the sibling `prsPartial`
+# must appear beside, so its absence means the heading or the fence moved and
+# the row reports THAT instead of passing over an empty slice.
+if [ "${T16_FENCE_N:-0}" -ge 8 ] && grep -qF -e 'prsOpened: [<int>]' <<<"$T16_RETURN_FENCE"; then
+  if grep -qF -e 'prsPartial: [<int>]' <<<"$T16_RETURN_FENCE"; then
+    echo "  PASS  T16.12 the return fence publishes prsPartial beside prsOpened ($T16_FENCE_N-line fence)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T16.12 the return fence declares prsOpened but not prsPartial"
+    echo "        file: $SOLVE_FLEET_SKILL ('## Return value' fence)"
+    echo "        a consumer reading only this fence cannot tell a partial-chain PR from a finished one (#592)"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  echo "  FAIL  T16.12 setup error: the '## Return value' fence did not slice (${T16_FENCE_N:-0} lines, prsOpened anchor absent)"
+  echo "        file: $SOLVE_FLEET_SKILL"
+  FAIL=$((FAIL + 1))
+fi
+
+# T16.13 — script side, scoped to finalize(), the one function that builds the
+# published return object. A comment elsewhere in the file naming the field must
+# not satisfy this row.
+T16_FINALIZE="$(tr -d '\r' < "$SOLVE_FLEET_JS" | awk '
+  /^function finalize\(\) \{/ { f = 1 }
+  f                           { print }
+  f && /^\}/                  { exit }
+')"
+T16_FINALIZE_N="$(grep -c . <<<"$T16_FINALIZE")"
+if [ "${T16_FINALIZE_N:-0}" -ge 20 ] && grep -qE '^[[:space:]]*prsOpened:' <<<"$T16_FINALIZE"; then
+  if grep -qE '^[[:space:]]*prsPartial:' <<<"$T16_FINALIZE"; then
+    echo "  PASS  T16.13 finalize() publishes prsPartial as a top-level sibling of prsOpened ($T16_FINALIZE_N lines)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T16.13 finalize() returns prsOpened but never publishes prsPartial"
+    echo "        file: $SOLVE_FLEET_JS (function finalize)"
+    echo "        SKILL.md would then document a field no run ever emits (#592)"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  echo "  FAIL  T16.13 setup error: function finalize() did not slice (${T16_FINALIZE_N:-0} lines, prsOpened key absent)"
+  echo "        file: $SOLVE_FLEET_JS"
+  FAIL=$((FAIL + 1))
+fi
+
+# T16.14 — the register entry itself, joined in BOTH directions like T16.12 and
+# T16.13 above, because a discharge has the same two failure modes as any other
+# contract: the retired claim can survive, and the replacement can go missing.
+#
+# Direction 1, absence — a SET of spellings over BOTH copies of the contract,
+# never one headline literal in one file. A discharge asserted against a single
+# string is a predicate DISJOINT from the drift class it exists to close
+# (#370/#371), and one scoped to a single file is disjoint in the same way when
+# the claim is written twice. Both failures were real here:
+#
+#   - paraphrase — the comment on the `partialDelivery` block, twelve lines under
+#     the retired paragraph, said the flag was what /goal's ingestion "has to
+#     grow a reader for". Same claim, different words, made false by the same
+#     commit that retired the headline literal.
+#   - other copy — SKILL.md, the doc side of this same contract, called the PR
+#     linkage "the one consequence of it that is visible outside this return
+#     value". A COUNT claim about the flag's consumers is the retired claim with
+#     a different number: true when written, falsified by the next commit that
+#     gives the flag a consumer, and #592 is that commit. A row that reads only
+#     the script cannot see it.
+#
+# A tree carrying two contradictory answers to "what reads this flag?" is worse
+# than either answer alone, so every retired spelling joins the set and the set
+# runs over every file that carries the contract.
+#
+# Direction 2, presence — the ALL-CAPS marker that replaced the retired one, in
+# the SCRIPT only. An absence-only row cannot tell a register entry that was
+# DISCHARGED from one that was DELETED: strip the whole paragraph and every row
+# here still greens, while the fact the entry exists to record — that
+# `chainComplete` reaches a consumer, and since which issue — is gone from the
+# file that carries it. A marker is pinned rather than a sentence on purpose:
+# prose around it is free to be rewritten, and pinning prose would make every
+# reword a red. SKILL.md is deliberately NOT held to the marker: it states the
+# same facts as prose and is joined by T16.12 and T16.15 instead.
+#
+# For the ABSENCE half each file is flattened to ONE logical line first — CR
+# stripped, newlines to spaces, runs squeezed — because these claims live in
+# wrapped comments and wrapped Markdown, where a re-wrap moves a token across a
+# line break and a line-scoped `grep -F` then greens over a claim that is still
+# there. The superlative quoted above was already split across two source lines
+# while it was live, so nothing shorter than the flattened form could pin it.
+# The presence half reads the file directly instead: its marker is one ALL-CAPS
+# line, and flattening a JS comment joins lines with the `//` openers between
+# them, so it would not survive a re-wrap either way. Flattening is a
+# value-producing `$( )` of draining readers and every matcher is a herestring,
+# so no early-exiting reader ever sits on a pipe (tests/epipe-guard.test.sh),
+# and there is no bare `grep -c` whose rc 1 on zero matches would trip a
+# stricter harness.
+#
+# Anti-vacuity: `chainComplete`, the subject of the whole register entry and a
+# symbol both copies must name, is asserted present in each flattened text — so
+# a truncated read or a copy that stopped documenting the field reports THAT
+# rather than passing over an empty haystack. Both files are also in the
+# preflight's `[ -r "$f" ] || exit 2` list, so a moved or renamed file is FATAL.
+T16_UNREAD_TOKEN='DECLARED UNREAD BY PRODUCTION CODE'
+T16_UNREAD_PARAPHRASE='has to grow a reader for'
+T16_UNREAD_COUNT_CLAIM='the one consequence of it that is visible outside this return value'
+T16_READ_MARKER='READ BY PRODUCTION CODE SINCE #592'
+T16_UNREAD_SUBJECT='chainComplete'
+T16_UNREAD_SURVIVING=""
+T16_UNREAD_UNANCHORED=""
+for T16_UNREAD_FILE in "$SOLVE_FLEET_JS" "$SOLVE_FLEET_SKILL"; do
+  T16_UNREAD_FLAT="$(tr -d '\r' < "$T16_UNREAD_FILE" | tr '\n' ' ' | tr -s ' ')"
+  if ! grep -qF -e "$T16_UNREAD_SUBJECT" <<<"$T16_UNREAD_FLAT"; then
+    T16_UNREAD_UNANCHORED="$T16_UNREAD_UNANCHORED $T16_UNREAD_FILE"
+    continue
+  fi
+  for T16_UNREAD_SPELLING in "$T16_UNREAD_TOKEN" "$T16_UNREAD_PARAPHRASE" "$T16_UNREAD_COUNT_CLAIM"; do
+    if grep -qF -e "$T16_UNREAD_SPELLING" <<<"$T16_UNREAD_FLAT"; then
+      T16_UNREAD_SURVIVING="$T16_UNREAD_SURVIVING [$T16_UNREAD_FILE: $T16_UNREAD_SPELLING]"
+    fi
+  done
+done
+if [ -n "$T16_UNREAD_UNANCHORED" ]; then
+  echo "  FAIL  T16.14 setup error: a copy of the contract no longer names $T16_UNREAD_SUBJECT"
+  echo "        file(s):$T16_UNREAD_UNANCHORED"
+  echo "        the absence set would otherwise pass over a haystack that stopped carrying the field"
+  FAIL=$((FAIL + 1))
+elif [ -n "$T16_UNREAD_SURVIVING" ]; then
+  echo "  FAIL  T16.14 a retired claim about what reads chainComplete is still in the tree"
+  echo "        surviving spelling(s):$T16_UNREAD_SURVIVING"
+  echo "        checked: $SOLVE_FLEET_JS and $SOLVE_FLEET_SKILL"
+  echo "        chainComplete has a production reader since #592 — each of these tells the next reader it has none, or that it has only the one"
+  FAIL=$((FAIL + 1))
+elif ! grep -qF -e "$T16_READ_MARKER" "$SOLVE_FLEET_JS"; then
+  echo "  FAIL  T16.14 the retired unread-register claim is gone, but nothing records what replaced it"
+  echo "        marker: $T16_READ_MARKER"
+  echo "        file: $SOLVE_FLEET_JS"
+  echo "        deleting the entry is not discharging it — the next reader learns neither that chainComplete is read nor since when (#592)"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  T16.14 the unread register entry is discharged: every retired spelling gone from both copies, the replacement marker present"
+  PASS=$((PASS + 1))
+fi
+
+# T16.15 — the residual keeps a FILED pointer. #592 lands option 1 (flag): the
+# issue behind a partial-chain PR is recorded and surfaced, and still never
+# re-queued, because lib/goal-phase3.sh builds each next cycle from
+# finding-labelled issues alone. Both copies of that residual — the script's own
+# note and the SKILL.md section documenting the same field — must name the
+# successor by number. A residual described as "a follow-up" is one nobody can
+# check for later.
+T16_SUCCESSOR='#613'
+T16_SUCCESSOR_MISSING=""
+for T16_SUCCESSOR_FILE in "$SOLVE_FLEET_JS" "$SOLVE_FLEET_SKILL"; do
+  grep -qF -e "$T16_SUCCESSOR" "$T16_SUCCESSOR_FILE" \
+    || T16_SUCCESSOR_MISSING="$T16_SUCCESSOR_MISSING $T16_SUCCESSOR_FILE"
+done
+if [ -z "$T16_SUCCESSOR_MISSING" ]; then
+  echo "  PASS  T16.15 the flagged-not-re-queued residual points at filed issue $T16_SUCCESSOR in both copies"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.15 the partial-chain residual lost its filed successor number"
+  echo "        literal: $T16_SUCCESSOR"
+  echo "        absent from:$T16_SUCCESSOR_MISSING"
+  echo "        an unnamed follow-up cannot be checked — that rule is the register note's own (#592)"
+  FAIL=$((FAIL + 1))
+fi
+
 echo
 echo "== Summary =="
 echo "  passed: $PASS"

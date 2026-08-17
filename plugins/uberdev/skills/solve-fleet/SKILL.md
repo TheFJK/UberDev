@@ -170,6 +170,7 @@ The script logs `WORKFLOW_RESULT <json>` and returns:
   chainComplete, partialDelivery: {tasksTotal, blocked, skipped, unreviewed},
   tasks: [{id, status, reviewVerdict, fixRounds, commitCount, claimedStatus}]} ],
   prsOpened: [<int>],
+  prsPartial: [<int>],
   counts: {prOpened, pushedNoPr, committedNotPushed, noChangesNeeded, refused, failed},
   tasksTotal, tasksApproved, tasksBlocked, tasksUnreviewed,
   verification: {probed, confirmed, disproven, unverified, notApplicable, relayRc},
@@ -213,13 +214,28 @@ widening that object is a contract change joined against this section in both
 directions — and they ride in the `partial_delivery` audit event and in the
 delivery agent's brief instead. Both fields appear only on a record the per-task
 chain delivered, and `partialDelivery` only when the chain fell short: its
-presence IS the signal. `/goal` ingests `prsOpened` — bare numbers, carrying
-neither field — so a PR opened over an unfinished chain is distinguishable only
-here.
+presence IS the signal.
 
-The flag also decides **how the PR links to its issue** (#554) — the one
-consequence of it that is visible outside this return value, because linkage and
-completeness used to be the same token:
+`/goal` ingests `prsOpened` — bare numbers, carrying neither field — so the flag
+reaches it as a **list**, not as a per-record property: `prsPartial` is the
+partial subset of `prsOpened`, filtered by `chainComplete === false` inside the
+same pass that builds `prsOpened`, so the two can never disagree about which
+record owns a number (#592). What `/goal` then does with that list is documented
+where it is implemented, and deliberately not restated here: a second,
+uncompared copy of a consumer's contract goes stale the moment the consumer
+renames a field, and no row reds. Only an explicit `false` is partial: an
+**absent** `chainComplete` is the single-solver path, which ran no task chain at
+all and so cannot have stopped short.
+
+That is a flag, and a flag is not convergence. The PR still merges, and the issue
+behind it is still never re-collected — `lib/goal-phase3.sh` builds each next
+cycle from the review-pr finding issues alone, and a merged-but-unfinished
+original carries no finding label. Re-queueing it, with the anti-spin guard that
+needs, is issue **#613**.
+
+The flag also decides **how the PR links to its issue** (#554) — the consequence
+of it that changes the PR body, because linkage and completeness used to be the
+same token:
 
 - `chainComplete: true` → the delivery brief mandates `Closes #N` in the PR
   body, and GitHub closes the issue when that PR merges.
