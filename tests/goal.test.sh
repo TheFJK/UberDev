@@ -15,7 +15,7 @@
 #   G8   Circuit breaker: stuck_loop (4h wall-clock)
 #   G9   Circuit breaker: merge_failed
 #   G10  Convergence happy-path (goal_converged + exit 0)
-#   G11  All 12 audit events present
+#   G11  Every GOAL_AUDIT_EVENT_ENUM member (14) is declared in lib/goal-state.sh
 #   G12  Alias provisioning across 5 surfaces (T5 — see notes)
 #   G13  claim_collision soft-fail
 #   G14  Blocker overflow (red-held + first-10 truncation, no goal halt)
@@ -234,13 +234,47 @@ assert_grep "$GOAL_P3"    'queue.*empty|new_candidates'   "G10.empty-queue-predi
 assert_grep "$GOAL_P3"    '^[[:space:]]*exit 0[[:space:]]*$' "G10.zero-exit"
 
 echo
-echo "== G11: all 12 audit events present =="
-for e in goal_dispatched goal_pr_transition goal_unblock_triggered \
-         goal_cycle_completed goal_converged goal_circuit_breaker \
-         goal_merge_deferred goal_review_pr_deferred goal_review_grace \
-         goal_reaper_kill goal_reaper_skipped goal_issue_closed_without_pr; do
-  assert_grep "$GOAL_SKILL" "$e" "G11.${e}"
-done
+echo "== G11: every GOAL_AUDIT_EVENT_ENUM member is declared in lib/goal-state.sh (14) =="
+# #592 — this row used to iterate a HARDCODED 12-name list and grep $GOAL_SKILL.
+# Both halves were wrong. The hardcoded list silently fell behind the enum
+# (`goal_version_bumped`, issue #364, was never added to it), and the grep target
+# was the very file the enum scalar lives in, so every name matched the scalar
+# itself: the row was self-matching and could not fail for any reason other than
+# a typo in its own list.
+#
+# It now EXTRACTS the members from the SKILL.md scalar and asserts each one
+# against lib/goal-state.sh, making it a two-site declaration comparator:
+# documentation scalar (SKILL.md) <-> `uberdev_goal_audit` case arm (goal-state.sh).
+#
+# Honest scope. The case arm lives in goal-state.sh too, so a member matches
+# there by construction as well — this does NOT prove a member has a READER
+# (`goal_dispatched` has exactly one hit in that file: the case arm; its emitter
+# is in goal-phase1.sh). What the repair buys is narrower and real: the two
+# declaration sites are compared at all, behind an anti-vacuity floor and an
+# exact count, so a silent shrink on either side reds. tests/contract-markers.test.sh
+# remains the authoritative set-equality comparator for this contract.
+#
+# The loop body must stay in the CURRENT shell — a heredoc, never `... | while` —
+# or the PASS/FAIL increments land in a subshell and are lost. See the BT84
+# comment below for the empirical PASS-line delta that failure mode produced.
+_g11_enum="$(awk -F"'" '/^GOAL_AUDIT_EVENT_ENUM=/{print $2; exit}' "$GOAL_SKILL")"
+_g11_count=0
+while IFS= read -r e; do
+  [ -n "$e" ] || continue
+  assert_grep "$GOAL_LIB" "$e" "G11.${e}"
+  _g11_count=$((_g11_count + 1))
+done <<EOF
+$(printf '%s\n' "$_g11_enum" | tr '|' '\n')
+EOF
+# Anti-vacuity: a renamed or moved scalar extracts ZERO members, which would make
+# every assertion above vacuously absent rather than failing.
+if [ "$_g11_count" -gt 0 ]; then
+  PASS=$((PASS+1)); echo "  PASS  G11.anti-vacuity ($_g11_count members extracted from $GOAL_SKILL)"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  G11.anti-vacuity (extracted ZERO members — GOAL_AUDIT_EVENT_ENUM moved or renamed in $GOAL_SKILL)" >&2
+fi
+# Exact count, so a member REMOVED from both sites in lockstep still reds here.
+assert_eq "$_g11_count" "14" "G11.member-count-is-14"
 
 echo
 echo "== G12: alias provisioning across 5 surfaces (T5 — partially pre-T5) =="
@@ -3328,6 +3362,81 @@ else
 fi
 assert_rc "$_bt85_neg_rc" "1" "BT85.d-unknown-event-still-rejected"
 
+echo "== BT87: new 'pr-pushed->input' re-entry arc (issue #592) =="
+# Issue #592 — a PR whose task chain stopped short still lands, so its issue must
+# be able to re-enter the queue for the tasks that never shipped. That is a
+# BACKWARDS arc out of `pr-pushed`, the one the issue machine never had: every
+# existing arc out of `pr-pushed` is terminal (`resolved`, `failed`), so a
+# partial delivery was indistinguishable from a complete one at the state layer.
+# `pr-pushed` is deliberately NOT terminal any more; `resolved`,
+# `resolved-by-no-action` and `failed` still are.
+# Negative control: `solving->input` must STAY rejected — the thing modelled is
+# re-entry after a LANDED partial delivery, not a slip backwards out of an
+# in-flight solve. Widening the case pattern to any `*->input` passes BT87.a and
+# fails BT87.b, which is the point of keeping both.
+# IMPORTANT: like BT84, this block must NOT be wrapped in a (...) subshell —
+# assert_rc/assert_eq mutate the parent's PASS/FAIL counters.
+_bt87_tmpdir="$_b12_tmpdir/goal-test-bt87"
+mkdir -p "$_bt87_tmpdir"
+UBERDEV_TMPDIR="$_bt87_tmpdir" bash -c '
+  set +e
+  . "'"$REPO_ROOT"'/plugins/uberdev/lib/goal-state.sh"
+  uberdev_goal_state_init "bt87" >/dev/null
+  uberdev_goal_issue_state_transition "bt87" 900 input dispatched >/dev/null
+  uberdev_goal_issue_state_transition "bt87" 900 dispatched solving >/dev/null
+  uberdev_goal_issue_state_transition "bt87" 900 solving pr-pushed >/dev/null
+  uberdev_goal_issue_state_transition "bt87" 900 pr-pushed input >/dev/null
+  echo "rc_a=$?"
+  # Negative control on a fresh issue 901.
+  uberdev_goal_issue_state_transition "bt87" 901 input dispatched >/dev/null
+  uberdev_goal_issue_state_transition "bt87" 901 dispatched solving >/dev/null
+  uberdev_goal_issue_state_transition "bt87" 901 solving input 2>/dev/null
+  echo "rc_b=$?"
+' > "$_bt87_tmpdir/bt87-out.txt" 2>&1
+_bt87_rc_a="$(grep -oE 'rc_a=[0-9]+' "$_bt87_tmpdir/bt87-out.txt" | head -1 | cut -d= -f2)"
+_bt87_rc_b="$(grep -oE 'rc_b=[0-9]+' "$_bt87_tmpdir/bt87-out.txt" | head -1 | cut -d= -f2)"
+_bt87_state="$(awk -v i=900 -v c1=1 -v c2=2 '$c1==i{s=$c2} END{print s}' \
+  "$_bt87_tmpdir/goal-bt87-issue-states.tsv" 2>/dev/null)"
+_bt87_state_901="$(awk -v i=901 -v c1=1 -v c2=2 '$c1==i{s=$c2} END{print s}' \
+  "$_bt87_tmpdir/goal-bt87-issue-states.tsv" 2>/dev/null)"
+assert_rc "$_bt87_rc_a" "0" "BT87.a-pr-pushed-to-input-accepted"
+assert_eq "$_bt87_state" "input" "BT87.a-tsv-last-wins-state-is-input"
+assert_rc "$_bt87_rc_b" "2" "BT87.b-solving-to-input-still-rejected"
+assert_eq "$_bt87_state_901" "solving" "BT87.b-rejected-arc-wrote-no-row"
+
+echo "== BT89: uberdev_goal_audit emits a goal_partial_chain JSONL row (issue #592) =="
+# Issue #592 — the partial-chain decision has to leave a durable trace or a run
+# that silently declined to re-queue is indistinguishable from one that had
+# nothing to re-queue. A rename or typo in the case arm would rc=1 and drop the
+# payload on the floor with no other symptom.
+# NOTE: uberdev_goal_audit reads goal_id from UBERDEV_GOAL_ID env (not arg) and
+# writes to "$UBERDEV_TMPDIR/goal-$UBERDEV_GOAL_ID.jsonl" — so both must be set.
+_bt89_tmpdir="$_b12_tmpdir/goal-test-bt89"
+mkdir -p "$_bt89_tmpdir"
+UBERDEV_TMPDIR="$_bt89_tmpdir" UBERDEV_GOAL_ID="bt89" bash -c '
+  set +e
+  . "'"$REPO_ROOT"'/plugins/uberdev/lib/goal-state.sh"
+  uberdev_goal_state_init "$UBERDEV_GOAL_ID" >/dev/null
+  uberdev_goal_audit goal_partial_chain \
+    "{\"issue\":11,\"pr\":901,\"stage\":\"requeued\"}" >/dev/null
+  echo "audit_rc=$?"
+' > "$_bt89_tmpdir/bt89-out.txt" 2>&1
+_bt89_audit_rc="$(grep -oE 'audit_rc=[0-9]+' "$_bt89_tmpdir/bt89-out.txt" | head -1 | cut -d= -f2)"
+assert_rc "$_bt89_audit_rc" "0" "BT89.a-uberdev_goal_audit-returns-zero"
+_bt89_audit="$_bt89_tmpdir/goal-bt89.jsonl"
+if grep -q '"event":"goal_partial_chain"' "$_bt89_audit" 2>/dev/null; then
+  PASS=$((PASS+1)); echo "  PASS  BT89.b-jsonl-row-written-with-event-name"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  BT89.b-jsonl-row-written-with-event-name (event row not found in $_bt89_audit)" >&2
+fi
+if grep -qE '"issue":11([,}]|$)' "$_bt89_audit" 2>/dev/null; then
+  PASS=$((PASS+1)); echo "  PASS  BT89.c-issue-field-is-numeric-not-quoted"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  BT89.c-issue-field-is-numeric-not-quoted (issue not numeric or row missing)" >&2
+fi
+_bt89_rows="$(grep -c '"event":"goal_partial_chain"' "$_bt89_audit" 2>/dev/null || true)"
+assert_eq "${_bt89_rows:-0}" "1" "BT89.d-exactly-one-row-appended"
+
 # Cleanup: remove the isolated tmpdir contents (we created the whole
 # directory via mktemp -d, so we can rm -rf safely — it's our own).
 # The single blanket rm subsumes every per-BT artifact (TSVs, audit
@@ -3347,6 +3456,8 @@ rm -rf "$_b12_tmpdir/goal-test-bt82"* 2>/dev/null || true
 rm -f "$_b12_tmpdir"/bt83-prompt-out.txt 2>/dev/null || true
 rm -rf "$_b12_tmpdir/goal-test-bt84"* 2>/dev/null || true
 rm -rf "$_b12_tmpdir/goal-test-bt85"* 2>/dev/null || true
+rm -rf "$_b12_tmpdir/goal-test-bt87"* 2>/dev/null || true
+rm -rf "$_b12_tmpdir/goal-test-bt89"* 2>/dev/null || true
 rm -f "$_b12_tmpdir"/goal-bt5-*-merge-attempts.tsv 2>/dev/null || true
 rm -rf "$_b12_tmpdir" 2>/dev/null || true
 

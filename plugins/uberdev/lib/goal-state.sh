@@ -655,7 +655,7 @@ uberdev_goal_audit() {
   local event="$1" payload="$2"
   # CONTRACT: goal-audit-event !case-arm
   case "$event" in
-    goal_dispatched|goal_pr_transition|goal_unblock_triggered|goal_cycle_completed|goal_converged|goal_circuit_breaker|goal_merge_deferred|goal_review_pr_deferred|goal_review_grace|goal_reaper_kill|goal_reaper_skipped|goal_issue_closed_without_pr|goal_version_bumped) ;;
+    goal_dispatched|goal_pr_transition|goal_unblock_triggered|goal_cycle_completed|goal_converged|goal_circuit_breaker|goal_merge_deferred|goal_review_pr_deferred|goal_review_grace|goal_reaper_kill|goal_reaper_skipped|goal_issue_closed_without_pr|goal_version_bumped|goal_partial_chain) ;;
     *) printf 'goal-state: unknown event %s\n' "$event" >&2; return 1 ;;
   esac
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
@@ -709,6 +709,15 @@ uberdev_goal_pr_state_transition() {
 # `dispatched` BEFORE uberdev_dispatch_one, so any leaf failure between spawn
 # and the post-spawn `solving` write still leaves a TSV row the Phase-1
 # skip-check (`dispatched|solving|pr-pushed`) can match on the next cycle.
+# `pr-pushed → input` (issue #592) is the ONE backwards arc, and the reason
+# `pr-pushed` is no longer terminal: when a solver's task chain stops short its
+# PR still lands, so the issue has to re-enter the queue for the tasks that
+# never shipped. Re-entry is an ARC, not a new state — the enum stays at 7
+# members and Phase 1 re-claims the issue through its existing
+# `input → dispatched` path. `solving → input` is deliberately NOT added: what
+# is modelled is re-entry after a LANDED partial delivery, never a slip
+# backwards out of an in-flight solve. `resolved`, `resolved-by-no-action` and
+# `failed` remain hard terminal.
 # No audit event (issue transitions are derived state; audit covers PR
 # transitions + cycle boundaries).
 uberdev_goal_issue_state_transition() {
@@ -716,7 +725,7 @@ uberdev_goal_issue_state_transition() {
   _uberdev_goal_validate_id "$goal_id" || return 1   # #156
   _uberdev_goal_validate_int "$issue" || return 1
   case "$from->$to" in
-    "input->dispatched"|"input->solving"|"dispatched->solving"|"dispatched->failed"|"solving->pr-pushed"|"pr-pushed->resolved"|"solving->failed"|"pr-pushed->failed"|"solving->resolved-by-no-action") ;;
+    "input->dispatched"|"input->solving"|"dispatched->solving"|"dispatched->failed"|"solving->pr-pushed"|"pr-pushed->resolved"|"solving->failed"|"pr-pushed->failed"|"solving->resolved-by-no-action"|"pr-pushed->input") ;;
     *) printf 'goal-state: invalid issue transition %s->%s\n' "$from" "$to" >&2; return 2 ;;
   esac
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
