@@ -117,7 +117,36 @@ sequential batches and run Phases 1–6 fully for each batch before starting the
 next. Issues inside a batch advance through phases **together** (§3.2 of the
 RFC): one issue finishing design early waits for its siblings.
 
-**(e)** Create a todo list with one entry per issue per phase, so a compact
+**(e) Persist each issue's body as a private run artifact — YOU write it.**
+
+```bash
+mkdir -p <runDirAbs>/issue-<N>/research
+gh issue view <N> --json number,title,body,labels > <runDirAbs>/issue-<N>/issue.json
+# render title + labels + body into <runDirAbs>/issue-<N>/issue-body.md, chmod 600
+```
+
+Invariant 2 says issue text reaches an agent as a **path**, never as prompt
+text — but nothing else in this run creates that file. The Workflow lane has no
+equivalent step because its agents re-read the issue from `gh` themselves; here
+the agents are given a path, so the path has to exist before the first
+dispatch. Omit this and Phase 2 has nothing to point at, and the tempting
+repair — pasting the body into the prompt — is exactly what invariant 2
+forbids.
+
+The launcher's `context_file` is **not** this artifact: it holds the routing
+decision (route, risk signals, tier), not the issue body. Do not pass it where
+an issue body is wanted.
+
+**The `research-*` agent cards will tell you otherwise.** Their
+`research-mode-contract-v1` block declares `issue_body` and their prose calls it
+"full text of the GitHub issue". That wording is stale: the shipped wire
+contract is `issue_path`, an absolute path to exactly this artifact — which is
+what `skills/orchestrator/SKILL.md` persists and dispatches, and what
+`tests/orchestrator-child-inputs.test.sh` locks. Hand the agent the **path** and
+say so explicitly in its brief; do not satisfy the card's wording by pasting the
+body in.
+
+**(f)** Create a todo list with one entry per issue per phase, so a compact
 cannot lose the run's shape.
 
 ---
