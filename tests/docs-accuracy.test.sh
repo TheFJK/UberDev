@@ -103,6 +103,21 @@ STRUCTURAL_LIB="$REPO_ROOT/tests/_lib_assert_structural.sh"
 ADAPTIVE_RFC="$RFC_DIR/0013-gpt-5-6-adaptive-execution.md"
 RUN_MANIFEST_PY="$PLUGIN_DIR/lib/run_manifest.py"
 
+# #606 citation-rot surfaces. skills/review-fleet/workflow.js carries the seam
+# rationale — why each stage boundary exists, and which two RFC 0012 §3.1
+# proposals the implementation rejects — and skills/review-fleet/SKILL.md
+# carries the same argument for a reader who never opens the script. ONE
+# argument, TWO copies, and both were written in file offsets. T18 below lints
+# both for offsets and compares the claims they share. The four files after
+# them are the ones those copies CITE: they are named here so that a rename is
+# an explicit FATAL rather than a row that quietly stops resolving anything.
+REVIEW_FLEET_JS="$PLUGIN_DIR/skills/review-fleet/workflow.js"
+REVIEW_FLEET_SKILL="$PLUGIN_DIR/skills/review-fleet/SKILL.md"
+POST_IMPL_SKILL="$PLUGIN_DIR/skills/post-impl-review/SKILL.md"
+REVIEW_AGGREGATE_SH="$PLUGIN_DIR/lib/review-aggregate.sh"
+REVIEW_FENCES_SH="$PLUGIN_DIR/lib/review-fences.sh"
+SIMPLIFY_CMD="$PLUGIN_DIR/commands/simplify.md"
+
 # This file, read as data: row T6.5b slices its own size-ratchet region to keep
 # the measurement platform-invariant (#522).
 DOCS_ACCURACY_SELF="$REPO_ROOT/tests/docs-accuracy.test.sh"
@@ -116,7 +131,9 @@ for f in "$TESTING_MD" "$CONTRIBUTING_MD" "$DISPATCH_RFC" "$ALIAS_RFC" \
          "$PRECISION_RFC" "$PRECISION_MINER" "$AGENTS_MD" "$SOLVE_FLEET_JS" \
          "$SOLVE_FLEET_SKILL" "$DISPATCH15_RFC" "$MERGE_PIPELINE_SKILL" \
          "$GOAL_WATCH_SH" "$BUMP_VERSION_SH" "$STRUCTURAL_LIB" \
-         "$ADAPTIVE_RFC" "$RUN_MANIFEST_PY" "$DOCS_ACCURACY_SELF"; do
+         "$ADAPTIVE_RFC" "$RUN_MANIFEST_PY" "$DOCS_ACCURACY_SELF" \
+         "$REVIEW_FLEET_JS" "$REVIEW_FLEET_SKILL" "$POST_IMPL_SKILL" \
+         "$REVIEW_AGGREGATE_SH" "$REVIEW_FENCES_SH" "$SIMPLIFY_CMD"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
 
@@ -166,6 +183,184 @@ assert_absent_fixed() {
   fi
 }
 
+# Slice one `# === BEGIN <title> ===` … `# === END <title> ===` region out of
+# THIS file, markers included. Same shape as T6.5b's inline awk further down,
+# with three differences that are load-bearing:
+#   * awk is handed the PATH, never a `tr -d '\r' |` pipe. awk exits at the
+#     first END marker, so a writer upstream of it would die on EPIPE and
+#     poison `pipefail` (tests/epipe-guard.test.sh). The CR strip therefore
+#     happens INSIDE awk, which the windows shape-check job needs because it
+#     checks out with core.autocrlf=true and grep cannot see a CR.
+#   * `index($0, …) == 1` is a literal starts-with. The title is data, and the
+#     obvious `$0 ~ "^# === BEGIN " t` would silently reinterpret a `.` or a
+#     `[` in it as a metacharacter — the T6.5b sibling escapes its `.` by hand
+#     precisely because its pattern IS a regex, and a parameterised copy of
+#     that shape is one un-escaped title away from matching the wrong line.
+#   * The markers are matched only at column 1, so a backtick-quoted MENTION of
+#     a marker inside a FAIL message or a comment cannot move where a slice
+#     starts — the failure mode measured while writing the T6.5b sibling.
+# No `command -v` guard is needed here: every caller feeds the slice to a
+# non-vacuity row that reds on an empty body, so a renamed helper (rc 127,
+# empty capture) surfaces as a loud FAIL rather than a silent pass.
+da_marked_region() {   # <marker title>
+  awk -v t="$1" '
+    { sub(/\r$/, "") }
+    index($0, "# === BEGIN " t " ===") == 1 { a = 1 }
+    a { print }
+    a && index($0, "# === END " t " ===") == 1 { exit }
+  ' "$DOCS_ACCURACY_SELF"
+}
+
+# Shared arm for the marker-region non-vacuity rows. Both halves are mandatory:
+# a floor alone passes on a slice that ran to EOF because its END marker was
+# deleted, and that runaway slice would swallow the very rows that lint it.
+da_assert_region_intact() {   # <row-id> <title> <min-lines> <body>
+  local id="$1" title="$2" floor="$3" body="$4" lines last
+  lines="$(grep -c . <<<"$body" || true)"
+  last="$(tail -n 1 <<<"$body")"
+  if [ "${lines:-0}" -lt "$floor" ] 2>/dev/null; then
+    echo "  FAIL  $id the '$title' region is missing or truncated (${lines:-0} lines, floor $floor)"
+    echo "        file: $DOCS_ACCURACY_SELF"
+    echo "        an absent region satisfies every absence row below vacuously (#347)"
+    FAIL=$((FAIL + 1))
+  elif [ "$last" != "# === END $title ===" ]; then
+    echo "  FAIL  $id the '$title' slice ran PAST its closing marker"
+    echo "        last line: $last"
+    echo "        a deleted END marker makes the slice run to EOF and swallow the rows that lint it"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  $id the '$title' region is intact (${lines} lines, closed by its own END marker)"
+    PASS=$((PASS + 1))
+  fi
+}
+
+# The same slicing job for a file that carries no `=== BEGIN/END ===` markers of
+# its own (#606). A shipped SKILL.md or workflow.js must not grow test-only
+# markers, so these two anchor on prose the file already ships: a literal the
+# section opens with, and either a literal it closes with or the SHAPE of the
+# next section's first line. awk is handed the PATH for the same two reasons
+# `da_marked_region` is — no writer to kill with EPIPE when awk exits early
+# (tests/epipe-guard.test.sh), and the CR strip has to happen inside awk because
+# the windows shape-check job checks out with core.autocrlf=true and grep cannot
+# see a CR. `index()` is a literal starts-anywhere search, so a `.` or a `[` in
+# an anchor stays a `.` or a `[`.
+#
+# The body-BUILDING helpers here need no `command -v` guard: a renamed builder is
+# rc 127 and an empty capture, and every caller feeds the result to a row that
+# reds on an empty body — the non-vacuity rows for the slicers, and every
+# multi-word needle for the unwrapper. Row-EMITTERS do need one, because a
+# renamed emitter prints no row at all: there is nothing left to red, only a
+# total that quietly got smaller. That guard sits further down and derives the
+# set it vets from this file's own `da_assert_` call sites, so it reaches every
+# emitter wherever defined — including any defined above this paragraph.
+da_slice_between() {   # <file> <start-literal> <end-literal>
+  awk -v s="$2" -v e="$3" '
+    { sub(/\r$/, "") }
+    !a && index($0, s) { a = 1; print; next }
+    a { print; if (index($0, e)) exit }
+  ' "$1"
+}
+
+# From <start-literal> to the last line before the first line matching <end-ere>.
+# The end is EXCLUSIVE and is a shape, not a literal, because a markdown section
+# ends where the next one begins and nothing in the closing line says so.
+da_slice_until_re() {   # <file> <start-literal> <end-ere>
+  awk -v s="$2" -v e="$3" '
+    { sub(/\r$/, "") }
+    !a && index($0, s) { a = 1; print; next }
+    a && $0 ~ e { exit }
+    a { print }
+  ' "$1"
+}
+
+# One body, UNWRAPPED: every line loses its leading comment marker (`#` or `//`)
+# together with all whitespace on either side of it, and the lines rejoin on
+# exactly one space. Prose wraps wherever the writer's re-flow puts the break, so
+# a quoted span can straddle two source lines — and a break carries cosmetic
+# whitespace on BOTH sides, whatever indentation the continuation is written
+# with and whatever trailing space the line before it ends on. Read raw, such a
+# span is a token carrying a newline; unwrapped without normalising both sides it
+# is a token carrying a run of spaces. Neither resolves anywhere, so a purely
+# cosmetic re-wrap would red a multi-word row with FAIL text naming a fault that
+# did not happen — a guard whose predicate is disjoint from the drift it must
+# find, which is the defect this suite's #606 rows exist to retire.
+#
+# DECLARED BOUNDARY, not an oversight: a break normalises to ONE space, which is
+# the one thing about the writer's wrap this cannot preserve. A needle whose
+# source carries two consecutive spaces exactly where the prose wraps is
+# therefore not quotable across that break — wrap it elsewhere. Every FAIL arm
+# prints the unresolved needle, so the case is diagnosable rather than
+# mysterious.
+#
+# Single-token needles — a file offset, a numeral, a spelled cardinal — are read
+# against the RAW body instead, deliberately: no line break can split them, and
+# the raw body keeps each match on a source line a reader can go open.
+da_unwrap_prose() {   # <body>
+  sed -e 's,^[[:space:]]*//,,' -e 's/^[[:space:]]*#//' -e 's/^[[:space:]]*//' \
+      -e 's/[[:space:]]*$//' <<<"$1" | tr '\n' ' '
+}
+
+# Non-vacuity for a prose-anchored slice, bounded in BOTH directions. The floor
+# catches a start anchor that no longer matches (short or empty slice, which
+# would satisfy every absence row below vacuously). The ceiling catches the
+# opposite failure: an end anchor that no longer matches lets the slice run to
+# EOF, and a slice that swallows the whole file both hides what it was supposed
+# to lint and buries the FAIL output of the rows that read it.
+#
+# The ceiling carries deliberate headroom — it is a RUNAWAY detector, not a size
+# ratchet. A runaway is off by hundreds of lines, so a ceiling at roughly twice
+# the live size separates the two cases without reding a section that grew a
+# paragraph. Measured on a renamed end anchor: the slice went from its own
+# length to the whole rest of the file.
+#
+# The two ends are not equally exposed, and the difference is worth knowing
+# before trusting this arm. A LITERAL end anchor is one rename away from
+# vanishing, which is the case above. A SHAPE end anchor — the next heading or
+# the next horizontal rule — is satisfied by whatever section follows, so
+# renaming that heading just moves the boundary rather than losing it, and the
+# ceiling only fires if the shape disappears from the entire rest of the file.
+# For those slices the FLOOR is the arm that catches the realistic failure, and
+# it does: measured, renaming either markdown heading yields a zero-line slice.
+da_assert_slice_intact() {   # <row-id> <label> <floor> <ceiling> <body> <start-anchor> <end-anchor>
+  local id="$1" label="$2" floor="$3" ceil="$4" body="$5" start="$6" endp="$7" lines
+  lines="$(grep -c . <<<"$body" || true)"
+  if [ "${lines:-0}" -lt "$floor" ] 2>/dev/null; then
+    echo "  FAIL  $id the '$label' slice is missing or truncated (${lines:-0} lines, floor $floor)"
+    echo "        start anchor: $start"
+    echo "        an anchor that no longer matches yields a short slice, and a short slice satisfies every absence row below vacuously (#347)"
+    FAIL=$((FAIL + 1))
+  elif [ "${lines:-0}" -gt "$ceil" ] 2>/dev/null; then
+    echo "  FAIL  $id the '$label' slice ran PAST its end anchor (${lines} lines, runaway ceiling $ceil)"
+    echo "        end anchor: $endp"
+    echo "        a lost end anchor makes the slice run to EOF and swallow the rest of the file"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  $id the '$label' slice is intact (${lines} lines, between its own prose anchors)"
+    PASS=$((PASS + 1))
+  fi
+}
+
+# One row per (symbol, file) pair: does the replacement anchor a de-lined
+# citation now names actually resolve, CONTIGUOUSLY, in the file it points at?
+# `grep -F` and not `grep -E`, because these needles carry `(` and `-` and a
+# regex reading of `post_review_write_aggregate_v2()` matches the bare name with
+# an empty group — i.e. it would pass on exactly the rename this row exists to
+# catch.
+da_assert_symbol_resolves() {   # <row-id> <file> <needle> <what-it-supports>
+  local id="$1" file="$2" needle="$3" why="$4"
+  # Repo-relative, not a basename: two of the files these rows read are called
+  # SKILL.md, and "resolves in SKILL.md" names neither of them.
+  if grep -qF -e "$needle" "$file"; then
+    echo "  PASS  $id $needle resolves in ${file#$REPO_ROOT/} ($why)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $id $needle no longer resolves in $file"
+    echo "        it is cited as $why"
+    echo "        a symbol that does not resolve is a line number with extra steps — re-read the file, then re-word both review-fleet copies in the SAME change"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
 echo "== testing.md describes the REAL harness, not vendored Superpowers =="
 # Vendored-upstream tokens that must NOT survive (the whole pre-#273 file).
 assert_absent_fixed "$TESTING_MD" "tests/claude-code/"        "T1.1 testing.md drops the upstream tests/claude-code/ path"
@@ -185,6 +380,32 @@ assert_grep "$TESTING_MD" 'tests/\*\.test\.sh'              "T1.7 testing.md nam
 assert_grep "$TESTING_MD" '\.github/workflows/test\.yml'    "T1.8 testing.md points at .github/workflows/test.yml"
 assert_grep "$TESTING_MD" 'uberdev@uberdev'                 "T1.9 testing.md uses the real uberdev@uberdev marketplace key"
 assert_grep "$TESTING_MD" 'solve-pipeline-zsh\.test\.sh'    "T1.11 testing.md names the zsh-runtime fixture"
+
+# T1.12 / T1.13 — convention 9 states the PRECONDITION for the bash 3.2 exit
+# laundering, not a shorter claim that happens to be false (#606). Measured on
+# 3.2.57 against 5.3.9, one abort mode (`set -u` on an unbound variable) and one
+# EXIT trap: `set -u` alone exits 1 on BOTH majors, with or without the trap and
+# with or without `pipefail`. Only `set -e` and `set -u` together, plus an
+# installed EXIT trap, launder the abort to 0 — and only on 3.2.
+#
+# So the short form the doc used to carry ("a `set -u` abort in a script that
+# has an `EXIT` trap installed exits zero") is not a simplification, it is a
+# false rule: a reader who applies it to their own `set -u`-only fixture
+# concludes they need the floor when nothing was laundering, and — worse —
+# reads the trap as the culprit and drops it. The same sentence is restated by
+# `e5_why` inside tests/exit-floor.test.sh, so the two are corrected together;
+# that file's E5 row measures the real thing on the shell in hand, which is why
+# the row here lints the PROSE and does not re-measure it.
+#
+# A pair, deliberately. The presence row alone is satisfied by prose that names
+# every option and still leads with the wrong rule; the absence row alone is
+# satisfied by deleting the paragraph. `on bash 3.2` scopes the presence pattern
+# to convention 9 — it appears once in the file — so a `set -e` sampled from the
+# unrelated example block further up cannot satisfy it.
+assert_grep "$TESTING_MD" 'on bash 3\.2.*set -u.*set -e.*EXIT' \
+  "T1.12 testing.md names errexit AND nounset AND the EXIT trap as the laundering precondition"
+assert_absent_fixed "$TESTING_MD" 'a `set -u` abort in a script that has an `EXIT` trap installed' \
+  "T1.13 testing.md drops the set-u-plus-trap-alone rule, which is measurably false on both bash majors"
 
 echo
 echo "== T1b: CI-layout prose is DERIVED from test.yml, not a hand-written count =="
@@ -2398,31 +2619,55 @@ command -v sf_doc_record_members >/dev/null 2>&1 || {
   exit 2
 }
 
-# Script side: the unpushedIssue() literal UNION every `out.<f> =` / `r.<f> =`
-# assignment — the same construction-plus-mutation shape T16.1–T16.3 already
-# uses for `taskRec.`, and `=[^=]` keeps the `===` comparisons out.
+# === BEGIN T16 citation block ===
+# Script side: the unpushedIssue() literal UNION every assignment matching the
+# pattern `out.<f> =` or the pattern `r.<f> =` — the same construction-plus-
+# mutation shape T16.1–T16.3 already uses for `taskRec.`, and the pattern
+# `=[^=]` keeps the `===` comparisons out.
 #
-# THE `\b` IS LOAD-BEARING; do not strip it for POSIX tidiness. `ledger` ends in
-# `r`, so without the boundary the alternation also matches the tail of
-# `ledger.complete =` (workflow.js:1572) and harvests a phantom member
-# `complete` — measured: 18 names instead of 17 — which reds the reverse row
-# spuriously. `\b` is a GNU/BSD ERE extension supported by both CI greps
-# (ubuntu-latest and windows-latest/Git Bash); it is NOT one of the undefined
-# escapes the `\{`/`\}` note above warns about.
+# Every reference below is a SYMBOL or a quoted code fragment, and every regex
+# or placeholder example is marked by the word pattern in front of it. That
+# marker is what T18.10c reads: a shape that resolves nowhere BY CONSTRUCTION is
+# excluded by how it is written, so the exclusion lives in this prose rather
+# than in a skip list somewhere else that nobody updates. The previous edition
+# of this record was written entirely in file offsets, and by the time anyone
+# read it again every one of them had rotted — a design record for a drift guard
+# that had itself drifted (#606). T18.10 keeps it that way.
 #
-# A file-wide bare `X:` key harvest is wrong for the opposite reason: `prProof`
-# is spelled twice in this script with two meanings — a relay object SCHEMA at
-# :471 and the published string classification at `r.prProof = "DISPROVEN"`
-# (:1739) — so a key harvest drags in schema properties
-# (deliveryWorkspaceReady, rows, httpStatus, …) the record never carries.
+# THE pattern `\b` IS LOAD-BEARING; do not strip it for POSIX tidiness.
+# `ledger` ends in `r`, so without the boundary the alternation also matches the
+# tail of the `ledger.complete =` assignment and harvests a phantom member
+# `complete` — a name the documented record does not carry, which reds the
+# reverse row spuriously. The pattern `\b` is a GNU/BSD ERE extension supported
+# by both CI greps (ubuntu-latest and windows-latest/Git Bash); it is NOT one of
+# the undefined bracket escapes the note above warns about.
 #
-# `out` is bound five times in the script and only three of those are this
-# record (:1154 the unpushedIssue literal, :1588 the delivered record, :2106 the
-# single-solver record). `var out = [], i;` (:255) and
-# `var out = reviewPath(...)` (:884) are unrelated bindings that today carry no
-# property writes at all. A stray `out.foo =` added under either would red the
-# reverse row: a REVIEWABLE FALSE POSITIVE, never a silent pass. That is the
-# deliberate trade, stated here so it is a decision rather than an accident.
+# A file-wide key harvest over the pattern `X:` is wrong for the opposite
+# reason: this script spells `prProof` in more than one role — the `prProof:`
+# key of the relay-object SCHEMA, and the published string classification
+# written by `r.prProof = "DISPROVEN"` — so a key harvest drags in schema
+# properties (deliveryWorkspaceReady, rows, httpStatus, …) the record never
+# carries.
+#
+# `out` is a local name the script REUSES, and only some of its bindings are
+# this record. Named by the function each binding sits in: the `unpushedIssue`
+# literal, the `deliverPrompt` await inside `runTaskChain` and the
+# `solvePrompt` await inside `solveOne` ARE this record; `chunk`'s accumulator
+# (`var out = [], i;`), `sanitizeEscalationReason`'s scrubbed string
+# (`var out = s.replace(`) and `taskReviewPrompt`'s path
+# (`var out = reviewPath(`) are unrelated locals that today carry no property
+# writes at all. Naming them beats counting them, and this note is the proof:
+# its previous edition stated how many bindings there were, and a later binding
+# made that number wrong while every name here stayed correct. Naming only
+# beats counting while the list stays CLOSED, which is what T18.5 asserts
+# against the script itself — a binding added under a function this paragraph
+# does not name reds there, instead of quietly falsifying the sentence above
+# the way the retired count was falsified.
+# A stray assignment matching the pattern `out.foo =` added under any of them
+# would red the reverse row: a REVIEWABLE FALSE POSITIVE, never a silent pass.
+# That is the deliberate trade, stated here so it is a decision rather than an
+# accident.
+# === END T16 citation block ===
 SF_DOC_ISSUE_FIELDS="$(sf_doc_record_members "$SOLVE_FLEET_SKILL" 'results: [ {')"
 SF_JS_ISSUE_FIELDS="$({ sf_js_keys '[{] *issue: issue,[^{}]*[}]'
   grep -oE '\b(out|r)\.[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[^=]' "$SOLVE_FLEET_JS" \
@@ -2430,12 +2675,16 @@ SF_JS_ISSUE_FIELDS="$({ sf_js_keys '[{] *issue: issue,[^{}]*[}]'
 SF_DOC_ISSUE_N="$(sf_member_count "$SF_DOC_ISSUE_FIELDS")"
 SF_JS_ISSUE_N="$(sf_member_count "$SF_JS_ISSUE_FIELDS")"
 
+# === BEGIN T16 member-count floor rationale ===
 # T16.9 — anti-vacuity. A moved or renamed anchor yields ZERO, which would make
-# T16.10/T16.11 pass while comparing nothing at all. The floor is 12 rather than
-# 16 (live is 17/17) deliberately: on a 17-member record a floor one below live
-# is not an anti-vacuity guard, it is a SIZE RATCHET that reds on a legitimate
-# two-sided field removal. Any positive floor catches the failure mode this row
-# exists for, because a lost anchor extracts zero names, not fifteen.
+# T16.10/T16.11 pass while comparing nothing at all. The floor below sits well
+# UNDER the live member count, deliberately: a floor set just beneath the live
+# size is not an anti-vacuity guard, it is a SIZE RATCHET that reds on a
+# legitimate field removal made on both sides. Any positive floor catches the
+# failure mode this row exists for, because a lost anchor extracts zero names
+# rather than merely fewer. The live sizes are NOT restated here — the row
+# prints both of them on every run, which is the only copy that cannot go stale.
+# === END T16 member-count floor rationale ===
 if [ "$SF_DOC_ISSUE_N" -ge 12 ] && [ "$SF_JS_ISSUE_N" -ge 12 ]; then
   echo "  PASS  T16.9 both per-issue record field lists extracted (SKILL.md: $SF_DOC_ISSUE_N, workflow.js: $SF_JS_ISSUE_N)"
   PASS=$((PASS + 1))
@@ -2590,6 +2839,888 @@ else
   echo "        literal: $T16_PARTIAL_TOKEN"
   echo "        absent from:$T16_PARTIAL_UNJOINED"
   echo "        a copy that never learns the spelling strands the uberdev:active claim (#554)"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== T18: review-fleet's seam record cites symbols, not offsets (#606) =="
+# The same defect class as the block below, in a different pair of files and
+# with a worse outcome. skills/review-fleet/workflow.js carries the seam
+# rationale, skills/review-fleet/SKILL.md restates it for a reader who never
+# opens the script, and both were written in file offsets.
+#
+# What a rotted offset costs here is more than an unresolvable pointer. The
+# offsets naming the push fence had drifted, and the sentence resting on them —
+# that `review_publish_same_repo_pr_head` is "genuinely not an on-disk
+# executable" — is measurably FALSE: the function is defined in
+# lib/review-fences.sh and commands/review-pr.md calls it. An offset nobody can
+# resolve is an offset nobody re-checks, so the claim built on it goes false
+# unnoticed. That is why T18.4 lints the CLAIM and not only the citation.
+#
+# Three slices, each anchored on prose the files already ship — a shipped
+# SKILL.md must not grow test-only markers the way this file does for itself:
+#   (b) workflow.js, the numbered `Consequences` list: its heading through the
+#       last line of item 5.
+#   (c) SKILL.md, the section on what the script deliberately does not do.
+#   (d) SKILL.md, the section on why the run is staged. A SEPARATE slice
+#       because it holds the SKILL.md mirror of (b)'s byte-shape-oracle cite,
+#       and de-lining one copy but not the other is precisely the drift this
+#       issue is about.
+#
+# DECLARED OMISSIONS, recorded so they read as decisions rather than oversights:
+# the preamble ABOVE numbered item 1 in workflow.js and the BOUND-CHILD PROTOCOL
+# block below item 5 both cite lib/code_fixer_contract.py by offset, and both are
+# left exactly as they are — as is every other offset in that file outside slice
+# (b). They point into a different file with a different blast radius, and
+# sweeping them here would turn a fix for a record that had already gone false
+# into a repo-wide file:line migration.
+#
+# Row ids T18.6 through T18.8 are an intentional gap: an earlier draft reserved
+# them for slice (a) rows that the block below now covers from the record's own
+# backticks (T18.10a-c) and its numeral ban (T18.11). A retired id stays retired
+# — reusing one reads as a resurrected row. T18.5 is not one of them: it is the
+# row that closes the record's `out`-binding list against the script, and it is
+# written in the block below under the id it was specified with, which is why
+# the ids there do not read in printing order.
+
+# --- Citation-lint detectors, section-local to T18 --------------------------
+# TWO forms, because a rotted citation comes in two shapes and one regex sees
+# only the first. T18_ANCHOR_RE catches `path.ext:N` and the `RP:`/`GS:`/`MP:`/
+# `SKILL:` shorthand. T18_BARE_OFFSET_RE catches the BARE offset — a colon and
+# a run of digits with no filename in front of them, parenthesised or not —
+# which names no file at all and is the form a reader cannot even resolve
+# without guessing which file was meant.
+#
+# Declared HERE, named for the section that owns them, rather than at file
+# scope beside the shared `assert_*` / `da_*` helpers: those helpers are
+# parameterised shapes with no policy in them, while these two ARE the policy —
+# they decide what this section counts as a citation, and that decision was
+# argued for these four slices and nothing else. At file scope a later section
+# could pick either of them up by accident and inherit a definition it never
+# argued for. Every call site is in this section or the one after it.
+#
+# Both forms are described below by SHAPE, never by quoting an offset sampled
+# out of the tree. A comment that names the wrapping "actually in use" is a
+# present-tense measurement of the tree, which is the exact species of claim
+# these detectors exist to catch — it goes false the moment the file it sampled
+# is edited, and nothing here lints a comment this far above the rows.
+#
+# Measured over the T16 design record as this change found it: of its EIGHT
+# citations T18_ANCHOR_RE saw exactly ONE. The bare form is the half that
+# matters here, which is why it is not folded into the anchor regex.
+#
+# T18_ANCHOR_RE restates T9.1's ANCHOR_RE further down, verbatim. That is
+# deliberate and follows the standing decision tests/epipe-guard.test.sh records
+# for its own restatement: hoisting two call sites in two suites would buy
+# indirection rather than reuse. Do not hoist either of these. How many such
+# restatements exist repo-wide is NOT recorded here — an ordinal typed into a
+# comment is a count the code can move past without telling it, which is the
+# thing T18.11 lints the record below for.
+T18_ANCHOR_RE='\.(md|sh|py|js|json|yaml|yml):[0-9]+|(^|[^A-Za-z])(RP|GS|MP|SKILL):[0-9]+'
+# The leading negated class is what keeps the bare form usable: it excludes
+# clock times (`12:30`), `host:8080`, `http://…` and `${x:0:3}`. In every one
+# of those the character immediately before the colon is alphanumeric, `_` or
+# `/`, so the class rejects the match on its own. The optional `[(`]` admits
+# the two wrappings the lint has to survive: a parenthesised offset in a shell
+# comment, where `(` sits immediately before the colon, and its backticked
+# Markdown twin, where the backtick consumes the optional class and `(`
+# satisfies the preceding negated class.
+#
+# The digit run is `+`, with no floor under it, and the floor is worth a note
+# because an earlier edition of this line carried one. It matched two digits or
+# more and justified itself by saying that widening would match `x:0` and every
+# `1:1` ratio in prose. That reads like an argument and is FALSE on execution —
+# the leading class already rejects both, because what precedes the colon in
+# them is a digit. Executed over the four slices this section lints, the
+# unfloored form matches nothing the floored one did not, while a one-digit
+# offset planted in slice (c) reds T18.1 where the floored form let it through.
+# A boundary that costs nothing it claims to cost and buys a hole is the same
+# species of defect this section exists to retire, so it is gone rather than
+# re-argued. What the linted regions happen to contain today is NOT recorded
+# here — a survey of the tree written into a comment is the thing that rots.
+T18_BARE_OFFSET_RE='(^|[^A-Za-z0-9_/])[(`]?:[0-9]+'
+
+T18_RF_B_START='Consequences, stated so nobody re-derives them wrongly later'
+T18_RF_B_END='strictly better than the pseudocode.'
+T18_RF_C_START='### What the script deliberately does **not** do'
+T18_RF_D_START='### Why the run is staged instead of one call'
+# One shape for both markdown ends: a section runs until the next heading or the
+# next horizontal rule, because nothing in its closing line says it is closing.
+#
+# DECLARED BOUNDARY: `^#+ ` is also the shape of a shell comment, so a fenced
+# code block containing one would end the slice at that line and every citation
+# below the cut would become invisible to T18.1. The non-vacuity floors below
+# sit well under the live sizes — they catch a slice that collapsed, not one
+# that was trimmed — so this end shape has to learn about fences before either
+# slice may grow one. Neither ships a fenced block today.
+T18_RF_MD_END='^---$|^#+ '
+T18_RF_B="$(da_slice_between "$REVIEW_FLEET_JS" "$T18_RF_B_START" "$T18_RF_B_END")"
+T18_RF_C="$(da_slice_until_re "$REVIEW_FLEET_SKILL" "$T18_RF_C_START" "$T18_RF_MD_END")"
+T18_RF_D="$(da_slice_until_re "$REVIEW_FLEET_SKILL" "$T18_RF_D_START" "$T18_RF_MD_END")"
+# All three slices UNWRAPPED as well, for every row whose needle is multi-word:
+# a shared symbol, a whole sentence, a quoted pseudocode line. Slice (b) is the
+# measurement that forces this — it DOES rest the rejection on the seam and it
+# DOES name the byte-shape oracle, but it writes both across a line break, so
+# the raw slice answers "absent" to needles the file plainly carries. A row that
+# reds on where a comment wraps reports a fault that did not happen.
+#
+# Slice (d) is unwrapped for the same reason even though it is a markdown table
+# rather than a comment block: T18.2i reads it for the `encode-aggregate` anchor
+# that replaced this change's de-lined `commands/simplify.md` offset, and there
+# is nothing to stop a later re-flow breaking that cell across two source lines.
+T18_RF_B_PROSE="$(da_unwrap_prose "$T18_RF_B")"
+T18_RF_C_PROSE="$(da_unwrap_prose "$T18_RF_C")"
+T18_RF_D_PROSE="$(da_unwrap_prose "$T18_RF_D")"
+
+# Every row EMITTER is guarded, unlike the helpers that build the bodies: a
+# renamed builder reds the non-vacuity rows through an empty capture, but a
+# renamed emitter prints nothing at all — no row, no FAIL, and a total this file
+# has no floor on. That is a silent coverage loss, which is the failure mode
+# this whole section exists to retire.
+#
+# The guarded set is DERIVED from this file's own text, never retyped here. A
+# spelled-out list can only vet the emitters somebody remembered to add to it,
+# and both halves of that gap are measured rather than feared: with the list
+# spelled out, renaming an UNLISTED emitter's definition dropped T18.9/T18.9a and
+# the run still ended rc 0, and typo'ing a LISTED emitter's call site dropped
+# T18.2a just as quietly — while the abort text claimed to catch exactly that.
+# A guard whose predicate is disjoint from the drift it advertises is the defect
+# #606 exists to close, so it may not be rebuilt inside the fix for it. No count
+# of emitters is stated anywhere here for the same reason: it is one more figure
+# the code could move past while the prose kept asserting it.
+#
+# CALL SITES are the harvest, not definitions: a renamed definition is only a
+# fault because some call site still says the old name, so `command -v` over the
+# CALLED names is what notices, and a rename that updates both is a legitimate
+# rename that must stay green. The `da_assert_` prefix is the seam between
+# emitters and builders, so a new emitter is covered the day it is named. Both
+# harvests are pinned to column 0: a call in this file is never indented, and an
+# emitter name quoted inside a comment or a FAIL string must not enlist itself.
+t18_defined_emitters="$(grep -oE '^da_assert_[a-z_]+\(\)' "$DOCS_ACCURACY_SELF" | sed 's/()$//' | sort -u)"
+t18_called_emitters="$(grep -oE '^da_assert_[a-z_]+[[:space:]]' "$DOCS_ACCURACY_SELF" | sed 's/[[:space:]]*$//' | sort -u)"
+
+# Non-vacuity for the harvest itself: an empty definition set means the pattern
+# stopped matching, and every arm below would then vet nothing and pass.
+[ -n "$t18_defined_emitters" ] || {
+  echo "FATAL: T18 emitter harvest matched no 'da_assert_*() {' definition in $DOCS_ACCURACY_SELF — the guards below would vet an empty set and every emitter row could vanish unnoticed" >&2
+  exit 2
+}
+
+# Herestrings, not pipes: a `while read` on the right-hand side of a pipe runs in
+# a subshell, where `exit 2` would abort the loop and let the run continue green.
+#
+# This runs before the first call site, so it aborts instead of letting rows go
+# missing — which also means an emitter must be DEFINED above here, up with the
+# other helpers. Adding one below this point trips the same abort, and the text
+# says so rather than sending the reader hunting for a rename that never
+# happened; a guard that misnames the fault is the class #606 exists to close.
+while IFS= read -r t18_fn; do
+  [ -n "$t18_fn" ] || continue
+  command -v "$t18_fn" >/dev/null 2>&1 || {
+    echo "FATAL: T18 row emitter $t18_fn is called but not defined at this point in the run (renamed definition, a typo'd call site, or a definition added BELOW this guard instead of up with the other helpers) — its rows would vanish from the run rather than fail" >&2
+    exit 2
+  }
+done <<<"$t18_called_emitters"
+
+# The reverse direction, which is what keeps the call-site harvest honest: if it
+# silently stopped matching, the loop above would vet nothing and still pass.
+while IFS= read -r t18_fn; do
+  [ -n "$t18_fn" ] || continue
+  grep -qxF "$t18_fn" <<<"$t18_called_emitters" || {
+    echo "FATAL: T18 row emitter $t18_fn is defined but never called at column 0 — it is dead, or its call is indented where the guard above cannot see it and so cannot vet it" >&2
+    exit 2
+  }
+done <<<"$t18_defined_emitters"
+
+# T18.0b/T18.0c/T18.0d — non-vacuity, per slice, before anything reads them.
+da_assert_slice_intact T18.0b 'review-fleet workflow.js consequences' 20 110 "$T18_RF_B" \
+  "$T18_RF_B_START" "$T18_RF_B_END"
+da_assert_slice_intact T18.0c 'review-fleet SKILL.md rejected-proposals section' 10 55 "$T18_RF_C" \
+  "$T18_RF_C_START" "$T18_RF_MD_END"
+da_assert_slice_intact T18.0d 'review-fleet SKILL.md staged-run section' 6 30 "$T18_RF_D" \
+  "$T18_RF_D_START" "$T18_RF_MD_END"
+
+# T18.1 — citation-free under THREE detectors, all three slices, with the FAIL
+# arm naming the slice each match came from. "There is an offset somewhere in
+# review-fleet" is not an actionable diagnostic when the offsets live in two
+# files and three sections.
+#
+# Two of the three are the file's SHARED detectors, reused rather than restated.
+# The standing decision recorded beside them is that the one existing restatement
+# of T9.1's regex is the last one this file gets; a fourth copy declared inside
+# this section would be one more place for the definition of a citation to drift
+# from the others.
+#
+# The third detector is local to this row and exists because these two files
+# cite one thing the T16 record never does: an RFC's pseudocode, addressed in
+# WORDS as `line 153`. That form carries no colon, so neither shared detector
+# can see it — and measured at the baseline, all three of the line references in
+# these slices had rotted exactly like the offsets beside them: RFC 0012 §3.1's
+# pseudocode had moved, and each number named an unrelated paragraph. A citation
+# spelled in English is still a citation.
+#
+# Declared cost, since a lint on `line <n>` is broader than a lint on `:<n>`:
+# these slices may not discuss a numbered line by its number at all. That is the
+# intended ratchet — name the pseudocode line by what it SAYS, which is what
+# both copies already quote and what T18.2f-T18.2h then resolve against the RFC.
+T18_RF_PROSE_OFFSET_RE='(^|[^A-Za-z])lines?[[:space:]]+[0-9]+'
+T18_RF_CITED=""
+for t18_slice in b c d; do
+  case "$t18_slice" in
+    b) t18_body="$T18_RF_B"; t18_where="(b) $REVIEW_FLEET_JS — $T18_RF_B_START" ;;
+    c) t18_body="$T18_RF_C"; t18_where="(c) $REVIEW_FLEET_SKILL — $T18_RF_C_START" ;;
+    d) t18_body="$T18_RF_D"; t18_where="(d) $REVIEW_FLEET_SKILL — $T18_RF_D_START" ;;
+  esac
+  t18_hits="$({ grep -oE -e "$T18_ANCHOR_RE" <<<"$t18_body" || true
+                grep -oE -e "$T18_BARE_OFFSET_RE" <<<"$t18_body" || true
+                grep -oE -e "$T18_RF_PROSE_OFFSET_RE" <<<"$t18_body" || true; } | sort -u)"
+  [ -z "$t18_hits" ] || T18_RF_CITED="$T18_RF_CITED
+        $t18_where
+$(sed 's/^/          /' <<<"$t18_hits")"
+done
+if [ -z "$T18_RF_CITED" ]; then
+  echo "  PASS  T18.1 all three review-fleet slices are citation-free under all three detectors"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T18.1 the review-fleet seam record still addresses code by line number"
+  echo "        offending matches, by slice:$T18_RF_CITED"
+  echo "        cite the symbol — or the sentence — the number was pointing AT; the line moves, the name does not"
+  FAIL=$((FAIL + 1))
+fi
+
+# T18.2a-T18.2h — the RESOLVE direction: the symbols those offsets were replaced
+# with have to still exist in the files they name.
+#
+# That is one direction of two, and it is worth being exact about which one,
+# because the obvious reading of these rows is wrong: da_assert_symbol_resolves
+# opens the CITED file and nothing else. It never reads the slice doing the
+# citing. So it proves the target still carries the string and it cannot see
+# whether slices (b), (c) or (d) still name it — while T18.1, the row this
+# family exists to complete, is satisfied by DELETING a citation exactly as well
+# as by fixing one, which trades a stale pointer for no pointer at all.
+#
+# T18.2i is the other direction, and neither is worth much alone. That is the
+# same both-directions rule T18.10a/T18.10b state for the T16 record's fragment
+# table further down, applied to the review-fleet slices.
+da_assert_symbol_resolves T18.2a "$POST_IMPL_SKILL" 'post_review_write_aggregate_v2' \
+  'the deterministic aggregate writer whose no-pathname-authority rule both copies quote'
+da_assert_symbol_resolves T18.2b "$REVIEW_AGGREGATE_SH" 'post_review_write_aggregate_v2()' \
+  'the on-disk definition that retired the "no executable to invoke" rejection'
+da_assert_symbol_resolves T18.2c "$SIMPLIFY_CMD" 'encode-aggregate --phase phase2' \
+  'the byte-shape oracle the simplify stage hands to Bash'
+da_assert_symbol_resolves T18.2d "$REVIEW_FENCES_SH" 'review_publish_same_repo_pr_head()' \
+  'the push fence, on disk — the measurement that makes T18.4 a correction and not a re-wording'
+# T18.2e — the CLAIM the aggregate-writer citation exists to support, not just
+# the symbol. Read against a whitespace-FLATTENED copy: measured, the raw
+# `grep -c` for this sentence is 0 because post-impl-review/SKILL.md wraps it
+# after "aggregation", so a raw probe would red a correct tree and teach the
+# next reader to delete the row. Never assert a wrapped prose claim against raw
+# lines.
+T18_PIR_FLAT="$(tr -d '\r' < "$POST_IMPL_SKILL" | tr '\n' ' ' | tr -s ' ')"
+if grep -qF -e 'does not use any pathname as aggregation authority' <<<"$T18_PIR_FLAT"; then
+  echo "  PASS  T18.2e the quoted no-pathname-authority rule is still the writer's own words"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T18.2e the review-fleet copies quote a rule post-impl-review/SKILL.md no longer states"
+  echo "        file: $POST_IMPL_SKILL"
+  echo "        quoted: does not use any pathname as aggregation authority"
+  echo "        a quotation that survives its source is the same rot as an offset that survives its line"
+  FAIL=$((FAIL + 1))
+fi
+
+# T18.2f-T18.2h — the same rule for the three RFC pseudocode lines the slices
+# used to address by number. Each is now quoted, and a quotation is only an
+# anchor while it is still the RFC's own words. The `what it supports` text on
+# each names the two copies that reject the proposal; that is a claim about the
+# review-fleet slices, which these rows do not open — T18.2i is the row that
+# holds it, for these three needles and for every other anchor above.
+da_assert_symbol_resolves T18.2f "$WORKFLOW_RFC" 'haiku writer emits post-impl-review-final.md' \
+  'the aggregate-writer proposal both copies reject'
+da_assert_symbol_resolves T18.2g "$WORKFLOW_RFC" 'push agent (haiku): git push origin HEAD' \
+  'the push-agent proposal both copies reject'
+da_assert_symbol_resolves T18.2h "$WORKFLOW_RFC" 'brief agent: gh pr diff' \
+  'the brief-relay proposal both copies reject'
+
+# T18.2i — the CITE direction for every anchor T18.2a-T18.2h resolves, and the
+# row that makes the paragraph above true rather than merely well-intentioned.
+# One declared table, answering one question per anchor: which slices have to
+# still NAME it?
+#
+# Four of these anchors had no citation-side cover anywhere in the suite, and
+# slice (d) was read by nothing that asks what it must CONTAIN — only by T18.0d,
+# which asks whether it still exists, and by T18.1, which asks what it must not
+# contain. Measured before this row existed: replacing
+# `code_fixer_contract.py encode-aggregate --phase phase2` in
+# slice (d)'s table cell with "the byte-shape encoder" left the whole run green,
+# and the cell degraded to a bare `commands/simplify.md` with no symbol beside
+# it — the "no pointer at all" outcome the rows above say they prevent. The same
+# was true of the three RFC quotes in both copies, which T18.1 then forbids
+# reverting to `line 153`: the pseudocode would end up cited by nothing.
+#
+# The overlap with T18.3's two shared symbols is deliberate. T18.3 asserts
+# SYMMETRY — that the two prose copies did not drift apart — over a list curated
+# for that purpose, and it never reads slice (d). This row asserts PERSISTENCE:
+# each replacement anchor is still cited where the de-lining put it. Two
+# different predicates that happen to agree on two members. Letting either one's
+# coverage rest on the other's list would make a retirement over there a silent
+# coverage loss over here, which is the class this section exists to retire.
+#
+# Curated rather than derived, for the reason T18.3 records: the three slices
+# are a rationale, a summary and a stage table, not mirrors of each other. An
+# anchor is listed for a slice only where that slice's argument DEPENDS on it —
+# pinning an incidental mention would red a legitimate re-write with a fault
+# that did not happen.
+#
+# Every needle is read against the UNWRAPPED slice bodies, and that is not
+# optional: measured, slice (b) breaks the `encode-aggregate` needle across a
+# line break and both copies break the no-pathname-authority sentence, so a raw
+# probe would red a correct tree on where its prose happens to wrap.
+REVIEW_FLEET_CITED_ANCHORS='post_review_write_aggregate_v2|bc
+review_publish_same_repo_pr_head|bc
+encode-aggregate --phase phase2|bd
+haiku writer emits post-impl-review-final.md|bc
+push agent (haiku): git push origin HEAD|bc
+brief agent: gh pr diff|bc
+does not use any pathname as aggregation authority|bc'
+T18_CITE_PAIRS=0
+T18_CITE_UNCITED=""
+T18_CITE_MALFORMED=""
+while IFS= read -r t18_pair; do
+  [ -n "$t18_pair" ] || continue
+  t18_needle="${t18_pair%|*}"
+  t18_want="${t18_pair##*|}"
+  # The slice field is a CLOSED set of one-letter names, and it is validated as
+  # one before it is used. A field that names nothing this section knows — a
+  # typo, a retired letter, a needle whose slice was renamed — would otherwise
+  # check no slice at all while still reading as a table entry, and the row
+  # would report a smaller number in its PASS text and nothing else. Measured
+  # while writing this row: with only a pair floor under it, corrupting ONE
+  # entry's field left the whole suite green. So every letter must resolve to a
+  # slice, and the count of resolved letters must equal the field's length,
+  # which is what makes `bcz` and `bb` faults rather than near-misses.
+  t18_hit=0
+  for t18_slice in b c d; do
+    case "$t18_want" in
+      *"$t18_slice"*) ;;
+      *) continue ;;
+    esac
+    t18_hit=$((t18_hit + 1))
+    case "$t18_slice" in
+      b) t18_body="$T18_RF_B_PROSE"; t18_where="slice (b), ${REVIEW_FLEET_JS#$REPO_ROOT/}" ;;
+      c) t18_body="$T18_RF_C_PROSE"; t18_where="slice (c), ${REVIEW_FLEET_SKILL#$REPO_ROOT/}" ;;
+      d) t18_body="$T18_RF_D_PROSE"; t18_where="slice (d), ${REVIEW_FLEET_SKILL#$REPO_ROOT/}" ;;
+    esac
+    T18_CITE_PAIRS=$((T18_CITE_PAIRS + 1))
+    grep -qF -e "$t18_needle" <<<"$t18_body" \
+      || T18_CITE_UNCITED="$T18_CITE_UNCITED
+        $t18_where no longer names: $t18_needle"
+  done
+  if [ "$t18_hit" -lt 1 ] || [ "${#t18_want}" -ne "$t18_hit" ]; then
+    T18_CITE_MALFORMED="$T18_CITE_MALFORMED
+        slice field '$t18_want' is not a set of (b|c|d) — entry: $t18_needle"
+  fi
+done <<EOF_T18_CITED
+$REVIEW_FLEET_CITED_ANCHORS
+EOF_T18_CITED
+if [ -n "$T18_CITE_MALFORMED" ]; then
+  echo "  FAIL  T18.2i an entry in the citation table names a slice this section does not have"
+  echo "        malformed:$T18_CITE_MALFORMED"
+  echo "        such an entry checks nothing while still looking like coverage — fix the letter, or delete the entry deliberately"
+  FAIL=$((FAIL + 1))
+elif [ "${T18_CITE_PAIRS:-0}" -lt 10 ] 2>/dev/null; then
+  echo "  FAIL  T18.2i the citation table did not read — ${T18_CITE_PAIRS:-0} (anchor, slice) pairs seen, floor 10, so this row asserted almost nothing"
+  echo "        an empty capture satisfies every needle below vacuously (#347)"
+  FAIL=$((FAIL + 1))
+elif [ -n "$T18_CITE_UNCITED" ]; then
+  echo "  FAIL  T18.2i a replacement anchor is no longer cited by the slice the de-lining put it in"
+  echo "        uncited:$T18_CITE_UNCITED"
+  echo "        deleting a citation satisfies T18.1 just as well as fixing one — restore the symbol, or retire its entry here in the SAME change"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  T18.2i all $T18_CITE_PAIRS (anchor, slice) pairs still cite the symbol that replaced their offset"
+  PASS=$((PASS + 1))
+fi
+
+# T18.3 — the two copies agree on the symbols they BOTH carry. Curated, not
+# derived, and the reason is a measurement: slice (b) additionally names
+# review_fixer_terminal_outcome, review_track_validated_fixer_head,
+# AskUserQuestion and the script's own shape gates, while in SKILL.md those
+# belong to slice (d) and to the bullet list above slice (c). The blocks are a
+# rationale and a summary of two rejected proposals, not mirrors of each other,
+# so a whole-block set equality would fail on its first execution and get
+# relaxed into nothing. What IS symmetric is the shared claim, and that is what
+# this list pins: a one-sided edit that drops any member from either copy reds.
+#
+# Every member must also resolve OUTSIDE the two prose copies — a path has to
+# exist on disk, a function name has to appear under lib/ or commands/ — so a
+# symbol the two copies only cite at each other cannot satisfy this row.
+#
+# Presence is checked against the UNWRAPPED bodies: a path token is exactly the
+# kind of needle a markdown re-flow lands inside.
+REVIEW_FLEET_REJECTION_SYMBOLS='post_review_write_aggregate_v2
+review_publish_same_repo_pr_head
+review_refresh_phase1_scope
+lib/review-aggregate.sh
+lib/review-fences.sh'
+T18_SYM_CHECKED=0
+T18_SYM_ONESIDED=""
+T18_SYM_DEAD=""
+while IFS= read -r t18_sym; do
+  [ -n "$t18_sym" ] || continue
+  T18_SYM_CHECKED=$((T18_SYM_CHECKED + 1))
+  grep -qF -e "$t18_sym" <<<"$T18_RF_B_PROSE" \
+    || T18_SYM_ONESIDED="$T18_SYM_ONESIDED
+        $t18_sym  (absent from slice (b), workflow.js)"
+  grep -qF -e "$t18_sym" <<<"$T18_RF_C_PROSE" \
+    || T18_SYM_ONESIDED="$T18_SYM_ONESIDED
+        $t18_sym  (absent from slice (c), SKILL.md)"
+  case "$t18_sym" in
+    */*) [ -r "$PLUGIN_DIR/$t18_sym" ] \
+           || T18_SYM_DEAD="$T18_SYM_DEAD
+        $t18_sym  (no such file under $PLUGIN_DIR)" ;;
+    *)   grep -rqF -e "$t18_sym" "$PLUGIN_DIR/lib" "$PLUGIN_DIR/commands" \
+           || T18_SYM_DEAD="$T18_SYM_DEAD
+        $t18_sym  (named by the prose, defined nowhere under lib/ or commands/)" ;;
+  esac
+done <<EOF_T18_SYMBOLS
+$REVIEW_FLEET_REJECTION_SYMBOLS
+EOF_T18_SYMBOLS
+if [ "${T18_SYM_CHECKED:-0}" -lt 4 ] 2>/dev/null; then
+  echo "  FAIL  T18.3 the shared-symbol list did not read — ${T18_SYM_CHECKED:-0} members seen, floor 4, so this row asserted almost nothing"
+  FAIL=$((FAIL + 1))
+elif [ -n "$T18_SYM_ONESIDED$T18_SYM_DEAD" ]; then
+  echo "  FAIL  T18.3 the two review-fleet copies have drifted apart, or name something that does not exist"
+  [ -z "$T18_SYM_ONESIDED" ] || echo "        one-sided:$T18_SYM_ONESIDED"
+  [ -z "$T18_SYM_DEAD" ] || echo "        unresolved:$T18_SYM_DEAD"
+  echo "        edit both copies in the same change, or retire the member here in that same change"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  T18.3 all $T18_SYM_CHECKED shared symbols are in both review-fleet copies and resolve outside them"
+  PASS=$((PASS + 1))
+fi
+
+# T18.4 — the CLAIM row, and the reason this section is a correction rather than
+# a de-lining. Two halves, because either alone is satisfiable without fixing
+# anything: the false rule must be gone from BOTH files, and the true reason
+# must be spelled the SAME way in both slices. Delete the paragraph and the
+# absence half passes; keep the paragraph and re-word only one copy and the
+# agreement half fails.
+T18_FALSE_REJECTION='not an on-disk executable'
+T18_SEAM_REASON='the controller proves, it does not delegate the proof to an LLM'
+T18_CLAIM_FAULTS=""
+for t18_copy in "$REVIEW_FLEET_JS" "$REVIEW_FLEET_SKILL"; do
+  ! grep -qF -e "$T18_FALSE_REJECTION" "$t18_copy" \
+    || T18_CLAIM_FAULTS="$T18_CLAIM_FAULTS
+        $t18_copy still claims: $T18_FALSE_REJECTION"
+done
+grep -qF -e "$T18_SEAM_REASON" <<<"$T18_RF_B_PROSE" \
+  || T18_CLAIM_FAULTS="$T18_CLAIM_FAULTS
+        slice (b) does not rest the rejection on: $T18_SEAM_REASON"
+grep -qF -e "$T18_SEAM_REASON" <<<"$T18_RF_C_PROSE" \
+  || T18_CLAIM_FAULTS="$T18_CLAIM_FAULTS
+        slice (c) does not rest the rejection on: $T18_SEAM_REASON"
+if [ -z "$T18_CLAIM_FAULTS" ]; then
+  echo "  PASS  T18.4 neither copy still calls the push fence off-disk, and both rest the rejection on the seam"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T18.4 a review-fleet rejection rests on a reason that is false, or on two different reasons"
+  echo "        faults:$T18_CLAIM_FAULTS"
+  echo "        review_publish_same_repo_pr_head() is defined in lib/review-fences.sh — T18.2d measures it on every run"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== T18: this suite's OWN T16 design record cites symbols, not offsets (#606) =="
+# The prose that explains T16.9-T16.11 was written entirely in citations —
+# eight of them, one `workflow.js:<line>` and seven bare `:<line>` offsets —
+# and by the time this section was written every one of them pointed somewhere
+# else. That is precisely the class T9.1 lints in the RFCs, reproduced inside
+# the suite whose job is to catch it, and unguarded because no row until now
+# read this file's own prose.
+#
+# No release number appears in this section on purpose. A version literal here
+# would put this file in `git grep -ln <version>`, where the bump ritual reads
+# its list of release surfaces from — and this file is not one.
+#
+# TWO regions, not one, and the second is not optional. The drift this change
+# retires is split across them: the offsets and a binding count sat in the
+# citation block, but the member-count claim sat in the floor rationale a few
+# lines below it, OUTSIDE. Scope the lint to the citation block alone and that
+# claim goes unguarded no matter how good the predicate is — the region boundary
+# decides what these rows can ever SEE, and a criterion that cannot reach the
+# drift it must find is the defect this issue is filed against. Measured on the
+# pre-rewrite prose: the member-count phrase matched ZERO times when the slice
+# was the citation block by itself.
+#
+# Neither title carries a row id, deliberately. A title is echoed by the rows
+# below, and a title of the form `T16.9 …` puts a second `T16.9` in the run
+# output — which is the one-id-two-meanings collision this file already carries
+# at `T16.10`, where two unrelated rows answer to that id. That collision is
+# pre-existing and stays out of scope here; adding a THIRD instance of it while
+# fixing something else is what this naming rule prevents.
+T18_CITE_TITLE='T16 citation block'
+T18_FLOOR_TITLE='T16 member-count floor rationale'
+T18_CITE_REGION="$(da_marked_region "$T18_CITE_TITLE")"
+T18_FLOOR_REGION="$(da_marked_region "$T18_FLOOR_TITLE")"
+
+# T18.9 / T18.9a — non-vacuity, asserted per region before anything reads them.
+da_assert_region_intact T18.9  "$T18_CITE_TITLE"  15 "$T18_CITE_REGION"
+da_assert_region_intact T18.9a "$T18_FLOOR_TITLE"  5 "$T18_FLOOR_REGION"
+
+# S-D: both regions, linted as one body. The FAIL arm prints every offending
+# match rather than just failing, because "there is a citation somewhere in
+# this block" is not an actionable diagnostic.
+T18_SD="$T18_CITE_REGION
+$T18_FLOOR_REGION"
+
+# The record UNWRAPPED, by the shared helper: every consumer below that looks up
+# a MULTI-WORD needle reads this body, never the raw slice, because a comment
+# wraps wherever the writer's re-flow puts the break and a quoted span — or the
+# `pattern` word that exempts one — can straddle two source lines. The helper's
+# own header carries the argument and the one declared boundary; measured here
+# against re-wraps of the `var out` sentence whose content is byte-identical — a
+# flat `# ` continuation, an INDENTED bullet continuation, and a break taken
+# after a trailing space — all three are inert.
+#
+# T18.10b and T18.10c read this unwrapped body. T18.10 and T18.11 keep reading
+# the raw `$T18_SD`, deliberately: their needles are single tokens (a file
+# offset, a numeral, a spelled cardinal) that no line break can split, and the
+# raw slice keeps each match on the source line a reader can go open.
+T18_SD_PROSE="$(da_unwrap_prose "$T18_SD")"
+
+# T18.5 — the CLOSURE row for the record's `out` paragraph, and the reason that
+# paragraph may be a LIST at all. A list of names is only better than a count
+# while it stays complete. The count it replaced went wrong when a later
+# binding was added; a list goes wrong the same way and more quietly, because
+# every name still in it stays correct while the SET stops being the whole set.
+# Measured on the edition that shipped the list without this row: appending a
+# new function with its own `out` binding to the script left every row in this
+# section green, with the record's closed-set sentence already false.
+#
+# DERIVED on the script side, CURATED on the record side, compared in BOTH
+# directions. Every `var` / `let` / `const` binding of `out` in the script is
+# resolved to the nearest enclosing `function` definition above it; a binding
+# whose encloser the record does not name FAILS, and a name the record lists
+# that no longer encloses a binding FAILS too. A third arm reads the record
+# itself, so dropping a name from the prose is caught from the prose side as
+# well. Deriving BOTH sides would only prove awk agrees with itself — the
+# curated side is what makes this a comparison against a claim.
+#
+# awk is handed the PATH and reads it to EOF: no early exit, so no writer dies
+# on EPIPE and poisons `pipefail` (tests/epipe-guard.test.sh), and the CR strip
+# happens inside awk because the windows job checks out with core.autocrlf=true
+# and grep cannot see a CR.
+#
+# DECLARED BOUNDARY: the encloser is the nearest preceding `function` keyword,
+# so a binding inside a function EXPRESSION or an arrow assigned to a variable
+# is attributed to whatever named function encloses that expression. That is
+# the right answer for the record — which names the site a reader would open —
+# and it is why the harvest is not written as a brace-matching parser.
+T18_OUT_SITES='chunk
+sanitizeEscalationReason
+taskReviewPrompt
+unpushedIssue
+runTaskChain
+solveOne'
+T18_OUT_BOUND_IN="$(awk '
+  { sub(/\r$/, "") }
+  /^[[:space:]]*(async[[:space:]]+)?function[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*\(/ {
+    t18fn = $0
+    sub(/^[[:space:]]*(async[[:space:]]+)?function[[:space:]]+/, "", t18fn)
+    sub(/[[:space:]]*\(.*$/, "", t18fn)
+  }
+  /(^|[^A-Za-z0-9_$])(var|let|const)[[:space:]]+out([^A-Za-z0-9_$]|$)/ {
+    printf "%s\n", (t18fn == "" ? "(bound above the first function definition)" : t18fn)
+  }
+' "$SOLVE_FLEET_JS")"
+T18_OUT_BINDINGS="$(grep -c . <<<"$T18_OUT_BOUND_IN" || true)"
+T18_OUT_ENCLOSERS="$(sort -u <<<"$T18_OUT_BOUND_IN")"
+T18_OUT_UNNAMED=""
+T18_OUT_STALE=""
+T18_OUT_UNCITED=""
+T18_OUT_CHECKED=0
+while IFS= read -r t18_encl; do
+  [ -n "$t18_encl" ] || continue
+  grep -qxF -e "$t18_encl" <<<"$T18_OUT_SITES" \
+    || T18_OUT_UNNAMED="$T18_OUT_UNNAMED
+        $t18_encl"
+done <<EOF_T18_ENCLOSERS
+$T18_OUT_ENCLOSERS
+EOF_T18_ENCLOSERS
+while IFS= read -r t18_site; do
+  [ -n "$t18_site" ] || continue
+  T18_OUT_CHECKED=$((T18_OUT_CHECKED + 1))
+  grep -qxF -e "$t18_site" <<<"$T18_OUT_ENCLOSERS" \
+    || T18_OUT_STALE="$T18_OUT_STALE
+        $t18_site"
+  grep -qF -e "$t18_site" <<<"$T18_SD_PROSE" \
+    || T18_OUT_UNCITED="$T18_OUT_UNCITED
+        $t18_site"
+done <<EOF_T18_SITES
+$T18_OUT_SITES
+EOF_T18_SITES
+if [ "${T18_OUT_BINDINGS:-0}" -lt 4 ] 2>/dev/null || [ "${T18_OUT_CHECKED:-0}" -lt 4 ] 2>/dev/null; then
+  echo "  FAIL  T18.5 the out-binding harvest did not read — ${T18_OUT_BINDINGS:-0} bindings and ${T18_OUT_CHECKED:-0} curated sites seen, floor 4 each, so this row asserted almost nothing"
+  echo "        file: $SOLVE_FLEET_JS"
+  FAIL=$((FAIL + 1))
+elif [ -n "$T18_OUT_UNNAMED$T18_OUT_STALE$T18_OUT_UNCITED" ]; then
+  echo "  FAIL  T18.5 the T16 design record's list of out bindings is no longer closed over the script"
+  echo "        script: $SOLVE_FLEET_JS"
+  echo "        record: $DOCS_ACCURACY_SELF (region: $T18_CITE_TITLE)"
+  [ -z "$T18_OUT_UNNAMED" ] || echo "        binds out, named by neither the record nor this row's site list:$T18_OUT_UNNAMED"
+  [ -z "$T18_OUT_STALE" ] || echo "        listed as a binding site but binds out nowhere:$T18_OUT_STALE"
+  [ -z "$T18_OUT_UNCITED" ] || echo "        a binding site the record has stopped naming:$T18_OUT_UNCITED"
+  echo "        name the new site in the record and add it here in the SAME change — a list that is not closed is the count it replaced, with the staleness hidden better"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  T18.5 every out binding in workflow.js sits in a function the T16 record names, and every site it names still binds one ($T18_OUT_BINDINGS bindings, $T18_OUT_CHECKED sites)"
+  PASS=$((PASS + 1))
+fi
+
+# T18.10 — anchor-free under BOTH detectors. Measured before this change: 8
+# matches (1 anchor form, 7 bare form).
+T18_SD_HITS="$({ grep -oE -e "$T18_ANCHOR_RE" <<<"$T18_SD" || true
+                 grep -oE -e "$T18_BARE_OFFSET_RE" <<<"$T18_SD" || true; } | sort -u)"
+if [ -z "$T18_SD_HITS" ]; then
+  echo "  PASS  T18.10 the T16 design record is citation-free under both detectors (symbols and quoted fragments only)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T18.10 the T16 design record still cites file offsets — the block that documents a drift guard cannot itself rot"
+  echo "        file: $DOCS_ACCURACY_SELF (regions: $T18_CITE_TITLE, $T18_FLOOR_TITLE)"
+  sed 's/^/        /' <<<"$T18_SD_HITS"
+  echo "        cite a symbol or a quoted code fragment instead; a line number is stale the next time the file is edited"
+  FAIL=$((FAIL + 1))
+fi
+
+# T18.10a / T18.10b / T18.10c — the POSITIVE half of T18.10, and the half that
+# makes the conversion worth doing. Absence of offsets is satisfied just as well
+# by prose that names fragments which no longer exist: the citation would have
+# changed SHAPE without becoming resolvable, and rot the next time something is
+# renamed. So every fragment the record quotes is looked up in the script it
+# describes — in BOTH directions, which is the T9.3/T9.4 shape this file already
+# runs over the RFC 0012 contract table.
+#
+# BOTH directions or the table certifies nothing. T18.10a asks whether the
+# fragment still RESOLVES in the script; T18.10b asks whether the record still
+# CITES it. Without T18.10b the record could drop every quoted binding and the
+# resolve loop would still report a full table — those fragments resolve because
+# the CODE carries them, which has nothing to do with whether the PROSE does.
+#
+# `needle|expected`: a number is an EXACT count — a fragment has to identify one
+# site to be a citation at all, and a second `var out = reviewPath(` would mean
+# the record's claim about that binding needs re-reading, not silently widening.
+# `+` is at-least-once, for the entries the record cites as NAMES rather than as
+# locations. The exact form can red on a legitimate duplication; that is the
+# same declared trade the record itself makes about a stray assignment, a
+# REVIEWABLE FALSE POSITIVE in place of a citation that quietly points nowhere.
+T18_FRAGMENTS='ledger.complete =|1
+r.prProof = "DISPROVEN"|1
+prProof:|1
+var out = [], i;|1
+var out = s.replace(|1
+var out = reviewPath(|1
+unpushedIssue|+
+deliverPrompt|+
+solvePrompt|+
+deliveryWorkspaceReady|+'
+T18_FRAG_UNRESOLVED=""
+T18_FRAG_UNCITED=""
+T18_FRAG_CHECKED=0
+while IFS='|' read -r t18_needle t18_want; do
+  [ -n "$t18_needle" ] || continue
+  T18_FRAG_CHECKED=$((T18_FRAG_CHECKED + 1))
+  t18_got="$(grep -cF -e "$t18_needle" "$SOLVE_FLEET_JS" || true)"
+  case "$t18_want" in
+    '+') [ "${t18_got:-0}" -ge 1 ] 2>/dev/null \
+           || T18_FRAG_UNRESOLVED="$T18_FRAG_UNRESOLVED
+        $t18_needle  (found ${t18_got:-0}, want at least 1)" ;;
+    *)   [ "${t18_got:-0}" -eq "$t18_want" ] 2>/dev/null \
+           || T18_FRAG_UNRESOLVED="$T18_FRAG_UNRESOLVED
+        $t18_needle  (found ${t18_got:-0}, want exactly $t18_want)" ;;
+  esac
+  grep -qF -e "$t18_needle" <<<"$T18_SD_PROSE" \
+    || T18_FRAG_UNCITED="$T18_FRAG_UNCITED
+        $t18_needle"
+done <<EOF_T18_FRAGMENTS
+$T18_FRAGMENTS
+EOF_T18_FRAGMENTS
+# A FLOOR, never the table's exact length: quoting a ninth fragment is a
+# legitimate edit, and an `-ne <len>` self-count would hard-fail it with "the
+# table did not read", which is a lie about what broke. The floor only has to
+# catch the heredoc silently yielding nothing.
+if [ "${T18_FRAG_CHECKED:-0}" -lt 6 ] 2>/dev/null; then
+  echo "  FAIL  T18.10a the fragment table did not read — ${T18_FRAG_CHECKED:-0} entries seen, floor 6, so this row asserted almost nothing"
+  FAIL=$((FAIL + 1))
+elif [ -n "$T18_FRAG_UNRESOLVED" ]; then
+  echo "  FAIL  T18.10a the T16 design record quotes code that no longer resolves in the script it describes"
+  echo "        file: $SOLVE_FLEET_JS"
+  echo "        unresolved:$T18_FRAG_UNRESOLVED"
+  echo "        a symbol that does not resolve is a line number with extra steps — re-read the code, then re-word the record"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  T18.10a each of the $T18_FRAG_CHECKED curated fragments resolves in workflow.js at its declared count"
+  PASS=$((PASS + 1))
+fi
+
+# T18.10b — the citation half. Same curated table, read against the RECORD.
+if [ "${T18_FRAG_CHECKED:-0}" -lt 6 ] 2>/dev/null; then
+  echo "  FAIL  T18.10b the fragment table did not read — ${T18_FRAG_CHECKED:-0} entries seen, floor 6, so this row asserted almost nothing"
+  FAIL=$((FAIL + 1))
+elif [ -n "$T18_FRAG_UNCITED" ]; then
+  echo "  FAIL  T18.10b the T16 design record no longer cites fragments this suite curates for it"
+  echo "        file: $DOCS_ACCURACY_SELF (regions: $T18_CITE_TITLE, $T18_FLOOR_TITLE)"
+  echo "        no longer cited:$T18_FRAG_UNCITED"
+  echo "        a record that stops naming the code it describes is back to prose nobody can check — re-cite it, or retire the entry here in the SAME change"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  T18.10b the T16 design record still cites each of the $T18_FRAG_CHECKED curated fragments"
+  PASS=$((PASS + 1))
+fi
+
+# T18.10c — DERIVED, the T9.4c shape, and the half that survives forgetfulness:
+# the table above is hand-maintained, so it can only ever certify the fragments
+# somebody remembered to add. This row reads the record's OWN backticks, so a
+# NEW quoted fragment that resolves nowhere reds without anyone extending a
+# list.
+#
+# Two span classes are excluded, both by a rule rather than by name:
+#   * a span the record marks as a PATTERN — it writes the word pattern in
+#     front of every regex or placeholder example. Those are shapes the harvest
+#     MATCHES, not code that exists, so they resolve nowhere by construction;
+#     the marker lives in the record's own prose, so a new example inherits the
+#     exclusion just by being written the same way. That is the `memory: `key``
+#     technique T9.4c uses, not a per-token skip list.
+#   * a row id or an issue ref, by SHAPE — a pointer to this suite's own rows or
+#     to a GitHub issue is not a symbol in the script being described.
+#
+# Both the marker rule and the harvest read `$T18_SD_PROSE`, the unwrapped body
+# built above, so neither depends on where a comment happens to wrap nor on how
+# far its continuation is indented — inside the one boundary declared there.
+T18_DERIVED_TOKENS="$(sed 's/pattern[[:space:]]*`[^`]*`//g' <<<"$T18_SD_PROSE" \
+  | grep -oE '`[^`]+`' \
+  | sed 's/^`//; s/`$//' \
+  | grep -vE '^(T[0-9]+(\.[0-9]+)?|#[0-9]+)$' \
+  | sort -u)"
+T18_DERIVED_COUNT="$(grep -c . <<<"$T18_DERIVED_TOKENS" || true)"
+T18_DERIVED_DEAD=""
+while IFS= read -r t18_tok; do
+  [ -n "$t18_tok" ] || continue
+  grep -qF -e "$t18_tok" "$SOLVE_FLEET_JS" \
+    || T18_DERIVED_DEAD="$T18_DERIVED_DEAD
+        $t18_tok"
+done <<EOF_T18_DERIVED
+$T18_DERIVED_TOKENS
+EOF_T18_DERIVED
+if [ "${T18_DERIVED_COUNT:-0}" -lt 8 ] 2>/dev/null; then
+  echo "  FAIL  T18.10c the backtick harvest yielded only ${T18_DERIVED_COUNT:-0} fragments (floor 8) — the record stopped quoting code, or the harvest broke"
+  echo "        file: $DOCS_ACCURACY_SELF (regions: $T18_CITE_TITLE, $T18_FLOOR_TITLE)"
+  FAIL=$((FAIL + 1))
+elif [ -n "$T18_DERIVED_DEAD" ]; then
+  echo "  FAIL  T18.10c the T16 design record quotes fragment(s) that resolve nowhere in the script it describes"
+  echo "        file: $SOLVE_FLEET_JS"
+  echo "        unresolved:"
+  # BOUNDED on both axes. When a region loses its END marker the slice runs to
+  # EOF and every swallowed line arrives here as a `fragment`, so an unbounded
+  # dump buries T18.9's sentinel — the row that names the REAL fault — under
+  # kilobytes of this file's own source. `awk` is used rather than `head`/`sed q`
+  # so nothing exits early on a reader and poisons `pipefail` with EPIPE
+  # (tests/epipe-guard.test.sh).
+  printf '%s\n' "$T18_DERIVED_DEAD" \
+    | awk 'NF { n += 1; if (n <= 12) print substr($0, 1, 120) }
+           END { if (n > 12) printf "        … and %d more (see T18.9/T18.9a first: a runaway slice reports every swallowed line as a fragment)\n", n - 12 }'
+  echo "        prose naming code that does not exist is a citation that changed shape without becoming resolvable; mark a regex or placeholder example by writing the word pattern before it"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  T18.10c all $T18_DERIVED_COUNT fragments harvested from the record's own backticks resolve in workflow.js"
+  PASS=$((PASS + 1))
+fi
+
+# T18.11 — the retyped counts stay retired, under a DERIVED predicate. The
+# previous edition of this row listed the figures the record had already been
+# caught copying out of the script by hand, which is a criterion that can only
+# ever look BACKWARDS: today's live count, retyped today, reads green through it
+# — and today's live count is exactly what every one of those listed figures WAS
+# on the day someone typed it. A row certifying "states mechanisms, not retyped
+# counts" while the current retype sails past it is the same disjoint-predicate
+# defect this whole task exists to retire, rebuilt inside the fix.
+#
+# What may legitimately carry a figure in the record, and nothing else:
+#   * a row id (`T<n>` / `T<n>.<n>`) or an issue ref (`#<n>`), both stripped by
+#     SHAPE before either arm looks;
+#   * prose naming a MECHANISM, which needs no figure at all — T16.9 prints the
+#     live sizes on every run, and that is the only copy that cannot go stale.
+#
+# TWO arms, because a count comes in two spellings and a digit predicate sees
+# only the first. The numeral arm catches a figure typed in digits; the cardinal
+# arm catches the same figure spelled as a word, which carries no digit at all
+# and would otherwise walk straight through — and a spelled count is what the
+# record was caught carrying, so dropping that arm would be dropping coverage
+# this suite already had. The cardinal vocabulary is a CLOSED CLASS of English,
+# not a list of figures observed to have rotted; that is what makes it look
+# forwards rather than backwards — but a closed class only looks forwards if it
+# is enumerated to its END. A vocabulary that stops after the units is a
+# BACKWARD-LOOKING list wearing a closed class's name: it spans exactly the
+# range whose members were caught rotting, and the first retype one step past
+# the truncation walks straight through a row whose PASS text says it cannot.
+# The class enumerated below is the English cardinal number words — the units,
+# the teens, the tens and the magnitudes — plus the collective and
+# multiplicative count words, which spell a quantity without being numerals.
+# Every word of that class which is NOT enumerated is named as a boundary in the
+# paragraph after: a word held out silently is the truncation this paragraph
+# rejects, wearing a different hat.
+#
+# What must not appear in this comment is a figure copied out of the script or
+# out of the record — a specimen here would be indistinguishable from a claim,
+# and the next reader has no way to tell an example from a measurement. The
+# cardinals this prose does spell name its own structure (two arms, two
+# spellings), which is not a quantity anything can move past.
+#
+# DECLARED BOUNDARIES, not oversights. Each is held out because including it
+# would cost more than the coverage it buys — and they are spelled out rather
+# than counted, so adding one does not leave a stale tally behind:
+#   * `one` is a pronoun and an article ("one of", "the one that"), so including
+#     it would red honest prose on every other line. `once` and `single` spell
+#     the same quantity as an adverb and an adjective, collide with ordinary
+#     prose exactly the same way, and are held out with it.
+#   * `zero` is how this suite names the VACUITY failure mode itself — an anchor
+#     that has moved extracts zero names — which is a mechanism that cannot rot,
+#     not a measurement copied out of the script.
+#   * the `-illion` magnitudes above `trillion`, and the `-uple` multiplicatives
+#     above `quadruple`, are regular open-ended series: they have no end to be
+#     enumerated to. A record that reaches them is not drifting, it is broken.
+# A count spelled as one of the words named above is what this row cannot see;
+# every other member of the class it can.
+#
+# This row is NOT immune to a lost region marker, and no assembled-needle trick
+# can make it so: its own numeral arm is spelled with digits. A slice that runs
+# to EOF swallows this source and reds here as well as at T18.9 — a redundant
+# red beside the sentinel that names the real fault, never a silent pass.
+#
+# Longest forms first. `-w` already stops a unit matching inside a teen, so the
+# order is not what makes the row SEE the teen — it is what makes `-o` report
+# the whole word rather than its prefix in the FAIL arm, and the offending text
+# is the actionable half of the diagnostic.
+T18_CARDINALS='thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen'
+T18_CARDINALS="$T18_CARDINALS|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety"
+T18_CARDINALS="$T18_CARDINALS|hundred|thousand|million|billion|trillion"
+T18_CARDINALS="$T18_CARDINALS|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve"
+T18_CARDINALS="$T18_CARDINALS|quadruple|couple|double|myriad|thrice|triple"
+T18_CARDINALS="$T18_CARDINALS|dozen|gross|score|twice|pair"
+T18_SD_NO_IDS="$(sed -e 's/T[0-9][0-9]*\.[0-9][0-9]*//g' -e 's/T[0-9][0-9]*//g' \
+                     -e 's/#[0-9][0-9]*//g' <<<"$T18_SD")"
+# `grep -o` is deliberate over `grep -n`: the line numbers would be relative to
+# the concatenated slice, not to the file, so they would point at nothing a
+# reader can open. The offending text is the actionable half.
+T18_COUNT_HITS="$({ grep -oE '[0-9][0-9]*' <<<"$T18_SD_NO_IDS" || true
+                    grep -owiE -e "$T18_CARDINALS" <<<"$T18_SD_NO_IDS" || true; } | sort -u)"
+if [ -z "$T18_COUNT_HITS" ]; then
+  echo "  PASS  T18.11 the T16 design record states mechanisms — no numeral outside a row id or issue ref, and no spelled cardinal"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T18.11 the T16 design record retypes a count the code can move past without telling it"
+  echo "        file: $DOCS_ACCURACY_SELF (regions: $T18_CITE_TITLE, $T18_FLOOR_TITLE)"
+  sed 's/^/        /' <<<"$T18_COUNT_HITS"
+  echo "        name the mechanism instead; T16.9 already prints the live counts on both sides"
   FAIL=$((FAIL + 1))
 fi
 

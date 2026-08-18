@@ -7,7 +7,10 @@
 # whole runner reported green having executed under half the fixture. The abort
 # was a `$BASHPID` expansion under `set -u` on macos-latest's bash 3.2. The
 # reason it was invisible for two months is the second half: on bash 3.2 a
-# `set -u` abort in a script that has an EXIT trap installed exits ZERO.
+# `set -u` abort exits ZERO when `set -e` is also in force AND an EXIT trap is
+# installed. All three together — which is every fixture in that job, because
+# `set -euo pipefail` plus a cleanup trap is the shape this corpus is written
+# in. Drop any one of the three and the abort exits 1 on both majors.
 #
 # Rows:
 #   E1  the floor turns a `set -u` truncation into a non-zero status
@@ -61,6 +64,11 @@ FLOOR_GUARD_FRAGMENT='|| { echo "FATAL: _lib_exit_floor.sh missing/unreadable" >
 # ---------------------------------------------------------------------------
 # Fixture pair. Same body, same abort modes; one arms the floor, one does not.
 # PROBE_MODE selects the abort, so a single pair covers every row.
+#
+# The `set -euo pipefail` line in both fixtures is part of the reproduction, not
+# boilerplate: the 3.2 laundering needs errexit AND nounset AND an EXIT trap
+# together. Relax it to `set -u` and E5's 3.2 arm stops reproducing anything —
+# the abort exits 1, and the row reds saying so.
 # ---------------------------------------------------------------------------
 FLOORED="$TMPD/floored.sh"
 UNFLOORED="$TMPD/unfloored.sh"
@@ -192,7 +200,7 @@ if [ "$BASH_MAJOR" -ge 4 ]; then
   e5_why="bash >= 4 propagates the set -u abort"
 else
   e5_want=0
-  e5_why="bash 3.2 launders the set -u abort to 0 when an EXIT trap is installed (#551)"
+  e5_why="bash 3.2 launders the set -u abort to 0 under set -e with an EXIT trap installed (#551)"
 fi
 if [ "$PROBE_RC" -eq "$e5_want" ]; then
   echo "  PASS  E5 unfloored rc=$PROBE_RC as expected — $e5_why"
