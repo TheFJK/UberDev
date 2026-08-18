@@ -366,12 +366,36 @@ assert_in_section "$VENDOR_RFC" '^## Amendment \(2026-08-14, #534\)' '^### ' \
 # BELOW the blockquote; '^## ' matches the '## Amendment …' start line itself and
 # collapses the range to that one line (the awk trap T3.6b records). '^# ' can
 # match neither a two- nor a three-hash heading, so the range spans the whole
-# amendment. It over-reaches to EOF while this is the last amendment in the file,
-# which is why the pattern is a full sentence naming a field that did not exist
-# before this change rather than a generic phrase a later amendment could repeat.
+# amendment — and past it. Nothing below the #534 block closes the range, so it
+# runs to EOF and also spans every amendment appended after that block (the
+# 2026-08-18 #604 one, and any later). The over-reach is why the pattern must be
+# a full sentence naming a field that did not exist before this change: a generic
+# phrase would be satisfiable from one of those later blocks, and this row would
+# pass while the #534 amendment had lost the paragraph it is here to hold.
 assert_in_section "$VENDOR_RFC" '^## Amendment \(2026-08-14, #534\)' '^# ' \
   '`upstream_tree` records that the cache is a repackaging of upstream, not upstream itself\.' \
   "T3.7c the #534 amendment states the measured tree is not upstream itself"
+
+# §7 and the #511/#534 amendments adjudicate an upstream that HAS a review
+# point. #604 defect 3 is the opposite case: that an upstream is adjudicated at
+# HEAD used to be recorded as the ABSENCE of `last_reviewed_release`, so
+# deleting one line from the register was indistinguishable from a deliberate
+# policy decision, and the report affirmatively attributed its own silence to a
+# key that was simply not there. The register now carries `head_only: true`, and
+# this amendment is where that key is adjudicated in prose rather than inferred.
+# Both T3.6 traps apply here verbatim:
+#   - assert_grep is `grep -qE`, so '(2026-08-18, #604)' MUST escape its parens.
+#     An unescaped form matches a heading that was never written.
+#   - the heading carries no U+2192; this file runs on ubuntu AND windows-latest.
+assert_grep "$VENDOR_RFC" '^## Amendment \(2026-08-18, #604\) — ' "T3.8 vendor RFC carries the dated #604 amendment heading"
+# Anchored to this amendment's OWN block for the T3.6b reason, and the pressure
+# is now six-fold: the #457, #503, #505, #509, #511 and #534 blocks each carry a
+# byte-identical status line, so a whole-file assert_grep would pass against any
+# one of them and never notice this amendment shipped without a status.
+# The section end is '^### ', NOT '^## ' — see the awk-range note above T3.6b.
+assert_in_section "$VENDOR_RFC" '^## Amendment \(2026-08-18, #604\)' '^### ' \
+  'Status of this amendment: \*\*Accepted, implemented\.\*\*' \
+  "T3.8b the #604 amendment declares its own status inside its own block"
 
 echo
 echo "== dispatch RFC 0004: internal version refs agree on v0.30.0 =="
