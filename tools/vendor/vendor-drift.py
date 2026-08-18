@@ -128,11 +128,31 @@ PRERELEASE_RANK = 0
 FINAL_RANK = 1
 RELEASE_KEY_PRERELEASE_FIELD = 1
 FINGERPRINT_RE = re.compile(r"drift-fingerprint:\s*([0-9a-f]+)")
-# The two verdict fields the fingerprint payload leaves out, because neither can
-# vary within it: `id` is the key each entry is stored under, and `actionable` is
-# the filter that decides an entry is there at all. Everything else the verdict
-# carries goes in — see `build_report`.
-FINGERPRINT_VERDICT_SKIP = frozenset({"id", "actionable"})
+# The one verdict field the fingerprint payload leaves out: `id` is the KEY each
+# entry is stored under, so carrying it inside the entry as well would hash the
+# same fact twice. Everything else the verdict carries goes in — see
+# `build_report`.
+#
+# `actionable` used to sit beside it, on the rationale that it "cannot vary
+# within the payload". That held only while `releases` carried the ACTIONABLE
+# verdicts alone. #604 widened it to EVERY verdict, because
+# `Recorded release review points` renders every one of them, so `actionable`
+# now varies entry to entry and the exception has lost its premise: the field
+# falls back under the rule its neighbours already follow — the whole verdict,
+# minus its key, never a hand-picked subset. Hashing it costs nothing, since it
+# is a total function of `state`, which is hashed anyway; skipping it would buy
+# only the return of a comment describing a filter this module no longer
+# applies.
+#
+# Do not re-skip it on the grounds that `state` already determines it. The
+# adjudication bucket — which verdicts get a finding block — is a function of
+# THIS field, so an entry without it could not be the only thing a render reads
+# to rebuild that bucket.
+FINGERPRINT_VERDICT_SKIP = frozenset({"id"})
+# The same rule for a change record. Spelled separately because it is a
+# different record: the two sets coincide today, and nothing says a field added
+# to one would have to be added to the other.
+FINGERPRINT_COMPONENT_SKIP = frozenset({"id"})
 # Cap the per-component file list so one large upstream release cannot turn the
 # issue body into an unreadable wall; the residual count is still reported.
 MAX_LISTED_FILES = 25
@@ -827,6 +847,68 @@ def release_finding_lines(verdict):
                      "(upstream %s)" % (state, verdict["id"]))
 
 
+def jsonable(value):
+    """One record field, in a form `json.dumps` can serialise deterministically.
+
+    The collection-valued fields a change record carries are `raw` and
+    `declared`, the file lists the body renders SORTED. Ordering them here is
+    what keeps the fingerprint a function of what the body shows rather than of
+    the order `git diff --name-only` happened to print. That ordering is the
+    whole reason this function is called. Scalars pass through untouched.
+
+    It exists so that "copy the whole record" can stay literal: the alternative
+    is a hand-picked list of the fields that happen to serialise, which is the
+    subset that #604 defect 2 is about.
+
+    `set` and `frozenset` are named in the isinstance tuple DEFENSIVELY, and
+    nothing reaches them: `main()` builds `raw` and `declared` as lists, and the
+    one set this module does build (`declared_files`' component-relative names)
+    is membership-tested at the call site and never stored on a record. So
+    "`json.dumps` refuses a set outright" is a hazard this module cannot
+    currently produce, and it is not why the helper exists; the two names are
+    there so a set arriving later is ordered like every other collection
+    instead of ending the run in a TypeError. Do not read the absence of a test
+    for that arm as evidence the arm is the point.
+    """
+    if isinstance(value, (set, frozenset, list, tuple)):
+        return sorted(value)
+    return value
+
+
+def tag_observation(published):
+    """What the `Upstream tags resolved this run` line says about one slug.
+
+    Exactly three facts — how many tags the remote publishes, which published
+    name is the newest version, and the commit that one points at — so the line
+    and the fingerprint payload are two spellings of ONE triple instead of two
+    traversals of the raw tag map that can quietly disagree. `newest` is None
+    when nothing published keys to a version, which is the case the line reports
+    as "none of them names a version"; `count` is 0 when the remote publishes
+    nothing at all, which is the case it reports as "no published tags".
+
+    The raw `{name: commit}` map is deliberately NOT what gets hashed: the line
+    never shows a per-tag sha, so hashing them would move the fingerprint for a
+    re-tag the body cannot express, and the payload would be reporting a fact
+    the report does not carry.
+
+    That is a rule about WHICH facts, not about how precisely each one is
+    carried. `newest_commit` goes into the payload at full length even though
+    the line renders only its first twelve hex — D-REL20's `oc3` is that gap,
+    declared over-covered rather than trimmed. Hash what the body mentions, at
+    whatever precision this function has; do not hash what it never mentions.
+
+    `newest` is chosen over every name that keys to a version, pre-releases
+    INCLUDED. This block is a neutral observation of what a remote publishes,
+    not a verdict; `release_candidates`' pre-release policy exists to keep an
+    unclearable FINDING out of the report, and applying it here would make the
+    observation misreport what upstream has actually published.
+    """
+    named = [name for name in published if release_key(name) is not None]
+    newest = max(named, key=release_sort_key) if named else None
+    return {"count": len(published), "newest": newest,
+            "newest_commit": published[newest] if newest is not None else None}
+
+
 def build_report(register, heads, tags, verdicts, changes):
     """Render the markdown body plus a stable fingerprint of its drift payload."""
     drifting = [c for c in changes if c["raw"]]
@@ -834,36 +916,79 @@ def build_report(register, heads, tags, verdicts, changes):
     actionable = sorted([v for v in verdicts if v["actionable"]],
                         key=lambda v: v["id"])
 
-    payload = json.dumps(
-        {
-            "heads": heads,
-            "components": {c["id"]: {"head": c["head"], "raw": sorted(c["raw"]),
-                                     "declared": sorted(c["declared"])}
-                           for c in changes if c["raw"] or c["declared"]},
-            # Actionable verdicts only, mirroring how `components` carries only
-            # the entries with content. The fingerprint is what decides whether
-            # an ALREADY-OPEN issue gets a comment (see main()), so without this
-            # key a freshly cut release with an unchanged file set fingerprints
-            # identically to last week's report: the body is refreshed, the
-            # comparison matches, no comment is posted, and the news lands where
-            # nobody is watching.
-            #
-            # Each entry is the VERDICT ITSELF, minus its key and the constant
-            # that got it here — never a hand-picked subset of its fields. A
-            # finding can only render what the verdict carries, so copying the
-            # whole thing is what keeps "the body changed, the fingerprint did
-            # not" unreachable; a subset re-opens that hole the moment a finding
-            # renders a datum nobody remembered to list. `published_commit` is
-            # the one that proved it: it is the `moved` finding's only variable
-            # line, and `newest_commit` stops covering it as soon as a newer
-            # release sits above the re-tagged review point — which is exactly
-            # when a re-tag is worth telling somebody about.
-            "releases": {v["id"]: {key: value for key, value in v.items()
-                                   if key not in FINGERPRINT_VERDICT_SKIP}
-                         for v in actionable},
-        },
-        sort_keys=True,
-    )
+    # ONE observations object, hashed whole. Every fact the body renders below
+    # has to be reachable from here, because the fingerprint is what decides
+    # whether an ALREADY-OPEN issue gets a comment — and main() edits the body
+    # FIRST, then compares. So a fact the body renders and this object omits is
+    # a body that gets rewritten under every subscriber in total silence.
+    #
+    # That is #604 defect 2, and its reproduction is quiet enough to have gone
+    # unnoticed for a release: upstream deletes an old tag without moving HEAD.
+    # No watermark moves, no file changes, the verdict stays `level` — only the
+    # published-tag count in the body moves, and the payload never carried it.
+    #
+    # OVER-COVERAGE IS THE ACCEPTED DIRECTION, stated here because the pressure
+    # runs the other way. A payload wider than the body costs at most one
+    # redundant comment; a payload narrower than the body costs a silent
+    # rewrite. D-REL20's `oc*` rows name ONE case in each class where this
+    # object is deliberately wider — a declared-only component's fields, a
+    # `raw` path past the listed cap, a sha past the twelve hex the body
+    # renders, a non-actionable verdict's field — so a narrowing that lands on
+    # one of them reds.
+    #
+    # They are EXAMPLES, not an enumeration, and the difference is not laziness:
+    # a differential row can only pin a field that MOVES while its record's
+    # class holds still, and a field that is constant across its whole class —
+    # a head-only verdict's `recorded` and, with it, its `published_commit`,
+    # both None for every upstream that stands that way — cannot be pinned that
+    # way at all. Narrowing this object is therefore a decision to take
+    # deliberately and to argue for HERE; the suite reds some narrowings, not
+    # every one, and is not the backstop.
+    observations = {
+        "heads": heads,
+        # The `Upstream tags resolved this run` block, carried as the triple
+        # that line is a pure function of rather than as the raw tag map — see
+        # `tag_observation`. Without this key the deleted-tag scenario above has
+        # no representation in the payload at all.
+        "tags": {slug: tag_observation(published)
+                 for slug, published in tags.items()},
+        # The whole change record, minus its key — never a hand-picked subset.
+        # `{head, raw, declared}` left `stance`, `base`, `repo` and
+        # `upstream_path` uncovered, and the component block renders EVERY one
+        # of the four: `stance` in the `### <id> — stance` heading, `repo` and
+        # `upstream_path` on the `- upstream:` line, `base` on the `- watermark`
+        # line. So advancing a watermark, re-stating a stance or re-pointing an
+        # upstream moved the body and nothing else. D-REL20 executes that list
+        # field by field — rows d, e, g and h are those four — rather than
+        # leaving it to be re-read off the render. The `raw or declared` filter
+        # STAYS: a component that renders nothing must not move the fingerprint.
+        "components": {c["id"]: {key: jsonable(value)
+                                 for key, value in c.items()
+                                 if key not in FINGERPRINT_COMPONENT_SKIP}
+                       for c in changes if c["raw"] or c["declared"]},
+        # EVERY verdict, not the actionable ones alone: `Recorded release review
+        # points` renders all of them, so a move between two NON-actionable
+        # standings — `head-only` -> `level`, the transition #604 names —
+        # rewrote that block while the payload stayed byte-identical. The
+        # actionable ones still have to be here for the original reason: without
+        # them a freshly cut release with an unchanged file set fingerprints
+        # identically to last week, the body is refreshed, the comparison
+        # matches, and the news lands where nobody is watching.
+        #
+        # Each entry is the VERDICT ITSELF, minus its key — never a hand-picked
+        # subset of its fields. A finding can only render what the verdict
+        # carries, so copying the whole thing is what keeps "the body changed,
+        # the fingerprint did not" unreachable; a subset re-opens that hole the
+        # moment a finding renders a datum nobody remembered to list.
+        # `published_commit` is the one that proved it: it is the `moved`
+        # finding's only variable line, and `newest_commit` stops covering it as
+        # soon as a newer release sits above the re-tagged review point — which
+        # is exactly when a re-tag is worth telling somebody about.
+        "releases": {v["id"]: {key: value for key, value in v.items()
+                               if key not in FINGERPRINT_VERDICT_SKIP}
+                     for v in verdicts},
+    }
+    payload = json.dumps(observations, sort_keys=True)
     fingerprint = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
     lines = [MARKER, ""]
@@ -887,18 +1012,22 @@ def build_report(register, heads, tags, verdicts, changes):
     # answered by a repository, not by a vendored component.
     lines.append("Upstream tags resolved this run:")
     lines.append("")
+    # Rendered from `tag_observation` — the same call the payload above hashes —
+    # so the three spellings below and the hashed triple cannot come apart. A
+    # second `max(..., key=release_sort_key)` here would be a second answer to
+    # "which tag is newest", and the report and its own fingerprint would then
+    # be able to disagree about it.
     for slug in sorted(tags):
-        published = tags[slug]
-        named = [n for n in published if release_key(n) is not None]
-        if not published:
+        seen = tag_observation(tags[slug])
+        if not seen["count"]:
             lines.append("- `%s`: no published tags" % slug)
-        elif not named:
+        elif seen["newest"] is None:
             lines.append("- `%s`: %d published tag(s); none of them names a "
-                         "version" % (slug, len(published)))
+                         "version" % (slug, seen["count"]))
         else:
-            newest = max(named, key=release_sort_key)
             lines.append("- `%s`: %d published tag(s); newest `%s` (`%s`)"
-                         % (slug, len(published), newest, published[newest][:12]))
+                         % (slug, seen["count"], seen["newest"],
+                            seen["newest_commit"][:12]))
     lines.append("")
 
     # The verdicts, keyed by upstream ID and never by slug. Two ids can name two

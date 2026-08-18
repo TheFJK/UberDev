@@ -313,6 +313,12 @@ def step_up(nums):
 
 
 rows = []
+# The older labels this loop generates, kept per upstream so the rows below can
+# name one WITHOUT re-deriving it. D-REL20 and D-REL21 both need "a published
+# tag that is old and is not the newest"; a second `step_down` call in their own
+# builders would be a second answer to the same question, and the day this
+# derivation changes the two would disagree silently.
+older_by_upstream = {}
 for upstream_id in labelled:
     meta = ups[upstream_id]
     slug, label = meta["repo"], meta["last_reviewed_release"]
@@ -324,12 +330,15 @@ for upstream_id in labelled:
                  "refs/tags/%s" % label))
     rows.append((slug, commit, "refs/tags/%s^{}" % label))
     lower = nums
+    olders = []
     for _ in range(2):
         lower = step_down(lower)
         if lower is None:
             raise SystemExit("recorded release %r has no room below it" % label)
         older = renumber(label, lower)
+        olders.append(older)
         rows.append((slug, synthetic(slug, older), "refs/tags/%s" % older))
+    older_by_upstream[upstream_id] = olders
     # ...and one tag that names no version at all, on the HAPPY path. Without it
     # every tag in this suite parses to a version, `release_key` never returns
     # None, and the filter that keeps such a tag out of `max()` filters nothing —
@@ -389,6 +398,9 @@ env = {
     "LEAD_LABEL": lead_label,
     "LEAD_PEEL12": lead_meta["last_reviewed_commit"][:12],
     "LEAD_TAG_COUNT": str(lead_tag_count),
+    # An OLD, non-newest published label on the lead slug — the one D-REL20's
+    # row `a` deletes in process and D-REL21 deletes from the table itself.
+    "OLDER_LABEL": older_by_upstream[lead][0],
     "SLUG_COUNT": str(len(all_slugs)),
     "UNVERSIONED_LABEL": UNVERSIONED,
     "TAGFREE_TAG_COUNT": str(tagfree_tag_count),
@@ -2056,12 +2068,25 @@ else
 fi
 
 # D-REL12 — the fingerprint is what decides whether an ALREADY-OPEN issue gets
-# a comment. Without release state in the payload, a freshly cut release with an
-# unchanged file set fingerprints identically to last week: the body is
+# a comment. Without the published tag set in the payload, a freshly cut release
+# with an unchanged file set fingerprints identically to last week: the body is
 # refreshed, the comparison matches, no comment is posted, and the news lands
 # where nobody is looking. Three runs, identical in every input except the
-# published tag set, so the only thing that can move the fingerprint is the
-# release state itself.
+# published tag set, so the tag set is the only thing that can move the
+# fingerprint at all.
+#
+# WHAT THIS ROW PINS — re-derived after #604 widened the payload, because its
+# old rationale was narrower than its assertions. It used to read "release STATE
+# reaches the fingerprint", and that was the honest reading while `releases` was
+# the only place a tag set could leave a mark: a newly published tag was visible
+# to the digest ONLY if it moved a verdict. The payload now carries a per-slug
+# `tags` observation in its own right, so publishing the newer label moves the
+# digest through two carriers at once — that observation, and the `newer`
+# verdict it produces — and this row isolates neither. What it still pins is the
+# property both carriers serve, which is the one that matters to a subscriber: a
+# published tag set that changes reaches the fingerprint, and one that does not
+# leaves it alone. Separating the carriers is D-REL20 row `a`'s job — it deletes
+# a tag that moves no verdict at all, which under the old payload was invisible.
 #
 # These runs carry component drift as well, which the two-section ORDER is
 # asserted on: this is the only scenario in the suite where both sections
@@ -2098,10 +2123,15 @@ TAGS_TABLE="$TAGS_MOVED_NEWER2"
 run_drift "$WORK/drel12-retag2.log" ok "$WATERMARK" "" "[]" --dry-run
 FP_RETAG2="$(fingerprint_of "$DRIFT_OUT")"
 TAGS_TABLE=""
-# Both anti-vacuity arms: the verdict has to be `moved` (not `newer`), and the
-# newest published release has to be a name OTHER than the re-tagged review
-# point — otherwise `newest_commit` alone would move the fingerprint and the
-# comparison would pin nothing.
+# Both anti-vacuity arms, and #604's widening retired neither. The verdict has
+# to be `moved` (not `newer`), and the newest published release has to be a name
+# OTHER than the re-tagged review point — otherwise `newest_commit` alone would
+# move the fingerprint and the comparison would pin nothing. The `tags`
+# observation the payload now carries does not cover this pair either: it holds
+# a count, the newest NAME, and that one name's commit, and a review point
+# re-tagged BELOW the newest release moves none of the three. So the verdict's
+# `published_commit` is still the only carrier here — which is exactly what
+# these two arms exist to guarantee, and why they survive the widening intact.
 grep -qF -e 'published at a different commit' <<<"$DREL12_RETAG_BODY" \
   || DREL12_FAILS="${DREL12_FAILS}${DREL12_FAILS:+; }the re-tag runs do not report a moved review point"
 grep -qF -e "newest \`$NEWER_LABEL\`" <<<"$DREL12_RETAG_BODY" \
@@ -3905,6 +3935,471 @@ if [ -z "$DREL24_FAILS" ]; then
   ok "D-REL24 the head-only standing cites head_only, and release_summary can no longer render the absent-key wording"
 else
   no "D-REL24 the head-only standing is still derived from an absent key: $DREL24_FAILS"
+fi
+
+echo
+echo "== D-REL20-D-REL21: the fingerprint covers every fact the body renders =="
+
+# D-REL20 / D-REL21 — #604 defect 2. The fingerprint decides whether an
+# ALREADY-OPEN issue gets a comment (`main()` edits the body first, then
+# compares), so any fact the body renders that the payload does not carry is a
+# body that can change under every subscriber in total silence. The issue's own
+# reproduction: upstream deletes an old tag without moving HEAD. The verdict
+# stays `level`, the actionable-only `releases` map stays empty, the payload is
+# byte-identical, `gh issue edit` runs, the comparison matches, and the
+# `N published tag(s)` line changes with nobody told.
+#
+# The property is a MATERIAL IMPLICATION — `body_differs => fp_differs` — and it
+# is deliberately one-directional. The converse ("the fingerprint moves only
+# when the body does") is NOT asserted, and must not be: a payload that is a
+# strict superset of what the body renders costs at most one redundant comment,
+# while a payload that is a subset costs a silent change. The `oc*` rows below
+# exist to STATE that asymmetry rather than leave it to be rediscovered by
+# somebody narrowing the payload to make a redundant comment go away.
+#
+# Driven in process, over `build_report` directly, because the mutation matrix
+# needs to move one datum at a time — a stubbed `git`/`gh` run can only move
+# whole tag tables and whole diffs, and half these rows have no spelling at that
+# level. D-REL21 then re-proves the issue's literal scenario through the real
+# `--dry-run` invocation, so the in-process rows cannot be green against a
+# `build_report` nothing reaches.
+DREL20_OUT="$(python3 - "$DRIFT" "$REGISTER" "$ADJUDICATION_HEADING" \
+                      "$LEAD_LABEL" "$OLDER_LABEL" "$RC_LABEL" \
+                      "$UNVERSIONED_LABEL" <<'PY'
+import copy, hashlib, importlib.util, json, re, sys
+
+(drift, reg, adjudication_heading, lead_label, older_label, rc_label,
+ unversioned) = sys.argv[1:8]
+
+# The module is the authority on every ordering and every constant this row
+# turns on. A local re-implementation of "which tag is newest" or of the
+# 25-file cap would keep agreeing with itself while drifting from the code the
+# assertions are about.
+modspec = importlib.util.spec_from_file_location("vendor_drift", drift)
+vendor_drift = importlib.util.module_from_spec(modspec)
+modspec.loader.exec_module(vendor_drift)
+build_report = vendor_drift.build_report
+release_verdict = vendor_drift.release_verdict
+release_key = vendor_drift.release_key
+release_sort_key = vendor_drift.release_sort_key
+MAX_LISTED_FILES = vendor_drift.MAX_LISTED_FILES
+FP_LINE = re.compile(r"^%s.*$" % re.escape(vendor_drift.FINGERPRINT_KEY), re.M)
+
+
+def synthetic(*parts):
+    """A derived 40-hex object id. Never a literal: a typed sha stops proving
+    anything the moment the register records a different one."""
+    # Not a security primitive — a deterministic id derived from the register.
+    return hashlib.sha1("|".join(parts).encode("utf-8"),
+                        usedforsecurity=False).hexdigest()
+
+
+register = json.load(open(reg, encoding="utf-8"))
+ups = register.get("upstreams", {})
+components = sorted([c for c in register.get("components", [])
+                     if c.get("origin") == "third-party"],
+                    key=lambda c: c["id"])
+used = sorted({c["upstream"] for c in components})
+slugs = {u: ups[u]["repo"] for u in used}
+labelled = [u for u in used if ups[u].get("last_reviewed_release")]
+labelled_slugs = {slugs[u] for u in labelled}
+# A HEAD-only upstream whose SLUG carries no labelled upstream: the tag query is
+# answered per repository, so an upstream sharing a monorepo with the labelled
+# one cannot be given a published set of its own without moving the lead's.
+head_only = [u for u in used if not ups[u].get("last_reviewed_release")
+             and slugs[u] not in labelled_slugs]
+if not labelled:
+    raise SystemExit("no used upstream declares last_reviewed_release, so the "
+                     "`level` standing rows a/b/oc3/oc4 hold fixed does not "
+                     "exist and every one of them would assert nothing")
+if not head_only:
+    raise SystemExit("no used upstream is HEAD-only on a slug of its own, so "
+                     "row c has no head-only -> level transition to make and "
+                     "oc3/oc4 have no non-actionable verdict to move")
+
+lead, ho = labelled[0], head_only[0]
+lead_slug, ho_slug = slugs[lead], slugs[ho]
+lead_commit = ups[lead]["last_reviewed_commit"]
+if ups[lead]["last_reviewed_release"] != lead_label:
+    raise SystemExit("the shell passed %r as the recorded release, the register "
+                     "records %r — this row would describe one upstream while "
+                     "asserting against another"
+                     % (lead_label, ups[lead]["last_reviewed_release"]))
+if release_key(unversioned) is not None:
+    raise SystemExit("the version-free label %r keys to a version, so row b "
+                     "would move `newest` as well as the count and would stop "
+                     "being the 'a name nobody can order' case" % unversioned)
+if not release_key(older_label) < release_key(lead_label) < release_key(rc_label):
+    raise SystemExit("the derived labels do not straddle the recorded one "
+                     "(%r < %r < %r is false), so row a would delete the newest "
+                     "tag and oc3/oc4 would move one field instead of two"
+                     % (older_label, lead_label, rc_label))
+
+# The observations, all three keyed the way the tool keys them: HEADs and tags
+# per SLUG, verdicts per upstream ID, components per component id.
+heads = {slug: synthetic("head", slug) for slug in sorted(set(slugs.values()))}
+tags = {
+    # `level`: the recorded label is published, at the recorded commit, and
+    # nothing outranks it. Every row below holds that standing fixed except the
+    # ones that deliberately move it.
+    lead_slug: {lead_label: lead_commit,
+                older_label: synthetic(lead_slug, older_label),
+                unversioned: synthetic(lead_slug, unversioned)},
+    # The HEAD-only slug publishes a PRE-RELEASE above its newest final. That is
+    # what splits oc3 from oc4: the tags block's `newest` is chosen over every
+    # name that keys to a version, so it is the pre-release, while the verdict's
+    # `newest` runs through `release_candidates`, which excludes a pre-release
+    # while the review point is not itself one — so it is the final. One field
+    # each, and neither row can pass on the other's datum.
+    ho_slug: {lead_label: synthetic(ho_slug, lead_label),
+              older_label: synthetic(ho_slug, older_label),
+              rc_label: synthetic(ho_slug, rc_label)},
+}
+
+# One drifting component and one declared-only component, so both render. The
+# drifter carries MORE raw paths than the body lists, which is what gives oc2 a
+# path it can swap below the fold.
+drifter, declared_only = components[0], components[1]
+raw_paths = ["%s/f%03d.md" % (drifter["upstream_path"], i)
+             for i in range(MAX_LISTED_FILES + 3)]
+if len(raw_paths) <= MAX_LISTED_FILES:
+    raise SystemExit("the drifting component carries %d raw path(s), which the "
+                     "body lists in full — oc2 has no path past the fold to "
+                     "swap and would be asserting over a visible one"
+                     % len(raw_paths))
+tail_old = sorted(raw_paths)[-1]
+tail_new = "%s/f%03d.md" % (drifter["upstream_path"], 999)
+swapped = sorted([p for p in raw_paths if p != tail_old] + [tail_new])
+if len(swapped) != len(raw_paths) or swapped.index(tail_new) < MAX_LISTED_FILES:
+    raise SystemExit("oc2's swapped-in path lands at index %d of %d, not past "
+                     "the %d the body lists — it would move the rendered file "
+                     "list and stop being an over-coverage row"
+                     % (swapped.index(tail_new), len(swapped),
+                        MAX_LISTED_FILES))
+stances = sorted({c["stance"] for c in components})
+if len(stances) < 2:
+    raise SystemExit("the register records one stance (%r), so row e has no "
+                     "second value to move to" % stances)
+other_stance = [s for s in stances if s != drifter["stance"]][0]
+
+changes = []
+for c in components:
+    slug = slugs[c["upstream"]]
+    record = {"id": c["id"], "repo": slug, "stance": c["stance"],
+              "upstream_path": c["upstream_path"],
+              "base": c["last_reviewed_upstream_commit"],
+              "head": heads[slug], "raw": [], "declared": []}
+    if c["id"] == drifter["id"]:
+        record["raw"] = list(raw_paths)
+    elif c["id"] == declared_only["id"]:
+        record["declared"] = ["%s/DECLARED.md" % c["upstream_path"]]
+    changes.append(record)
+
+
+def base_state():
+    return {"ups": copy.deepcopy(ups), "heads": dict(heads),
+            "tags": copy.deepcopy(tags), "changes": copy.deepcopy(changes)}
+
+
+def by_id(state, cid):
+    return [r for r in state["changes"] if r["id"] == cid][0]
+
+
+def render(state):
+    """One report, with the verdicts RE-DERIVED from the mutated state. Hand-built
+    verdict dicts would let a row assert a standing `release_verdict` never
+    produces — the exact gap between the register and the report this whole
+    suite is about."""
+    verdicts = [release_verdict(u, state["ups"][u], state["tags"][slugs[u]])
+                for u in used]
+    body, fingerprint, _ = build_report(register, state["heads"], state["tags"],
+                                        verdicts, state["changes"])
+    return FP_LINE.sub("", body), fingerprint, body, verdicts
+
+
+def mut_none(s):
+    return s
+
+
+def mut_delete_old_tag(s):
+    del s["tags"][lead_slug][older_label]
+    return s
+
+
+def mut_add_unversioned_tag(s):
+    s["tags"][ho_slug][unversioned] = synthetic(ho_slug, unversioned, "added")
+    return s
+
+
+def mut_declare_a_review_point(s):
+    s["ups"][ho].pop("head_only", None)
+    s["ups"][ho]["last_reviewed_release"] = lead_label
+    s["ups"][ho]["last_reviewed_commit"] = s["tags"][ho_slug][lead_label]
+    return s
+
+
+def mut_advance_drifting_base(s):
+    by_id(s, drifter["id"])["base"] = synthetic("advanced", drifter["id"])
+    return s
+
+
+def mut_change_drifting_stance(s):
+    by_id(s, drifter["id"])["stance"] = other_stance
+    return s
+
+
+def mut_repoint_drifting_repo(s):
+    # The record's `repo` is rendered on the `- upstream:` line and read nowhere
+    # else in `build_report` — `heads` and `tags` are keyed by the caller's slug,
+    # not by this field — so the row moves exactly one rendered datum.
+    record = by_id(s, drifter["id"])
+    record["repo"] = "%s-renamed" % record["repo"]
+    return s
+
+
+def mut_relocate_drifting_upstream_path(s):
+    # `raw` is left exactly as it was, so the file list below the `- upstream:`
+    # line is unmoved and this row is that line's second field alone.
+    record = by_id(s, drifter["id"])
+    record["upstream_path"] = "%s/relocated" % record["upstream_path"]
+    return s
+
+
+def mut_advance_declared_only_base(s):
+    by_id(s, declared_only["id"])["base"] = synthetic("advanced",
+                                                      declared_only["id"])
+    return s
+
+
+def mut_swap_path_below_the_fold(s):
+    by_id(s, drifter["id"])["raw"] = list(swapped)
+    return s
+
+
+def mut_retag_past_the_rendered_prefix(s):
+    published = s["tags"][ho_slug]
+    was = published[rc_label]
+    # Shares the twelve hex the body renders, differs beyond them. Derived by
+    # rotating the last digit rather than ground out, so it cannot fail to
+    # collide the day the seed changes.
+    twin = was[:-1] + ("0" if was[-1] != "0" else "1")
+    if twin[:12] != was[:12] or twin == was:
+        raise SystemExit("oc3's derived twin sha does not share the first 12 "
+                         "hex of %r while differing beyond them, so the row "
+                         "would be moving a datum the body renders" % was)
+    published[rc_label] = twin
+    return s
+
+
+def mut_move_nonactionable_newest_commit(s):
+    s["tags"][ho_slug][lead_label] = synthetic(ho_slug, lead_label, "re-tagged")
+    return s
+
+
+OVER_COVERAGE_RULING = ("over-coverage is the accepted direction; see spec "
+                        "§2.1 — narrowing the payload here is a deliberate "
+                        "decision, not a bug fix")
+
+# The label is DECLARED per row, and the assertion is made against the label
+# rather than against whatever the run happened to do. A matrix that read its
+# expectation off the run would agree with any implementation at all.
+#
+# Rows d, e, g and h are one per field: `base`, `stance`, `repo` and
+# `upstream_path` are the four the component block renders that the old
+# `{head, raw, declared}` payload did not carry, and each is asserted on its own
+# so "the whole record, minus its key" is executed field by field rather than
+# claimed in a comment.
+ROWS = [
+    ("a", "body-visible", "delete one old, non-newest published tag",
+     mut_delete_old_tag),
+    ("b", "body-visible", "publish one more tag naming no version",
+     mut_add_unversioned_tag),
+    ("c", "body-visible", "flip a HEAD-only upstream to a recorded review "
+     "point, moving its verdict head-only -> level",
+     mut_declare_a_review_point),
+    ("d", "body-visible", "advance a drifting component's base, raw set "
+     "identical", mut_advance_drifting_base),
+    ("e", "body-visible", "change a drifting component's stance",
+     mut_change_drifting_stance),
+    ("f", "body-invisible", "no-op re-run", mut_none),
+    ("g", "body-visible", "re-point a drifting component's repo",
+     mut_repoint_drifting_repo),
+    ("h", "body-visible", "relocate a drifting component's upstream_path",
+     mut_relocate_drifting_upstream_path),
+    ("oc1", "over-covered", "change a declared-only component's base",
+     mut_advance_declared_only_base),
+    ("oc2", "over-covered", "swap one raw path that sorts past the listed "
+     "cap, count unchanged", mut_swap_path_below_the_fold),
+    ("oc3", "over-covered", "re-tag the newest published release past the "
+     "twelve hex the body renders", mut_retag_past_the_rendered_prefix),
+    ("oc4", "over-covered", "move a non-actionable verdict's newest_commit",
+     mut_move_nonactionable_newest_commit),
+]
+
+base_body, base_fp, base_raw_body, base_verdicts = render(base_state())
+by_upstream = {v["id"]: v for v in base_verdicts}
+problems = []
+
+# Anti-vacuity, before a single row runs: the two standings every row holds
+# fixed have to actually BE the standings, and the two `newest` answers oc3 and
+# oc4 move have to actually be different names.
+if by_upstream[lead]["state"] != "level":
+    problems.append("the lead upstream's baseline standing is %r, not `level` — "
+                    "rows a and b would be moving a verdict as well as the tag "
+                    "observation" % by_upstream[lead]["state"])
+if by_upstream[ho]["state"] != "head-only":
+    problems.append("the HEAD-only upstream's baseline standing is %r, not "
+                    "`head-only` — row c has no transition to make"
+                    % by_upstream[ho]["state"])
+if by_upstream[ho]["newest"] != lead_label:
+    problems.append("the HEAD-only verdict names %r as its newest release, not "
+                    "the final %r, so oc4 would be moving the same datum the "
+                    "tags block renders and oc3 asserts over"
+                    % (by_upstream[ho]["newest"], lead_label))
+named = [n for n in tags[ho_slug] if release_key(n) is not None]
+if max(named, key=release_sort_key) != rc_label:
+    problems.append("the HEAD-only slug's newest published tag is %r, not the "
+                    "pre-release %r, so oc3 and oc4 exercise one field instead "
+                    "of two" % (max(named, key=release_sort_key), rc_label))
+
+saw_body_move = saw_body_still = False
+for row, label, description, mutate in ROWS:
+    body, fingerprint, raw_body, _ = render(mutate(base_state()))
+    body_differs = body != base_body
+    fp_differs = fingerprint != base_fp
+    saw_body_move = saw_body_move or body_differs
+    saw_body_still = saw_body_still or not body_differs
+    if adjudication_heading in raw_body:
+        problems.append("row %s renders %r, so its movement could be coming "
+                        "from a release FINDING rather than from the "
+                        "observation blocks this row is about"
+                        % (row, adjudication_heading))
+    # Criterion 7, over EVERY row including the over-covered ones. This is the
+    # whole property; the per-label arms below only say which side each row is
+    # declared to land on.
+    if body_differs and not fp_differs:
+        problems.append("row %s (%s) moved the body without moving the "
+                        "fingerprint — an already-open issue would be silently "
+                        "rewritten under every subscriber" % (row, description))
+    if label == "body-visible":
+        if not body_differs:
+            problems.append("row %s (%s) is declared body-visible but rendered "
+                            "an identical body" % (row, description))
+        if not fp_differs:
+            problems.append("row %s (%s) is declared body-visible but left the "
+                            "fingerprint alone" % (row, description))
+    elif label == "body-invisible":
+        if body_differs:
+            problems.append("row %s (%s) is declared body-invisible but moved "
+                            "the body" % (row, description))
+        if fp_differs:
+            problems.append("row %s (%s) is declared body-invisible but moved "
+                            "the fingerprint — two identical runs would comment "
+                            "every week" % (row, description))
+    elif label == "over-covered":
+        if body_differs:
+            problems.append("row %s (%s) is declared over-covered but moved the "
+                            "body, so it is not the case it was written for"
+                            % (row, description))
+        if not fp_differs:
+            problems.append("row %s (%s) left the fingerprint alone: %s"
+                            % (row, description, OVER_COVERAGE_RULING))
+    else:
+        raise SystemExit("row %s carries the unknown label %r" % (row, label))
+
+if not (saw_body_move and saw_body_still):
+    raise SystemExit("the matrix is one-sided (a body move was %sseen, a body "
+                     "left alone was %sseen) — an implication with no false "
+                     "antecedent, or no true one, asserts nothing"
+                     % ("" if saw_body_move else "not ",
+                        "" if saw_body_still else "not "))
+
+print("; ".join(problems) if problems else "D-REL20-OK")
+PY
+)"
+DREL20_RC=$?
+DREL20_FAILS=''
+[ "$DREL20_RC" -eq 0 ] \
+  || DREL20_FAILS="the probe itself exited rc=$DREL20_RC — a traceback, or an anti-vacuity refusal, is not a pass"
+case "$DREL20_OUT" in
+  D-REL20-OK) ;;
+  '') DREL20_FAILS="${DREL20_FAILS}${DREL20_FAILS:+; }the probe printed nothing at all" ;;
+  *)  DREL20_FAILS="${DREL20_FAILS}${DREL20_FAILS:+; }$DREL20_OUT" ;;
+esac
+if [ -z "$DREL20_FAILS" ]; then
+  ok "D-REL20 every mutation that moves the body moves the fingerprint, identical runs move neither, and the over-covered rows are declared"
+else
+  no "D-REL20 the fingerprint does not cover the body: $DREL20_FAILS"
+fi
+
+# D-REL21 — the issue's literal reproduction, through the real invocation shape.
+# Two `--dry-run` runs at the SAME watermark, differing only by one deleted old
+# tag: no HEAD moves, no file changes, the verdict is `level` in both, and the
+# only thing that can differ is the published-tag count the body renders. Before
+# the payload carried `tags` at all, that run pair fingerprinted identically.
+#
+# In process (D-REL20 row `a`) and through `python3 vendor-drift.py --dry-run`
+# are not the same assertion: the in-process rows reach `build_report` directly,
+# so they stay green against a `main()` that never builds the observations it is
+# handed. This row is what pins the whole path.
+TAGS_MINUS_OLD="$WORK/tags-minus-old.tbl"
+python3 - "$TAGS_DEFAULT" "$TAGS_MINUS_OLD" "$LEAD_SLUG" \
+         "$OLDER_LABEL" <<'PY' || { echo "  ABORT — could not derive the deleted-tag table"; exit 99; }
+import sys
+
+src, dest, lead_slug, older_label = sys.argv[1:5]
+kept, dropped = [], 0
+for line in open(src, encoding="utf-8"):
+    if not line.strip():
+        continue
+    slug, sha, ref = line.rstrip("\n").split("\t")
+    name = ref.split("refs/tags/", 1)[1]
+    name = name[:-3] if name.endswith("^{}") else name
+    if slug == lead_slug and name == older_label:
+        dropped += 1
+        continue
+    kept.append((slug, sha, ref))
+# Exactly one, or the row is not the scenario it claims: zero means the table
+# never published the label and both runs would be identical; more than one
+# means the label was annotated and the peel row went with it, which is a
+# different deletion than the one #604 describes.
+if dropped != 1:
+    raise SystemExit("dropping %s/%s removed %d table row(s), not exactly 1"
+                     % (lead_slug, older_label, dropped))
+open(dest, "w", encoding="utf-8").write(
+    "".join("%s\t%s\t%s\n" % r for r in kept))
+PY
+run_drift "$WORK/drel21a.log" ok "$WATERMARK" "" "[]" --dry-run
+DREL21_BODY_A="$DRIFT_OUT"
+DREL21_FP_A="$(fingerprint_of "$DRIFT_OUT")"
+DREL21_RC_A="$DRIFT_RC"
+TAGS_TABLE="$TAGS_MINUS_OLD"
+run_drift "$WORK/drel21b.log" ok "$WATERMARK" "" "[]" --dry-run
+TAGS_TABLE=""
+DREL21_BODY_B="$DRIFT_OUT"
+DREL21_FP_B="$(fingerprint_of "$DRIFT_OUT")"
+DREL21_RC_B="$DRIFT_RC"
+DREL21_FAILS=''
+[ "$DREL21_RC_A" -eq 0 ] && [ "$DREL21_RC_B" -eq 0 ] \
+  || DREL21_FAILS="a run exited non-zero (rc=$DREL21_RC_A / rc=$DREL21_RC_B), so the bodies below are aborts rather than reports"
+# Anti-vacuity, both directions. The count has to actually drop, and the NEWEST
+# release has to be the same name in both runs — a deletion that took the newest
+# tag with it would move the verdict, and the row would be re-proving D-REL12
+# instead of the deleted-old-tag scenario #604 is about.
+grep -qF -e "- \`$LEAD_SLUG\`: $LEAD_TAG_COUNT published tag(s); newest \`$LEAD_LABEL\`" <<<"$DREL21_BODY_A" \
+  || DREL21_FAILS="${DREL21_FAILS}${DREL21_FAILS:+; }the first run does not report $LEAD_TAG_COUNT published tag(s) for $LEAD_SLUG with \`$LEAD_LABEL\` newest"
+grep -qF -e "- \`$LEAD_SLUG\`: $((LEAD_TAG_COUNT - 1)) published tag(s); newest \`$LEAD_LABEL\`" <<<"$DREL21_BODY_B" \
+  || DREL21_FAILS="${DREL21_FAILS}${DREL21_FAILS:+; }the second run does not report one fewer published tag for $LEAD_SLUG with the same newest release"
+grep -qF -e "$ADJUDICATION_HEADING" <<<"$DREL21_BODY_A$DREL21_BODY_B" \
+  && DREL21_FAILS="${DREL21_FAILS}${DREL21_FAILS:+; }a run rendered a release finding, so the fingerprint could have moved through a verdict rather than through the deleted tag"
+[ -n "$DREL21_FP_A" ] && [ -n "$DREL21_FP_B" ] \
+  || DREL21_FAILS="${DREL21_FAILS}${DREL21_FAILS:+; }a run rendered no fingerprint at all"
+[ "$DREL21_FP_A" != "$DREL21_FP_B" ] \
+  || DREL21_FAILS="${DREL21_FAILS}${DREL21_FAILS:+; }deleting one old tag changed the body and not the fingerprint — main() would edit the issue and post no comment"
+if [ -z "$DREL21_FAILS" ]; then
+  ok "D-REL21 an old tag deleted with HEAD unmoved changes the published-tag line and the fingerprint with it"
+else
+  no "D-REL21 the deleted-tag scenario is still silent: $DREL21_FAILS"
 fi
 
 echo
