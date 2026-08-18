@@ -118,7 +118,10 @@ close, so the gap is written down rather than left implied.
     fictional `solve.lead.<tier>` id survived review inside comment prose. L2b
     must not, because a comment binds nothing and treating prose as a command
     manufactures findings out of English: `# Inconclusive (read blip or comment
-    not yet indexed)` — solve-launcher.sh:843, a real line — parses as a `read`
+    not yet indexed)` — a real line of solve-launcher.sh, quoted here rather
+    than numbered because a number for it went stale before it was written and
+    the same wrong one reached three rows of tests/solve-run-tree.test.sh —
+    parses as a `read`
     binding the six words after it, and adding any `$VAR` to that sentence used
     to red this guard (measured rc 1 before, rc 0 now). An ARGUMENT is out of
     scope for the same reason (`echo "a; printf -v UBERDEV_ROOT_EDGE_ID x"`,

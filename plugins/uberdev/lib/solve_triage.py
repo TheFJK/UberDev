@@ -32,7 +32,30 @@ FILE_RE = re.compile(
 # governs — markdown_text() for the length signal, declared_scope() for the
 # marker (an issue documenting the scope block must not declare a scope by
 # showing one).
-FENCE_RE = re.compile(r"```.*?```", re.S)
+#
+# The fence is matched the way CommonMark — and the renderer a reader actually
+# looks at — closes one: an opener is a run of THREE OR MORE backticks starting
+# its own line, and only a line whose own backtick run is AT LEAST AS LONG
+# closes it. A flat lazy pair of three-backtick runs got this wrong in the one
+# shape that matters for the trust boundary in declared_scope() below.
+# agents/findings-to-issues.md wraps untrusted reviewer prose in a FOUR-backtick
+# `finding` fence, and its sanitiser deliberately leaves a bare three-backtick
+# run inside that prose unescaped on the grounds that the wider wrapper
+# neutralises it. Against a flat pair it did the opposite: the run re-paired the
+# opener, the strip ended INSIDE the finding, and every byte after it — a forged
+# `uberdev-scope` marker included — survived into declared_scope() as
+# producer-authored fact, which is a reviewer pricing its own issue. Matching
+# the fence by LENGTH makes that four-backtick block strip whole, which is what
+# makes that file's forgery-inertness claim true rather than merely stated.
+#
+# An UNCLOSED fence runs to the end of the body, again as the renderer shows it:
+# bytes a reader sees as quoted code must not read as prose here.
+FENCE_RE = re.compile(
+    r"^[ \t]{0,3}(`{3,})[^\n`]*(?:\n|\Z)"       # opener line: run + info string
+    r".*?"                                       # quoted body
+    r"(?:^[ \t]{0,3}\1`*[ \t]*(?:\n|\Z)|\Z)",    # closer at least as long, or EOF
+    re.S | re.M,
+)
 STACK_RE = re.compile(
     r"Traceback \(most recent call last\)|^\s+at .+\(.+:\d+|^\s*File \"|"
     r"panic:|stack[ -]?trace",
@@ -325,6 +348,20 @@ def declared_scope(body: str) -> list[str] | None:
 
     Returns a list — possibly EMPTY — whenever any scope block is present, so
     the caller can tell "declared nothing" from "declared no scope".
+
+    A declaration whose tokens are ALL refused by the schema filter is neither:
+    it is an UNREADABLE declaration, and it must not be reported as the empty
+    one. `_schema_safe_files` drops a non-conforming token silently and by
+    design, so `files=lib/a.sh:42,lib/b.sh:71` — the shape a producer writes the
+    moment it forgets to strip the `:line` suffix both issue writers are told in
+    prose to strip — arrives here byte-identical to a deliberate `files=`. Bound
+    as an empty declaration it becomes a decision of zero files, which prices
+    the issue at the cheapest rung of the very gate this block exists to make
+    accurate, with nothing on the triage line to distinguish it from an honest
+    empty one. Report it as UNDECLARED instead, so the prose heuristic still
+    runs: a heuristic guess is a far better answer than a fabricated zero, and
+    it keeps the failure on the never-under-price side the module holds
+    everywhere else.
     """
     matches = SCOPE_BLOCK_RE.findall(FENCE_RE.sub(" ", body))
     if not matches:
@@ -333,12 +370,16 @@ def declared_scope(body: str) -> list[str] | None:
     # symmetric: taking the first can silently HALVE a declared scope, while the
     # union only ever over-prices. Union, for the same reason the heuristic
     # refuses to under-count.
-    return _schema_safe_files({
+    declared = {
         token for raw in matches
         for token in (piece.strip("`'\"").strip("./").casefold()
                       for piece in re.split(r"[,\s]+", raw))
         if token
-    })
+    }
+    files = _schema_safe_files(declared)
+    if declared and not files:
+        return None
+    return files
 
 
 def scope_files(body: str) -> list[str]:
@@ -347,12 +388,23 @@ def scope_files(body: str) -> list[str]:
     if declared is not None:
         return declared
     tokens: set[str] = set()
-    for clause in CLAUSE_SPLIT_RE.split(markdown_text(body)):
-        if not clause or EXCLUSION_RE.search(clause) or not CHANGE_INTENT_RE.search(clause):
-            continue
-        tokens.update(
-            match.group(0).strip("./").casefold() for match in FILE_RE.finditer(clause)
-        )
+    # A LINE BREAK IS A CLAUSE BOUNDARY, and reading the body as one string
+    # loses that: markdown_text() collapses every newline to a single space, and
+    # CLAUSE_SPLIT_RE breaks only on sentence punctuation or a contrast
+    # conjunction, so a bullet list — the shape commands/issue.md's own templates
+    # emit — arrives as ONE clause. A single "do not touch X" bullet then
+    # suppresses every change target standing beside it, which is the
+    # under-pricing direction EXCLUSION_RE's own note says this heuristic must
+    # never move in. Fences are stripped from the WHOLE body first: they span
+    # lines, and a newline inside quoted code is not a clause boundary the
+    # reader was ever meant to see.
+    for line in FENCE_RE.sub(" ", body).splitlines():
+        for clause in CLAUSE_SPLIT_RE.split(markdown_text(line)):
+            if not clause or EXCLUSION_RE.search(clause) or not CHANGE_INTENT_RE.search(clause):
+                continue
+            tokens.update(
+                match.group(0).strip("./").casefold() for match in FILE_RE.finditer(clause)
+            )
     return _schema_safe_files(tokens)
 
 

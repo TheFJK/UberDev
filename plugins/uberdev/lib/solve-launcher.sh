@@ -205,12 +205,8 @@ if [[ -n "$FORCE_FLAG" ]]; then
 else
   FORCE_CLAIM=0
 fi
-# --- Phase A: claim-protocol shell constants (v0.28.0) ---
-# Canonical values; the Constants table in solve-pipeline/SKILL.md documents
-# them. Keep at column 0 — tests/solve-claim.test.sh anchors
-# `^UBERDEV_ACTIVE_LABEL=` and `^CLAIM_COMMENT_MARKER=`.
-# Issue-body snapshot cap for the standard-mode lane (RFC 0020). A BYTE budget,
-# same 64 KiB ceiling and same reason as _UBERDEV_GOAL_BODY_CAP in
+# --- Phase A: standard-mode issue-body snapshot cap (RFC 0020) ---
+# A BYTE budget, same 64 KiB ceiling and same reason as _UBERDEV_GOAL_BODY_CAP in
 # lib/goal-state.sh (which enforces it with `head -c`): the body is fed to every
 # research lens and to the spec writer, and is unbounded input to their own
 # scanning. Env-overridable for a pathological repo, but validated -- an
@@ -225,6 +221,10 @@ case "$UBERDEV_ISSUE_BODY_CAP" in
 esac
 # Parallel to ISSUE_NUMS[]/TIERS[] (bash 3.2: no associative arrays).
 ISSUE_BODY_FILES=()
+# --- Phase A: claim-protocol shell constants (v0.28.0) ---
+# Canonical values; the Constants table in solve-pipeline/SKILL.md documents
+# them. Keep at column 0 — tests/solve-claim.test.sh anchors
+# `^UBERDEV_ACTIVE_LABEL=` and `^CLAIM_COMMENT_MARKER=`.
 UBERDEV_ACTIVE_LABEL='uberdev:active'
 UBERDEV_ACTIVE_LABEL_COLOR='D93F0B'
 UBERDEV_ACTIVE_LABEL_DESCRIPTION='Issue currently being worked on by a /solve or /turbo dispatcher. Auto-managed; do not edit.'
@@ -668,7 +668,19 @@ for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
   # number, so the one signal an operator reads to sanity-check a tier would
   # have contradicted the tier itself. `scope_files` is that decision's
   # `file_count`, by construction.
-  TRIAGE_SCOPE_FILES="$(python3 -I -c 'import json,sys; print(json.loads(sys.argv[1])["file_count"],end="")' "$TRIAGE_JSON")"
+  #
+  # GUARDED, because this file sets no errexit: a decode failure or a decision
+  # that has stopped carrying the key yields an EMPTY value, and the operator
+  # line below would then print a blank scope count beside a real tier — the
+  # precise contradiction the paragraph above says this change exists to
+  # eliminate — while the run dispatched anyway on a signal that had silently
+  # lost its meaning. A decision that cannot answer aborts the batch instead.
+  if ! TRIAGE_SCOPE_FILES="$(python3 -I -c 'import json,sys; print(json.loads(sys.argv[1])["file_count"],end="")' "$TRIAGE_JSON" 2>&1)"; then
+    ERRORS+=("#$ISSUE_NUM: triage decision carries no readable file_count: $TRIAGE_SCOPE_FILES")
+    rm -f "$UBERDEV_TMPDIR/solve-validate-$ISSUE_NUM.json"
+    _vidx=$((_vidx + 1))
+    continue
+  fi
   echo "triage: #$ISSUE_NUM tier=$TIER($TIER_SOURCE) labels=[$TRIAGE_LABELS] body_chars=$TRIAGE_BODY_CHARS stack_trace=$TRIAGE_STACK scope_files=$TRIAGE_SCOPE_FILES title=\"$TITLE\""
   TIERS[$_vidx]="$TIER"
   TITLES[$_vidx]="$TITLE"
@@ -688,34 +700,51 @@ for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
   # round-trip less safely and bind it to the caller's cwd remote rather than
   # to $REPO_SLUG.
   #
-  # Capped at UBERDEV_ISSUE_BODY_CAP for the reason goal-state.sh:161 caps its
-  # own body reads: an unbounded body is fed to every research lens and to the
-  # spec writer, and is an unbounded input to their regex scanning.
+  # Capped at UBERDEV_ISSUE_BODY_CAP for the reason `_UBERDEV_GOAL_BODY_CAP` in
+  # lib/goal-state.sh caps its own body reads with `head -c`: an unbounded body
+  # is fed to every research lens and to the spec writer, and is an unbounded
+  # input to their regex scanning. Named by SYMBOL and by the enforcing command,
+  # the way the constant's own definition above states it — the numbered form
+  # this replaces pointed at the cap DEFAULT rather than at the read it caps,
+  # which is one file over from what the sentence describes.
   if [[ "$STANDARD_MODE" == "1" ]]; then
-    if ! python3 -I -B -c '
+    # stderr is CAPTURED and appended to the error entry, the way the gh-fetch
+    # arm above appends its own: the writer names the invariant it tripped, and
+    # a reason that never reaches the operator is a reason nobody has.
+    if ! SNAPSHOT_ERR="$(python3 -I -B -c '
 import json,os,stat,sys
 root,target,cap_raw,raw=sys.argv[1:5]
-# The cap is a BYTE budget and must be positive. cap=0 wrote a zero-byte file
-# that passed every downstream check, handing an empty requirements document to
-# every research lens; a negative cap silently trimmed the END of the body. Both
-# exited 0, so the run continued. Validate before it can do either.
+# Defence in depth, not the rationale: the shell `case` beside the constant
+# already rejects empty, non-numeric and non-positive values. The re-check is
+# here only because the value crosses an interpreter boundary.
 try:
     cap=int(cap_raw)
 except ValueError:
     print("issue-body cap is not an integer",file=sys.stderr); raise SystemExit(2)
 if cap<1:
     print("issue-body cap must be >= 1",file=sys.stderr); raise SystemExit(2)
+# Every arm below names itself on stderr before it exits. Nine invariants shared
+# one bare status 2 and one generic shell message, so an operator watching a run
+# die learned that the snapshot could not be persisted and nothing about why:
+# a permissions problem, a stale artifact from a previous run hitting the
+# exclusive create, a symlinked run dir and a full disk were indistinguishable.
 root=os.path.realpath(root); target=os.path.abspath(target)
-if os.path.dirname(target)!=root: raise SystemExit(2)
+if os.path.dirname(target)!=root:
+    print("snapshot target is not directly inside the run root",file=sys.stderr); raise SystemExit(2)
 # Same root guards _uberdev_fetch_issue_json performs before writing into this
 # directory. The prior version cited that snippet for its safety properties
 # without re-establishing them.
 uid=os.geteuid() if hasattr(os,"geteuid") else None
 posix_security=os.name!="nt"
 root_entry=os.stat(root,follow_symlinks=False)
-if not stat.S_ISDIR(root_entry.st_mode) or (uid is not None and root_entry.st_uid!=uid): raise SystemExit(2)
-if posix_security and stat.S_IMODE(root_entry.st_mode)!=0o700: raise SystemExit(2)
-if os.path.islink(root): raise SystemExit(2)
+if not stat.S_ISDIR(root_entry.st_mode):
+    print("run root is not a directory",file=sys.stderr); raise SystemExit(2)
+if uid is not None and root_entry.st_uid!=uid:
+    print("run root is not owned by this user",file=sys.stderr); raise SystemExit(2)
+if posix_security and stat.S_IMODE(root_entry.st_mode)!=0o700:
+    print("run root mode is not 0700",file=sys.stderr); raise SystemExit(2)
+if os.path.islink(root):
+    print("run root is a symlink",file=sys.stderr); raise SystemExit(2)
 d=json.loads(raw)
 labels=",".join(l.get("name","") for l in d.get("labels") or [])
 body=d.get("body") or ""
@@ -728,20 +757,27 @@ data=data.decode("utf-8","ignore").encode("utf-8")
 fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600)
 try:
     entry=os.fstat(fd)
-    if (uid is not None and entry.st_uid!=uid) or entry.st_nlink!=1 or not stat.S_ISREG(entry.st_mode): raise SystemExit(2)
+    if uid is not None and entry.st_uid!=uid:
+        print("snapshot file is not owned by this user",file=sys.stderr); raise SystemExit(2)
+    if entry.st_nlink!=1:
+        print("snapshot file has more than one hard link",file=sys.stderr); raise SystemExit(2)
+    if not stat.S_ISREG(entry.st_mode):
+        print("snapshot file is not a regular file",file=sys.stderr); raise SystemExit(2)
     written=0
     while written<len(data):
         # os.write may return short; a discarded return value truncated the body
         # mid-content while every later check still passed.
         n=os.write(fd,data[written:])
-        if n<=0: raise SystemExit(2)
+        if n<=0:
+            print("short write persisting the snapshot (disk full?)",file=sys.stderr); raise SystemExit(2)
         written+=n
     final=os.fstat(fd)
-    if final.st_size!=len(data): raise SystemExit(2)
+    if final.st_size!=len(data):
+        print("snapshot final size does not match the bytes written",file=sys.stderr); raise SystemExit(2)
 finally:
     os.close(fd)
-' "$UBERDEV_TMPDIR" "$UBERDEV_TMPDIR/issue-body-$ISSUE_NUM.md" "$UBERDEV_ISSUE_BODY_CAP" "$ISSUE_JSON"; then
-      ERRORS+=("#$ISSUE_NUM: could not persist the standard-mode issue-body snapshot")
+' "$UBERDEV_TMPDIR" "$UBERDEV_TMPDIR/issue-body-$ISSUE_NUM.md" "$UBERDEV_ISSUE_BODY_CAP" "$ISSUE_JSON" 2>&1)"; then
+      ERRORS+=("#$ISSUE_NUM: could not persist the standard-mode issue-body snapshot: ${SNAPSHOT_ERR:-no reason reported}")
       rm -f "$UBERDEV_TMPDIR/solve-validate-$ISSUE_NUM.json"
       _vidx=$((_vidx + 1))
       continue

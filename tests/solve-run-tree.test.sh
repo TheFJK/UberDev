@@ -715,9 +715,12 @@ edge_differential E19 "$EXPORT_ANCHOR" \
 # E20-E23 came back rc 0 (the binding walked straight past the rule) while
 # E24-E26 and E28-E29 came back rc 1 (text that binds nothing was reported as a
 # binding). Neither direction is hypothetical, and BOTH false-positive rounds
-# came off the launcher itself: E24 is its own comment at
-# plugins/uberdev/lib/solve-launcher.sh:843 with one `$VAR` added, and E28 is its
-# own `CLAIM_BODY` heredoc line at :809 with one clause added. That is how close
+# came off the launcher itself: E24 is plugins/uberdev/lib/solve-launcher.sh's
+# own `# Inconclusive (read blip or comment not yet indexed)` comment with one
+# `$VAR` added, and E28 is a line of its own `CLAIM_BODY` heredoc body with one
+# clause added. Cited by SYMBOL and by the quoted text, never by line number:
+# this same PR moves the launcher by roughly a hundred lines, and every numbered
+# form of these four references was already pointing at the wrong line. That is how close
 # a live CI-gating file was, twice, to redding E1 for an unrelated wording edit.
 # E27, E30 and E32 are the other direction: they were rc 1 before and must STAY
 # rc 1, because each pins a way the fix for its neighbour overshoots into silence.
@@ -755,7 +758,8 @@ edge_differential E23 "$EXPORT_ANCHOR" \
   'bound by read'
 
 # E24 -- COMMENT PROSE IS NOT A COMMAND, and this exact line is why. It is
-# solve-launcher.sh:843 verbatim plus a `$TMPDIR`: an English sentence in which
+# solve-launcher.sh's `# Inconclusive (read blip or comment not yet indexed)`
+# comment verbatim plus a `$TMPDIR`: an English sentence in which
 # the words `comment` and `read` happen to follow a `(`. Parsed as a command it
 # yields the "bound names" blip/or/comment/not/yet/indexed, and the live file was
 # clean only because none of those six words contains a `$`. Want 0 -- editing an
@@ -795,8 +799,8 @@ edge_differential E27 "$EXPORT_ANCHOR" \
   'bound by printf -v'
 
 # E28 -- HEREDOC BODY PROSE, the same class as E24 one construct over and the one
-# with a live corpus surface: the mutant is solve-launcher.sh:809 (`CLAIM_BODY`)
-# with one clause added. Its body is user-facing English full of `$VAR`, so a
+# with a live corpus surface: the mutant is a line of solve-launcher.sh's
+# `CLAIM_BODY` heredoc body with one clause added. That body is user-facing English full of `$VAR`, so a
 # sentence in which the word `read` happens to follow a `(` used to be parsed as a
 # binding and red E1 on a CI-gating file for a wording edit. Nothing a heredoc
 # body contains can bind in the current shell -- an unquoted body expands, and an
@@ -827,8 +831,8 @@ printf -v UBERDEV_ROOT_EDGE_ID '"'"'%s'"'"' "$V"' "$EXPORT_ANCHOR")" 1 1 \
   'bound by printf -v'
 
 # E31 -- the heredoc must be FOUND, and the launcher's own two bodies are opened
-# from inside a double-quoted string: `CLAIM_BODY="$(cat <<EOF` at
-# plugins/uberdev/lib/solve-launcher.sh:799, `RELEASE_BODY=` the same at :1314.
+# from inside a double-quoted string: plugins/uberdev/lib/solve-launcher.sh
+# opens both as `CLAIM_BODY="$(cat <<EOF` and `RELEASE_BODY="$(cat <<EOF`.
 # The `"` closes three lines later, so a line-oriented quote tracker reads the
 # `<<EOF` as quoted text and finds no opener at all -- which is why the delimiter
 # scan looks THROUGH double quotes, and why that decision needs a row. Teaching

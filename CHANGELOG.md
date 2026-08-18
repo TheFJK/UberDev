@@ -54,6 +54,55 @@ mutation-tested) and `R13` in `tests/turbox-fleet-runtime.test.sh` (13
 behavioural assertions executing the writer extracted verbatim from the launcher,
 the same technique `R12` uses for the plan envelope).
 
+### Changed - `/solve` tier now prices SCOPE, not citation density (#614)
+
+`lib/solve_triage.py`'s `named_files()` scraped every filename-shaped token out
+of an issue body and called the count the size of the work, so it could not tell
+a file cited as **evidence** from a file the fix will **edit**. Three files is
+the `large` threshold, which gates a 33x solver spend (1 vs 33) — and because
+every writer that files issues into this repo is required to anchor claims with
+`path:line` evidence, the better-evidenced an issue was, the larger it priced.
+Measured against the live backlog the rule returned `large` for **every** open
+issue: 40 of 40 when #614 was filed, 43 of 43 when this landed.
+
+`scope_files()` replaces it, declaration first and prose second:
+
+- Issue writers may declare their own change set with an
+  `<!-- uberdev-scope v=1 files=... -->` block, which is read as fact.
+  `commands/issue.md` and `agents/findings-to-issues.md` both emit one.
+- Absent a declaration, the prose heuristic keeps only clauses that carry a
+  change verb and no exclusion phrase, so an evidence wall scores zero.
+- `lib/solve-launcher.sh`'s operator-facing `triage:` line reads `scope_files`
+  off the decision instead of re-deriving it with its own `grep` — one producer
+  for the count, rather than a second copy kept in sync by nothing.
+
+**This re-tiers most of the backlog**, and tier is what decides how many solver
+agents `/solve` dispatches per issue, so expect the dispatch cost of an
+unchanged issue to move.
+
+### Added - one run-shared repo profile for the research fan-out (#615 Part A)
+
+Design-tier issues used to have every research lens re-derive the same
+repository-wide facts — the rule corpus, the test runner, the dependency
+manifests — once per lens per issue. A single repo-profile agent now derives
+them once per run and every delegating lens reads that artifact instead. The
+profile is content-keyed and cached across runs; `reused` and `cacheWritten`
+ride in the audit trail so a cache with a reader and no writer is observable
+rather than inferred, which is the #308 shape that killed the previous research
+cache.
+
+### Changed - the solver fleet admits work through a sliding window (#615 Part B)
+
+`skills/solve-fleet/workflow.js` chunked the issue list into waves and awaited
+each wave whole, so every wave barriered on its slowest chain: a 2-task issue
+sat idle until the 15-task issue beside it finished research → design →
+implement → deliver, and chain durations vary by an order of magnitude. Nothing
+downstream needed that barrier — each chain owns its own worktree, branch and
+PR, and no chain reads another's result. `concurrency` is now a live ceiling on
+chains in flight rather than a batch size, which bounds live worktrees exactly
+as the barrier did while a lane freed by a fast chain picks up the next issue
+immediately.
+
 ## [0.49.0] — 2026-08-18
 
 ### Added - `/turbox`, the standard-mode solver fleet (RFC 0020)

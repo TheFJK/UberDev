@@ -536,8 +536,14 @@ const S = {
     properties: {
       profilePath: { type: "string", description: "absolute path written, or empty on failure" },
       rc: { type: "integer" },
-      reused: { type: "boolean", description: "true only if a content-keyed cache entry was copied instead of deriving" },
-      cacheWritten: { type: "boolean", description: "true only if the write-back entry was verified on disk afterwards" },
+      // MUTUALLY EXCLUSIVE, which the type system here cannot say: a cache HIT
+      // copies and stops with `cacheWritten` false, and only a MISS reaches the
+      // write-back. Both true is an impossible state, and it is the one that
+      // matters, because it lands on the silent side of the zero-writers
+      // detector in main() — so main() audits the combination rather than
+      // letting the schema's silence stand in for a relation it cannot express.
+      reused: { type: "boolean", description: "true only if a content-keyed cache entry was copied instead of deriving; never true together with cacheWritten" },
+      cacheWritten: { type: "boolean", description: "true only if the write-back entry was verified on disk afterwards; never true together with reused" },
     },
   },
   written: {
@@ -916,7 +922,13 @@ function profileSection(lens, profilePath) {
     + "a nested rule document beside the files in question, a suite that covers only this module, a "
     + "manifest scoped to one package.\n"
     + "If the profile is missing a fact you need, derive that one fact yourself and name it in "
-    + "`## Risks` as something you had to re-derive. Never treat a gap in it as an answer.";
+    + "`## Risks` as something you had to re-derive. Never treat a gap in it as an answer.\n"
+    + "IF THAT PATH CANNOT BE OPENED, IS EMPTY, OR ENDS MID-SENTENCE, this whole paragraph does not "
+    + "apply: ignore it, derive the invariant half normally — rule corpus, test configuration and "
+    + "dependency manifests included — and record in `## Risks` that the profile was unreadable so "
+    + "you did. The script cannot stat that file; it accepts the profile on the profile agent's own "
+    + "report, so an absent, empty or truncated artifact reaches you looking exactly like a complete "
+    + "one. An unopenable path is NOT the gap case above, and it is never a reason to skip the work.";
 }
 
 // The repo-profile agent's brief. It is NOT worktree-isolated, for the reason
@@ -3160,6 +3172,21 @@ async function main() {
           log("research: the repo profile was derived but NOT written back to the cache — the next "
             + "run on this base will derive it again. Check that the write path resolved the main "
             + "repository via --git-common-dir (RFC 0012 §3.5).");
+        } else if (reused && cached) {
+          // The two flags are declared independently, so nothing in the schema
+          // stops a return asserting BOTH. The prompt allows neither together:
+          // a cache HIT copies and stops at `cacheWritten false`, and only a
+          // MISS reaches the write-back. A contradictory pair therefore reports
+          // a state that cannot have happened — and it lands on the one side of
+          // the detector above that stays silent, so a run whose cache has no
+          // writer would read as healthy. Audited rather than trusted: the
+          // reported observation IS the evidence here, so an impossible
+          // observation has to be as visible as a bad one.
+          auditEvents.push({ event: "repo_profile_flags_contradictory", reused: true,
+            cached: true, ts: nowIso });
+          log("research: the repo-profile agent reported BOTH a cache reuse and a cache write-back, "
+            + "which the brief allows only one of — treat the caching half of this run as unproven "
+            + "and re-check the write path before trusting the zero-writers signal.");
         }
         log("research: repo profile " + (reused ? "reused from the content-keyed cache" : "derived")
           + " once for this run — " + designCount + " design-tier issue(s) read it instead of "

@@ -2676,11 +2676,11 @@ command -v sf_doc_record_members >/dev/null 2>&1 || {
 # `out` is a local name the script REUSES, and only some of its bindings are
 # this record. Named by the function each binding sits in: the `unpushedIssue`
 # literal, the `deliverPrompt` await inside `runTaskChain` and the
-# `solvePrompt` await inside `solveOne` ARE this record; `chunk`'s accumulator
-# (`var out = [], i;`), `sanitizeEscalationReason`'s scrubbed string
-# (`var out = s.replace(`) and `taskReviewPrompt`'s path
-# (`var out = reviewPath(`) are unrelated locals that today carry no property
-# writes at all. Naming them beats counting them, and this note is the proof:
+# `solvePrompt` await inside `solveOne` ARE this record;
+# `sanitizeEscalationReason`'s scrubbed string (`var out = s.replace(`) and
+# `taskReviewPrompt`'s path (`var out = reviewPath(`) are unrelated locals that
+# today carry no property writes at all. Naming them beats counting them, and
+# this note is the proof:
 # its previous edition stated how many bindings there were, and a later binding
 # made that number wrong while every name here stayed correct. Naming only
 # beats counting while the list stays CLOSED, which is what T18.5 asserts
@@ -3440,8 +3440,7 @@ T18_SD_PROSE="$(da_unwrap_prose "$T18_SD")"
 # is attributed to whatever named function encloses that expression. That is
 # the right answer for the record — which names the site a reader would open —
 # and it is why the harvest is not written as a brace-matching parser.
-T18_OUT_SITES='chunk
-sanitizeEscalationReason
+T18_OUT_SITES='sanitizeEscalationReason
 taskReviewPrompt
 unpushedIssue
 runTaskChain
@@ -3540,7 +3539,6 @@ fi
 T18_FRAGMENTS='ledger.complete =|1
 r.prProof = "DISPROVEN"|1
 prProof:|1
-var out = [], i;|1
 var out = s.replace(|1
 var out = reviewPath(|1
 unpushedIssue|+
