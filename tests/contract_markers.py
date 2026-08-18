@@ -293,7 +293,7 @@ CONTRACTS: dict[str, list[str]] = {
         "lib/run_manifest.py",
         "lib/run_manifest.py",
     ],
-    # rank 9 — the events uberdev_goal_audit accepts (13)
+    # rank 9 — the events uberdev_goal_audit accepts (15)
     "goal-audit-event": [
         "lib/goal-state.sh",
         "skills/goal-pipeline/SKILL.md",

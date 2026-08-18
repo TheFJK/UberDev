@@ -23,10 +23,19 @@
 #        run-state-flush failure at a bounded exit boundary (bg agents PRESERVED
 #        on that path — distinct from a breaker exit 1, which reaps first).
 #
+# Those three are the statuses the LOOP produces. Two STARTUP refusals sit before
+# it, both reached before any agent exists and so before there is anything to
+# reap: 2 for an argument this script will not accept (an unrecognised flag, or a
+# `--partial-prs` value that is not digits-and-commas) and 3 for run-state that
+# cannot be rehydrated. workflow.js maps every status outside {0, 42, 1} to
+# haltReason `watch_script_error` and halts the goal, which is the intended
+# reading — the driver composed the command line, so a refusal of it is a bug in
+# the driver, not a transient the run should poll through.
+#
 # Operator abort is INT (Ctrl-C), which still reaps and exits 130.
 #
 # CONTRACT
-#   bash lib/goal-watch.sh [--goal-id=<id>]
+#   bash lib/goal-watch.sh [--goal-id=<id>] [--partial-prs=<csv>]
 #
 # Run it under bash >= 4: the verdict locator
 # (uberdev_goal_locate_review_pr_audit_by_pr, lib/goal-state.sh) iterates
@@ -48,12 +57,54 @@ set -u
 UBERDEV_PLUGIN_ROOT="${UBERDEV_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}"
 
 GOAL_ID_CLI=""
+# #592 — the PR numbers this pass was handed whose solver task chain STOPPED
+# SHORT, comma-separated. The command line is the carrier because it is the only
+# channel there is: skills/goal-pipeline/workflow.js is the one party that sees
+# the fleet's per-issue `chainComplete`, and it is forbidden to touch the
+# filesystem (RFC 0012 §2.2, constraint 6), so it can neither write a file this
+# script would read nor reach into a running shell.
+#
+# ONE ENTRANCE, ONE RESOLUTION SITE, and the environment is deliberately NOT the
+# other entrance. The relay hands this set over on argv and only when it is
+# non-empty — it omits the flag entirely on a clean pass rather than emitting an
+# empty one — so an environment carrier would be un-overridable as well as
+# unwritten: anything that leaked such a variable into this process (an
+# operator's shell, a --resume, a debugging session) would silently become EVERY
+# pass's partial set, marking complete deliveries partial and refusing to
+# converge a run that converged. That is the same silent failure #592 exists to
+# fix, pointed the other way.
+#
+# Resolved here and nowhere else, so the two consumers — the ledger write below
+# and the decision mark in the merge gate — cannot be fed from different
+# expressions and disagree, which would be a run that marks its transitions
+# partial while its summary counts zero, or the reverse.
+PARTIAL_PRS=""
 for _arg in "$@"; do
   case "$_arg" in
     --goal-id=*) GOAL_ID_CLI="${_arg#--goal-id=}" ;;
+    --partial-prs=*) PARTIAL_PRS="${_arg#--partial-prs=}" ;;
     *) echo "goal-watch: unknown argument '$_arg'" >&2; exit 2 ;;
   esac
 done
+# Shape refusal, and it is an INJECTION BOUNDARY rather than tidiness: this
+# scalar is interpolated into JSON audit payloads downstream (the partial-chain
+# ledger, and the `partial_chain` marker on the goal_pr_transition row), so
+# anything that is not digits-and-commas is refused here, at the edge, before it
+# can reach a writer. Refusing the empty-member / leading / trailing separator
+# forms too keeps the padded-haystack membership test in the merge gate honest:
+# `,,` would otherwise make the empty string a "member" of the set.
+#
+# The message is deliberately DISTINCT from the catch-all above. Both exit 2, so
+# the status alone cannot tell a malformed value from an unrecognised flag — and
+# a build that never grew this flag at all would satisfy a status-only test by
+# falling through to `unknown argument`.
+case "$PARTIAL_PRS" in
+  "") ;;
+  *[!0-9,]*|,*|*,,*|*,)
+    printf "goal-watch: malformed --partial-prs value '%s' — expected a comma-separated list of PR numbers\n" \
+      "$PARTIAL_PRS" >&2
+    exit 2 ;;
+esac
 [ -n "$GOAL_ID_CLI" ] && export UBERDEV_GOAL_ID="$GOAL_ID_CLI"
 
 # #171 fresh-shell rehydration — re-source libs (idempotent via _UBERDEV_*_LOADED
@@ -63,6 +114,25 @@ done
 [ -r "${UBERDEV_PLUGIN_ROOT}/lib/goal-state.sh" ]  && . "${UBERDEV_PLUGIN_ROOT}/lib/goal-state.sh"
 GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
 uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 2" >&2; exit 3; }
+# #592 — land the pass's partial-chain carrier on disk before anything reads it.
+# The solver fleet is the only party that knows whether an issue's task chain ran
+# to completion, and its driver is forbidden to touch the filesystem, so the fact
+# arrives on THIS script's command line (resolved into PARTIAL_PRS above). This
+# is the only point in the lane that sees it, and it must run before the merge
+# gate below: after this line the gate can tell a partial delivery from a
+# converged one by reading the ledger instead of re-deriving it from GitHub,
+# which it cannot do.
+#
+# The ledger is what OUTLIVES this pass — a PR recorded partial in cycle 1 can
+# still be green when a later cycle's fleet returns a different set — so the
+# scalar is written into it here rather than being consulted twice.
+#
+# Placed immediately after the rehydration because that is also where the ambient
+# `cycle` becomes available — the helper's optional third argument is omitted so
+# it rides that scalar, which is the documented watch-lane shape. Recording is
+# fail-soft: a ledger write that fails must not stall the whole goal.
+uberdev_goal_record_partial_prs "$GOAL_ID" "$PARTIAL_PRS" \
+  || printf 'goal: recording the partial-chain PR set failed — the merge gate will not flag this pass\n' >&2
 uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # re-derive backend/env (idempotent, D8); not persisted
 
 # ---------------------------------------------------------------------------
@@ -663,6 +733,53 @@ while true; do
     # `break` + the cross-pass MERGING interlock together guarantee at most one
     # manifest-touching merge is ever in flight.
     # >>> region: merge-dispatch-gate
+    # #592 — flag a partial-chain PR at the moment it LEAVES green for merging.
+    # Called from exactly the two arms that make that transition: the
+    # already-merged/resume arm and the dispatch-success arm. NOT from the three
+    # withholding arms nor from the dispatch-failure branch — there the PR stays
+    # green and is re-evaluated next tick, so a pre-dispatch read would emit one
+    # row per tick for a PR that never merged.
+    #
+    # ONE ROW PER PR IS STRUCTURAL, BUT IT IS CONDITIONAL, and the condition is
+    # worth naming because the obvious reading of these two arms is wrong. What
+    # drops the PR out of the next pass's candidate list is NOT the
+    # `uberdev_goal_pr_state_transition … green merging` call that precedes each
+    # of these two call sites: `_uberdev_goal_batch_green_prs_ordered` in
+    # lib/goal-state.sh — grep that name for the definition — selects solely on
+    # the BATCH-REGISTRY terminal_state column being GREEN and never opens
+    # pr-states.tsv at all. The write that actually de-greens the PR is
+    # `_uberdev_goal_set_batch_terminal_state … MERGING`, and BOTH arms
+    # deliberately let it fail (the `|| printf … barrier may not serialize`
+    # breadcrumbs below). On that failure path the row is still GREEN next pass,
+    # the same arm runs again, and a SECOND goal_partial_delivery is emitted —
+    # one per tick until the sentinel write sticks.
+    #
+    # That is accepted, not overlooked. The run is already degraded and says so
+    # out loud; duplicate telemetry about a real merge beats a de-duplication
+    # counter, which would need its own durable state and could suppress a
+    # genuine second delivery. So: exactly-once PROVIDED the MERGING sentinel
+    # write succeeds, at-least-once otherwise — and never a row for a PR the
+    # gate withheld.
+    #
+    # The definition lives INSIDE the region markers on purpose. The gate is
+    # driven in tests by slicing this marked block and sourcing it standalone; a
+    # helper defined above the marker would be undefined in that slice, the `if`
+    # would take its false branch, and every positive assertion would pass
+    # vacuously while the real emit was silently unreachable.
+    #
+    # `${cycle:-0}` because the slice runs under `set -u` with only GOAL_ID / pr /
+    # any_active defined, and `|| true` because audit is best-effort telemetry —
+    # the same treatment uberdev_goal_pr_state_transition gives it. The issue
+    # number comes from the batch registry step 2a populated earlier in this same
+    # pass; on a resume where it did not, the helper prints 0 and the row is still
+    # valid JSON rather than a broken one.
+    _uberdev_goal_flag_partial_merge() {
+      local pr="$1"
+      uberdev_goal_pr_is_partial "$GOAL_ID" "$pr" || return 0
+      uberdev_goal_audit goal_partial_delivery \
+        "{\"goal_id\":\"$GOAL_ID\",\"pr\":$pr,\"issue\":$(_uberdev_goal_batch_issue_for_pr "$GOAL_ID" "$pr"),\"cycle\":${cycle:-0}}" \
+        || true
+    }
     pr="$(_uberdev_goal_batch_green_prs_ordered "$GOAL_ID" | head -n 1)"
     if [ -n "$pr" ]; then
       if uberdev_goal_pr_is_merged "$pr"; then
@@ -670,6 +787,7 @@ while true; do
         # /merge against an already-landed PR. Flip the batch row to MERGING so
         # the barrier stays closed until 2d records MERGED.
         uberdev_goal_pr_state_transition "$GOAL_ID" "$pr" green merging
+        _uberdev_goal_flag_partial_merge "$pr"
         _uberdev_goal_set_batch_terminal_state "$GOAL_ID" "$pr" MERGING \
           || printf 'goal: set_batch_terminal_state(MERGING) failed for PR=%s (rc=%s); barrier may not serialize\n' "$pr" "$?" >&2
         any_active=1
@@ -738,7 +856,27 @@ while true; do
           uberdev_goal_audit goal_merge_deferred \
             "{\"goal_id\":\"$GOAL_ID\",\"pr\":$pr,\"reason\":\"ci_pending\"}"
         elif _uberdev_goal_dispatch_merge "$pr"; then
-          uberdev_goal_pr_state_transition "$GOAL_ID" "$pr" green merging
+          # #592 — this is the one arm in the gate that TAKES a merge decision,
+          # so it is the one that records what it knew when it took it. The
+          # marker comes from this pass's own carrier, not from the ledger the
+          # sibling emit below reads: the two say the same thing on a healthy
+          # run, but only the scalar still describes the decision on a run whose
+          # ledger write failed — precisely the run where uberdev_goal_pr_is_partial
+          # answers "no" and no goal_partial_delivery row is written at all.
+          #
+          # PADDED HAYSTACK, NOT A SUBSTRING TEST: a plain *"$pr"* marks PR 100
+          # when the set is {1000}. And `case`, never `for x in $PARTIAL_PRS` —
+          # an unquoted scalar loop runs exactly once over the whole string under
+          # zsh, a bashism this repo has shipped twice. `${PARTIAL_PRS:-}` because
+          # this region is sliced out and executed standalone under `set -u`.
+          _partial_chain=""
+          case ",${PARTIAL_PRS:-}," in *",$pr,"*) _partial_chain=1 ;; esac
+          if [ -n "$_partial_chain" ]; then
+            printf 'goal-pipeline: PR %s covers an INCOMPLETE task chain — merging it anyway (its UberDev-Partial trailer leaves the issue OPEN), so this run has NOT converged that issue\n' \
+              "$pr" >&2
+          fi
+          uberdev_goal_pr_state_transition "$GOAL_ID" "$pr" green merging "$_partial_chain"
+          _uberdev_goal_flag_partial_merge "$pr"
           # Flip to the MERGING sentinel BEFORE the collision-chain so the very
           # next batch_all_terminal read (this PR no longer GREEN/terminal)
           # blocks re-entry — the cross-pass half of the serialization.

@@ -1701,9 +1701,35 @@ function finalize() {
   // the claim-side call in prNumbersToVerify asks it with a ceiling and no
   // audit. No ceiling here: a number this pass dropped would be one /goal never
   // sees at all.
+  //
+  // #592 — prsPartial is the PARTIAL SUBSET of that same list, derived INSIDE
+  // this one pass through onAccept. `chainComplete` has been script-derived and
+  // correct since #554 and reached no consumer: /goal ingests prsOpened through
+  // a shape-only digit filter and merges on the numbers, so a PR opened over a
+  // chain that stopped short arrived at the merge gate byte-identical to one
+  // opened over a finished chain.
+  //
+  // NOT a second filter over `solved`. That would be a second, uncompared copy
+  // of the collision rule (#370): when two records claim ONE number and
+  // disagree about completeness, a union answers "partial" in both directions
+  // while prsOpened has already decided that the FIRST record owns the number
+  // and the repeat's per-record facts went with its discarded claim. Keyed off
+  // the winner, the two lists cannot disagree.
+  //
+  // `=== false`, never `!r.chainComplete`. An ABSENT chainComplete means the
+  // record ran no task chain at all — the single-solver path attaches the field
+  // nowhere — and a record with no chain cannot have an incomplete one; the
+  // falsy test would put every trivial-tier PR in the partial list.
+  const partialSet = {};
   const prsOpened = distinctClaimedPrNumbers(0, function (r, n) {
     auditEvents.push({ event: "pr_number_collision", issue: r.issue, pr: n, ts: nowIso });
+  }, null, function (r, n) {
+    if (r.chainComplete === false) partialSet[String(n)] = 1;
   });
+  // A filter OF prsOpened, so subset-ness is structural rather than asserted:
+  // every member is a number prsOpened emitted, in the same order. Subset twice
+  // over, in fact — partialSet only ever receives numbers this pass emitted.
+  const prsPartial = prsOpened.filter(function (n) { return partialSet[String(n)] === 1; });
   return {
     runId: runId,
     repoSlug: repoSlug,
@@ -1715,6 +1741,7 @@ function finalize() {
     researchArtifacts: researchArtifacts,
     results: solved,
     prsOpened: prsOpened,
+    prsPartial: prsPartial,
     counts: {
       prOpened: opened.length,
       pushedNoPr: solved.filter(function (r) { return r && r.status === "PUSHED_NO_PR"; }).length,
@@ -2378,32 +2405,46 @@ async function runTaskChain(rec, planPath, planFindings) {
   // over a finished chain BEFORE goal-pipeline ingests the number and merges
   // on it. The claim is not touched — only this fact is added beside it.
   //
-  // DECLARED UNREAD BY PRODUCTION CODE — and the residual is now MEASURED, not
-  // guessed at. Both fields below are attached AFTER schema validation, so the
-  // unread-property guard cannot see them, and the only readers today are this
-  // file's suites and the sibling SKILL.md: goal-pipeline ingests prsOpened
-  // through a shape-only digit filter and consults neither.
+  // READ BY PRODUCTION CODE SINCE #592. This paragraph used to declare the
+  // opposite — an honest register entry while the gap was real, and a lie about
+  // the tree the moment it closed, which is the worse of the two failures: a
+  // stale "nobody reads this" tells the next reader not to go looking for the
+  // consumers that now exist. What closed it: finalize() FILTERS prsOpened by
+  // this flag and publishes the partial subset as `prsPartial`, so the fact
+  // reaches the consumer as numbers on the list it already ingests rather than
+  // as a per-record field it never opens. What the /goal side then does with
+  // that list is stated where it is implemented, never restated here: this
+  // file's contract ends at the return value, and a second, uncompared copy of
+  // a consumer's contract goes stale the moment the consumer renames a field,
+  // with no row to red — the same discipline the partialDelivery block below
+  // follows. Both fields below are still attached AFTER schema validation, so
+  // the unread-property guard cannot see them — a fact about that guard, no
+  // longer a claim about the readership.
   //
-  // #554 changed the CONSEQUENCE of that, not the readership. An incomplete
-  // chain now delivers a PR carrying the non-closing `UberDev-Partial: #N`
-  // trailer, so merging it leaves the issue OPEN and /merge Step 3.4 releases
-  // its `uberdev:active` claim off that same trailer. What it does NOT buy is
-  // convergence: /goal builds each next cycle from the review-pr FINDING issues
-  // alone — `gh issue list --label <finding-label> --state open` in
-  // lib/goal-phase3.sh — so the original issue is never re-collected and the
-  // run ends with it simply open. That is strictly better than the unearned
-  // auto-close it replaces — unfinished work stays visible instead of being
-  // closed over — but it is not the ingesting side learning to read this flag,
-  // which remains the open half and is tracked as issue #592. A pointer to a
-  // filed number rather than to "a follow-up issue": an unnamed one cannot be
-  // checked, and the whole point of this note is that the gap stays legible.
+  // WHAT IT STILL DOES NOT BUY, recorded so the remaining half does not go
+  // quiet: the issue is FLAGGED, never re-queued. #554 made an incomplete chain
+  // deliver a PR carrying the non-closing `UberDev-Partial: #N` trailer, so
+  // merging it leaves the issue OPEN and /merge Step 3.4 releases its
+  // `uberdev:active` claim off that same trailer — but lib/goal-phase3.sh still
+  // builds each next cycle from the review-pr FINDING issues alone
+  // (`gh issue list --label <finding-label> --state open`), and a
+  // merged-but-unfinished original carries no finding label, so nothing
+  // re-collects it inside the run. The PR number is on `prsPartial`, so the
+  // shortfall is now VISIBLE where it has to be; what visibility does not buy
+  // is re-collection. Re-queueing, with the anti-spin guard it needs, is issue
+  // #613.
+  // A pointer to a filed number rather than to "a follow-up issue":
+  // an unnamed one cannot be checked, and tests/docs-accuracy.test.sh T16.15
+  // checks this one.
   out.chainComplete = ledger.complete;
   if (!ledger.complete) {
     // The MEMBER LIST here is a published contract, joined against SKILL.md's
     // declaration in both directions, so the disputed ids ride in the
     // partial_delivery audit event and in the delivery prompt rather than being
     // added silently: presence of this object is the signal, and the flag above
-    // is what /goal's ingestion has to grow a reader for.
+    // is what finalize() filters prsOpened by to publish `prsPartial`, the list
+    // /goal ingests. What the /goal side does with it is documented there and
+    // nowhere here, for the reason given in the paragraph above the flag.
     out.partialDelivery = {
       tasksTotal: ledger.total, blocked: ledger.blocked, skipped: ledger.skipped,
       unreviewed: ledger.unreviewed,
@@ -2458,7 +2499,16 @@ function isPosInt(n) { return Number.isInteger(n) && n > 0; }
 //                 CLAIM: the request-side caller cannot address it, but it is
 //                 published to /goal all the same, so the caller that imposes a
 //                 ceiling has to say what became of it.
-function distinctClaimedPrNumbers(ceiling, onCollision, onCeiling) {
+//   `onAccept`    called with (record, number) for the record that WINS the
+//                 number — exactly once per emitted element, immediately after
+//                 it is pushed — or null to skip it. THE WINNER IS THE ONLY
+//                 RECORD THAT MAY SPEAK FOR THE NUMBER: a repeat's prNumber is
+//                 discarded above, so every per-record fact that hangs off that
+//                 number goes with it. A caller deriving a second list keyed on
+//                 the emitted numbers has to read it HERE rather than re-filter
+//                 `solved` itself, or the two lists disagree exactly when two
+//                 records claim one number and disagree about the fact.
+function distinctClaimedPrNumbers(ceiling, onCollision, onCeiling, onAccept) {
   const seen = {};
   const nums = [];
   solved.forEach(function (r) {
@@ -2476,6 +2526,7 @@ function distinctClaimedPrNumbers(ceiling, onCollision, onCeiling) {
     }
     seen[key] = 1;
     nums.push(n);
+    if (onAccept) onAccept(r, n);
   });
   return nums;
 }

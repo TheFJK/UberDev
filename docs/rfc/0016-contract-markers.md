@@ -399,7 +399,7 @@ Codex-side markers sit in those files and are bookkeeping, not new coupling.**
 | `dispatch-backend` | 6 | 6 | 8 | run-state allowlist carries `-auto`; the supervision subset carries `-auto -workflow`; `solve_triage.py`'s `parse_cli` gate is the copy #360 shipped stale |
 | `agent-liveness-value` | 7 | 5 | 5 | three `goal-state.sh` probes carry `-queued` (declared divergence) |
 | `run-terminal-status` | 8 | 4 | 15 | `+running`, `+absent`, `+live`, `+setup_failed`, `-completed` deltas where a site is a superset or subset |
-| `goal-audit-event` | 9 | 13 | 2 | SKILL.md constants block via `@anchor` |
+| `goal-audit-event` | 9 | 15 | 2 | SKILL.md constants block via `@anchor`; `goal_partial_chain` and `goal_partial_delivery` added by #592 |
 | `park-reason` | 10 | 4 | 3 | Markdown table via `@anchor`; the failure-mode table via a `data.reason` role key; goal-state side via `!case-arm` |
 | `agent-terminal-event` | 11 | 5 | 8 | the writer gate is role-keyed so an `or … == "x"` widening is seen |
 

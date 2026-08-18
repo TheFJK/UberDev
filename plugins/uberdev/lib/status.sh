@@ -14,7 +14,7 @@
 #   1. /solve/turbo/turbox claims  the `uberdev:active` GitHub label plus
 #                                  per-issue solve-bg-status-<N>.json
 #                                  under the runtime root
-#   2. /goal                       GOAL_ID-keyed sidecars (1 jsonl + 7 TSVs +
+#   2. /goal                       GOAL_ID-keyed sidecars (1 jsonl + 8 TSVs +
 #                                  the runstate scalar/array files), reachable
 #                                  only through the fixed-path
 #                                  goal-active-id.txt bootstrap pointer
