@@ -4646,6 +4646,28 @@ if [ -n "$L7_SEED" ] && [ -n "$L_RESEARCH_DIR" ]; then
       || L8_BAD="$L8_BAD $l8_seed_env='$L_PROBE_OUT'(want '$L7_FIXED|$L7_SEED',rc=$L_PROBE_RC)"
   done
 
+  # A record that EXISTS but does not validate must NOT fall back to the
+  # advanced local head: that is the defect this carrier exists to prevent,
+  # reappearing on the corrupt path only. Empty is the honest answer, and the
+  # consumer refuses on it.
+  printf 'not-a-sha\n' >"$L_RESEARCH_DIR/published-head.txt"
+  l_probe "$L_TMP/seed-fast.env" / 'printf "%s|%s" "${VALIDATED_FIXER_HEAD_SHA:-}" "${REVIEWED_HEAD_SHA:-}"'
+  [ "$L_PROBE_RC" = 0 ] && [ "$L_PROBE_OUT" = "$L7_FIXED|" ] \
+    || L8_BAD="$L8_BAD corrupt-record-fell-back='$L_PROBE_OUT'(want '$L7_FIXED|',rc=$L_PROBE_RC)"
+
+  # BOTH shipped writers are guarded, not just the lib reader. L8 seeds the
+  # record itself, so without these two rows the Phase 1 seed and the Step 6a
+  # advance could both be deleted and every row above would stay green while
+  # 6a rehydrated the advanced local head again.
+  L8_CMD="$REPO_ROOT/plugins/uberdev/commands/review-pr.md"
+  L8_WRITERS="$(grep -c 'review_fleet_write_published_head' "$L8_CMD" 2>/dev/null || printf 0)"
+  [ "$L8_WRITERS" = 2 ] \
+    || L8_BAD="$L8_BAD command-writers=$L8_WRITERS(want 2: the Phase 1 seed and the 6a advance)"
+  grep -q 'review_fleet_write_published_head "$REVIEW_BASE_RUN_DIR/published-head.txt" "$REVIEWED_HEAD_SHA"' "$L8_CMD" \
+    || L8_BAD="$L8_BAD phase1-seed-writer-missing"
+  grep -q 'review_fleet_write_published_head "$RESEARCH_DIR_ABS/published-head.txt" "$POST_FIXER_HEAD_SHA"' "$L8_CMD" \
+    || L8_BAD="$L8_BAD step6a-advance-writer-missing"
+
   # Absent published record => today's behaviour, so a run that predates the
   # seed is not made worse by the fix.
   rm -f "$L_RESEARCH_DIR/published-head.txt"

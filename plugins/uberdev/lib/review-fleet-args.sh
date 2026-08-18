@@ -2153,8 +2153,21 @@ _review_fleet_bind_reviewed_head() {
   # survives ONLY for a run that predates the seed: absent the record, behaviour
   # is exactly what it was.
   if [ -z "${REVIEWED_HEAD_SHA:-}" ] && [ -r "$research_dir/published-head.txt" ]; then
-    REVIEWED_HEAD_SHA="$(review_fleet_read_published_head \
-      "$research_dir/published-head.txt" 2>/dev/null)" || REVIEWED_HEAD_SHA=
+    # PRESENT-BUT-UNREADABLE IS NOT ABSENT, and the difference is the whole
+    # value of this carrier. The readability guard above means the only way to
+    # reach this failure branch is a record that EXISTS and does not validate --
+    # a zero-byte or truncated file from an interrupted session or a full disk,
+    # which is exactly the fresh-shell world the record was added for. Falling
+    # through to the validated head there would hand Step 6a the fixer-advanced
+    # LOCAL head again and reinstate the very gate failure this record prevents,
+    # silently and on the corrupt path only. So the name is left EMPTY and the
+    # consumer refuses with its own message; the reader's diagnostic is NOT
+    # redirected away, because a carrier that cannot be read has to say so.
+    if ! REVIEWED_HEAD_SHA="$(review_fleet_read_published_head \
+        "$research_dir/published-head.txt")"; then
+      REVIEWED_HEAD_SHA=
+      return 0
+    fi
   fi
   REVIEWED_HEAD_SHA="${REVIEWED_HEAD_SHA:-$VALIDATED_FIXER_HEAD_SHA}"
   return 0
