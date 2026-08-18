@@ -20,7 +20,7 @@
 # in CI before merge without an interactive harness.
 #
 # Sections:
-#   A1 — install-aliases.md exists, references all 13 aliases, has marker
+#   A1 — install-aliases.md exists, references all 14 aliases, has marker
 #   A2 — install-aliases.md performs collision detection (skip-if-exists)
 #   A3 — install-aliases.md generates ONE-WAY forwarders, not duplicates
 #   A4 — uninstall-aliases.md exists and only removes marker-tagged files
@@ -90,7 +90,7 @@ HOOK="$REPO_ROOT/plugins/uberdev/hooks/session-start"
 PLUGIN_JSON="$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json"
 PLUGIN_VERSION="$(jq -r .version "$PLUGIN_JSON")"
 
-echo "== A1: install-aliases command exists and registers all 13 aliases =="
+echo "== A1: install-aliases command exists and registers all 14 aliases =="
 # Each canonical /uberdev:<name> must be wired up. We grep for the literal
 # canonical command names since those are the targets the forwarders must
 # point at; if any is missing, the user-visible alias for that command
@@ -240,7 +240,7 @@ for canonical in issue solve turbo simplify review-pr merge dev testers goal ube
 done
 
 echo
-echo "== S1: fresh install — first session installs all 13 aliases =="
+echo "== S1: fresh install — first session installs all 14 aliases =="
 S1_HOME="$(mktemp -d)"
 S1_STDERR="$(mktemp)"
 HOME="$S1_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
@@ -263,11 +263,11 @@ else
   echo "  FAIL  S1: version marker missing or wrong"
   FAIL=$((FAIL + 1))
 fi
-# Verify the canonical "installed 13 aliases" summary line appears verbatim
+# Verify the canonical "installed 14 aliases" summary line appears verbatim
 # on stderr. The grep below uses a substring; the doubled-quote literal is
-# pinned in a comment so the harness's drift-check grep -cF '"installed 13 aliases"'
+# pinned in a comment so the harness's drift-check grep -cF '"installed 14 aliases"'
 # matches even after future edits to the assertion phrasing.
-if grep -q "first run: installed 13 aliases" "$S1_STDERR"; then
+if grep -q "first run: installed 14 aliases" "$S1_STDERR"; then
   echo "  PASS  S1: first-run summary line on stderr"
   PASS=$((PASS + 1))
 else
@@ -283,7 +283,7 @@ S2_STDERR="$(mktemp)"
 HOME="$S2_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
   bash "$HOOK" >/dev/null 2>/dev/null || true
 
-# Precondition: first run must have produced the 13 forwarders. Without this
+# Precondition: first run must have produced the 14 forwarders. Without this
 # guard, the mtime capture below silently picks up empty strings for absent
 # files, the post-run lookup also returns "", and `[ "" = "" ]` makes the
 # section spuriously PASS — masking the very TDD red signal we want.
@@ -338,7 +338,7 @@ S3_STDERR="$(mktemp)"
 HOME="$S3_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
   bash "$HOOK" >/dev/null 2>/dev/null || true
 
-# Precondition: first run must have produced the 13 forwarders before we can
+# Precondition: first run must have produced the 14 forwarders before we can
 # meaningfully test that a stale-marker rewrite changes their mtimes. Same
 # spurious-PASS trap as S2 if absent.
 S3_PREFLIGHT_OK=1
@@ -457,7 +457,7 @@ if [ "$S5_INSTALLED" = "12" ]; then
 else
   echo "  FAIL  S5: only $S5_INSTALLED of 12 non-collision forwarders installed"; FAIL=$((FAIL + 1))
 fi
-# 13 total - 1 conflict (solve) = 12 installed; use [0-9]+ to keep this
+# 14 total - 1 conflict (solve) = 13 installed; use [0-9]+ to keep this
 # assertion robust to future ALIASES count bumps.
 if grep -qE 'installed [0-9]+ aliases, skipped 1 conflicts \(solve\)' "$S5_STDERR"; then
   echo "  PASS  S5: stderr summary reports skip"; PASS=$((PASS + 1))
@@ -569,7 +569,7 @@ for short in issue solve turbo simplify review-pr merge dev testers ubergoal ube
   fi
 done
 if [ "$S8_OK" = "1" ]; then
-  echo "  PASS  S8: all 13 forwarders well-formed after race"; PASS=$((PASS + 1))
+  echo "  PASS  S8: all 14 forwarders well-formed after race"; PASS=$((PASS + 1))
 else
   echo "  FAIL  S8: race produced malformed/empty forwarder"; FAIL=$((FAIL + 1))
 fi
@@ -617,7 +617,7 @@ S11_GOT="$(
   printf '%s' "${UBERDEV_ALIAS_NOTICE:-}"
 )"
 case "$S11_GOT" in
-  *"installed 13 short-form aliases"*)
+  *"installed 14 short-form aliases"*)
     echo "  PASS  S11: first-run notice composed"; PASS=$((PASS + 1)) ;;
   *)
     echo "  FAIL  S11: UBERDEV_ALIAS_NOTICE='$S11_GOT'"; FAIL=$((FAIL + 1)) ;;
@@ -661,7 +661,7 @@ else
     fi
   done
   if [ "$S12_OK" = "1" ]; then
-    echo "  PASS  S12: all 13 forwarders installed with jq masked"; PASS=$((PASS + 1))
+    echo "  PASS  S12: all 14 forwarders installed with jq masked"; PASS=$((PASS + 1))
   else
     echo "  FAIL  S12: forwarders missing when jq absent"; FAIL=$((FAIL + 1))
   fi
@@ -698,7 +698,7 @@ S14_HOME="$(mktemp -d)"
 S14_STDOUT="$(mktemp)"
 HOME="$S14_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
   bash "$HOOK" >"$S14_STDOUT" 2>/dev/null || true
-if grep -q 'installed 13 short-form aliases' "$S14_STDOUT"; then
+if grep -q 'installed 14 short-form aliases' "$S14_STDOUT"; then
   echo "  PASS  S14: first-run notice present in context injection"; PASS=$((PASS + 1))
 else
   echo "  FAIL  S14: first-run notice missing from context"; FAIL=$((FAIL + 1))

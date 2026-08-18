@@ -46,13 +46,22 @@
 # ---------------------------------------------------------------------------
 AUTO_MODE=0
 TURBO_OPT=0
+# --standard selects the /turbox lane (RFC 0020): the CALLING SESSION is the
+# fleet's orchestrator and dispatches every agent through the Agent tool, so
+# the implementation phase can run waves of parallel implementers over disjoint
+# file sets — which a Workflow agent, having no Agent/Task tool, cannot do.
+# It is a launcher option and NOT a dispatch_backend member, deliberately:
+# `dispatch_backend` answers "how is one per-issue solver child launched?", and
+# standard mode launches no per-issue solver at all (RFC 0020 §2).
+STANDARD_MODE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --auto-mode=*) AUTO_MODE="${1#--auto-mode=}" ;;
     --turbo)       TURBO_OPT=1 ;;
+    --standard)    STANDARD_MODE=1 ;;
     --)            shift; break ;;
     *)
-      echo "error: solve-launcher: unknown launcher option '$1' (only --auto-mode=0|1, --turbo, -- are accepted before the user arguments)" >&2
+      echo "error: solve-launcher: unknown launcher option '$1' (only --auto-mode=0|1, --turbo, --standard, -- are accepted before the user arguments)" >&2
       exit 64
       ;;
   esac
@@ -277,9 +286,44 @@ case "$DISPATCH_BACKEND" in
   # CONTRACT: dispatch-backend
   *) echo "error: --backend='$DISPATCH_BACKEND' not in {auto,workflow,wezterm,background}" >&2; exit 1 ;;
 esac
+# --- Phase A: --standard (the /turbox lane) vs --backend (RFC 0020 §2) ---
+# The two express different models of the same run and are mutually exclusive.
+# An operator who wrote both has two of them in their head at once, and picking
+# one silently is how a batch lands somewhere nobody expected. Refused here —
+# before Step 4.5 writes a single claim.
+#
+# The refusal fires on an EXPLICIT backend only (CLI flag or env). A repo-wide
+# `dispatch_backend:` in config is a default for the OTHER lane; refusing on it
+# would make /turbox unusable in any repo that pins one, so standard mode
+# overrides it and says so.
+if [[ "$STANDARD_MODE" == "1" ]]; then
+  if [[ -n "$BACKEND_FLAG_VALUE" ]]; then
+    echo "error: --standard (/turbox) and --backend=$BACKEND_FLAG_VALUE are mutually exclusive (RFC 0020 §2): standard mode runs the fleet in THIS session and launches no per-issue solver child, so there is no backend for it to select. Drop one." >&2
+    echo "no claims written; no agents dispatched" >&2
+    exit 1
+  fi
+  if [[ -n "${UBERDEV_DISPATCH_BACKEND:-}" ]]; then
+    echo "error: --standard (/turbox) and UBERDEV_DISPATCH_BACKEND=$UBERDEV_DISPATCH_BACKEND are mutually exclusive (RFC 0020 §2): standard mode runs the fleet in THIS session and launches no per-issue solver child. Unset the env var, or use /turbo." >&2
+    echo "no claims written; no agents dispatched" >&2
+    exit 1
+  fi
+  # Pin the resolver to `workflow` so uberdev_dispatch_preflight,
+  # uberdev_dispatch_resolve_env and uberdev_dispatch_prepare_root still run —
+  # standard mode needs the route, the context files and the prepared root
+  # request they produce. The pin is honest rather than cosmetic: `workflow` is
+  # the one member whose permission story matches standard mode exactly (no
+  # per-child argv; children inherit the calling session's tier, RFC 0015 §6
+  # R-1b). Audited so the pin is never invisible.
+  if [[ "$DISPATCH_BACKEND" != "auto" && "$DISPATCH_BACKEND" != "workflow" ]]; then
+    echo "note: --standard overrides the configured dispatch_backend='$DISPATCH_BACKEND' — /turbox has no per-issue solver child to dispatch (RFC 0020 §2)" >&2
+  fi
+  _uberdev_audit_emit standard_mode_backend_pinned \
+    "{\"configured\":\"$DISPATCH_BACKEND\",\"pinned\":\"workflow\"}" || true
+  DISPATCH_BACKEND=workflow
+fi
 export UBERDEV_DISPATCH_BACKEND_REQUESTED="$DISPATCH_BACKEND"
 if [[ ${#ISSUE_NUMS[@]} -eq 0 ]]; then
-  echo "Usage: /uberdev:solve|/uberdev:turbo <issue-number> [<issue-number>...] [--trivial|--small|--full] [--auto] [--force]"
+  echo "Usage: /uberdev:solve|/uberdev:turbo|/uberdev:turbox <issue-number> [<issue-number>...] [--trivial|--small|--full] [--auto] [--force]"
   exit 1
 fi
 # --full is an alias for medium/large (keeps current behavior)
@@ -1061,16 +1105,40 @@ done
 # validate-all-first pass, the triage decisions, the prepared root request /
 # context files, and the Step 4.5 claim protocol have all already run. Only
 # the transport differs.
+#
+# Step 5s — the /turbox standard-mode lane (RFC 0020) shares this whole block.
+# It needs exactly what Step 5w needs — the manifest, the base capture, the
+# risk count — and differs only in the LAST thing it does: it emits a turbox
+# plan for this session to execute instead of a Workflow args envelope. Its
+# resolved backend is `workflow` because --standard pinned it there (RFC 0020
+# §2), so it enters here; STANDARD_MODE is what tells the two apart.
 if [[ "${UBERDEV_RESOLVED_BACKEND:-}" == "workflow" ]]; then
   # The prompt + context files must outlive this process — the fleet agents
   # read them after the launcher has exited.
   UBERDEV_KEEP_TMPDIR=1
 
   SOLVE_FLEET_PLUGIN_ROOT="${UBERDEV_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}"
-  SOLVE_FLEET_WORKFLOW_JS="$SOLVE_FLEET_PLUGIN_ROOT/skills/solve-fleet/workflow.js"
-  if [ ! -f "$SOLVE_FLEET_WORKFLOW_JS" ]; then
-    echo "error: $SOLVE_FLEET_WORKFLOW_JS missing (RFC 0012 §4.1); reinstall the plugin, or re-run with an explicit --backend=<name> to use a detached transport" >&2
-    exit 2
+  if [[ "$STANDARD_MODE" == "1" ]]; then
+    # Standard mode's executables, validated BEFORE anything is emitted for the
+    # same reason Step 5w validates workflow.js: a missing or misnamed surface
+    # on a target install must refuse cleanly at preflight, not fail later at
+    # the layer that tries to use it.
+    TURBOX_FLEET_LIB="$SOLVE_FLEET_PLUGIN_ROOT/lib/turbox-fleet.sh"
+    TURBOX_FLEET_SKILL="$SOLVE_FLEET_PLUGIN_ROOT/skills/turbox-fleet/SKILL.md"
+    if [ ! -f "$TURBOX_FLEET_LIB" ]; then
+      echo "error: $TURBOX_FLEET_LIB missing (RFC 0020); reinstall the plugin, or run /turbo instead of /turbox" >&2
+      exit 2
+    fi
+    if [ ! -f "$TURBOX_FLEET_SKILL" ]; then
+      echo "error: $TURBOX_FLEET_SKILL missing (RFC 0020); reinstall the plugin, or run /turbo instead of /turbox" >&2
+      exit 2
+    fi
+  else
+    SOLVE_FLEET_WORKFLOW_JS="$SOLVE_FLEET_PLUGIN_ROOT/skills/solve-fleet/workflow.js"
+    if [ ! -f "$SOLVE_FLEET_WORKFLOW_JS" ]; then
+      echo "error: $SOLVE_FLEET_WORKFLOW_JS missing (RFC 0012 §4.1); reinstall the plugin, or re-run with an explicit --backend=<name> to use a detached transport" >&2
+      exit 2
+    fi
   fi
   # uberdev_emit_workflow_args lives in config-read.sh. It is sourced earlier on
   # most paths (the enum readers), but only conditionally — source it here so
@@ -1185,10 +1253,80 @@ print(sum(1 for r in d["issues"]
 ' "$SOLVE_FLEET_MANIFEST")" \
     || { echo "error: failed to derive the solve-fleet risk-issue count from $SOLVE_FLEET_MANIFEST" >&2; exit 2; }
 
+  SOLVE_FLEET_ISSUES="$(printf '%s,' "${ISSUE_NUMS[@]}")"; SOLVE_FLEET_ISSUES="${SOLVE_FLEET_ISSUES%,}"
+
+  # --- Step 5s — the /turbox standard-mode plan (RFC 0020 §4.2) -------------
+  # A DIFFERENT marker pair on purpose. WORKFLOW_ARGS_BEGIN/END means "call
+  # Workflow() with this"; a turbox plan relayed into Workflow() would be a
+  # category error rather than an error message.
+  if [[ "$STANDARD_MODE" == "1" ]]; then
+    # Parallel-issue wave size. Its own config key, its own hard ceiling of 3
+    # (RFC 0020 §3.3) — standard mode's agent count per issue is multiplicative
+    # where the Workflow lane's is additive, so it cannot inherit solve_bg's 6.
+    # The clamp lives in lib/turbox-fleet.sh so the ceiling has ONE definition.
+    if command -v uberdev_read_int_in_range >/dev/null 2>&1; then
+      TURBOX_CONFIGURED_CONCURRENCY="$(uberdev_read_int_in_range fanout_concurrency.turbox UBERDEV_FANOUT_TURBOX 1 50 3)"
+    else
+      TURBOX_CONFIGURED_CONCURRENCY=3
+    fi
+    if ! TURBOX_CONCURRENCY="$(bash "$TURBOX_FLEET_LIB" issue-concurrency --configured "$TURBOX_CONFIGURED_CONCURRENCY")"; then
+      echo "error: failed to resolve the /turbox parallel-issue concurrency" >&2
+      exit 2
+    fi
+
+    _uberdev_audit_emit turbox_standard_fleet_prepared \
+      "{\"issues\":${#ISSUE_NUMS[@]},\"manifest\":\"$SOLVE_FLEET_MANIFEST\",\"concurrency\":$TURBOX_CONCURRENCY}"
+
+    TURBOX_PLAN_JSON="$(python3 -I -B -c '
+import json,sys
+(manifest, issues, issue_count, risk_count, concurrency, run_dir, repo_root,
+ plugin_root, repo_slug, base_branch, implement_budget, max_agents,
+ fix_rounds) = sys.argv[1:14]
+print(json.dumps({
+    "v": 1,
+    "lane": "turbox-standard",
+    "manifestPathAbs": manifest,
+    "issues": issues,
+    "issueCount": int(issue_count),
+    "riskIssueCount": int(risk_count),
+    "concurrency": int(concurrency),
+    "runDirAbs": run_dir,
+    "worktreeRootAbs": run_dir.rstrip("/") + "/worktrees",
+    "repoRootAbs": repo_root,
+    "pluginRootAbs": plugin_root,
+    "repoSlug": repo_slug,
+    "baseBranch": base_branch,
+    "branchPrefix": "worktree-turbox-issue-",
+    "implementBudget": int(implement_budget),
+    "maxAgents": int(max_agents),
+    "fixRounds": int(fix_rounds),
+    "autoMode": True,
+}, sort_keys=True, separators=(",", ":")))
+' "$SOLVE_FLEET_MANIFEST" "$SOLVE_FLEET_ISSUES" "${#ISSUE_NUMS[@]}" \
+  "$SOLVE_FLEET_RISK_ISSUES" "$TURBOX_CONCURRENCY" "$UBERDEV_TMPDIR" \
+  "$REPO_ROOT_ABS" "${UBERDEV_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}" "$REPO_SLUG" \
+  "$SOLVE_FLEET_BASE_BRANCH" "${UBERDEV_TURBOX_IMPLEMENT_BUDGET:-24}" \
+  "${UBERDEV_TURBOX_MAX_AGENTS:-600}" "$(bash "$TURBOX_FLEET_LIB" loop-cap fix_rounds)")" \
+      || { echo "error: failed to compose the turbox plan envelope" >&2; exit 2; }
+
+    echo "TURBOX_PLAN_BEGIN"
+    printf '%s\n' "$TURBOX_PLAN_JSON"
+    echo "TURBOX_PLAN_END"
+
+    echo "repo: $REPO_SLUG" >&2
+    echo "prepared ${#ISSUE_NUMS[@]} issue(s) for the standard-mode solver fleet (/turbox, RFC 0020)" >&2
+    echo "This session is the fleet's orchestrator: follow skills/turbox-fleet/SKILL.md with the JSON between TURBOX_PLAN_BEGIN/TURBOX_PLAN_END." >&2
+    echo "Parallel-issue wave size: $TURBOX_CONCURRENCY (hard cap $(bash "$TURBOX_FLEET_LIB" loop-cap issue_cap))." >&2
+    echo "There is no Workflow run and no /workflows tree — progress is this transcript plus $UBERDEV_TMPDIR." >&2
+    if [[ "${AUTO_PERMISSIONS:-0}" == "1" || "${SKIP_PERMISSIONS:-0}" == "1" ]]; then
+      echo "note: --standard — the resolved bypass tier is NOT scoped to the fleet's agents; they run in THIS session and inherit its permission tier (same property as backend=workflow, RFC 0015 §6 R-1b)." >&2
+    fi
+    exit 0
+  fi
+
   _uberdev_audit_emit solve_workflow_fleet_prepared \
     "{\"issues\":${#ISSUE_NUMS[@]},\"manifest\":\"$SOLVE_FLEET_MANIFEST\",\"concurrency\":$MAX_PARALLEL_BG_AGENTS}"
 
-  SOLVE_FLEET_ISSUES="$(printf '%s,' "${ISSUE_NUMS[@]}")"; SOLVE_FLEET_ISSUES="${SOLVE_FLEET_ISSUES%,}"
   uberdev_emit_workflow_args solve-fleet \
     repo_root="$REPO_ROOT_ABS" \
     pluginRootAbs="${UBERDEV_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}" \
