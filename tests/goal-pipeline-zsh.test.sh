@@ -336,10 +336,18 @@ else
   fail "P3.extract: could NOT extract the terminal region (region marker 'terminal' moved, or the convergence block left it?)"
 fi
 
-# Driver template emitter: $1=goal-id $2=case(conv|queue|stuck|failed).
+# Driver template emitter: $1=goal-id $2=case(conv|queue|stuck|failed|cands).
 # Seeds the pr-states.tsv per case, then runs the extracted terminal fence.
-write_term_driver() {  # $1=outfile $2=gid $3=case
-  local out="$1" gid="$2" cs="$3"
+#
+# $4 is the OPTIONAL #592 partial-chain set, emitted as the `PARTIAL_ISSUES`
+# scalar the terminal region reads. It is emitted on EVERY driver, empty by
+# default, because that is what production does: lib/goal-phase3.sh resolves the
+# scalar once (CLI flag unioned with the run's own audit trail) before the region
+# runs, so a driver that left it unset would exercise a shape the region never
+# sees. The existing P3a-P3d rows therefore keep their meaning AND become the
+# empty-set control for the refusal below.
+write_term_driver() {  # $1=outfile $2=gid $3=case [$4=partial-issues csv]
+  local out="$1" gid="$2" cs="$3" partial="${4:-}"
   {
     echo 'set -u'
     echo "export UBERDEV_TMPDIR='$WORK/state'"
@@ -360,11 +368,15 @@ write_term_driver() {  # $1=outfile $2=gid $3=case
     echo 'MAX_CYCLES=5'
     echo 'new_candidates=()'
     echo 'watch_start="$(date +%s)"'
+    echo "PARTIAL_ISSUES='$partial'"
     case "$cs" in
       conv)  echo 'queue=()' ;;
       queue) echo 'queue=(777)' ;;   # #288 #1: a non-empty rollover must BLOCK convergence
       stuck) echo 'queue=()' ;;
       failed) echo 'queue=()' ;;
+      # #592 P3g: real work still queued for the NEXT cycle — the partial-chain
+      # refusal must NOT pre-empt the loop-back.
+      cands) echo 'queue=()'; echo 'new_candidates=(4242)' ;;
     esac
     echo "source '$TERMINAL_FENCE'"
     echo 'echo "FELL-THROUGH rc=$?"'
@@ -481,6 +493,179 @@ if [ "$F_RC" -eq 1 ] \
   pass "P3d: failed solver issue halts with solver_failed before convergence, exit 1"
 else
   fail "P3d: failed solver issue did not halt before convergence (rc=$F_RC, out=[$F_OUT], audit=[$(tr -d '\n' < "$(audit_for "$G_F")" 2>/dev/null)])"
+fi
+
+# --- P3e: all PRs terminal + a partial chain -> REFUSE to converge (#592).
+# The bug this row locks: convergence is measured purely on PR terminal states,
+# and a PR whose solver task chain stopped short reaches a terminal state exactly
+# like a complete one — so the run announced a convergence it never achieved. The
+# assertions read the DECISION (exit status + the breaker row + what the operator
+# is told), never the mere presence of the scalar.
+G_PE="pipepartial01"
+printf '100\tmerged\t10\n200\tyellow-held\t20\n' > "$WORK/state/goal-$G_PE-pr-states.tsv"
+: > "$(audit_for "$G_PE")"; : > "$WORK/state/goal-$G_PE-issue-states.tsv"
+DRV_PE="$WORK/drv_term_partial.zsh"; write_term_driver "$DRV_PE" "$G_PE" conv 11
+PE_OUT="$("$ZSH_BIN" -f "$DRV_PE" 2>&1)"
+PE_RC=$?
+PE_BREAKER="$(grep 'goal_circuit_breaker' "$(audit_for "$G_PE")" 2>/dev/null | tail -n 1)"
+if [ "$PE_RC" -eq 1 ] \
+   && grep -q '"reason":"solver_failed"' <<<"$PE_BREAKER" \
+   && grep -q '"phase":"partial_chain"' <<<"$PE_BREAKER" \
+   && grep -q '"partial_issues":"11"' <<<"$PE_BREAKER"; then
+  pass "P3e: an all-terminal cycle with a partial chain halts solver_failed/phase=partial_chain, exit 1 (#592)"
+else
+  fail "P3e: partial-chain refusal did not fire (#592 — rc=$PE_RC, out=[$PE_OUT], breaker=[$PE_BREAKER])"
+fi
+if ! grep -q 'goal_converged' "$(audit_for "$G_PE")" 2>/dev/null; then
+  pass "P3e.no-converged: the refused cycle emits NO goal_converged row (#592)"
+else
+  fail "P3e.no-converged: the run claimed convergence it did not achieve (#592 — audit=[$(tr -d '\n' < "$(audit_for "$G_PE")" 2>/dev/null)])"
+fi
+# The audit row is for a later reader; the stderr line is for the human watching
+# an unattended run, and nothing else in the pipeline tells them. It must name
+# the set, and say that --resume re-halts here rather than looking like a
+# transient worth retrying.
+if grep -q 'NOT converged' <<<"$PE_OUT" \
+   && grep -q 'issue(s)/PR(s) 11' <<<"$PE_OUT" \
+   && grep -q -- '--resume' <<<"$PE_OUT"; then
+  pass "P3e.operator-line: the refusal prints an operator line naming the set and the --resume semantics (#592)"
+else
+  fail "P3e.operator-line: the refusal is silent to the operator (#592 — out=[$PE_OUT])"
+fi
+
+# --- P3f: NEGATIVE CONTROL — same all-terminal cycle, empty partial set (#592).
+# Seeded WITH a partial-prs ledger on disk so this row also proves the two
+# mechanisms are distinct: the ledger feeds the `partial:N` count on the
+# converged row (P3b.partial-nonzero), and only the RESOLVED $PARTIAL_ISSUES
+# scalar may refuse convergence. A refusal driven by the ledger's mere existence
+# would make every resumed run un-convergeable.
+G_PF="pipepartial02"
+printf '100\tmerged\t10\n200\tyellow-held\t20\n' > "$WORK/state/goal-$G_PF-pr-states.tsv"
+: > "$(audit_for "$G_PF")"; : > "$WORK/state/goal-$G_PF-issue-states.tsv"
+printf '100\t1\t10\n' > "$WORK/state/goal-$G_PF-partial-prs.tsv"
+DRV_PF="$WORK/drv_term_partial_none.zsh"; write_term_driver "$DRV_PF" "$G_PF" conv ""
+PF_OUT="$("$ZSH_BIN" -f "$DRV_PF" 2>&1)"
+PF_RC=$?
+if [ "$PF_RC" -eq 0 ] \
+   && grep -q 'goal_converged' "$(audit_for "$G_PF")" 2>/dev/null \
+   && ! grep -q 'partial_chain' "$(audit_for "$G_PF")" 2>/dev/null; then
+  pass "P3f: with an EMPTY partial set the same cycle converges exactly as before — exit 0, no partial_chain breaker (#592)"
+else
+  fail "P3f: the empty-partial control did not converge (#592 — rc=$PF_RC, out=[$PF_OUT], audit=[$(tr -d '\n' < "$(audit_for "$G_PF")" 2>/dev/null)])"
+fi
+
+# --- P3g: a partial chain must NOT pre-empt a cycle with real work left (#592).
+# new_candidates is NON-empty, so the convergence branch is not taken at all and
+# the region falls through to the loop-back. `exit 42` lives OUTSIDE this region
+# (it is the file's last line), so the driver's own FELL-THROUGH line is the
+# observable — the same reason sibling P3a asserts rc=0 rather than 42.
+G_PG="pipepartial03"
+printf '100\tmerged\t10\n' > "$WORK/state/goal-$G_PG-pr-states.tsv"
+: > "$(audit_for "$G_PG")"; : > "$WORK/state/goal-$G_PG-issue-states.tsv"
+DRV_PG="$WORK/drv_term_partial_cands.zsh"; write_term_driver "$DRV_PG" "$G_PG" cands 11
+PG_OUT="$("$ZSH_BIN" -f "$DRV_PG" 2>&1)"
+PG_RC=$?
+if grep -q 'FELL-THROUGH rc=0' <<<"$PG_OUT" \
+   && grep -q 'goal_cycle_completed' "$(audit_for "$G_PG")" 2>/dev/null \
+   && ! grep -q 'partial_chain' "$(audit_for "$G_PG")" 2>/dev/null; then
+  pass "P3g: with candidates still queued the partial-chain gate does not fire — the cycle loops back (#592)"
+else
+  fail "P3g: the partial-chain gate pre-empted a cycle with real work left (#592 — rc=$PG_RC, out=[$PG_OUT], audit=[$(tr -d '\n' < "$(audit_for "$G_PG")" 2>/dev/null)])"
+fi
+
+# --- P3h: the D4a resume-sticky UNION, executed (#592).
+# The union is what makes the refusal survive `--resume`: a resumed pass gets an
+# EMPTY argv set, so without it the run re-evaluates the same all-terminal state
+# and converges five minutes after refusing to. It lives in its own region
+# precisely so it can be executed here rather than inferred from the source.
+# Under zsh because that is the shell the phase scripts must survive, and because
+# the helper it calls builds its accumulator in a heredoc-fed loop.
+echo
+echo "== P3h: the #592 resume-sticky partial-issue union under zsh =="
+UNION_FENCE="$WORK/partial-union.fence.sh"
+if extract_region partial-union "$GOAL_P3" > "$UNION_FENCE" && [ -s "$UNION_FENCE" ] \
+   && grep -q 'uberdev_goal_partial_issues_from_audit' "$UNION_FENCE"; then
+  pass "P3h.extract: located the partial-union region in lib/goal-phase3.sh"
+else
+  fail "P3h.extract: could NOT extract the partial-union region (marker renamed, or the union left it?)"
+fi
+
+# $1=outfile $2=goal-id $3=the CLI-resolved PARTIAL_ISSUES value.
+write_union_driver() {
+  local out="$1" gid="$2" cli="$3"
+  {
+    echo 'set -u'
+    echo "export UBERDEV_TMPDIR='$WORK/state'"
+    echo "export GOAL_ID='$gid'"
+    echo "export UBERDEV_GOAL_ID='$gid'"
+    echo ". \"\$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh\""
+    echo "PARTIAL_ISSUES='$cli'"
+    echo "source '$UNION_FENCE'"
+    echo 'echo "UNION=[$PARTIAL_ISSUES]"'
+  } > "$out"
+}
+union_run() {   # $1=goal-id $2=cli value -> prints the resolved scalar
+  local gid="$1" cli="$2" drv="$WORK/drv_union_$1_$$.zsh"
+  write_union_driver "$drv" "$gid" "$cli"
+  # stderr deliberately left visible — the union degrades with a breadcrumb and
+  # never with a status, so suppressing it here would hide the only signal.
+  "$ZSH_BIN" -f "$drv" | sed -n 's/^UNION=\[\(.*\)\]$/\1/p'
+}
+
+G_U="pipeunion01"
+cat > "$(audit_for "$G_U")" <<'UNIONJSONL'
+{"ts":"2026-01-01T00:00:00Z","event":"goal_circuit_breaker","payload":{"reason":"solver_failed","phase":"partial_chain","cycle":1,"partial_issues":"11,12","prs":2}}
+UNIONJSONL
+U_EMPTY="$(union_run "$G_U" "")"
+if [ "$U_EMPTY" = "11,12" ]; then
+  pass "P3h.resume: with an EMPTY CLI set the union re-derives the run's own refusal from the audit trail (#592)"
+else
+  fail "P3h.resume: the resumed pass lost the refused set (#592 — got [$U_EMPTY], want [11,12])"
+fi
+U_BOTH="$(union_run "$G_U" "9")"
+if [ "$U_BOTH" = "9,11,12" ]; then
+  pass "P3h.union: this pass's CLI set and the run's prior set are UNIONED, CLI first (#592)"
+else
+  fail "P3h.union: the union dropped one of its two halves (#592 — got [$U_BOTH], want [9,11,12])"
+fi
+# The two halves OVERLAP by construction: what the fleet reports partial this
+# pass is what the audit trail carries one pass later. A concatenating union
+# would put `11,11` in the operator line and in the breaker row the next pass
+# reads back.
+U_DUP="$(union_run "$G_U" "11")"
+if [ "$U_DUP" = "11,12" ]; then
+  pass "P3h.dedupe: a member present in BOTH halves appears once (#592)"
+else
+  fail "P3h.dedupe: the union duplicated an overlapping member (#592 — got [$U_DUP], want [11,12])"
+fi
+
+# The member vocabulary is WIDER than digits: `pr-<n>` names a partial delivery
+# the run could not map back to an issue, and it is exactly the member a resumed
+# run is often the only witness of. A union that re-filtered to digits (to match
+# the CLI flag's shape refusal) would drop it and let the run converge on a set
+# it never achieved — so this row is the guard on that specific "tidy-up".
+G_UP="pipeunion02"
+cat > "$(audit_for "$G_UP")" <<'UNIONJSONL'
+{"ts":"2026-01-01T00:00:00Z","event":"goal_partial_delivery","payload":{"goal_id":"pipeunion02","pr":77,"issue":0}}
+UNIONJSONL
+U_PR="$(union_run "$G_UP" "")"
+if [ "$U_PR" = "pr-77" ]; then
+  pass "P3h.vocabulary: a non-digit member (pr-77) survives the union — the CLI shape refusal does not re-filter it (#592)"
+else
+  fail "P3h.vocabulary: the union re-filtered the helper's output down to digits (#592 — got [$U_PR], want [pr-77])"
+fi
+
+# No audit trail at all (a first pass, or a run whose jsonl is absent): the union
+# must be a clean no-op in BOTH directions, never a fabricated member and never a
+# wipe of the value argv just handed us.
+G_UN="pipeunion03"
+rm -f "$(audit_for "$G_UN")"
+U_NONE="$(union_run "$G_UN" "")"
+U_CLI="$(union_run "$G_UN" "9")"
+if [ -z "$U_NONE" ] && [ "$U_CLI" = "9" ]; then
+  pass "P3h.no-trail: with no audit trail the union is a no-op — empty stays empty, the CLI set is preserved (#592)"
+else
+  fail "P3h.no-trail: the union corrupted the scalar with no audit trail (#592 — empty=[$U_NONE], cli=[$U_CLI])"
 fi
 
 # ==========================================================================

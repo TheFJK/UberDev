@@ -4312,6 +4312,269 @@ else
 fi
 chmod 644 "$_g54_d7/goal-d7.jsonl" 2>/dev/null || true
 
+# --- G-592.1 — lib/goal-phase3.sh's `--partial-issues` argument boundary
+# EXECUTED against the real script, because the value is interpolated into a JSON
+# audit payload and into an operator line downstream: the refusal IS the
+# injection boundary, and a shape check on the source would not prove the script
+# ever reaches it. Every arm asserts the MESSAGE as well as the status — the
+# catch-all `unknown argument` arm also exits 2, so a status-only assertion is
+# satisfied by a build that never grew the flag at all (reviewer finding F5).
+_g54_args="$_g54_tmp/args"
+mkdir -p "$_g54_args"
+# The plugin root is deliberately UNSET: the parser runs before any sourcing, so
+# refusing (or accepting) an argument must not depend on a resolvable plugin
+# tree, and an accepted value then fails predictably at rehydration instead.
+_g54_p3() {   # _g54_p3 ERRFILE ARGS... -> exit status, stderr captured to ERRFILE
+  local err="$1"; shift
+  env -u CLAUDE_PLUGIN_ROOT -u UBERDEV_PLUGIN_ROOT -u PLUGIN_ROOT -u UBERDEV_GOAL_ID \
+    UBERDEV_TMPDIR="$_g54_args" bash "$GOAL_P3" "$@" >/dev/null 2>"$err"
+}
+
+_g54_e1="$_g54_args/inject.err"
+_g54_p3 "$_g54_e1" "--partial-issues=1;rm -rf /"
+assert_rc "$?" 2 "G-592.1.injection-probe-exits-2"
+assert_grep_file    "$_g54_e1" 'malformed --partial-issues' "G-592.1.injection-probe-names-the-flag-whose-shape-was-wrong"
+assert_no_grep_file "$_g54_e1" 'unknown argument'           "G-592.1.injection-probe-is-the-shape-refusal-not-the-catch-all"
+
+# The separator forms matter as much as the character class: an empty member
+# would otherwise become a "member" of the set and reach the operator line.
+for _g54_bad in ',11' '11,' '11,,12' '11 12' 'pr-11'; do
+  _g54_e2="$_g54_args/bad.err"
+  _g54_p3 "$_g54_e2" "--partial-issues=$_g54_bad"
+  assert_rc "$?" 2 "G-592.1.malformed-[$_g54_bad]-exits-2"
+  assert_grep_file "$_g54_e2" 'malformed --partial-issues' "G-592.1.malformed-[$_g54_bad]-refused-by-the-shape-guard"
+done
+
+# Accept half. The status is deliberately NOT pinned to a literal: with no
+# plugin root resolvable the run dies at rehydration, and WHICH status that
+# produces depends on the invoking environment. What must hold is that the value
+# passed the parser — neither refusal message was printed and the shape guard did
+# not claim it.
+_g54_e3="$_g54_args/ok.err"
+_g54_p3 "$_g54_e3" "--goal-id=g54ok" "--partial-issues=11,12"
+_g54_rc=$?
+if [ "$_g54_rc" != "2" ]; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "G-592.1.well-formed-value-is-not-refused (rc=$_g54_rc, refusal=2)"
+else
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "G-592.1.well-formed-value-is-not-refused (rc=2 — a digits-and-commas value was rejected)" >&2
+  printf '        stderr: %s\n' "$(cat "$_g54_e3" 2>/dev/null || true)" >&2
+fi
+assert_no_grep_file "$_g54_e3" 'malformed --partial-issues' "G-592.1.well-formed-value-draws-no-shape-complaint"
+assert_no_grep_file "$_g54_e3" 'unknown argument'           "G-592.1.well-formed-flag-is-recognised-not-swallowed-by-the-catch-all"
+
+# Non-vacuity for the pair above: the catch-all must still be reachable, and it
+# must NOT be the arm that produced the refusals asserted at the top.
+_g54_e4="$_g54_args/unknown.err"
+_g54_p3 "$_g54_e4" "--partial-prs=11"
+assert_rc "$?" 2 "G-592.1.unknown-flag-still-exits-2"
+assert_grep_file    "$_g54_e4" 'unknown argument'           "G-592.1.catch-all-is-intact"
+assert_no_grep_file "$_g54_e4" 'malformed --partial-issues' "G-592.1.shape-refusal-did-not-swallow-the-unknown-flag"
+
+# --- G-592.4 — the convergence refusal and the resume union, under BASH
+# The zsh twin (tests/goal-pipeline-zsh.test.sh P3e-P3h) is ubuntu-only by its
+# own ci-wiring declaration, so without these rows the Windows job never executes
+# the gate at all. Both regions are SLICED and RUN, never grepped: what is under
+# test is the DECISION (status + audit row + what the operator is told), and a
+# shape check cannot see a gate that is present but unreachable.
+
+# --- G-592.4.order — the two halves COMPOSE, and composition is file order
+# Every behavioural row in this section drives ONE sliced region: the terminal
+# fixtures ASSIGN `PARTIAL_ISSUES` by hand and the union fixtures only print it.
+# Slicing is the only way to execute a gate that `exit`s, but on its own it
+# leaves the mechanism — the union resolving the scalar the gate then reads,
+# in one process — asserted by nothing. Moving the union region below the
+# terminal region, or above the digits-and-commas refusal, keeps every sliced
+# row green while the run converges on a set it never resolved. Same file-order
+# idiom G44 and G45 already apply to this same file.
+#
+# The refusal anchor is the second half of the claim the region header makes:
+# the union must land AFTER the shape guard, never through it, because the
+# helper's member vocabulary is WIDER than digits and re-filtering it would drop
+# exactly the members that must halt the run.
+_g54_ord_refusal="$(grep -nF 'malformed --partial-issues value' "$GOAL_P3" | head -1 | cut -d: -f1)"
+_g54_ord_union="$(grep -nF '# >>> region: partial-union' "$GOAL_P3" | head -1 | cut -d: -f1)"
+_g54_ord_term="$(grep -nF '# >>> region: terminal' "$GOAL_P3" | head -1 | cut -d: -f1)"
+if [ -n "${_g54_ord_refusal:-}" ] && [ -n "${_g54_ord_union:-}" ] && [ -n "${_g54_ord_term:-}" ] \
+   && [ "$_g54_ord_refusal" -lt "$_g54_ord_union" ] && [ "$_g54_ord_union" -lt "$_g54_ord_term" ]; then
+  PASS=$((PASS + 1))
+  printf '  PASS  %s\n' "G-592.4.order-refusal-then-union-then-terminal (refusal=$_g54_ord_refusal < union=$_g54_ord_union < terminal=$_g54_ord_term)"
+else
+  FAIL=$((FAIL + 1))
+  printf '  FAIL  %s\n' "G-592.4.order-refusal-then-union-then-terminal (refusal=${_g54_ord_refusal:-MISSING} union=${_g54_ord_union:-MISSING} terminal=${_g54_ord_term:-MISSING} — the union must run AFTER the shape refusal and BEFORE the gate that reads its result)" >&2
+fi
+
+_g54_beh="$_g54_tmp/behav"
+mkdir -p "$_g54_beh"
+_g54_term="$_g54_beh/terminal.sh"
+_g54_union="$_g54_beh/partial-union.sh"
+_g54_bash="${BASH:-bash}"
+if extract_region terminal "$GOAL_P3" > "$_g54_term" && [ -s "$_g54_term" ] \
+   && extract_region partial-union "$GOAL_P3" > "$_g54_union" && [ -s "$_g54_union" ]; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "G-592.4.extract: the terminal + partial-union regions are sliceable from lib/goal-phase3.sh"
+
+  # $1=goal-id $2=PARTIAL_ISSUES $3=new_candidates literal -> driver path.
+  # The stubs mirror the zsh fixture's: the loop scalars are set directly and the
+  # exit-side effects (reaper / summary / cleanup / flush) are not under test.
+  _g54_term_driver() {
+    local gid="$1" partial="$2" cands="$3" drv="$_g54_beh/drv-$1.sh"
+    {
+      printf 'set -u\n'
+      printf 'export UBERDEV_TMPDIR=%s\n' "'$_g54_beh'"
+      printf 'export GOAL_ID=%s; export UBERDEV_GOAL_ID=%s\n' "'$gid'" "'$gid'"
+      printf '. %s\n' "'$GOAL_LIB'"
+      printf '_uberdev_goal_reap_zombies() { return 0; }\n'
+      printf 'print_summary() { :; }\n'
+      printf 'uberdev_goal_cleanup_run_state() { return 0; }\n'
+      printf 'uberdev_goal_write_run_state() { return 0; }\n'
+      printf 'cycle=1; MAX_CYCLES=5; queue=(); overflow_count=0\n'
+      printf 'new_candidates=%s\n' "$cands"
+      printf 'PARTIAL_ISSUES=%s\n' "'$partial'"
+      printf 'source %s\n' "'$_g54_term'"
+      printf 'echo "FELL-THROUGH rc=$?"\n'
+    } > "$drv"
+    printf '%s' "$drv"
+  }
+
+  # G-592.4a — all PRs terminal + a partial chain -> REFUSE, exit 1.
+  printf '100\tmerged\t10\n200\tyellow-held\t20\n' > "$_g54_beh/goal-b1-pr-states.tsv"
+  : > "$_g54_beh/goal-b1-issue-states.tsv"; : > "$_g54_beh/goal-b1.jsonl"
+  _g54_out="$("$_g54_bash" "$(_g54_term_driver b1 '11,pr-77' '()')" 2>&1)"; _g54_rc=$?
+  _g54_row="$(grep 'goal_circuit_breaker' "$_g54_beh/goal-b1.jsonl" 2>/dev/null | tail -n 1)"
+  assert_rc "$_g54_rc" 1 "G-592.4a.partial-chain-halts-with-exit-1"
+  assert_contains "$_g54_row" '"reason":"solver_failed"'      "G-592.4a.reuses-the-closed-set-breaker-reason"
+  assert_contains "$_g54_row" '"phase":"partial_chain"'       "G-592.4a.phase-subfield-discriminates-the-two-solver_failed-halts"
+  assert_contains "$_g54_row" '"partial_issues":"11,pr-77"'   "G-592.4a.the-refused-set-rides-on-the-row-that-refused-it"
+  assert_no_grep_file "$_g54_beh/goal-b1.jsonl" 'goal_converged' "G-592.4a.no-convergence-is-claimed"
+  # The operator line is the ONLY channel an unattended run has to a human, and
+  # it must be worded for the whole member vocabulary (a member may name a PR).
+  assert_contains "$_g54_out" 'NOT converged'          "G-592.4a.operator-line-says-the-run-did-not-converge"
+  assert_contains "$_g54_out" 'issue(s)/PR(s) 11,pr-77' "G-592.4a.operator-line-names-the-set-in-vocabulary-neutral-words"
+  assert_contains "$_g54_out" '--resume'               "G-592.4a.operator-line-states-the-resume-semantics"
+
+  # G-592.4b — NEGATIVE CONTROL: same cycle, empty set, ledger present on disk.
+  # Proves the refusal is driven by the resolved scalar and not by the ledger's
+  # existence — a refusal on the ledger alone would make every run with a merged
+  # partial PR permanently un-convergeable.
+  printf '100\tmerged\t10\n200\tyellow-held\t20\n' > "$_g54_beh/goal-b2-pr-states.tsv"
+  : > "$_g54_beh/goal-b2-issue-states.tsv"; : > "$_g54_beh/goal-b2.jsonl"
+  printf '100\t1\t10\n' > "$_g54_beh/goal-b2-partial-prs.tsv"
+  _g54_out="$("$_g54_bash" "$(_g54_term_driver b2 '' '()')" 2>&1)"; _g54_rc=$?
+  assert_rc "$_g54_rc" 0 "G-592.4b.empty-partial-set-still-converges"
+  assert_grep_file    "$_g54_beh/goal-b2.jsonl" 'goal_converged' "G-592.4b.the-converged-row-is-still-written"
+  assert_no_grep_file "$_g54_beh/goal-b2.jsonl" 'partial_chain'  "G-592.4b.no-breaker-row-on-the-control"
+
+  # G-592.4c — a cycle with candidates still queued must NOT be pre-empted.
+  printf '100\tmerged\t10\n' > "$_g54_beh/goal-b3-pr-states.tsv"
+  : > "$_g54_beh/goal-b3-issue-states.tsv"; : > "$_g54_beh/goal-b3.jsonl"
+  _g54_out="$("$_g54_bash" "$(_g54_term_driver b3 '11' '(4242)')" 2>&1)"
+  assert_contains "$_g54_out" 'FELL-THROUGH rc=0' "G-592.4c.a-cycle-with-real-work-left-loops-back"
+  assert_grep_file    "$_g54_beh/goal-b3.jsonl" 'goal_cycle_completed' "G-592.4c.the-loop-back-row-is-written"
+  assert_no_grep_file "$_g54_beh/goal-b3.jsonl" 'partial_chain'        "G-592.4c.the-gate-does-not-pre-empt-pending-work"
+
+  # G-592.4.union-* — the D4a resume union, executed. Without it a `--resume`
+  # re-evaluates the same all-terminal state with an EMPTY argv set and converges
+  # on exactly what the earlier pass refused.
+  _g54_union_run() {   # $1=goal-id $2=CLI value -> the resolved scalar
+    local gid="$1" cli="$2" drv="$_g54_beh/drv-union-$1.sh"
+    {
+      printf 'set -u\n'
+      printf 'export UBERDEV_TMPDIR=%s\n' "'$_g54_beh'"
+      printf 'export GOAL_ID=%s; export UBERDEV_GOAL_ID=%s\n' "'$gid'" "'$gid'"
+      printf '. %s\n' "'$GOAL_LIB'"
+      printf 'PARTIAL_ISSUES=%s\n' "'$cli'"
+      printf 'source %s\n' "'$_g54_union'"
+      printf 'printf "UNION=%%s\\n" "$PARTIAL_ISSUES"\n'
+    } > "$drv"
+    # stderr is NOT suppressed: the union's degradation paths (an unreadable
+    # audit jsonl, a refused goal id) are breadcrumb-only by design, and hiding
+    # them here would make this fixture the one place they cannot be seen.
+    "$_g54_bash" "$drv" | sed -n 's/^UNION=//p'
+  }
+  cat > "$_g54_beh/goal-u1.jsonl" <<'G54JSONL'
+{"ts":"2026-01-01T00:00:00Z","event":"goal_circuit_breaker","payload":{"reason":"solver_failed","phase":"partial_chain","cycle":1,"partial_issues":"11,12","prs":2}}
+{"ts":"2026-01-01T00:00:01Z","event":"goal_partial_delivery","payload":{"goal_id":"u1","pr":77,"issue":0}}
+G54JSONL
+  assert_eq "$(_g54_union_run u1 '')"  "11,12,pr-77"   "G-592.4.union-resume: an empty argv set re-derives the run's own refused set"
+  assert_eq "$(_g54_union_run u1 '9')" "9,11,12,pr-77" "G-592.4.union-both: this pass's set and the run's prior set are unioned, argv first"
+  # The halves overlap by construction, so the union must dedupe: otherwise the
+  # operator line and the breaker row the next pass reads back both carry 11,11.
+  assert_eq "$(_g54_union_run u1 '11')" "11,12,pr-77"  "G-592.4.union-dedupe: a member present in both halves appears once"
+  rm -f "$_g54_beh/goal-u2.jsonl"
+  assert_eq "$(_g54_union_run u2 '')"  ""              "G-592.4.union-no-trail: no audit trail invents no member"
+  assert_eq "$(_g54_union_run u2 '9')" "9"             "G-592.4.union-preserves-cli: no audit trail does not wipe the argv set"
+
+  # G-592.4.composed-* — BOTH regions, ONE process, in file order, with the argv
+  # half EMPTY. This is the only row that observes the union's result reaching
+  # the gate, and it discriminates the two refactors the sliced rows above are
+  # blind to: a scalar renamed in ONE half (the union fixtures read the name the
+  # union writes, the terminal fixtures assign the name the gate reads, so
+  # either rename alone is invisible to both), and a union body moved behind a
+  # function or an early `return` (sourcing it would then resolve nothing).
+  # The file-order half of the same claim is G-592.4.order above; neither row
+  # subsumes the other.
+  _g54_composed_driver() {   # $1=goal-id -> driver path
+    local gid="$1" drv="$_g54_beh/drv-composed-$1.sh"
+    {
+      printf 'set -u\n'
+      printf 'export UBERDEV_TMPDIR=%s\n' "'$_g54_beh'"
+      printf 'export GOAL_ID=%s; export UBERDEV_GOAL_ID=%s\n' "'$gid'" "'$gid'"
+      printf '. %s\n' "'$GOAL_LIB'"
+      printf '_uberdev_goal_reap_zombies() { return 0; }\n'
+      printf 'print_summary() { :; }\n'
+      printf 'uberdev_goal_cleanup_run_state() { return 0; }\n'
+      printf 'uberdev_goal_write_run_state() { return 0; }\n'
+      printf 'cycle=1; MAX_CYCLES=5; queue=(); overflow_count=0; new_candidates=()\n'
+      # EMPTY on purpose: this models the `--resume` pass, where argv carries
+      # nothing and the run's own audit trail is the only surviving channel.
+      printf 'PARTIAL_ISSUES=""\n'
+      printf 'source %s\n' "'$_g54_union'"
+      printf 'source %s\n' "'$_g54_term'"
+      printf 'echo "FELL-THROUGH rc=$?"\n'
+    } > "$drv"
+    printf '%s' "$drv"
+  }
+
+  # All PRs terminal, nothing on argv, one partial delivery in the run's trail.
+  printf '100\tmerged\t10\n' > "$_g54_beh/goal-c1-pr-states.tsv"
+  : > "$_g54_beh/goal-c1-issue-states.tsv"
+  cat > "$_g54_beh/goal-c1.jsonl" <<'G54JSONL'
+{"ts":"2026-01-01T00:00:00Z","event":"goal_partial_delivery","payload":{"goal_id":"c1","pr":100,"issue":42}}
+G54JSONL
+  _g54_cdrv="$(_g54_composed_driver c1)"
+  _g54_out="$("$_g54_bash" "$_g54_cdrv" 2>&1)"; _g54_rc=$?
+  _g54_row="$(grep 'goal_circuit_breaker' "$_g54_beh/goal-c1.jsonl" 2>/dev/null | tail -n 1)"
+  assert_rc "$_g54_rc" 1 "G-592.4.composed-the-union-result-reaches-the-gate-and-halts"
+  assert_contains "$_g54_row" '"phase":"partial_chain"' "G-592.4.composed-writes-the-partial-chain-breaker-row"
+  assert_contains "$_g54_row" '"partial_issues":"42"'   "G-592.4.composed-refuses-on-the-set-only-the-union-could-have-supplied"
+  assert_contains "$_g54_row" '"prs":1'                 "G-592.4.composed-the-refusal-row-still-counts-the-run-s-PRs"
+  assert_contains "$_g54_out" 'issue(s)/PR(s) 42'       "G-592.4.composed-operator-line-names-the-re-derived-set"
+  assert_no_grep_file "$_g54_beh/goal-c1.jsonl" 'goal_converged' "G-592.4.composed-claims-no-convergence"
+
+  # Second pass over the SAME trail, which now also carries the breaker row the
+  # first pass wrote — this is what `--resume` actually re-enters. It must
+  # re-halt, and on a set that has NOT grown a duplicate member: the delivery
+  # row and the breaker row name the same issue by construction, and that set is
+  # interpolated straight into the next breaker row and the operator line.
+  _g54_out="$("$_g54_bash" "$_g54_cdrv" 2>&1)"; _g54_rc=$?
+  _g54_row="$(grep 'goal_circuit_breaker' "$_g54_beh/goal-c1.jsonl" 2>/dev/null | tail -n 1)"
+  assert_rc "$_g54_rc" 1 "G-592.4.composed-resume-re-halts-on-the-run-s-own-breaker-row"
+  assert_contains "$_g54_row" '"partial_issues":"42"' "G-592.4.composed-resume-does-not-duplicate-the-member"
+  assert_no_grep_file "$_g54_beh/goal-c1.jsonl" 'goal_converged' "G-592.4.composed-resume-still-claims-no-convergence"
+
+  # Anti-vacuity for the three rows above: the composed driver is not wired to
+  # refuse. Same regions, same stubs, same all-terminal PR set — an EMPTY trail
+  # converges, so the halt really is the union's doing.
+  printf '100\tmerged\t10\n' > "$_g54_beh/goal-c2-pr-states.tsv"
+  : > "$_g54_beh/goal-c2-issue-states.tsv"; : > "$_g54_beh/goal-c2.jsonl"
+  _g54_out="$("$_g54_bash" "$(_g54_composed_driver c2)" 2>&1)"; _g54_rc=$?
+  assert_rc "$_g54_rc" 0 "G-592.4.composed-control-an-empty-trail-still-converges"
+  assert_grep_file    "$_g54_beh/goal-c2.jsonl" 'goal_converged' "G-592.4.composed-control-writes-the-converged-row"
+  assert_no_grep_file "$_g54_beh/goal-c2.jsonl" 'partial_chain'  "G-592.4.composed-control-invents-no-member"
+else
+  FAIL=$((FAIL + 1))
+  printf '  FAIL  %s\n' "G-592.4.extract: could NOT slice the terminal + partial-union regions from lib/goal-phase3.sh (region markers renamed?)" >&2
+fi
+
 rm -rf "$_g54_tmp"
 
 echo
