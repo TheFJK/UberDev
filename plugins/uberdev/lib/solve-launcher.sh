@@ -209,6 +209,13 @@ fi
 # Canonical values; the Constants table in solve-pipeline/SKILL.md documents
 # them. Keep at column 0 — tests/solve-claim.test.sh anchors
 # `^UBERDEV_ACTIVE_LABEL=` and `^CLAIM_COMMENT_MARKER=`.
+# Issue-body snapshot cap for the standard-mode lane (RFC 0020). Same 64 KiB
+# ceiling and the same reason as _UBERDEV_GOAL_BODY_CAP in lib/goal-state.sh:
+# the body is fed to every research lens and to the spec writer, and is an
+# unbounded input to their own scanning. Env-overridable for a pathological repo.
+: "${UBERDEV_ISSUE_BODY_CAP:=65536}"
+# Parallel to ISSUE_NUMS[]/TIERS[] (bash 3.2: no associative arrays).
+ISSUE_BODY_FILES=()
 UBERDEV_ACTIVE_LABEL='uberdev:active'
 UBERDEV_ACTIVE_LABEL_COLOR='D93F0B'
 UBERDEV_ACTIVE_LABEL_DESCRIPTION='Issue currently being worked on by a /solve or /turbo dispatcher. Auto-managed; do not edit.'
@@ -650,6 +657,49 @@ for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
   TITLES[$_vidx]="$TITLE"
   RISKS[$_vidx]="$RISK_JSON"
   TRIAGE_DECISIONS[$_vidx]="$TRIAGE_JSON"
+  # --- Standard-mode issue-body snapshot (RFC 0020) -------------------------
+  # The /turbox controller hands its agents a PATH to the issue body; invariant
+  # 2 of skills/turbox-fleet/SKILL.md forbids interpolating the text into a
+  # prompt. That artifact is written HERE rather than by the controller,
+  # because a step the launcher performs cannot be skipped and a step described
+  # in prose can — which is the omission class this exists to close.
+  #
+  # The bytes are already in hand: $ISSUE_JSON came from the bounded snapshot
+  # _uberdev_fetch_issue_json created with O_EXCL|O_NOFOLLOW at 0600 inside the
+  # 0700 run dir, and the line below used to be the only thing that happened to
+  # them. Re-fetching controller-side would repeat a validated GitHub
+  # round-trip less safely and bind it to the caller's cwd remote rather than
+  # to $REPO_SLUG.
+  #
+  # Capped at UBERDEV_ISSUE_BODY_CAP for the reason goal-state.sh:161 caps its
+  # own body reads: an unbounded body is fed to every research lens and to the
+  # spec writer, and is an unbounded input to their regex scanning.
+  if [[ "$STANDARD_MODE" == "1" ]]; then
+    if ! python3 -I -B -c '
+import json,os,stat,sys
+root,target,cap,raw=sys.argv[1:5]
+root=os.path.realpath(root); target=os.path.abspath(target)
+if os.path.dirname(target)!=root: raise SystemExit(2)
+d=json.loads(raw)
+labels=",".join(l.get("name","") for l in d.get("labels") or [])
+body=d.get("body") or ""
+text="# Issue #%s: %s\n\nLabels: %s\n\n---\n\n%s\n" % (d.get("number"), d.get("title",""), labels, body)
+text=text[:int(cap)]
+fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600)
+try:
+    os.write(fd,text.encode("utf-8"))
+finally:
+    os.close(fd)
+entry=os.stat(target,follow_symlinks=False)
+if entry.st_nlink!=1 or not stat.S_ISREG(entry.st_mode) or stat.S_IMODE(entry.st_mode)!=0o600: raise SystemExit(2)
+' "$UBERDEV_TMPDIR" "$UBERDEV_TMPDIR/issue-body-$ISSUE_NUM.md" "$UBERDEV_ISSUE_BODY_CAP" "$ISSUE_JSON"; then
+      ERRORS+=("#$ISSUE_NUM: could not persist the standard-mode issue-body snapshot")
+      rm -f "$UBERDEV_TMPDIR/solve-validate-$ISSUE_NUM.json"
+      _vidx=$((_vidx + 1))
+      continue
+    fi
+    ISSUE_BODY_FILES[$_vidx]="$UBERDEV_TMPDIR/issue-body-$ISSUE_NUM.md"
+  fi
   rm -f "$UBERDEV_TMPDIR/solve-validate-$ISSUE_NUM.json"
   _vidx=$((_vidx + 1))
 done
@@ -1205,8 +1255,13 @@ if [[ "${UBERDEV_RESOLVED_BACKEND:-}" == "workflow" ]]; then
       # and the security research lens is gated on the difference.
       python3 -I -c '
 import json,sys
-issue,tier,prompt_file,root_request,risk_signals=sys.argv[1:6]
+issue,tier,prompt_file,root_request,risk_signals,issue_body_file=sys.argv[1:7]
 rec={"issue":int(issue),"tier":tier,"prompt_file":prompt_file}
+# Present only on the standard lane, where the launcher persisted it. Absent
+# elsewhere for the same reason context_file is conditional: an absent key must
+# keep meaning "this lane does not produce one", never "the relay dropped it".
+if issue_body_file:
+    rec["issue_body_file"]=issue_body_file
 try:
     r=json.loads(root_request) if root_request else {}
 except ValueError:
@@ -1223,7 +1278,7 @@ if not isinstance(rs,list):
 rec["risk_signals"]=[s for s in rs if isinstance(s,str)]
 print(json.dumps(rec,sort_keys=True,separators=(",",":")),end="")
 ' "$ISSUE_NUM" "${TIERS[$_midx]}" "$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt" "${ROOT_REQUESTS[$_midx]:-}" \
-        "${RISKS[$_midx]}" \
+        "${RISKS[$_midx]}" "${ISSUE_BODY_FILES[$_midx]:-}" \
         || { echo "error: failed to build the solve-fleet manifest record for #$ISSUE_NUM" >&2; exit 2; }
       _midx=$((_midx + 1))
     done
