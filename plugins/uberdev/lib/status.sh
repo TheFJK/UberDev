@@ -11,7 +11,7 @@
 #
 # UberDev keeps run state in FIVE disjoint stores:
 #
-#   1. /solve + /turbo claims      the `uberdev:active` GitHub label plus
+#   1. /solve/turbo/turbox claims  the `uberdev:active` GitHub label plus
 #                                  per-issue solve-bg-status-<N>.json
 #                                  under the runtime root
 #   2. /goal                       GOAL_ID-keyed sidecars (1 jsonl + 7 TSVs +
@@ -523,11 +523,11 @@ _uberdev_status_discover_repo() {
   fi
 }
 
-# --- Section 1: /solve + /turbo claims -------------------------------------
+# --- Section 1: /solve + /turbo + /turbox claims -------------------------------------
 
 _uberdev_status_section_claims() {
   local rc json entry role root file issue backend announced found=0
-  _uberdev_status_rule "1. /solve + /turbo claims (label ${_UBERDEV_STATUS_ACTIVE_LABEL})"
+  _uberdev_status_rule "1. /solve + /turbo + /turbox claims (label ${_UBERDEV_STATUS_ACTIVE_LABEL})"
 
   if ! command -v gh >/dev/null 2>&1; then
     _uberdev_status_note 'gh: not on PATH — the label census is unavailable (local artefacts still shown).'

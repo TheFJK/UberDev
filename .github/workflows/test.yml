@@ -211,6 +211,8 @@ jobs:
           bash tests/testers-workflow.test.sh && \
           bash tests/scan-fleet-workflow.test.sh && \
           bash tests/solve-fleet-workflow.test.sh && \
+          bash tests/turbox-fleet.test.sh && \
+          bash tests/turbox-fleet-runtime.test.sh && \
           bash tests/review-pr-workflow.test.sh && \
           bash tests/goal-workflow.test.sh && \
           bash tests/uberthink-workflow.test.sh && \
@@ -424,6 +426,14 @@ jobs:
 #                                         same Unix-bound harness class as
 #                                         status.test.sh; the teardown code
 #                                         itself stays portable)
+#   - turbox-fleet-runtime.test.sh        (RFC 0020: executes lib/turbox-fleet.sh
+#                                         against a throwaway git repo with real
+#                                         `git worktree add`, and hands python3
+#                                         mktemp -d paths on argv — the same
+#                                         Git Bash path-translation class as
+#                                         uberscan-report. Its SHAPE twin,
+#                                         turbox-fleet.test.sh, is pure
+#                                         grep-and-assert and runs on BOTH jobs)
 # === END ci-wiring windows-skip-list ===
         # review-child-handoff and run-manifest use bounded native-Windows
         # modes for carrier/path serialization and captured publication retry;
@@ -499,6 +509,7 @@ jobs:
           bash tests/testers-workflow.test.sh && \
           bash tests/scan-fleet-workflow.test.sh && \
           bash tests/solve-fleet-workflow.test.sh && \
+          bash tests/turbox-fleet.test.sh && \
           bash tests/goal-workflow.test.sh && \
           bash tests/uberthink-workflow.test.sh && \
           bash tests/epipe-guard.test.sh && \

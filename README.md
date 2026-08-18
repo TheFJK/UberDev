@@ -4,7 +4,7 @@
 
 **Personal Claude Code marketplace — opinionated GitHub-workflow slash commands.**
 
-[![Version](https://img.shields.io/badge/version-0.48.0-blue)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.49.0-blue)](./CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8B5CF6)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Repo Agnostic](https://img.shields.io/badge/repo--agnostic-yes-success)](#configuration)
@@ -39,6 +39,7 @@ UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-scou
 |---|---|
 | **`/solve <issue#>`** | Runs an autonomous solver per issue as a worktree-isolated agent in the session's Workflow runtime (watch with `/workflows`). Tier-aware: trivial issues skip design; medium/large get a parallel research fan-out → spec → plan → implement chain. Detached transports remain available via `--backend=`. |
 | **`/turbo <issue#>`** | Unattended `/solve`. Same pipeline, but the brainstorm phase auto-accepts the lead agent's recommendation and Q&A is resolved against the research bundle. Use when you trust the recommendation and want issue → PR with no babysitting. |
+| **`/turbox <issue#>`** | Unattended `/turbo` in **standard mode**: this session orchestrates the fleet through the `Task` tool instead of the Workflow runtime, so the implementation phase runs **waves of parallel implementers over disjoint file sets** — which the Workflow lane's leaf agents structurally cannot do. Research, design and delivery fan out across issues too. Parallel-issue cap **3**. Costs session context; buys wall-clock. (RFC 0020) |
 | **`/issue <description>`** | Creates a well-investigated, deduped, label-validated GitHub issue from a one-line ask. 2-scout fanout (codebase + triage) runs in <30 s, with conventional-commit titling and template-by-type. |
 | **`/review-pr [<PR#>]`** | Comprehensive PR review using specialized agents in cap-controlled dispatch-before-wait waves — code review, simplifier, silent-failure hunter, type-design analyzer, comment analyzer, test analyzer. With more than one PR open it first offers (interactively, once) to combine them all onto a single review branch and run the pipeline once over the combined result — cheaper by a factor of N, at the cost of per-PR revert granularity and per-PR finding attribution. `--consolidate` accepts without asking; `--no-consolidate` declines permanently and wins over `--consolidate`. Never offered under `--turbo`, without a TTY, or on a chained `finish-branch` run. |
 | **`/merge [<PR#> \| --all]`** | Lands an approved PR into the integration branch — autopilot. Bare invocation auto-discovers scope: single PR for the current branch, or all eligible open PRs against `integration_branch`. Ordering, per-PR strategy, conflict resolution (one parallel agent per conflicted file), and local sync, all unattended. |
@@ -71,7 +72,7 @@ Then in Claude Code:
 /uberdev:issue trivial typo in README install step   # smoke-test
 ```
 
-The thirteen short-form aliases (`/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`, `/dev`, `/testers`, `/ubergoal`, `/uberscan`, `/ubersimplify`, `/uberthink`, `/ubercluster`) are auto-installed on first session and refreshed on plugin upgrade — `jq` is not required, and if a short name collides with an existing file the session context reports which alias was skipped. The first-run notice confirms "installs 13 aliases". Opt out with `auto_install_aliases: false` in `.claude/uberdev.local.md` or `UBERDEV_NO_AUTO_ALIAS=1`.
+The fourteen short-form aliases (`/issue`, `/solve`, `/turbo`, `/turbox`, `/simplify`, `/review-pr`, `/merge`, `/dev`, `/testers`, `/ubergoal`, `/uberscan`, `/ubersimplify`, `/uberthink`, `/ubercluster`) are auto-installed on first session and refreshed on plugin upgrade — `jq` is not required, and if a short name collides with an existing file the session context reports which alias was skipped. The first-run notice confirms "installs 14 aliases". Opt out with `auto_install_aliases: false` in `.claude/uberdev.local.md` or `UBERDEV_NO_AUTO_ALIAS=1`.
 
 > **Why a bootstrap script?** Upstream Claude Code has a bug where `/plugin install` populates the cache but does not write `enabledPlugins` in `~/.claude/settings.json` — so `/uberdev:*` commands silently 404. `install.sh` does the install **and** jq-patches `enabledPlugins`. Idempotent. Requires `jq`.
 >
@@ -233,6 +234,64 @@ Spec & plan are still written to disk before implementation — audit them mid-f
 
 ---
 
+## `/turbox` — unattended issue resolution, standard mode
+
+Same fleet, same launcher, same claims — a different **orchestrator**.
+
+`/turbo` runs its fleet inside the Workflow runtime, and **a Workflow agent has
+no `Task` tool**: it cannot fan out. That is why `skills/solve-fleet/workflow.js`
+walks the implementation phase one task at a time, each in its own agent, gated
+by a reviewer. Correct, but serial.
+
+`/turbox` makes the orchestrator a *session* instead of a leaf. The plan-writer
+has always emitted `## Execution Waves` and per-task `Owns (file allowlist)`
+fields; only a fan-out-capable orchestrator can honour them.
+
+```
+/turbox 355 356 357
+  └── lib/solve-launcher.sh --standard   validate -> triage -> claim -> emit plan   (one Bash call)
+  └── this session, following skills/turbox-fleet/SKILL.md
+        Phase 2  research    [355×4 lenses │ 356×3 │ 357×3]   ← ONE message, 10 agents
+        Phase 3  design      spec ×3 → review ×3 → plan ×3 → plan-review ×3
+        Phase 4  wave 1      [355.t1 355.t2 355.t3 │ 356.t1 356.t2 │ 357.t1]  ← ONE message
+                             controller stages + commits per task; implementers never run git
+        Phase 5  gate        per-task reviewers in parallel, bounded fix ladder
+        Phase 6  deliver     suite → push → PR, per issue in parallel
+```
+
+| | `/turbo` | `/turbox` |
+|---|---|---|
+| Orchestrator | `solve-fleet/workflow.js` (a leaf) | **your session** |
+| Implementation | sequential per task | **wave-parallel over disjoint `Owns` sets** |
+| Progress | `/workflows` tree | the transcript + the run directory |
+| Return | one structured JSON object | the controller's report + an audit log |
+| Context cost | near zero | **real** — the controller holds per-task state |
+| Parallel issues | 6 | **3** |
+
+**Disjointness is refused, not reviewed.** `plan-reviewer` Check 2 already
+reviews same-wave `Owns` lists. A review is advice; `turbox-fleet.sh
+wave-disjoint` is the refusal. Before any implementer in a wave is dispatched,
+every pair of tasks is compared for equality **or directory containment** — one
+task owning `lib/` and a sibling owning `lib/x.sh` race exactly as if they
+shared a path, and a plain set intersection calls them disjoint. On overlap it
+dispatches **nothing**: an overlap is a plan defect, not a scheduling problem.
+
+**Who may run git** is a property of the checkout, not the agent: a worktree
+with two or more concurrent writers has exactly one git operator (the
+controller); a worktree with a single writer runs its own git. So wave
+implementers report paths and the controller commits them — through a helper
+that refuses `git add -A`, `--all`, a bare `.`, absolute paths and `../`
+escapes.
+
+`--backend=` is **refused** on this lane and the launcher says so before writing
+a claim: standard mode launches no per-issue solver child, so there is no
+backend to select. Use `/turbo --backend=…` for the detached transports.
+
+Pick `/turbo` for batch throughput and context economy. Pick `/turbox` when the
+issues are few, hand-picked, and decompose into genuinely independent tasks.
+
+---
+
 ## `/merge` — post-review PR landing (autopilot)
 
 Lands approved PRs into the integration branch — fully unattended. No prompts, no halts. Per-PR failures park; the queue continues.
@@ -333,7 +392,7 @@ Precedence: CLI flag > env var > `.claude/uberdev.local.md` > default. Missing f
 
 ## Short-form aliases
 
-Plugin commands are addressed as `/uberdev:<command>` by default — the `uberdev:` prefix is required by Claude Code's plugin manifest. Auto-install drops thirteen forwarders into `~/.claude/commands/`:
+Plugin commands are addressed as `/uberdev:<command>` by default — the `uberdev:` prefix is required by Claude Code's plugin manifest. Auto-install drops fourteen forwarders into `~/.claude/commands/`:
 
 | Short form | Canonical |
 |---|---|

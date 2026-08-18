@@ -39,10 +39,11 @@ solve_tier_floor: small          # one of: trivial, small, medium, large; clamps
 solve_tier_ceiling: medium       # one of: trivial, small, medium, large; clamps auto-triage DOWN to ceiling; default unset (no upper clamp); env: SOLVE_TIER_CEILING
 
 # --- per-phase parallel fanout caps ---
-# dot-path refs: fanout_concurrency.research, fanout_concurrency.post_impl_review, fanout_concurrency.merge_strategy, fanout_concurrency.conflict_resolver
+# dot-path refs: fanout_concurrency.research, fanout_concurrency.post_impl_review, fanout_concurrency.merge_strategy, fanout_concurrency.conflict_resolver, fanout_concurrency.turbox
 fanout_concurrency:
   research: 6                    # int [1, 50]; orchestrator Phase 1 research-fanout cap; default 6; env: UBERDEV_FANOUT_RESEARCH
   solve_bg: 6                    # int [1, 50]; /turbo parallel claude --bg fanout cap; default 6; env: UBERDEV_FANOUT_SOLVE_BG
+  turbox: 3                      # int [1, 3]; /turbox parallel-ISSUE wave size; default 3; HARD ceiling 3 (config may lower, never raise); env: UBERDEV_FANOUT_TURBOX
   post_impl_review: 7            # int [1, 50]; post-impl-review reviewer fanout cap; default 7; env: UBERDEV_FANOUT_POST_IMPL_REVIEW
   merge_strategy: 10             # int [1, 50]; /merge Phase 2.2 strategy-decider fanout cap; default 10; env: UBERDEV_FANOUT_MERGE_STRATEGY (alias for MAX_PARALLEL_AGENTS in merge-pipeline/SKILL.md Constants)
   conflict_resolver: 10          # int [1, 50]; /merge Phase 3.3 conflict-resolver fanout cap; default 10; env: UBERDEV_FANOUT_CONFLICT_RESOLVER (NEW — Phase 3.3 was uncapped previously)
@@ -202,7 +203,7 @@ same-source conflicts, exact model/effort pairs, and risk floors before any
 dispatch. Together with `UBERDEV_MODEL_ROUTING_MODE` and
 `UBERDEV_SERVICE_TIER`, these are the complete RFC 0013 environment controls.
 
-**Auto-installed aliases (Claude Code only):** UberDev's SessionStart hook installs 13 top-level forwarder commands (`/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`, `/dev`, `/testers`, `/ubergoal`, `/uberscan`, `/ubersimplify`, `/uberthink`, `/ubercluster`) into Claude Code's user commands directory on first session and refreshes them on plugin upgrade. The `ALIASES` table in `lib/aliases-sync.sh` is the canonical set (SSOT) — this paragraph mirrors it and is count-checked by `tests/docs-accuracy.test.sh`. Hand-authored files at any of those command paths are preserved (the hook detects them via a `managed-by: uberdev-aliases` marker and skips). Disable per-project with `auto_install_aliases: false` or globally with `UBERDEV_NO_AUTO_ALIAS=1`. Remove already-installed forwarders with `/uberdev:uninstall-aliases`. Codex does not have a slash-alias install path; use the installed `$uberdev-cmd-*` skills instead.
+**Auto-installed aliases (Claude Code only):** UberDev's SessionStart hook installs 14 top-level forwarder commands (`/issue`, `/solve`, `/turbo`, `/turbox`, `/simplify`, `/review-pr`, `/merge`, `/dev`, `/testers`, `/ubergoal`, `/uberscan`, `/ubersimplify`, `/uberthink`, `/ubercluster`) into Claude Code's user commands directory on first session and refreshes them on plugin upgrade. The `ALIASES` table in `lib/aliases-sync.sh` is the canonical set (SSOT) — this paragraph mirrors it and is count-checked by `tests/docs-accuracy.test.sh`. Hand-authored files at any of those command paths are preserved (the hook detects them via a `managed-by: uberdev-aliases` marker and skips). Disable per-project with `auto_install_aliases: false` or globally with `UBERDEV_NO_AUTO_ALIAS=1`. Remove already-installed forwarders with `/uberdev:uninstall-aliases`. Codex does not have a slash-alias install path; use the installed `$uberdev-cmd-*` skills instead.
 
 **`integration_branch` precedence:** CLI flag `--integration-branch=<name>` > env var `UBERDEV_INTEGRATION_BRANCH` > config file (this YAML) > `gh repo view --json defaultBranchRef`. If all four tiers are empty, `/merge` falls back to the literal `main` and emits a one-line stderr warning — it does NOT prompt (autopilot is unconditional).
 
@@ -222,7 +223,7 @@ one stderr warning fires (`floor_gt_ceiling`) and BOTH are ignored.
 Env overrides: `SOLVE_TIER_FLOOR`, `SOLVE_TIER_CEILING`. Default:
 unset on both sides.
 
-**`fanout_concurrency.{research, post_impl_review, merge_strategy, conflict_resolver, solve_bg}`:**
+**`fanout_concurrency.{research, post_impl_review, merge_strategy, conflict_resolver, solve_bg, turbox}`:**
 per-phase cap on parallel agent fanout. Each value is an int in
 `[1, 50]`. When the in-scope agent count exceeds the cap, the host
 skill splits dispatch into `ceil(N / cap)` sequential single-message
@@ -234,6 +235,17 @@ introduces a NEW default cap of 10 in Phase 3.3 of `/merge`, where the
 fanout was previously uncapped — queues of 11+ conflicted files in a
 single PR now chunk into multiple waves (intentional behavioural
 change; matches the `merge_strategy` chunking precedent).
+
+`turbox` is the odd one out and deliberately so: it caps parallel **issues**
+for `/turbox` (RFC 0020), not parallel agents, and its ceiling is a **hard 3**
+rather than 50. Standard mode's agent count per issue is multiplicative where
+the Workflow lane's is additive — a three-issue batch at wave width 3 puts nine
+implementers plus their reviewers in flight at once — so a configured value
+above 3 is clamped to 3 with a stderr note rather than honoured. The clamp has
+one definition, `TURBOX_ISSUE_CAP` in `lib/turbox-fleet.sh`; the launcher reads
+it back rather than restating the number. Env override: `UBERDEV_FANOUT_TURBOX`.
+Queues longer than the cap split into `ceil(N / cap)` sequential batches, each
+running the full phase pipeline before the next begins.
 
 **`dispatch_backend` precedence (RFC 0004 / RFC 0012):** CLI flag `--backend=<name>` > env var `UBERDEV_DISPATCH_BACKEND` > config file (this YAML) > default `auto`. Accepts `auto | workflow | wezterm | background`. `auto` resolves once per `/solve` or `/turbo` invocation via `lib/dispatch.sh`'s preflight: **everything → `workflow`** (RFC 0015), on every OS class including native Windows. `workflow` runs one worktree-isolated solver agent per issue inside the calling session's Workflow runtime (`skills/solve-fleet/workflow.js`) — watch it with `/workflows`. The detached `claude --bg` backend was removed in RFC 0015 §7 as amended, and the `codex` backend in #381 — naming either is now an enum error, not a deprecation warning. The resolved backend is committed for the whole batch — a fan-out is never split across backends. An explicit `--backend=X` hard-errors before any dispatch if `X` is unusable on the host (e.g. `--backend=wezterm` from WSL2 targeting a native-Windows WezTerm). Invalid values fall back to `auto` non-fatally and emit a `uberdev_config_invalid` audit event via the existing `uberdev_read_enum` machinery.
 

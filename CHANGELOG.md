@@ -4,6 +4,59 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.49.0] — 2026-08-18
+
+### Added - `/turbox`, the standard-mode solver fleet (RFC 0020)
+
+A second execution lane for the solver fleet. `/turbox 355 356 357` takes the same
+issue-number arguments as `/turbo` and runs the same launcher - validate-all-first,
+triage, route resolution, prepared root request, and the `uberdev:active` claim
+protocol are byte-identical - but the **calling session** orchestrates the fleet
+through the `Task` tool instead of handing it to the Workflow runtime.
+
+The reason the lane exists: **a Workflow agent has no `Task` tool and cannot fan out**,
+so `skills/solve-fleet/workflow.js` walks the implementation phase one task at a time.
+The plan-writer has always emitted `## Execution Waves` and per-task
+`Owns (file allowlist)` fields; a session-hosted orchestrator is the first one able to
+honour them. `/turbox` therefore runs **waves of parallel implementers over strictly
+disjoint file sets**, plus cross-issue-parallel research, design and delivery.
+
+- `commands/turbox.md` - the command. Deliberately does **not** declare the `Workflow`
+  tool: a turbox plan relayed into `Workflow()` would be a category error.
+- `skills/turbox-fleet/SKILL.md` - the 8-phase controller pipeline, its invariants
+  (pointers-not-artifacts, untrusted input, who-may-run-git, explicit-path staging,
+  dispatch-before-wait), the three return contracts, and breakers TB1-TB4.
+- `lib/turbox-fleet.sh` - the executable helpers the controller calls: `wave-disjoint`
+  (the refusal), `stage-commit` (controller-only git), `plan-tasks`, `project-agents`,
+  `budget-spend`, `round-permitted`, `worktree-add`, `audit`. An executable, never a
+  sourced library - sourcing it from a skill fence would run it under the Bash tool's
+  `/bin/zsh`, which is a trap this project has hit repeatedly.
+- `lib/solve-launcher.sh` - a `--standard` option and Step 5s, which emits a
+  `TURBOX_PLAN_BEGIN`/`TURBOX_PLAN_END` envelope instead of Workflow args.
+- `fanout_concurrency.turbox` - parallel-**issue** wave size, default 3, **hard ceiling
+  3** (config may lower it, never raise it). Standard mode's agent count per issue is
+  multiplicative where the Workflow lane's is additive.
+- `/turbox` joins the auto-installed short-form aliases (now 14).
+
+**Disjointness is refused, not reviewed.** `plan-reviewer` Check 2 reviews same-wave
+`Owns` lists; a review is advice. `wave-disjoint` compares every pair for equality *or
+directory containment* - one task owning `lib/` and a sibling owning `lib/x.sh` race
+exactly as if they shared a path, and a plain set intersection calls them disjoint - and
+on overlap it dispatches nothing.
+
+**`--standard` is not a `dispatch_backend` member**, deliberately (RFC 0020 section 2).
+That enum answers "how is one per-issue solver child launched?", and standard mode
+launches none; adding a member would make nine registered copies of the contract answer
+wrongly for a value none of them can reach. `--standard` with an explicit `--backend=`
+or `UBERDEV_DISPATCH_BACKEND` is refused before any claim is written.
+
+`/turbo` is unchanged. Two lanes, one launcher: `/turbo` for batch throughput and
+context economy, `/turbox` for a hand-picked few that decompose into independent tasks.
+
+New tests: `tests/turbox-fleet.test.sh` (portable shape checks, both CI jobs) and
+`tests/turbox-fleet-runtime.test.sh` (behaviour checks, Unix-only - it executes the
+helpers against a throwaway git repo with real worktrees).
+
 ## [0.48.0] — 2026-08-16
 
 Consolidated landing of 20 pull requests (#567, #569, #570, #573–#577, #584–#587, #589,
