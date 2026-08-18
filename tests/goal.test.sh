@@ -4577,6 +4577,46 @@ fi
 
 rm -rf "$_g54_tmp"
 
+# G-592.delivery — EVERY green->merging transition flags a partial chain.
+#
+# THE DEFECT this pins: the merge lane had THREE such transitions and only two
+# were covered. Step 2a's already-merged pre-stage runs earlier in the pass than
+# the merge-dispatch-gate region that defines the flagger, and the PR it stages
+# never becomes a gate candidate either (2c tags the batch row GREEN only while
+# pr-state is `green`, and 2a has already moved it to `merging`). So a resumed
+# run whose PR landed with its solver task chain stopped short converged
+# reporting an issue it had not finished, with no goal_partial_delivery row and
+# nothing to distinguish it from an honest convergence.
+#
+# Enumerated from the file rather than pinned to a count: a FOURTH transition
+# added tomorrow is covered by this row the day it lands, which a hardcoded
+# "there are three" would not be.
+echo "== G-592.delivery: every green->merging transition emits goal_partial_delivery =="
+_g592_uncovered="$(awk '
+  { line[NR] = $0 }
+  END {
+    for (n = 1; n <= NR; n++) {
+      if (line[n] !~ /uberdev_goal_pr_state_transition .* green merging/) continue
+      if (line[n] ~ /^[ \t]*#/) continue
+      covered = 0
+      for (i = n + 1; i <= n + 30 && i <= NR; i++) {
+        if (line[i] ~ /uberdev_goal_audit goal_partial_delivery/) covered = 1
+        if (line[i] ~ /_uberdev_goal_flag_partial_merge "/) covered = 1
+      }
+      if (!covered) printf "%d ", n
+    }
+  }
+' "$GOAL_WATCH")"
+if [ -z "$_g592_uncovered" ]; then
+  PASS=$((PASS + 1))
+  printf '  PASS  %s\n' "G-592.delivery every green->merging transition is followed by a partial-chain flag"
+else
+  FAIL=$((FAIL + 1))
+  printf '  FAIL  %s\n' "G-592.delivery a green->merging transition emits no goal_partial_delivery" >&2
+  printf '        file:            %s\n' "$GOAL_WATCH" >&2
+  printf '        uncovered lines: %s\n' "$_g592_uncovered" >&2
+fi
+
 echo
 echo "== Summary =="
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"

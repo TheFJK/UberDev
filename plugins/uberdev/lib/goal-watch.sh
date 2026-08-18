@@ -358,6 +358,29 @@ while true; do
         # /review-pr or /merge dispatch against an already-merged PR.
         uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" pushed-reviewing green
         uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" green merging
+        # #592 — THE THIRD green->merging transition, and the one the merge
+        # lane's own flagger cannot reach. The gate's
+        # `_uberdev_goal_flag_partial_merge` covers the other two, but this
+        # pre-stage runs EARLIER in the same pass than the region that defines
+        # it, and the PR it stages never becomes a gate candidate anyway: 2c
+        # tags the batch row GREEN only for PRs whose pr-state is `green`, and
+        # this one is already `merging`, so `_uberdev_goal_batch_green_prs_ordered`
+        # never selects it and neither gate arm ever runs for it. Without a row
+        # here a resumed run whose PR landed with its task chain stopped short
+        # converges reporting an issue it did not finish — silently, which is
+        # the exact collapse goal_partial_delivery exists to prevent.
+        #
+        # Emitted inline rather than through the helper on purpose: the helper's
+        # definition must stay INSIDE the merge-dispatch-gate markers (the gate
+        # is sliced and sourced standalone in tests/goal-version-bump.test.sh,
+        # which stubs its callees rather than sourcing goal-state.sh, and V12/V13
+        # assert the partial-chain read sits inside those markers). `issue` is
+        # the loop variable here, so this call needs no registry lookup at all.
+        if uberdev_goal_pr_is_partial "$GOAL_ID" "$pr_num"; then
+          uberdev_goal_audit goal_partial_delivery \
+            "{\"goal_id\":\"$GOAL_ID\",\"pr\":$pr_num,\"issue\":$issue,\"cycle\":${cycle:-0}}" \
+            || true
+        fi
       fi
       any_active=1
       continue
