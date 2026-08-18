@@ -4,6 +4,56 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.49.1] — 2026-08-18
+
+### Fixed - `/turbox` required an issue-body artifact nothing created
+
+Found by `/turbox`'s first live run (against #619), then reworked twice under
+review.
+
+`skills/turbox-fleet/SKILL.md` invariant 2 requires that issue text reach an
+agent as a **path** to a private run artifact, never as prompt text. Nothing
+created that artifact. The failure mode was worse than a missing step: a
+controller arriving at Phase 2 with nothing to point at reaches for the obvious
+repair -- paste the body into the prompt -- which is exactly what the invariant
+forbids. The gap pushed toward violating the rule it existed to protect.
+
+The fix lives in the launcher rather than in controller prose, because a step
+the launcher performs cannot be skipped:
+
+- `lib/solve-launcher.sh` now persists `issue-body-<N>.md` on the standard lane
+  from bytes it had **already** fetched and validated for triage -- written with
+  `O_EXCL|O_NOFOLLOW` at `0600` inside the `0700` run dir, `fstat`-checked before
+  close, written in a loop with a final size assertion, and guarded by the same
+  root-directory checks `_uberdev_fetch_issue_json` performs. Previously those
+  bytes were fetched, used for triage, and deleted.
+- Manifest records gain `issue_body_file`, conditional exactly as `context_file`
+  is, so an absent key keeps meaning "this lane produces none" rather than "the
+  relay dropped it".
+- `UBERDEV_ISSUE_BODY_CAP` (64 KiB, matching `_UBERDEV_GOAL_BODY_CAP`) is
+  validated in the shell and again in python, and truncates by **bytes**. An
+  unvalidated cap of `0` wrote a zero-byte requirements document that passed
+  every downstream check and exited 0; a negative one trimmed the body from the
+  end; and character-slicing let a 4-byte-per-character body reach 4x the byte
+  ceiling the cap promises downstream.
+
+Three sites in the skill still told the controller to read the issue body out of
+`context_file` -- the Inputs table read *before* Phase 0, the single-solver path,
+and the spec-writer rung. `context_file` holds the routing decision, not the
+issue. All three corrected; the document no longer contradicts itself.
+
+The stale-agent-card warning now covers `spec-writer` and `spec-reviewer` as well
+as `research-*`. `agents/spec-reviewer.md` describes `issue_body` as "full issue
+text (provided inline in the prompt)", naming the violation as its mechanism. The
+cards are stale about the input's SHAPE -- `issue_body` inline versus the shipped
+`issue_path` contract -- not about the trust rule, which every one of them
+carries. Renaming that shared input is tracked as #623.
+
+New tests: `TX15` in `tests/turbox-fleet.test.sh` (15 shape assertions,
+mutation-tested) and `R13` in `tests/turbox-fleet-runtime.test.sh` (13
+behavioural assertions executing the writer extracted verbatim from the launcher,
+the same technique `R12` uses for the plan envelope).
+
 ## [0.49.0] — 2026-08-18
 
 ### Added - `/turbox`, the standard-mode solver fleet (RFC 0020)

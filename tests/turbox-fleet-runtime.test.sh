@@ -323,6 +323,71 @@ case "$ENVELOPE" in
   *) bad "no recognisable branch prefix in the envelope" ;;
 esac
 
+echo "== R13: the issue-body writer refuses a bad cap and truncates by BYTES =="
+# Extracted VERBATIM from the launcher, like R12 -- a hand-copied twin would
+# pass while the shipped one was broken.
+#
+# Every row here is a bug that shipped and was caught in review: cap=0 wrote a
+# ZERO-BYTE requirements document and still exited 0, so every research lens and
+# the spec writer would have received an empty issue; cap=-1 silently trimmed the
+# body from the END; and character-slicing let a 4-byte-per-char body reach 4x
+# the byte ceiling the comment promises downstream.
+awk '
+  /^root,target,cap_raw,raw=sys.argv\[1:5\]/ { inb=1; print "import json,os,stat,sys"; print; next }
+  inb && /^'"'"' / { inb=0 }
+  inb { print }
+' "$LAUNCHER" > "$TMP/writer.py"
+writer_lines="$(wc -l < "$TMP/writer.py" | tr -d ' ')"
+if [ "${writer_lines:-0}" -ge 20 ]; then
+  ok "extracted the issue-body writer from the launcher ($writer_lines lines)"
+else
+  bad "writer extraction produced $writer_lines lines -- the block moved or was renamed"
+fi
+
+# The launcher hands python an already-realpath-derived UBERDEV_TMPDIR, so the
+# fixture must too or the containment guard false-trips on macOS /var.
+WRITER_ROOT="$(cd "$TMP" && pwd -P)"
+WRITER_RAW='{"number":619,"title":"t","labels":[],"body":"REAL REQUIREMENTS THAT MUST REACH THE AGENTS"}'
+
+rc_is 0 "a valid cap writes the body" -- python3 -I -B "$TMP/writer.py" \
+  "$WRITER_ROOT" "$WRITER_ROOT/ib-ok.md" 65536 "$WRITER_RAW"
+if [ -s "$WRITER_ROOT/ib-ok.md" ]; then ok "the artifact is non-empty"; else bad "artifact empty on a valid cap"; fi
+# GNU FIRST, then BSD. `stat -f` on GNU coreutils is --file-system: it SUCCEEDS
+# and prints filesystem info, so a `-f || -c` chain never reaches the fallback
+# and compares that output to a mode. This fixture shipped that way and reddened
+# ubuntu while macOS and Windows passed. Int-validate too, so no future
+# succeeds-but-wrong probe can masquerade as a mode.
+ib_mode="$(stat -c '%a' "$WRITER_ROOT/ib-ok.md" 2>/dev/null || stat -f '%Lp' "$WRITER_ROOT/ib-ok.md" 2>/dev/null)"
+case "$ib_mode" in ''|*[!0-7]*) ib_mode="unreadable" ;; esac
+if [ "$ib_mode" = "600" ]; then ok "the artifact is 0600"; else bad "artifact mode is '$ib_mode', not 600"; fi
+
+rc_is 2 "cap=0 REFUSED (was a zero-byte requirements doc)" -- python3 -I -B "$TMP/writer.py" \
+  "$WRITER_ROOT" "$WRITER_ROOT/ib-zero.md" 0 "$WRITER_RAW"
+out_has "cap must be >= 1" "the refusal says why"
+if [ -e "$WRITER_ROOT/ib-zero.md" ]; then bad "a refused cap still created a file"; else ok "no file is left behind on refusal"; fi
+
+rc_is 2 "cap=-1 REFUSED (was an end-trim)" -- python3 -I -B "$TMP/writer.py" \
+  "$WRITER_ROOT" "$WRITER_ROOT/ib-neg.md" -1 "$WRITER_RAW"
+rc_is 2 "a non-numeric cap REFUSED" -- python3 -I -B "$TMP/writer.py" \
+  "$WRITER_ROOT" "$WRITER_ROOT/ib-abc.md" abc "$WRITER_RAW"
+out_has "not an integer" "the non-numeric refusal is distinguishable"
+
+# Byte truncation, on a body where characters and bytes differ 4x.
+EMOJI_RAW="$(python3 -c 'import json;print(json.dumps({"number":1,"title":"t","labels":[],"body":"\U0001F642"*100}))')"
+rc_is 0 "a multi-byte body writes" -- python3 -I -B "$TMP/writer.py" \
+  "$WRITER_ROOT" "$WRITER_ROOT/ib-emoji.md" 200 "$EMOJI_RAW"
+emoji_bytes="$(wc -c < "$WRITER_ROOT/ib-emoji.md" | tr -d ' ')"
+if [ "${emoji_bytes:-0}" -le 200 ]; then
+  ok "truncated by BYTES, not characters ($emoji_bytes <= 200)"
+else
+  bad "byte cap exceeded: $emoji_bytes > 200 -- slicing characters again?"
+fi
+if python3 -c "open('$WRITER_ROOT/ib-emoji.md','rb').read().decode('utf-8')" 2>/dev/null; then
+  ok "no partial multi-byte sequence at the tail"
+else
+  bad "the truncation split a multi-byte character"
+fi
+
 echo
 echo "== Summary =="
 echo "  PASS=$PASS  FAIL=$FAIL"
