@@ -5,7 +5,8 @@
 #
 # Public surface (functions):
 #   uberdev_goal_state_init                    GOAL_ID
-#   uberdev_goal_pr_state_transition           GOAL_ID PR FROM TO
+#   uberdev_goal_pr_state_transition           GOAL_ID PR FROM TO [PARTIAL]
+#   uberdev_goal_partial_issues_from_audit     GOAL_ID               (issue #592)
 #   uberdev_goal_issue_state_transition        GOAL_ID ISSUE FROM TO
 #   uberdev_goal_read_trust_signal             VERDICT_RECEIPT_OR_AUDIT_JSON_PATH
 #   uberdev_goal_check_fingerprint_repeat      GOAL_ID CYCLE FINGERPRINT
@@ -685,10 +686,30 @@ uberdev_goal_audit() {
   _uberdev_goal_append "$tmpdir/goal-$goal_id.jsonl" "$line"
 }
 
-# uberdev_goal_pr_state_transition GOAL_ID PR FROM TO
+# uberdev_goal_pr_state_transition GOAL_ID PR FROM TO [PARTIAL]
 # Validate + append + audit.
+#
+# PARTIAL (issue #592) is OPTIONAL and telemetry-only: pass the literal `1`
+# when the PR being transitioned delivers an INCOMPLETE solver task chain, so
+# the decision the gate is recording carries the fact it was taken on.
+#
+# HOW THIS RELATES TO THE PARTIAL-CHAIN LEDGER FURTHER DOWN THIS FILE. There IS
+# a second partial-chain carrier here — `goal-<id>-partial-prs.tsv`
+# (uberdev_goal_record_partial_prs / _pr_is_partial / _count_partial_prs) — and
+# that ledger, not this argument, is the run's SOURCE OF RECORD: it is the copy
+# that survives a cycle boundary, the one the merge gate's
+# `goal_partial_delivery` emit branches on, and the one print_summary counts.
+# This argument is NOT a competing ledger and must not be treated as one; it is
+# the same fact rendered onto the decision row itself, so that a replay of the
+# `goal_pr_transition` stream — the canonical record of what the PR machine
+# decided — is self-describing and needs no join against a sibling event.
+# Its one independent property is PROVENANCE: it carries what the gate KNEW
+# when it took the decision (this pass's own partial set, straight from the
+# fleet), which is the reading that still holds on a run whose ledger write
+# failed — precisely the run where `uberdev_goal_pr_is_partial` answers "no" and
+# no `goal_partial_delivery` row is written at all.
 uberdev_goal_pr_state_transition() {
-  local goal_id="$1" pr="$2" from="$3" to="$4"
+  local goal_id="$1" pr="$2" from="$3" to="$4" partial="${5:-}"
   _uberdev_goal_validate_id "$goal_id" || return 1   # #156
   _uberdev_goal_validate_int "$pr" || return 1
   _uberdev_goal_pr_state_machine_valid "$from" "$to" || {
@@ -700,13 +721,201 @@ uberdev_goal_pr_state_transition() {
   # audit call's rc mask it (this row is the PR machine's source of truth).
   local row; printf -v row '%s\t%s\t%s' "$pr" "$to" "$(_uberdev_goal_now_secs)"
   _uberdev_goal_append "$tmpdir/goal-$goal_id-pr-states.tsv" "$row" || return 1
+  # #592 — ONLY the literal `1` marks. Every other value (including the empty
+  # string the merge gate passes for a complete PR, and including anything a
+  # caller might hope to smuggle in) leaves the payload byte-identical to what
+  # four-argument callers have always written, so this argument is not a
+  # payload-injection surface. `if`, not `[ … ] && …`: a trailing failed
+  # AND-list is the whole statement's rc and would abort a `set -e` caller.
+  local extra=""
+  if [ "$partial" = "1" ]; then extra=',"partial_chain":true'; fi
   # The state-row above is the PR machine's source of truth; the audit jsonl is
   # best-effort telemetry. uberdev_goal_audit surfaces its own write failures to
   # stderr, but a telemetry-write failure must NOT report a transition whose
   # state-row already persisted as failed — so swallow audit's rc here and let
   # this function's rc reflect the source-of-truth write.
   uberdev_goal_audit goal_pr_transition \
-    "{\"goal_id\":\"$goal_id\",\"pr\":$pr,\"from\":\"$from\",\"to\":\"$to\"}" || true
+    "{\"goal_id\":\"$goal_id\",\"pr\":$pr,\"from\":\"$from\",\"to\":\"$to\"$extra}" || true
+}
+
+# uberdev_goal_partial_issues_from_audit GOAL_ID
+# Echoes a deduped CSV, in first-seen order, of the MEMBERS this run must not
+# declare converged on, or an empty line. rc 0 in both cases; rc 1 only on an
+# unsafe goal_id. (issue #592)
+#
+# THE MEMBER VOCABULARY is closed, and it is deliberately NOT "issue numbers"
+# alone:
+#
+#   <n>          an issue number whose task chain fell short;
+#   pr-<n>       a partial delivery this run could not map back to an issue,
+#                named by the PR the decision was taken on;
+#   pr-unknown   the same, on a row whose PR is unreadable too.
+#
+# The two `pr-` members exist because the delivery shape carries a documented
+# NO-ISSUE SENTINEL. `_uberdev_goal_batch_issue_for_pr` prints `0` — explicitly a
+# placeholder, never a claim that issue 0 exists — when the batch registry has no
+# row for the PR, which is exactly what a resume looks like, and
+# `_uberdev_goal_flag_partial_merge` interpolates that straight into the row.
+# Both naive readings of that `0` are wrong: dropping the row lets a run that
+# really did merge a partial PR converge, and passing `0` through as a member
+# makes an unattended run tell its operator that issue 0 fell short. So the fact
+# still halts the run — it happened — under a name that is honest about what is
+# unknown and still points at something the operator can open.
+# Every member matches `^([0-9]+|pr-([0-9]+|unknown))$`, so a consumer may
+# interpolate the CSV into a JSON string and into an operator line unquoted.
+#
+# TWO CONSUMER OBLIGATIONS follow from that vocabulary being WIDER THAN DIGITS.
+# Both are false-convergence bugs when broken, and neither is visible to this
+# helper's own tests, so they are stated here where the contract lives:
+#
+#   * NEVER re-filter this output down to `^[0-9]+$` (or `[0-9,]`) to "restore
+#     consistency" with a digits-only carrier beside it. The `pr-` members are
+#     exactly the partial deliveries the run could NOT map back to an issue —
+#     the ones a resumed run is often the only witness of — so dropping them
+#     lets the run converge on a set it never achieved, which is the outcome
+#     this whole carrier exists to prevent. A digits-and-commas SHAPE REFUSAL on
+#     a `--partial-issues`-style CLI value guards the FLAG VALUE only: union this
+#     helper's output in AFTER that refusal, never through it.
+#   * An operator-facing sentence built from this CSV must be worded for the
+#     whole vocabulary — "issue(s)/PR(s)", not "issue(s)" — because a member may
+#     name a PR rather than an issue.
+#
+# Why re-derive instead of carrying the set in a variable: `--resume` re-enters a
+# run with an empty in-memory ledger, so a resumed run would re-evaluate the same
+# all-terminal state and announce the convergence a previous pass of the SAME run
+# already refused. Phase 0 deliberately does not truncate the run's audit jsonl on
+# `--resume`, so the run's own trail is the durable channel — reading it back adds
+# no sidecar, so neither uberdev_goal_state_init's truncate list nor the reaper's
+# cleanup inventory moves.
+#
+# TWO row shapes are read, in file order, and unioned:
+#
+#   1. `goal_partial_delivery` -> `"issue":N`, or the `pr-` fallback above.
+#      Written by the merge gate
+#      (lib/goal-watch.sh::_uberdev_goal_flag_partial_merge) the moment a PR the
+#      partial-prs.tsv ledger flags leaves `green` for `merging`. This is the
+#      PRIMARY shape, and the reason this reader is not a reader without a
+#      writer: it records what the run actually DID, before any convergence
+#      check runs, so it also covers the run that merged a partial PR and then
+#      died before phase 3 ever refused anything. Such a row ALWAYS contributes
+#      exactly one member — never zero.
+#   2. `goal_circuit_breaker` rows carrying `"phase":"partial_chain"` ->
+#      `"partial_issues":"N,M"`. Written by lib/goal-phase3.sh's convergence
+#      refusal. This is what makes the refusal ITSELF sticky, including for an
+#      issue whose partial PR this run can no longer map back to a delivery row.
+#      Phase 3 writes THIS helper's own output back into that field, so shape 2
+#      accepts the whole vocabulary and not just digits: a `pr-<n>` member that
+#      survived one pass and vanished on the next would let the run that refused
+#      convergence at 12:00 converge at 12:05.
+#
+# `goal_partial_chain` (the re-queue DECISION record, RFC 0005 D592a-event) is
+# deliberately NOT read: its `requeued` stage marks an issue that went BACK into
+# the queue, which is the opposite of a reason to refuse convergence.
+#
+# THE INVARIANT SHAPE 1 RIDES ON, stated because a later change can break it
+# without touching this file: /goal does not re-queue a partial delivery within
+# the run. While that holds, a delivered partial chain is permanent for the run
+# and shape 1 cannot raise a false halt. If re-queue ever lands, this helper has
+# to subtract the recovered issues — a `goal_partial_delivery` row on its own
+# would no longer mean "still unachieved".
+#
+# EXTRACTION — one awk pass, per line, file order preserved:
+#   * both shapes are selected by their `"event":"…"`, so `phase=partial_chain`
+#     riding some other event contributes nothing;
+#   * every key is located with `match()` ANYWHERE on the line, never by
+#     requiring one key to precede another. Key order is not a contract here —
+#     uberdev_goal_audit takes the payload as an opaque string from its caller —
+#     so a reader that required `"phase"` before `"partial_issues"` would start
+#     returning "" the day a caller reordered its own printf, and the phase-3
+#     consumer cannot tell that empty from a healthy one;
+#   * both captures take the RAW value (`[^,}]*` for a number, `[^"]*` for a
+#     string) and `_ok()` is the ONE place that validates, so a corrupt token
+#     costs only itself. A capture pinned to `[0-9,]*` would fail to match the
+#     line at all and drop the valid issue numbers beside the bad one —
+#     reintroducing the silent "converged without achieving it" outcome this
+#     carrier exists to prevent. On shape 1 a raw `issue` that is not a positive
+#     integer does not drop the row either; it falls through to `pr-<n>`.
+#
+# Portability requirements, all load-bearing:
+#   * the loop is fed by a HEREDOC, never a pipe. The hazard is BASH's — and
+#     POSIX sh's, hence Git Bash's — and NOT zsh's: bash runs EVERY stage of a
+#     pipeline in a subshell, so `… | while read` would build `csv` in a child
+#     and discard it with no diagnostic, whereas zsh runs the LAST stage in the
+#     current shell and would keep it. So the guard for this property is
+#     tests/goal.test.sh's G-592.5 (bash on the ubuntu job, Git Bash on the
+#     Windows one); tests/goal-state-zsh.test.sh CANNOT see a pipe here under
+#     zsh, by construction, so do not read that suite's green as cover for
+#     turning this heredoc back into a pipe;
+#   * the dedupe is a padded-haystack `case`, not an array — `ARR=($SCALAR)`
+#     word-splits differently under zsh, and THAT is the half the zsh suite locks;
+#   * the awk is POSIX awk (user functions, match/RSTART/RLENGTH, substr, split)
+#     — the same dialect the TSV readers further down this file already run on
+#     the Windows job; no mapfile, no `paste -s`, no process substitution, so Git
+#     Bash runs this unchanged.
+uberdev_goal_partial_issues_from_audit() {
+  local goal_id="${1:-}" f csv="" n members
+  _uberdev_goal_validate_id "$goal_id" || return 1   # #156 — it reaches a path
+  f="${UBERDEV_TMPDIR:-/tmp}/goal-$goal_id.jsonl"
+  # MISSING and PRESENT-BUT-UNREADABLE are two different worlds and only the
+  # first is benign. Collapsing them onto one silent "" is how a resume with the
+  # wrong UBERDEV_TMPDIR, a permissions change, or an I/O error turns into a
+  # false convergence — the exact outcome this helper exists to prevent. So the
+  # unreadable case leaves a breadcrumb, the way _uberdev_goal_append (#157) and
+  # uberdev_goal_audit's `unknown` sink already do for their own degradations.
+  # It still must not abort the caller: the convergence gate may proceed, it may
+  # just not proceed silently.
+  if [ ! -r "$f" ]; then
+    if [ -e "$f" ]; then
+      printf 'goal-state: partial_issues_from_audit: %s exists but is unreadable; this run cannot re-derive its partial-chain set and may under-report\n' "$f" >&2
+    fi
+    printf '\n'
+    return 0
+  fi
+  # No `2>/dev/null` on the extraction: readability is established one line
+  # above, so anything awk still has to say about this file is a real fault the
+  # operator needs, not expected noise. Its rc gets the same treatment — an
+  # extraction that DIED must not read downstream as "nothing to report", which
+  # is precisely how a false convergence is delivered silently.
+  members=""
+  if ! members="$(awk '
+    function _raw(line, key,   off) {
+      if (match(line, "\"" key "\":[^,}]*")) {
+        off = length(key) + 3
+        return substr(line, RSTART + off, RLENGTH - off)
+      }
+      return ""
+    }
+    function _str(line, key,   off) {
+      if (match(line, "\"" key "\":\"[^\"]*\"")) {
+        off = length(key) + 4
+        return substr(line, RSTART + off, RLENGTH - off - 1)
+      }
+      return ""
+    }
+    function _ok(v) { return v ~ /^[0-9]+$/ || v ~ /^pr-([0-9]+|unknown)$/ }
+    function _emit(v) { if (_ok(v)) print v }
+    /"event":"goal_partial_delivery"/ {
+      issue = _raw($0, "issue")
+      if (issue ~ /^[0-9]+$/ && issue + 0 > 0) { _emit(issue); next }
+      pr = _raw($0, "pr")
+      if (pr ~ /^[0-9]+$/) { _emit("pr-" pr) } else { _emit("pr-unknown") }
+      next
+    }
+    /"event":"goal_circuit_breaker"/ && /"phase":"partial_chain"/ {
+      n_piece = split(_str($0, "partial_issues"), piece, ",")
+      for (idx = 1; idx <= n_piece; idx++) _emit(piece[idx])
+    }
+  ' "$f")"; then
+    printf 'goal-state: partial_issues_from_audit: extracting from %s failed; this run cannot re-derive its partial-chain set and may under-report\n' "$f" >&2
+  fi
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    case ",$csv," in *",$n,"*) continue ;; esac
+    if [ -n "$csv" ]; then csv="$csv,$n"; else csv="$n"; fi
+  done <<EOF
+$members
+EOF
+  printf '%s\n' "$csv"
 }
 
 # uberdev_goal_issue_state_transition GOAL_ID ISSUE FROM TO

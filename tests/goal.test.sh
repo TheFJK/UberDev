@@ -4023,6 +4023,298 @@ assert_grep "$GOAL_P0" 'maxWatchTicks="\$MAX_WATCH_TICKS"'                      
 assert_grep "$GOAL_CMD" '--max-watch-ticks=N'                                     "G53.cmd-documents-the-flag"
 
 echo
+echo "== G54: partial-chain carrier (#592) =="
+# #592 — a solver's per-issue `chainComplete` never reaches /goal's merge gate,
+# so a PR whose task chain stopped short is merged as though it were complete and
+# the run then reports a convergence it never achieved. This section locks the two
+# lib/goal-state.sh halves of the carrier:
+#
+#   G-592.3  the OPTIONAL fifth positional of uberdev_goal_pr_state_transition.
+#            The run's SOURCE OF RECORD for a partial chain is the
+#            goal-<id>-partial-prs.tsv ledger further down that same lib; this
+#            marker renders the same fact onto the decision row so a replay of
+#            the goal_pr_transition stream is self-describing without a join
+#            against the sibling goal_partial_delivery event.
+#   G-592.5  uberdev_goal_partial_issues_from_audit — re-derives the set this run
+#            must not converge on from the run's own audit jsonl, which is what
+#            makes a partial-chain refusal survive `--resume` (phase 0 does NOT
+#            truncate that jsonl on a resume, so the run's own trail is the
+#            durable channel). It reads BOTH shapes that carry the fact: the
+#            goal_partial_delivery rows the merge gate writes today, and the
+#            goal_circuit_breaker/phase=partial_chain rows the convergence
+#            refusal writes — so the reader can never be a reader with no writer,
+#            which behind its caller's `|| true` would be indistinguishable from
+#            a healthy reader that found nothing.
+#
+# Both rows EXECUTE the helpers in a fresh `bash` instead of grepping for their
+# shape. Arity drift is a live defect class in this repo: only a real call proves
+# that a fifth argument neither leaks into the source-of-truth state row nor
+# rewrites the payload that every four-argument caller already ships.
+_g54_tmp="$(mktemp -d 2>/dev/null || printf '/tmp/goal-g54-%s' "$$")"
+mkdir -p "$_g54_tmp"
+
+# --- G-592.3 — only a literal `1` marks; every other shape stays byte-identical
+# One call per argument shape, distinct PR numbers, one jsonl. PR 105 carries the
+# shape production actually emits once the gate always passes five arguments: an
+# EMPTY fifth argument for a complete PR. Without that case the "unmarked payload
+# is unchanged" lock would be pinned to a call shape the gate stops making.
+_g54_arity="$_g54_tmp/arity"
+mkdir -p "$_g54_arity"
+UBERDEV_TMPDIR="$_g54_arity" UBERDEV_GOAL_ID=g1 bash -c '
+  . "$1" || exit 3
+  uberdev_goal_pr_state_transition g1 100 green merging                     || exit 4
+  uberdev_goal_pr_state_transition g1 101 green merging 1                   || exit 5
+  uberdev_goal_pr_state_transition g1 102 green merging 0                   || exit 6
+  uberdev_goal_pr_state_transition g1 103 green merging true                || exit 7
+  uberdev_goal_pr_state_transition g1 104 green merging "x\",\"injected\":1" || exit 8
+  uberdev_goal_pr_state_transition g1 105 green merging ""                  || exit 9
+' _ "$GOAL_LIB" > "$_g54_tmp/arity.log" 2>&1
+assert_rc "$?" 0 "G-592.3.every-argument-shape-returns-0"
+
+_g54_jsonl="$_g54_arity/goal-g1.jsonl"
+_g54_audit="$(cat "$_g54_jsonl" 2>/dev/null || true)"
+# Each needle closes with `}}` — the payload object AND the envelope — so an
+# extra key anywhere in the payload falsifies the row it belongs to.
+assert_contains "$_g54_audit" '"payload":{"goal_id":"g1","pr":100,"from":"green","to":"merging"}}' \
+  "G-592.3.four-argument-payload-is-byte-identical"
+assert_contains "$_g54_audit" '"payload":{"goal_id":"g1","pr":101,"from":"green","to":"merging","partial_chain":true}}' \
+  "G-592.3.literal-1-marks-the-decision-row"
+assert_contains "$_g54_audit" '"payload":{"goal_id":"g1","pr":102,"from":"green","to":"merging"}}' \
+  "G-592.3.zero-does-not-mark"
+assert_contains "$_g54_audit" '"payload":{"goal_id":"g1","pr":103,"from":"green","to":"merging"}}' \
+  "G-592.3.the-word-true-does-not-mark"
+assert_contains "$_g54_audit" '"payload":{"goal_id":"g1","pr":104,"from":"green","to":"merging"}}' \
+  "G-592.3.injection-probe-does-not-mark"
+assert_contains "$_g54_audit" '"payload":{"goal_id":"g1","pr":105,"from":"green","to":"merging"}}' \
+  "G-592.3.empty-fifth-argument-is-the-complete-PR-shape"
+# The probe's payload text must not reach the sink in ANY form, and exactly one
+# of the six decision rows may carry the marker.
+assert_no_grep_file "$_g54_jsonl" 'injected' "G-592.3.injection-probe-writes-no-key"
+_g54_marked="$(grep -c 'partial_chain' "$_g54_jsonl" 2>/dev/null || true)"
+assert_eq "$_g54_marked" "1" "G-592.3.exactly-one-of-six-rows-is-marked"
+# The TSV row is the PR machine's source of truth; the marker is telemetry on the
+# audit row only. A fifth argument must not widen or reorder the state row.
+_g54_states="$_g54_arity/goal-g1-pr-states.tsv"
+assert_no_grep_file "$_g54_states" 'partial|injected' "G-592.3.state-row-never-carries-the-marker"
+_g54_state_rows="$(grep -c 'merging' "$_g54_states" 2>/dev/null || true)"
+assert_eq "$_g54_state_rows" "6" "G-592.3.all-six-transitions-persisted-a-state-row"
+
+# --- G-592.5 — the audit re-derivation that makes the refusal survive --resume
+# SOURCED and EXECUTED, never grepped: the two traps this helper must dodge are
+# runtime-only. A `… | while read` feed would discard the accumulator in a
+# subshell (case 1 would print empty), and an array built from a scalar splits
+# differently under zsh — neither is visible to a shape check.
+_g54_derive() {   # _g54_derive TMPDIR GOAL_ID -> CSV on stdout, helper's rc
+  UBERDEV_TMPDIR="$1" bash -c '. "$2" || exit 3; uberdev_goal_partial_issues_from_audit "$3"' \
+    _ "$1" "$GOAL_LIB" "$2"
+}
+
+_g54_d1="$_g54_tmp/d1"; mkdir -p "$_g54_d1"
+cat > "$_g54_d1/goal-d1.jsonl" <<'G54JSONL'
+{"ts":"2026-01-01T00:00:00Z","event":"goal_circuit_breaker","payload":{"reason":"solver_failed","phase":"partial_chain","partial_issues":"11,12"}}
+{"ts":"2026-01-01T00:00:01Z","event":"goal_cycle_completed","payload":{"cycle":1}}
+{"ts":"2026-01-01T00:00:02Z","event":"goal_circuit_breaker","payload":{"reason":"solver_failed","phase":"partial_chain","partial_issues":"12,13"}}
+G54JSONL
+_g54_out="$(_g54_derive "$_g54_d1" d1)"; _g54_rc=$?
+assert_eq "$_g54_out" "11,12,13" "G-592.5.two-partial-rows-dedupe-in-first-seen-order"
+assert_rc "$_g54_rc" 0 "G-592.5.dedupe-returns-rc-0"
+
+_g54_d2="$_g54_tmp/d2"; mkdir -p "$_g54_d2"
+cat > "$_g54_d2/goal-d2.jsonl" <<'G54JSONL'
+{"ts":"2026-01-01T00:00:00Z","event":"goal_circuit_breaker","payload":{"reason":"max_cycles","cycles":6}}
+{"ts":"2026-01-01T00:00:01Z","event":"goal_converged","payload":{"cycles":2}}
+G54JSONL
+_g54_out="$(_g54_derive "$_g54_d2" d2)"; _g54_rc=$?
+assert_eq "$_g54_out" "" "G-592.5.breaker-rows-without-the-partial-phase-yield-nothing"
+assert_rc "$_g54_rc" 0 "G-592.5.no-partial-row-returns-rc-0"
+
+_g54_d3="$_g54_tmp/d3"; mkdir -p "$_g54_d3"
+_g54_out="$(_g54_derive "$_g54_d3" d3)"; _g54_rc=$?
+assert_eq "$_g54_out" "" "G-592.5.missing-jsonl-yields-nothing"
+assert_rc "$_g54_rc" 0 "G-592.5.missing-jsonl-returns-rc-0"
+
+# A corrupt token must cost only itself. Dropping the whole row would silently
+# lose the issue numbers beside it — the exact "converged without achieving it"
+# outcome this carrier exists to prevent — and only digits may ever leave here.
+_g54_d4="$_g54_tmp/d4"; mkdir -p "$_g54_d4"
+cat > "$_g54_d4/goal-d4.jsonl" <<'G54JSONL'
+{"ts":"2026-01-01T00:00:00Z","event":"goal_circuit_breaker","payload":{"reason":"solver_failed","phase":"partial_chain","partial_issues":"14,x,15"}}
+G54JSONL
+_g54_out="$(_g54_derive "$_g54_d4" d4)"; _g54_rc=$?
+assert_eq "$_g54_out" "14,15" "G-592.5.non-digit-token-dropped-digit-tokens-kept"
+assert_rc "$_g54_rc" 0 "G-592.5.non-digit-token-returns-rc-0"
+
+# The goal id reaches a path, so it is validated before it is interpolated (#156).
+_g54_out="$(_g54_derive "$_g54_d1" '../pwned' 2>/dev/null)"; _g54_rc=$?
+assert_rc "$_g54_rc" 1 "G-592.5.unsafe-goal-id-refused-rc-1"
+assert_eq "$_g54_out" "" "G-592.5.unsafe-goal-id-prints-nothing"
+
+# The goal_partial_delivery shape — the one this tree ALREADY writes, from
+# lib/goal-watch.sh::_uberdev_goal_flag_partial_merge. Without this row the
+# helper would ship as a reader whose only producer is a sibling task, and its
+# caller swallows both stderr and rc, so "broken" and "nothing to report" would
+# render identically. The fixture interleaves all four shapes IN FILE ORDER so
+# the row also pins the union, the cross-shape dedupe and the first-seen
+# ordering — and pins the two shapes that must NOT contribute: a
+# goal_pr_transition row carrying the "partial_chain":true marker (that is a PR
+# marker, not an issue) and a goal_partial_chain re-queue decision (D592a-event;
+# `requeued` means the issue went BACK into the queue, the opposite of a reason
+# to refuse convergence).
+_g54_d5="$_g54_tmp/d5"; mkdir -p "$_g54_d5"
+cat > "$_g54_d5/goal-d5.jsonl" <<'G54JSONL'
+{"ts":"2026-01-01T00:00:00Z","event":"goal_partial_delivery","payload":{"goal_id":"d5","pr":100,"issue":21,"cycle":1}}
+{"ts":"2026-01-01T00:00:01Z","event":"goal_pr_transition","payload":{"goal_id":"d5","pr":100,"from":"green","to":"merging","partial_chain":true}}
+{"ts":"2026-01-01T00:00:02Z","event":"goal_partial_chain","payload":{"issue":31,"pr":300,"stage":"requeued"}}
+{"ts":"2026-01-01T00:00:03Z","event":"goal_circuit_breaker","payload":{"reason":"solver_failed","phase":"partial_chain","partial_issues":"22,21"}}
+{"ts":"2026-01-01T00:00:04Z","event":"goal_partial_delivery","payload":{"goal_id":"d5","pr":101,"issue":23,"cycle":2}}
+G54JSONL
+_g54_out="$(_g54_derive "$_g54_d5" d5)"; _g54_rc=$?
+assert_eq "$_g54_out" "21,22,23" "G-592.5.delivery-and-breaker-rows-union-dedupe-in-file-order"
+assert_rc "$_g54_rc" 0 "G-592.5.union-returns-rc-0"
+
+# Negative control for the same fixture: with the two contributing shapes
+# removed, the two look-alike shapes on their own yield NOTHING. Without this
+# the row above would still pass if the helper matched `partial_chain` loosely
+# and swept in the PR marker or the re-queue record.
+_g54_d6="$_g54_tmp/d6"; mkdir -p "$_g54_d6"
+cat > "$_g54_d6/goal-d6.jsonl" <<'G54JSONL'
+{"ts":"2026-01-01T00:00:00Z","event":"goal_pr_transition","payload":{"goal_id":"d6","pr":100,"from":"green","to":"merging","partial_chain":true}}
+{"ts":"2026-01-01T00:00:01Z","event":"goal_partial_chain","payload":{"issue":31,"pr":300,"stage":"requeued"}}
+G54JSONL
+_g54_out="$(_g54_derive "$_g54_d6" d6)"; _g54_rc=$?
+assert_eq "$_g54_out" "" "G-592.5.pr-marker-and-requeue-record-contribute-nothing"
+assert_rc "$_g54_rc" 0 "G-592.5.look-alike-rows-return-rc-0"
+
+# Key ORDER inside a payload is not a contract, and this reader must not invent
+# one. uberdev_goal_audit takes the payload as an OPAQUE string from its caller,
+# so nothing in this repo pins whether `"phase"` precedes `"partial_issues"` on a
+# breaker row or `"pr"` precedes `"issue"` on a delivery row — and a reader that
+# required either order would start returning "" the day a caller reordered its
+# own printf, which its phase-3 consumer (`… 2>/dev/null || true`) cannot tell
+# apart from a healthy reader that found nothing. The third row is the scoping
+# control: `phase=partial_chain` riding ANY OTHER event contributes nothing,
+# which is what the shape-2 contract actually says.
+_g54_d9="$_g54_tmp/d9"; mkdir -p "$_g54_d9"
+cat > "$_g54_d9/goal-d9.jsonl" <<'G54JSONL'
+{"ts":"2026-01-01T00:00:00Z","event":"goal_circuit_breaker","payload":{"reason":"solver_failed","partial_issues":"31,32","phase":"partial_chain"}}
+{"ts":"2026-01-01T00:00:01Z","event":"goal_partial_delivery","payload":{"goal_id":"d9","cycle":1,"issue":33,"pr":100}}
+{"ts":"2026-01-01T00:00:02Z","event":"goal_cycle_completed","payload":{"cycle":2,"phase":"partial_chain","partial_issues":"99"}}
+G54JSONL
+_g54_out="$(_g54_derive "$_g54_d9" d9)"; _g54_rc=$?
+assert_eq "$_g54_out" "31,32,33" "G-592.5.reordered-keys-still-read-and-the-phase-read-is-event-scoped"
+assert_rc "$_g54_rc" 0 "G-592.5.reordered-keys-return-rc-0"
+
+# The producer's documented no-issue sentinel. _uberdev_goal_batch_issue_for_pr
+# prints `0` — never a claim that issue 0 exists — when the batch registry has no
+# row for the PR, which is exactly what a resume looks like, and
+# _uberdev_goal_flag_partial_merge interpolates that straight into the delivery
+# row. Both naive readings are wrong: DROPPING the row lets a run that really did
+# merge a partial PR converge, and PASSING `0` THROUGH makes an unattended run
+# tell its operator that issue 0 fell short. So the delivery still halts the run,
+# under a name that is honest about what is unknown and still points at something
+# the operator can open. Same treatment for an issue column that is not a number
+# at all, and the last row pins that a delivery row can never contribute NOTHING
+# — it has no `pr` key either.
+_g54_d10="$_g54_tmp/d10"; mkdir -p "$_g54_d10"
+cat > "$_g54_d10/goal-d10.jsonl" <<'G54JSONL'
+{"ts":"2026-01-01T00:00:00Z","event":"goal_partial_delivery","payload":{"goal_id":"d10","pr":100,"issue":0,"cycle":1}}
+{"ts":"2026-01-01T00:00:01Z","event":"goal_partial_delivery","payload":{"goal_id":"d10","pr":101,"issue":41,"cycle":1}}
+{"ts":"2026-01-01T00:00:02Z","event":"goal_partial_delivery","payload":{"goal_id":"d10","pr":102,"issue":"x","cycle":2}}
+{"ts":"2026-01-01T00:00:03Z","event":"goal_partial_delivery","payload":{"goal_id":"d10","issue":0,"cycle":3}}
+G54JSONL
+_g54_out="$(_g54_derive "$_g54_d10" d10)"; _g54_rc=$?
+assert_eq "$_g54_out" "pr-100,41,pr-102,pr-unknown" \
+  "G-592.5.unmappable-delivery-halts-the-run-without-claiming-issue-0"
+assert_rc "$_g54_rc" 0 "G-592.5.sentinel-issue-returns-rc-0"
+
+# Phase 3 writes the set this helper returns back into the breaker row it emits,
+# and this helper reads that row again on the next `--resume`. So the round trip
+# has to be lossless for EVERY member of the vocabulary, not just for digits:
+# a `pr-<n>` member that survived one pass and vanished on the next would let the
+# run that refused convergence at 12:00 converge at 12:05. Everything OUTSIDE the
+# vocabulary is still dropped — the audit jsonl is a file on disk, so its tokens
+# are input, and the phase-3 consumer interpolates them into a JSON payload and
+# an operator line.
+_g54_d11="$_g54_tmp/d11"; mkdir -p "$_g54_d11"
+cat > "$_g54_d11/goal-d11.jsonl" <<'G54JSONL'
+{"ts":"2026-01-01T00:00:00Z","event":"goal_circuit_breaker","payload":{"reason":"solver_failed","phase":"partial_chain","partial_issues":"51,pr-100,pr-unknown,x,1;rm -rf /,pr-,pr-x"}}
+G54JSONL
+_g54_out="$(_g54_derive "$_g54_d11" d11)"; _g54_rc=$?
+assert_eq "$_g54_out" "51,pr-100,pr-unknown" \
+  "G-592.5.the-member-vocabulary-round-trips-and-nothing-else-does"
+assert_rc "$_g54_rc" 0 "G-592.5.vocabulary-round-trip-returns-rc-0"
+
+# An extraction that DIED must not read downstream as "nothing to report". The
+# phase-3 consumer swallows this helper's stderr and its rc, so a broken `awk` —
+# a PATH that resolves to something else, a fatal on a truncated line, a
+# resource limit — would otherwise deliver the same "" a clean run delivers, and
+# the run would converge on a set it never actually read. The stub is a real
+# `awk` earlier on PATH so the failure is deterministic on every platform rather
+# than depending on how this host's awk reacts to a malformed file.
+_g54_d12="$_g54_tmp/d12"; mkdir -p "$_g54_d12"
+cat > "$_g54_d12/goal-d12.jsonl" <<'G54JSONL'
+{"ts":"2026-01-01T00:00:00Z","event":"goal_circuit_breaker","payload":{"reason":"solver_failed","phase":"partial_chain","partial_issues":"61"}}
+G54JSONL
+_g54_stub="$_g54_tmp/stubbin"; mkdir -p "$_g54_stub"
+printf '#!/bin/sh\nexit 2\n' > "$_g54_stub/awk"
+chmod +x "$_g54_stub/awk"
+_g54_err="$_g54_tmp/d12.err"
+_g54_out="$(PATH="$_g54_stub:$PATH" UBERDEV_TMPDIR="$_g54_d12" \
+  bash -c '. "$1" || exit 3; uberdev_goal_partial_issues_from_audit d12' \
+  _ "$GOAL_LIB" 2>"$_g54_err")"; _g54_rc=$?
+assert_eq "$_g54_out" "" "G-592.5.failed-extraction-yields-nothing"
+assert_rc "$_g54_rc" 0 "G-592.5.failed-extraction-does-not-abort-the-caller"
+assert_contains "$(cat "$_g54_err" 2>/dev/null || true)" 'extracting from' \
+  "G-592.5.failed-extraction-leaves-a-breadcrumb-on-stderr"
+# Anti-vacuity for the row above: the SAME fixture through the real awk yields
+# the number, so the empty result really is the stub's doing and not a fixture
+# this reader could never have read.
+_g54_out="$(_g54_derive "$_g54_d12" d12)"; _g54_rc=$?
+assert_eq "$_g54_out" "61" "G-592.5.the-failed-extraction-fixture-is-readable-by-a-working-awk"
+assert_rc "$_g54_rc" 0 "G-592.5.failed-extraction-control-returns-rc-0"
+
+# Anti-tautology for the two rows above: those fixtures are hand-written
+# literals, so on their own they prove only that the reader matches the shape
+# THIS file believes in. Here the row is written by uberdev_goal_audit — the
+# same emitter lib/goal-watch.sh's merge gate calls — so the envelope the reader
+# parses is the envelope production actually produces, framing and all.
+_g54_d8="$_g54_tmp/d8"; mkdir -p "$_g54_d8"
+UBERDEV_TMPDIR="$_g54_d8" UBERDEV_GOAL_ID=d8 bash -c '
+  . "$1" || exit 3
+  uberdev_goal_audit goal_partial_delivery "{\"goal_id\":\"d8\",\"pr\":100,\"issue\":41,\"cycle\":3}"
+' _ "$GOAL_LIB" > "$_g54_tmp/d8.log" 2>&1
+assert_rc "$?" 0 "G-592.5.uberdev_goal_audit-accepts-the-delivery-event"
+_g54_out="$(_g54_derive "$_g54_d8" d8)"; _g54_rc=$?
+assert_eq "$_g54_out" "41" "G-592.5.reader-round-trips-a-row-written-by-the-real-emitter"
+assert_rc "$_g54_rc" 0 "G-592.5.round-trip-returns-rc-0"
+
+# PRESENT-BUT-UNREADABLE is not MISSING. Both yield an empty set, and the
+# caller swallows the rc, so the only thing that can tell an operator that this
+# run lost its ability to re-derive the refused set is a breadcrumb on stderr —
+# the same treatment _uberdev_goal_append (#157) gives an unwritable tmpdir.
+# Guarded rather than asserted blind: a root run and a filesystem without POSIX
+# modes (Git Bash on the Windows job) both still read a chmod-000 file, and a
+# vacuous PASS there would be worse than an honest skip.
+_g54_d7="$_g54_tmp/d7"; mkdir -p "$_g54_d7"
+cat > "$_g54_d7/goal-d7.jsonl" <<'G54JSONL'
+{"ts":"2026-01-01T00:00:00Z","event":"goal_circuit_breaker","payload":{"reason":"solver_failed","phase":"partial_chain","partial_issues":"77"}}
+G54JSONL
+chmod 000 "$_g54_d7/goal-d7.jsonl" 2>/dev/null || true
+if [ -r "$_g54_d7/goal-d7.jsonl" ]; then
+  printf '  SKIP  G-592.5.unreadable-jsonl — this host still reads a chmod-000 file (root, or a filesystem without POSIX modes); the missing-file half is covered by G-592.5.missing-jsonl-* above\n'
+else
+  _g54_err="$_g54_tmp/d7.err"
+  _g54_out="$(_g54_derive "$_g54_d7" d7 2>"$_g54_err")"; _g54_rc=$?
+  assert_eq "$_g54_out" "" "G-592.5.unreadable-jsonl-yields-nothing"
+  assert_rc "$_g54_rc" 0 "G-592.5.unreadable-jsonl-does-not-abort-the-caller"
+  assert_contains "$(cat "$_g54_err" 2>/dev/null || true)" 'exists but is unreadable' \
+    "G-592.5.unreadable-jsonl-leaves-a-breadcrumb-on-stderr"
+fi
+chmod 644 "$_g54_d7/goal-d7.jsonl" 2>/dev/null || true
+
+rm -rf "$_g54_tmp"
+
+echo
 echo "== Summary =="
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 

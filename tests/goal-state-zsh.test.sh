@@ -809,6 +809,98 @@ else
 fi
 rm -rf "$Z19_TMP" 2>/dev/null || true
 
+echo
+echo "== Z20: partial_issues_from_audit dedupes, extracts and filters under the live shell (#592) =="
+# Every portability property uberdev_goal_partial_issues_from_audit's own comment
+# calls load-bearing is RUNTIME-only, so no shape check can see any of them — but
+# they do not all belong to the same shell, and this row must not sell itself as
+# the guard for one it cannot see. What Z20 genuinely locks UNDER ZSH:
+#   - the dedupe is a padded-haystack `case` rather than an array — `ARR=($SCALAR)`
+#     word-splits differently here, and swapping the `case` for an array reds Z20a
+#     under zsh;
+#   - the awk extraction survives the live shell: the event-scoped selectors, the
+#     reordered-key reads and the `0`-sentinel -> `pr-<n>` mapping (Z20c), and the
+#     present-but-unreadable breadcrumb (Z20b);
+#   - nothing uses mapfile / `paste -s` / process substitution.
+# What it does NOT lock is the HEREDOC feed. `... | while read` discards `csv` in
+# a subshell under bash and Git Bash, but NOT under zsh — zsh runs the LAST stage
+# of a pipeline in the current shell — so replacing the heredoc with a pipe leaves
+# this suite green under zsh, the only invocation test.yml wires for this file,
+# and reds goal.test.sh's G-592.5 instead. That row, on the
+# ubuntu-bash and Windows Git-Bash jobs, is the guard for the heredoc. This one is
+# the CI-wired zsh fixture for exactly this lib, which is what keeps
+# `for x in $SCALAR` and `ARR=($SCALAR)` from coming back a third time.
+#
+# The fixture interleaves both contributing row shapes so the row also proves the
+# union and the cross-shape dedupe: goal_partial_delivery ("issue":N, written
+# today by lib/goal-watch.sh's merge gate) and goal_circuit_breaker with
+# "phase":"partial_chain" ("partial_issues":"N,M", written by the phase-3
+# convergence refusal). The `x` token must cost only itself.
+Z20_TMP="$(mktemp -d)"
+cat > "$Z20_TMP/goal-goaltestz20.jsonl" <<'Z20JSONL'
+{"ts":"2026-01-01T00:00:00Z","event":"goal_partial_delivery","payload":{"goal_id":"goaltestz20","pr":100,"issue":11,"cycle":1}}
+{"ts":"2026-01-01T00:00:01Z","event":"goal_circuit_breaker","payload":{"reason":"solver_failed","phase":"partial_chain","partial_issues":"12,11"}}
+{"ts":"2026-01-01T00:00:02Z","event":"goal_circuit_breaker","payload":{"reason":"solver_failed","phase":"partial_chain","partial_issues":"13,x,12"}}
+Z20JSONL
+Z20_OUT="$(
+  export UBERDEV_TMPDIR="$Z20_TMP"
+  uberdev_goal_partial_issues_from_audit goaltestz20
+)"
+Z20_RC=$?
+if [ "$Z20_OUT" = "11,12,13" ] && [ "$Z20_RC" = "0" ]; then
+  pass "Z20a: union+dedupe+digit-filter -> 11,12,13 rc 0 under $RUN_SHELL (#592)"
+else
+  fail "Z20a: got [$Z20_OUT] rc=$Z20_RC under $RUN_SHELL, expected [11,12,13] rc 0 (#592 — an array dedupe splits differently here, or the awk extraction broke; a piped feed loses the accumulator under bash/Git Bash but NOT under zsh, so it cannot be the cause of a zsh failure)"
+fi
+
+# Key order is not a contract, the `phase` read is scoped to its EVENT, and a
+# delivery row the run cannot map back to an issue still halts — named by its PR
+# rather than as the producer's `0` sentinel. goal.test.sh's
+# G-592.5.reordered-keys-* / .unmappable-delivery-* are the bash twins; this is
+# the zsh half, because the extraction is the one part of this helper a shell
+# difference can silently empty, and an empty return is indistinguishable from a
+# clean run at the phase-3 caller.
+Z20C_TMP="$(mktemp -d)"
+cat > "$Z20C_TMP/goal-goaltestz20c.jsonl" <<'Z20JSONL'
+{"ts":"2026-01-01T00:00:00Z","event":"goal_circuit_breaker","payload":{"reason":"solver_failed","partial_issues":"21,22","phase":"partial_chain"}}
+{"ts":"2026-01-01T00:00:01Z","event":"goal_partial_delivery","payload":{"goal_id":"goaltestz20c","pr":100,"issue":0,"cycle":1}}
+{"ts":"2026-01-01T00:00:02Z","event":"goal_cycle_completed","payload":{"cycle":2,"phase":"partial_chain","partial_issues":"99"}}
+Z20JSONL
+Z20C_OUT="$(
+  export UBERDEV_TMPDIR="$Z20C_TMP"
+  uberdev_goal_partial_issues_from_audit goaltestz20c
+)"
+Z20C_RC=$?
+if [ "$Z20C_OUT" = "21,22,pr-100" ] && [ "$Z20C_RC" = "0" ]; then
+  pass "Z20c: reordered keys + event-scoped phase read + unmappable delivery -> 21,22,pr-100 rc 0 under $RUN_SHELL (#592)"
+else
+  fail "Z20c: got [$Z20C_OUT] rc=$Z20C_RC under $RUN_SHELL, expected [21,22,pr-100] rc 0 (#592 — key order is not a contract, the phase key alone is not the selector, and the 0 sentinel is not issue 0)"
+fi
+rm -rf "$Z20C_TMP" 2>/dev/null || true
+
+# The unreadable-but-present jsonl: empty set, rc 0, and a breadcrumb — because
+# the phase-3 caller swallows both stderr and rc, so a silent "" is how a resume
+# with the wrong UBERDEV_TMPDIR becomes a false convergence. Guarded: a root run
+# still reads a chmod-000 file and would PASS vacuously.
+chmod 000 "$Z20_TMP/goal-goaltestz20.jsonl" 2>/dev/null || true
+if [ -r "$Z20_TMP/goal-goaltestz20.jsonl" ]; then
+  echo "  SKIP  Z20b — this host still reads a chmod-000 file (root?); the readable half is covered by Z20a"
+else
+  Z20B_ERR="$Z20_TMP/z20b.err"
+  Z20B_OUT="$(
+    export UBERDEV_TMPDIR="$Z20_TMP"
+    uberdev_goal_partial_issues_from_audit goaltestz20 2>"$Z20B_ERR"
+  )"
+  Z20B_RC=$?
+  if [ -z "$Z20B_OUT" ] && [ "$Z20B_RC" = "0" ] && grep -q 'exists but is unreadable' "$Z20B_ERR"; then
+    pass "Z20b: unreadable jsonl -> empty, rc 0, breadcrumb on stderr under $RUN_SHELL (#592)"
+  else
+    fail "Z20b: unreadable jsonl mishandled under $RUN_SHELL (#592 — out=[$Z20B_OUT] rc=$Z20B_RC err=[$(cat "$Z20B_ERR" 2>/dev/null || true)])"
+  fi
+fi
+chmod 644 "$Z20_TMP/goal-goaltestz20.jsonl" 2>/dev/null || true
+rm -rf "$Z20_TMP" 2>/dev/null || true
+
 # Cleanup
 rm -rf "$Z2_TMP" "$Z3_TMP" "$Z4_TMP" 2>/dev/null || true
 
