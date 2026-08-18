@@ -352,7 +352,13 @@ WRITER_RAW='{"number":619,"title":"t","labels":[],"body":"REAL REQUIREMENTS THAT
 rc_is 0 "a valid cap writes the body" -- python3 -I -B "$TMP/writer.py" \
   "$WRITER_ROOT" "$WRITER_ROOT/ib-ok.md" 65536 "$WRITER_RAW"
 if [ -s "$WRITER_ROOT/ib-ok.md" ]; then ok "the artifact is non-empty"; else bad "artifact empty on a valid cap"; fi
-ib_mode="$(stat -f '%Lp' "$WRITER_ROOT/ib-ok.md" 2>/dev/null || stat -c '%a' "$WRITER_ROOT/ib-ok.md" 2>/dev/null)"
+# GNU FIRST, then BSD. `stat -f` on GNU coreutils is --file-system: it SUCCEEDS
+# and prints filesystem info, so a `-f || -c` chain never reaches the fallback
+# and compares that output to a mode. This fixture shipped that way and reddened
+# ubuntu while macOS and Windows passed. Int-validate too, so no future
+# succeeds-but-wrong probe can masquerade as a mode.
+ib_mode="$(stat -c '%a' "$WRITER_ROOT/ib-ok.md" 2>/dev/null || stat -f '%Lp' "$WRITER_ROOT/ib-ok.md" 2>/dev/null)"
+case "$ib_mode" in ''|*[!0-7]*) ib_mode="unreadable" ;; esac
 if [ "$ib_mode" = "600" ]; then ok "the artifact is 0600"; else bad "artifact mode is '$ib_mode', not 600"; fi
 
 rc_is 2 "cap=0 REFUSED (was a zero-byte requirements doc)" -- python3 -I -B "$TMP/writer.py" \
