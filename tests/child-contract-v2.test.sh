@@ -12,108 +12,23 @@ LIB="$ROOT/plugins/uberdev/lib/child-dispatch.sh"
 CONTRACT="$ROOT/plugins/uberdev/shared/phase1-reviewer-output-v1.md"
 FINDINGS_AGENT="$ROOT/plugins/uberdev/agents/findings-to-issues.md"
 
-python3 -I -B - "$TREE" <<'PY'
-import json,sys
-tree=json.load(open(sys.argv[1])); providers={k:v for k,v in tree['edges'].items() if v['kind']=='provider'}
-assert tree.get('input_limits')=={'max_serialized_bytes':49152}
-types={'integer','string','bounded_text','optional_string','boolean','path','optional_path','directory','string_array','path_array','optional_path_array','repo_path_array'}
-assert providers
-for edge,row in providers.items():
-    assert row.get('workspace_mode','isolated') in {'isolated','caller'}, edge
-    assert 'inputs' not in row and 'input_types' not in row, edge
-    assert isinstance(row.get('required_inputs'),dict), edge
-    assert isinstance(row.get('optional_inputs'),dict), edge
-    assert not (set(row['required_inputs']) & set(row['optional_inputs'])), edge
-    assert set(row['required_inputs'].values())|set(row['optional_inputs'].values()) <= types, edge
-    allowed=row.get('allowed_workflows')
-    assert isinstance(allowed,list) and allowed==sorted(set(allowed)), edge
-    assert set(allowed) <= {'solve','turbo','review-pr','simplify'}, edge
-for edge in ('orchestrator.plan.write','sdd.task.implement'):
-    assert providers[edge]['allowed_workflows']==['solve','turbo']
-assert providers['orchestrator.plan.write']['retry']=={'revision':1,'verification':2}
-assert providers['orchestrator.plan.write']['optional_inputs']['verification_feedback_path']=='path'
-assert providers['orchestrator.plan.write']['optional_inputs']['revision_brief_path']=='path'
-for edge,row in providers.items():
-    if row.get('retry',{}).get('format'):
-        assert row['optional_inputs']['format_retry']=='boolean', edge
-        assert row['optional_inputs']['format_example_path']=='path', edge
-for edge in ('review_pr.simplify.reuse','review_pr.simplify.quality','review_pr.simplify.efficiency'):
-    row=providers[edge]
-    assert 'focus' not in row['required_inputs'], edge
-    assert row['optional_inputs'].get('focus')=='optional_string', edge
-    assert 'additional_focus' not in row['optional_inputs'], edge
-fixer_inputs={
- 'findings_path':'path',
- 'findings_sha256':'string',
- 'commit_range_path':'path',
- 'commit_range_sha256':'string',
- 'working_dir':'directory',
- 'pr_number':'integer',
- 'disposition_path':'path',
- 'authority_path':'path',
- 'authority_sha256':'string',
-}
-for edge,policy_phase in (
- ('review_pr.fix.phase1','review_fix'),
- ('review_pr.fix.phase2','simplify_fix'),
-):
-    row=providers[edge]
-    assert row['required_inputs']==fixer_inputs, edge
-    assert row['optional_inputs']=={}, edge
-    assert row['phase']==policy_phase, edge
-standalone_fixer_inputs={
- 'findings_path':'path',
- 'findings_sha256':'string',
- 'standalone_snapshot_path':'path',
- 'standalone_snapshot_sha256':'string',
- 'working_dir':'directory',
- 'pr_number':'integer',
- 'disposition_path':'path',
- 'authority_path':'path',
- 'authority_sha256':'string',
-}
-standalone=providers['simplify.fix.phase2']
-assert standalone['required_inputs']==standalone_fixer_inputs
-assert standalone['optional_inputs']=={}
-assert standalone['phase']=='simplify_fix'
-assert standalone['allowed_workflows']==['simplify']
-review_edges={edge for edge in providers if edge.startswith('review_pr.review.')}
-assert len(review_edges)==7
-assert tree.get('output_contracts')=={
- 'phase1-reviewer-v1':'shared/phase1-reviewer-output-v1.md',
- 'finding-verifier-v1':'shared/finding-verifier-output-v1.md',
- 'code-fixer-v1':'shared/code-fixer-output-v1.md',
- 'sdd-implementer-v1':'shared/sdd-implementer-output-v1.md'
-}
-# #517: the SDD implementer edge. Its role card declared a three-member terminal
-# vocabulary, the controller branched on a different four-member one, and the
-# assembled prompt ended with a contract-less fallback directive that NAMED a
-# third vocabulary agreeing with neither -- so the controller's cheap
-# NEEDS_CONTEXT path was unreachable and `context_rounds` bounded nothing. #546
-# retired that directive's vocabulary: the contract-less arm now points at the
-# return contract the role card declares. The binding pinned below is what makes
-# this edge's return shape machine-checkable rather than merely delegated.
-assert providers['sdd.task.implement'].get('output_contract')=='sdd-implementer-v1'
-for edge in review_edges:
-    row=providers[edge]
-    assert row['required_inputs']['changed_paths']=='repo_path_array', edge
-    assert row.get('output_contract')=='phase1-reviewer-v1', edge
-# #474: the three fixer edges carry a format contract for the SAME reason the
-# reviewer edges do. The reviewers were bound to a whole-file-fence rule and
-# never broke it; the fixer was bound to none, wrote a titled report around its
-# YAML twice in a row, and each violation was caught only AFTER it had already
-# committed -- turning a formatting slip into MUTATED_BLOCKED.
-fixer_edges={'review_pr.fix.phase1','review_pr.fix.phase2','simplify.fix.phase2'}
-for edge in fixer_edges:
-    assert providers[edge].get('output_contract')=='code-fixer-v1', edge
-caller_edges={
- 'review_pr.fix.phase1','review_pr.fix.phase2','simplify.fix.phase2','review_pr.ci.fix_code',
- 'review_pr.ci.rebase','review_pr.ci.resolve_conflict'
-}
-assert {edge for edge,row in providers.items() if row.get('workspace_mode')=='caller'}==caller_edges
-for edge in caller_edges:
-    assert providers[edge]['required_inputs'].get('working_dir')=='directory', edge
-PY
+# The second schema oracle over policy/solve-run-tree-v1.json that used to sit
+# here (lines 15-116) was absorbed into tests/solve-run-tree.test.sh, which is
+# now the single oracle for that manifest.
+#
+# The two oracles were NOT duplicates, and each one's removal had been argued
+# for on the grounds that the other still covered the manifest -- applying both
+# arguments would have left it with no oracle at all. Five rules existed only
+# here and were merged there before this block was dropped: the closed
+# allowed_workflows vocabulary, the retired inputs/input_types ban, the
+# UNIVERSAL retry.format -> format_retry/format_example_path rule, the DERIVED
+# review-lens count of 7 (the surviving file's own review_edges set is a
+# hardcoded six predating the convention lens), and the simplify-lens
+# focus/additional_focus contract. Each was proven to red on a seeded mutation
+# of a scratch copy of the manifest before this deletion was made.
+#
+# What remains in this file is the child-dispatch LIBRARY contract, which is a
+# different subject and has no second holder.
 
 grep -q '^uberdev_preflight_child_batch()' "$LIB"
 grep -q '^uberdev_unwind_child()' "$LIB"

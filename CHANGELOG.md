@@ -134,6 +134,65 @@ chains in flight rather than a batch size, which bounds live worktrees exactly
 as the barrier did while a lane freed by a fast chain picks up the next issue
 immediately.
 
+### Changed - test suite: prose-locks retired, repo-wide guards consolidated
+
+First tranche of the `tests/` reduction. Roughly two thirds of the assertions in the
+121,793-line suite are **prose-locks** - greps asserting that a particular heading,
+wording or line-ordering still appears in a `.md` prompt surface. They red on every
+reword, catch no runtime defect, and are why a one-line prompt edit costs a 28-minute
+suite run and a multi-file test chase.
+
+A per-assertion classification of all 125 files puts the safely removable total at
+**29,055 lines (24%)** - not the ~90% a raw grep-count suggests. Three adversarial
+passes overrode 16 of 80 file verdicts, two because the deletion would have changed
+shipped behaviour.
+
+- `tests/solve-claim.test.sh` **502 -> 101**. The ~99 structural-grep rows are gone.
+  The file is **not** deleted and must not be: `lib/bump-version.sh:221` binds it as
+  release surface #6 and `:224-233` fails *closed* when it is unreadable, so removing
+  it would refuse every release, every `/merge` release-anchor pass and every `/goal`
+  version bump. What survives is the release ratchet plus the `#123` B1 block, which
+  executes the closing-keyword regex against known-bad and known-good fixtures and is
+  pinned to the shipped bytes by its paired `assert_grep`.
+- `tests/child-contract-v2.test.sh` **688 -> 603**. Its schema oracle over
+  `policy/solve-run-tree-v1.json` is folded into `tests/solve-run-tree.test.sh`, now
+  the single oracle. The two were **not** duplicates and each one's removal had been
+  argued for by naming the other as the survivor - applying both would have left the
+  manifest unguarded. Five rules existed only in the dropped block, including a
+  *derived* review-lens count of 7 where the survivor hardcodes 6.
+
+### Added - `tests/epipe-guard.test.sh` sections L0-L6, the shared lint host
+
+- **L0** declares the shipped-code corpus once, so a guard folded in later cannot
+  bring a narrower walk of its own. Shell-ness is decided by **shebang, not filename**:
+  `git ls-files -- '*.sh'` drops every shipped hook, since `session-start`,
+  `session-end`, `pre-compact`, `inject-brainstorm-answers` and `lib/rl-curl` carry no
+  extension. A third enumerator covers `skills/*/workflow.js` - 8 files holding 18 live
+  `gh pr`/`gh issue` call sites that neither a shell nor a markdown walk reaches.
+- **L1-L6** port six repo-wide guards off single-document donors: retired
+  terminal-dispatch transports, the retired codex arm, quoted-literal-tilde paths
+  (#194), non-portable `sed -i`, the zsh-NOMATCH echo-ternary trap, and gh-issue writes
+  with an inline `--body` expansion. Five of the six previously read exactly one
+  hardcoded file.
+- Every zero-hit ratchet ships a denominator, because an absence assertion cannot tell
+  a clean corpus from a matcher that stopped matching: 4,378 quoted-RHS assignments,
+  36 `sed` invocations, 37 gh write call sites.
+
+### Why
+
+Each ported guard is proven **both directions** against a git-init'd scratch mirror -
+red on a seeded violation, green on its nearest legitimate neighbour. The second half
+is not ceremony: a vacuity audit of the candidate predicates found two that would have
+shipped permanently green. One resolved variables corpus-globally first-match-wins, so
+a seeded 113-byte label description measured 5 bytes and passed; the other required
+backtick-delimited tokens and was therefore blind to the operative `subagent_type:`
+dispatch spelling, leaving 413 of 578 references unchecked. Both are held back until
+their carve-outs are designed. A green guard whose donor has been deleted is strictly
+worse than no guard.
+
+Donors are **not** deleted in this release - coverage is deliberately duplicated until
+the deletion step, so a mistake in a ported predicate cannot silently drop a class.
+
 ## [0.49.0] — 2026-08-18
 
 ### Added - `/turbox`, the standard-mode solver fleet (RFC 0020)
