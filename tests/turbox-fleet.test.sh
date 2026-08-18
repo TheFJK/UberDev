@@ -47,7 +47,7 @@ echo "== TX1: command file structure + the no-Workflow invariant =="
 ck "has description frontmatter"   "grep -q '^description:' '$CMD'"
 ck "has argument-hint"             "grep -q '^argument-hint:' '$CMD'"
 ck "has allowed-tools"             "grep -q '^allowed-tools:' '$CMD'"
-ck "allowed-tools declares Task"   "grep '^allowed-tools:' '$CMD' | grep -q '\"Task\"'"
+ck "allowed-tools declares Task"   "[ \$(grep '^allowed-tools:' '$CMD' | grep -c '\"Task\"') -ge 1 ]"
 # The lane's defining negative: /turbox must not be able to call Workflow.
 # A turbox plan relayed into Workflow() is a category error, and the cheapest
 # place to make that impossible is the tool list.
@@ -218,7 +218,7 @@ ck "RFC has acceptance criteria"        "grep -q '^## 6. Acceptance criteria' '$
 ck "RFC number 0020 is unique"          "[ \$(ls '$REPO_ROOT/docs/rfc/' | grep -c '^0020-') -eq 1 ]"
 
 echo "== TX14: the lib is an executable, never sourced (the zsh trap) =="
-ck "lib has a bash shebang"             "head -1 '$LIB' | grep -q '^#!/usr/bin/env bash'"
+ck "lib has a bash shebang"             "[ \$(head -1 '$LIB' | grep -c '^#!/usr/bin/env bash') -ge 1 ]"
 ck "lib documents the never-source rule" "grep -q 'never a sourced library' '$LIB'"
 ck "skill documents the never-source rule" "grep -qi 'executable\*\*, never sourced' '$SKILL'"
 # A `. \$LIB` / `source \$LIB` anywhere in the skill would run the body under
