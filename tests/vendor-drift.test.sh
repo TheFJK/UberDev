@@ -2816,6 +2816,183 @@ else
 fi
 
 echo
+echo "== D-REL17b: the returned shape, stated once =="
+
+# D-REL17b — criterion 19, the half of defect 4 D-REL17 does not reach. D-REL17
+# asserts the RETIRED tuple's vocabulary is gone; this row asserts the surviving
+# shape is stated in exactly ONE place. Three copies is how defect 4 happened:
+# the `PRERELEASE_RANK` comment restated a five-tuple the module had already
+# stopped returning, nothing compared the copies, and the stale one read as
+# authoritative to whoever grepped it first. Deleting the stale copy fixes one
+# instance; asserting there is only ever one copy is what fixes the class.
+#
+# The three prose sites are the same three D-REL13 reasons over — `release_key`'s
+# docstring, `is_prerelease`'s docstring, and the `#` comment run above
+# `PRERELEASE_RANK` — and this row adds no fourth. Two come straight off
+# `__doc__`; the comment run is anchored on the assignment's own line number, so
+# moving the constant carries the row with it rather than silently emptying it.
+# That anchoring rule, and the `split("\n")`-vs-`splitlines()` reasoning below,
+# are D-REL13's (`:2223-2233`, `:2331-2340`) restated here because the two probes
+# are separate heredocs; a change to how the comment run is found has to land in
+# BOTH, and this row's own subject — uncompared copies of one rule — is why that
+# is called out rather than left to be discovered.
+#
+# TWO PREDICATES, because one cannot be right in both directions, which is the
+# reasoning D-REL13's header sets out at `:2138-2145` applied here. The row makes
+# two opposite claims about the same prose, and the widest rule that is correct
+# for the "restated nowhere else" direction is precisely the wrong rule for the
+# "stated here" direction:
+#
+#   `SHAPE` — the ≤1 / restatement arm. Deliberately WIDE, because a restatement
+#   drifts whatever spelling it wears: a parenthesised, comma-separated component
+#   list in the identifier form `(nums, rank, pre_ids)` AND equally in the value
+#   form `(6, 4, 0)`, or an arity word bound to the tuple (`triple`,
+#   `three-tuple`). A value-form copy planted in the `PRERELEASE_RANK` comment run
+#   is exactly how defect 4 read, so admitting it is the point.
+#
+#   `STATEMENT` — the ≥1 / anti-vacuity arm. Deliberately STRICT: a parenthesised
+#   run of two or more members where every member is an IDENTIFIER. `(nums, rank,
+#   pre_ids)` satisfies it; the worked example `(6, 4, 0)` at
+#   `tools/vendor/vendor-drift.py:236-237` — which illustrates an inversion and
+#   declares nothing — does not. Feeding `SHAPE` to this arm instead is a green
+#   hole: the statement can be deleted outright while the example keeps the arm
+#   satisfied, and the row then reports "stated once, in `release_key`'s
+#   docstring" over a module that states it in zero of the three sites.
+#
+# `STATEMENT` deliberately omits the arity words `SHAPE` admits. "A triple" states
+# the ARITY without naming the fields, and the fields are what the other two sites
+# defer here to read — so the omission demands content, not a spelling. The trade
+# it buys is known and is the safe direction: a statement rewritten without
+# parentheses ("`nums`, then the rank, then the identifiers") reds this row
+# loudly, where the reverse error would have been silent.
+#
+# Naming the bare word "tuple" is a statement under NEITHER predicate: the
+# `PRERELEASE_RANK` comment does exactly that while deferring to `release_key`,
+# and a rule that failed it would be demanding the deferral itself be deleted.
+#
+# ANTI-VACUITY, and it is the whole row: "matches zero of three" and "matches
+# exactly one" are one integer apart, so a pattern broken into matching nothing
+# would read as the green this row is looking for. `STATEMENT` matching NO site
+# is therefore a `SystemExit` — the statement is gone or the predicate is broken,
+# and from in here those are indistinguishable and both fatal. An empty site is
+# fatal rather than a non-match. And because the arms only compose while
+# `STATEMENT` is the strict HALF of `SHAPE`, the containment is asserted rather
+# than assumed: a site that states without mentioning means the two have drifted
+# apart, and neither count can be trusted afterwards.
+DREL17B_OUT="$(python3 - "$DRIFT" <<'PY'
+import ast
+import importlib.util
+import re
+import sys
+import tokenize
+
+drift = sys.argv[1]
+modspec = importlib.util.spec_from_file_location("vendor_drift", drift)
+vendor_drift = importlib.util.module_from_spec(modspec)
+modspec.loader.exec_module(vendor_drift)
+
+with open(drift, encoding="utf-8") as fh:
+    source = fh.read()
+# `split("\n")`, never `splitlines()`, for the reason D-REL13 spells out at
+# length: this list is indexed by `tokenize` row numbers, and `splitlines()`
+# breaks on form feeds and `\x85` too, which desyncs the two numberings.
+srclines = source.split("\n")
+tree = ast.parse(source)
+with open(drift, "rb") as fh:
+    comments = [t for t in tokenize.tokenize(fh.readline)
+                if t.type == tokenize.COMMENT]
+
+assign_row = None
+for node in tree.body:
+    if isinstance(node, ast.Assign):
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == "PRERELEASE_RANK":
+                assign_row = node.lineno
+if assign_row is None:
+    print("ANTI-VACUITY: no module-level `PRERELEASE_RANK` assignment to anchor "
+          "the third prose site on")
+    raise SystemExit(1)
+whole_line = {t.start[0]: t.string for t in comments
+              if srclines[t.start[0] - 1].lstrip().startswith("#")}
+run = []
+row = assign_row - 1
+while row in whole_line:
+    run.append(whole_line[row])
+    row -= 1
+run.reverse()
+
+# The WIDE half — every spelling a drifting copy might wear, value form
+# included. Correct for "restated nowhere else", and a green hole if it is
+# also asked to answer "stated here".
+SHAPE = re.compile(
+    r"\((?:\s*[A-Za-z_0-9]+\s*,)+\s*[A-Za-z_0-9]+\s*\)"
+    r"|\btriple\b"
+    r"|\b(?:two|three|four|five|six|seven|eight|nine|ten|\d+)[-\s]tuple\b")
+# The STRICT half — a component list whose members NAME the fields. Every
+# member must open with a letter or an underscore, which is the whole
+# difference: `(nums, rank, pre_ids)` declares, `(6, 4, 0)` illustrates.
+STATEMENT = re.compile(
+    r"\(\s*[A-Za-z_][A-Za-z_0-9]*\s*(?:,\s*[A-Za-z_][A-Za-z_0-9]*\s*)+\)")
+
+SITES = (("release_key.__doc__", vendor_drift.release_key.__doc__ or ""),
+         ("is_prerelease.__doc__", vendor_drift.is_prerelease.__doc__ or ""),
+         ("the comment run above PRERELEASE_RANK", "\n".join(run)))
+STATES_IT = SITES[0][0]
+for label, text in SITES:
+    if not text.strip():
+        print("ANTI-VACUITY: %s is empty, so this row would assert over two "
+              "sites while reporting on three" % (label,))
+        raise SystemExit(1)
+
+mentioning = [label for label, text in SITES if SHAPE.search(text)]
+stating = [label for label, text in SITES if STATEMENT.search(text)]
+
+if not set(stating) <= set(mentioning):
+    print("ANTI-VACUITY: %r states the shape without mentioning it, so "
+          "`STATEMENT` is no longer the strict half of `SHAPE`. The two arms "
+          "only compose while it is, and neither count means what this row "
+          "reports once they have drifted apart"
+          % (sorted(set(stating) - set(mentioning)),))
+    raise SystemExit(1)
+if not stating:
+    print("ANTI-VACUITY: no site NAMES the returned components — either the "
+          "module's only statement of the shape has been deleted, leaving the "
+          "other two sites deferring to nothing, or `STATEMENT` is broken. "
+          "From here those are indistinguishable and both are fatal; reading "
+          "either as 'restated nowhere' is the vacuous green this arm exists "
+          "to refuse")
+    raise SystemExit(1)
+
+problems = []
+if STATES_IT not in stating:
+    problems.append("the returned components are named at %r but NOT at %s, "
+                    "the one site every other defers to, so the module's "
+                    "authority on its own key states nothing"
+                    % (stating, STATES_IT))
+if len(mentioning) != 1:
+    problems.append("the returned-tuple shape is stated at %d of the three "
+                    "prose sites, want exactly 1 (%s), so a second copy is free "
+                    "to drift from the module: %r"
+                    % (len(mentioning), STATES_IT, mentioning))
+print("; ".join(problems) if problems else "D-REL17b-OK")
+PY
+)"
+DREL17B_RC=$?
+DREL17B_FAILS=''
+[ "$DREL17B_RC" -eq 0 ] \
+  || DREL17B_FAILS="the probe itself exited rc=$DREL17B_RC — a traceback, or an anti-vacuity refusal, is not a pass"
+case "$DREL17B_OUT" in
+  D-REL17b-OK) ;;
+  '') DREL17B_FAILS="${DREL17B_FAILS}${DREL17B_FAILS:+; }the probe printed nothing at all" ;;
+  *)  DREL17B_FAILS="${DREL17B_FAILS}${DREL17B_FAILS:+; }$DREL17B_OUT" ;;
+esac
+if [ -z "$DREL17B_FAILS" ]; then
+  ok "D-REL17b the returned tuple's components are named in release_key's docstring — a named list, not a worked example — and the shape is restated at neither of the other two sites"
+else
+  no "D-REL17b the returned-tuple shape is not stated once, in release_key's docstring, and nowhere else: $DREL17B_FAILS"
+fi
+
+echo
 echo "== D-REL18: the parse's bounds, and the key's shape =="
 
 # D-REL18 — two failure shapes that look like style points and are not.
@@ -3483,6 +3660,251 @@ if [ "$DREL15_RC" -eq 0 ] && [ -z "$DREL15_MSG" ]; then
   ok "D-REL15 every used upstream declares exactly one of last_reviewed_release / head_only, and the opt-out is JSON true"
 else
   no "D-REL15 the committed register's release standings are incomplete: ${DREL15_MSG:-probe exited $DREL15_RC with no output}"
+fi
+
+echo
+echo "== D-REL22: main()'s gh ledger, and its order =="
+
+# D-REL22 — criterion 11, read off the stub's own LEDGER rather than off main()'s
+# source. The order is load-bearing and invisible to anyone who has not noticed
+# WHY: `existing_fingerprint(issue)` compares against the body
+# `find_tracking_issue` fetched BEFORE `gh issue edit` overwrote it. Re-fetch
+# after the edit and the comparison becomes the new body against the new
+# fingerprint — equal every time, no comment ever again, and the "drift set
+# changed" notification is silently gone for good while every run still looks
+# green.
+#
+# That is exactly the wrong fix #604's fingerprint widening invites. Widening the
+# payload makes more runs post comments; a maintainer reads the extra traffic as
+# noise; "re-read the issue first" is the one-line change that quiets it and
+# breaks the feature. So this row pins the multiset AND the order: one
+# `gh issue list`, one `gh issue edit <n>`, one `gh issue comment <n>`, edit
+# before comment, and NO other `gh` verb at all — from outside, a post-edit
+# re-fetch is just a second READ, whether it is spelled `gh issue view` or a
+# second `gh issue list`, so the row refuses both by refusing everything else.
+#
+# ANTI-VACUITY: the stale-fingerprint arm is the only one that reaches the
+# comment at all — D9 already covers the equal-fingerprint arm that must NOT —
+# so the recorded fingerprint is DERIVED from the live one by rotating every hex
+# digit, which cannot collide with it by construction, and the comment body is
+# asserted to carry the NEW fingerprint. Without that last assertion a run that
+# never reached the comment would satisfy "no other verb" trivially.
+#
+# The fixture issue's number is the one value here that has to be typed — it
+# names nothing outside this row — so it is typed ONCE. Its marker is not:
+# `build_report` emits `MARKER` as the body's first line, so the stub's open
+# issue carries the module's own marker rather than a copy that goes stale the
+# day `MARKER` is versioned, which would send this run down the
+# `gh issue create` path and red the row for a reason it is not about.
+DREL22_NUM=903
+run_drift "$WORK/drel22-fp.log" ok "$MOVED_HEAD" "skills/writing-skills/SKILL.md" "[]" --dry-run
+DREL22_FP="$(fingerprint_of "$DRIFT_OUT")"
+DREL22_MARKER="$(awk 'NR==1{print; exit}' <<<"$DRIFT_OUT")"
+DREL22_STALE=''
+DREL22_FAILS=''
+case "$DREL22_MARKER" in
+  '<!--'*'-->') ;;
+  *) DREL22_FAILS="the rendered body's first line is not the HTML-comment marker find_tracking_issue matches on, so the fixture issue below could not be found: ${DREL22_MARKER:-<empty>}" ;;
+esac
+if [ -n "$DREL22_FAILS" ]; then
+  :
+elif [ -z "$DREL22_FP" ]; then
+  DREL22_FAILS="the report carries no drift-fingerprint line, so there is no fingerprint to make stale"
+else
+  DREL22_STALE="$(python3 - "$DREL22_FP" <<'PY'
+import sys
+
+HEX = "0123456789abcdef"
+fp = sys.argv[1]
+rotated = "".join(HEX[(HEX.index(c) + 1) % 16] for c in fp)
+# Derived, never typed. A hardcoded "stale" fingerprint is one payload change
+# away from being the live one, and this row would then quietly become D9.
+assert rotated != fp, "rotating every hex digit was a fixed point"
+print(rotated)
+PY
+)" || DREL22_FAILS="the stale-fingerprint derivation exited non-zero, so the recorded fingerprint cannot be shown to differ"
+fi
+if [ -z "$DREL22_FAILS" ]; then
+  DREL22_ISSUE='[{"number":'"$DREL22_NUM"',"body":"'"$DREL22_MARKER"'\ndrift-fingerprint: '"$DREL22_STALE"'"}]'
+  run_drift "$WORK/drel22.log" ok "$MOVED_HEAD" "skills/writing-skills/SKILL.md" "$DREL22_ISSUE"
+  [ "$DRIFT_RC" -eq 0 ] \
+    || DREL22_FAILS="${DREL22_FAILS}${DREL22_FAILS:+; }the run exited rc=$DRIFT_RC, so the ledger below is an abort's rather than main()'s: $DRIFT_OUT"
+  # `<verb as the diagnostic names it>|<ERE the ledger is counted with>`.
+  for DREL22_SPEC in "gh issue list|^gh issue list( |\$)" \
+                     "gh issue edit $DREL22_NUM|^gh issue edit $DREL22_NUM( |\$)" \
+                     "gh issue comment $DREL22_NUM|^gh issue comment $DREL22_NUM( |\$)"; do
+    DREL22_VERB="${DREL22_SPEC%%|*}"
+    DREL22_PAT="${DREL22_SPEC#*|}"
+    DREL22_N="$(grep -cE "$DREL22_PAT" "$WORK/drel22.log" || true)"
+    [ "${DREL22_N:-0}" -eq 1 ] \
+      || DREL22_FAILS="${DREL22_FAILS}${DREL22_FAILS:+; }\`$DREL22_VERB\` ran ${DREL22_N:-0} time(s), want exactly 1"
+  done
+  # Line numbers, not a second pass over the counts: "one of each" says nothing
+  # about which ran first, and the wrong order is the whole failure mode.
+  DREL22_EDIT_LN="$(awk -v n="$DREL22_NUM" '$0 ~ "^gh issue edit " n "( |$)" {print NR; exit}' "$WORK/drel22.log")"
+  DREL22_COMMENT_LN="$(awk -v n="$DREL22_NUM" '$0 ~ "^gh issue comment " n "( |$)" {print NR; exit}' "$WORK/drel22.log")"
+  if [ -n "$DREL22_EDIT_LN" ] && [ -n "$DREL22_COMMENT_LN" ]; then
+    [ "$DREL22_EDIT_LN" -lt "$DREL22_COMMENT_LN" ] \
+      || DREL22_FAILS="${DREL22_FAILS}${DREL22_FAILS:+; }the comment (ledger line $DREL22_COMMENT_LN) precedes the edit (line $DREL22_EDIT_LN)"
+  else
+    DREL22_FAILS="${DREL22_FAILS}${DREL22_FAILS:+; }the ledger carries no edit/comment pair to order (edit=${DREL22_EDIT_LN:-none} comment=${DREL22_COMMENT_LN:-none})"
+  fi
+  DREL22_OTHER="$(awk -v n="$DREL22_NUM" '/^gh / && !/^gh issue list( |$)/ && $0 !~ "^gh issue edit " n "( |$)" && $0 !~ "^gh issue comment " n "( |$)"' "$WORK/drel22.log")"
+  [ -z "$DREL22_OTHER" ] \
+    || DREL22_FAILS="${DREL22_FAILS}${DREL22_FAILS:+; }the run made a gh call outside the three-verb ledger, which is what a post-edit re-fetch looks like from here: $DREL22_OTHER"
+  grep -qF -e "New fingerprint \`$DREL22_FP\`" "$WORK/drel22.log" \
+    || DREL22_FAILS="${DREL22_FAILS}${DREL22_FAILS:+; }the comment body does not carry the new fingerprint \`$DREL22_FP\`, so this run did not take the changed-fingerprint arm and asserts nothing about it"
+fi
+if [ -z "$DREL22_FAILS" ]; then
+  ok "D-REL22 a stale fingerprint yields exactly one gh issue list, then edit, then comment, and no second read"
+else
+  no "D-REL22 main()'s gh ledger is not the one criterion 11 pins: $DREL22_FAILS"
+fi
+
+echo
+echo "== D-REL24: the head-only sentence names the key it is read from =="
+
+# D-REL24 — criterion 15, defect 3's prose half. The old sentence — "no recorded
+# release; HEAD-only upstream, as the register declares" — was derived from an
+# ABSENT key. It read identically whether the maintainer had deliberately opted
+# the upstream out or had deleted its review point by accident, and it
+# affirmatively attributed the tool's own silence to a declaration nobody had
+# made. Naming `head_only` is what makes the sentence earned.
+#
+# Two arms, because either alone is satisfied by the defect. Arm (a) alone
+# passes on a sentence naming BOTH ("as `head_only` in the register declares, as
+# the register declares"); arm (b) alone passes on a function that renders no
+# head-only sentence at all.
+#
+# Arm (b) is scoped to what `release_summary` can RENDER — its `str` constants,
+# via `ast` — and deliberately NOT to its source text, which still quotes the old
+# wording in a comment recording why it changed. A source-text predicate would
+# be satisfiable by deleting that comment, i.e. by destroying the record of the
+# fix to make the test green: defect 4's exact shape, one level up from where it
+# was fixed.
+#
+# ANTI-VACUITY, four ways, each a `SystemExit` rather than a quiet non-match:
+# unless the committed register really declares a used `head_only` upstream
+# (else arm (a) iterates over nothing), unless the rendered body carries the
+# review-points section at all, unless `release_summary` resolves to exactly one
+# definition holding at least one string constant, and — the one that ties the
+# arms together — unless every sentence arm (a) read out of the body IS one of
+# the constants arm (b) searches. Without that last gate an `ast` walk that
+# landed on some other function would be searching a haystack with no relation
+# to the line the maintainer is actually shown.
+#
+# That last gate demands EQUALITY between a rendered sentence and a literal, so
+# its bound is known and deliberate: build the sentence with `%`-formatting or
+# an f-string instead of adjacent literals and no constant equals it any more,
+# and the gate refuses a module that still satisfies criterion 15. That is the
+# safe direction — the row reds loudly and is re-tied to the new spelling —
+# whereas relaxing it to a substring test would let arm (b) search a haystack
+# only coincidentally related to the rendered line, which is the failure the
+# gate exists to prevent.
+run_drift "$WORK/drel24.log" ok "$WATERMARK" "" "[]" --dry-run
+# Stashed immediately: `DRIFT_RC` is a shared global, and a later
+# `run_drift` anywhere below would answer for this one.
+DREL24_RUN_RC="$DRIFT_RC"
+DREL24_BODY="$WORK/drel24.body"
+printf '%s\n' "$DRIFT_OUT" > "$DREL24_BODY"
+DREL24_OUT="$(python3 - "$DRIFT" "$REGISTER" "$DREL24_BODY" <<'PY'
+import ast
+import json
+import re
+import sys
+
+drift, register, bodyfile = sys.argv[1], sys.argv[2], sys.argv[3]
+
+with open(register, encoding="utf-8") as fh:
+    registered = json.load(fh)
+upstreams = registered.get("upstreams", {})
+used = sorted({c["upstream"] for c in registered.get("components", [])
+               if c.get("origin") == "third-party"})
+# Derived from the committed register, never typed: a hardcoded upstream id is
+# a claim about the register that stops being true the week it is re-declared.
+head_only = [uid for uid in used
+             if upstreams.get(uid, {}).get("head_only") is True]
+if not head_only:
+    print("ANTI-VACUITY: the committed register declares no used head_only "
+          "upstream, so arm (a) would iterate over nothing")
+    raise SystemExit(1)
+
+with open(bodyfile, encoding="utf-8") as fh:
+    body = fh.read()
+HEADING = "Recorded release review points:"
+if HEADING not in body:
+    print("ANTI-VACUITY: the rendered body carries no %r section, so arm (a) "
+          "has nothing to read a sentence out of" % (HEADING,))
+    raise SystemExit(1)
+
+problems = []
+sentences = []
+for uid in head_only:
+    # The rendered line is ``- `<id>` (`<slug>`): <summary>``, and <summary> is
+    # `release_summary`'s own return value verbatim.
+    hit = re.search(r"^- `%s` \(`[^`]*`\): (.+)$" % re.escape(uid),
+                    body, re.MULTILINE)
+    if hit is None:
+        problems.append("(a) the body renders no review-point line for the "
+                        "head_only upstream %r, so its standing is a silence "
+                        "rather than a statement" % (uid,))
+        continue
+    sentence = hit.group(1)
+    sentences.append(sentence)
+    if "head_only" not in sentence:
+        problems.append("(a) %r's review-point line does not name the "
+                        "`head_only` key its standing is read from: %r"
+                        % (uid, sentence))
+
+with open(drift, encoding="utf-8") as fh:
+    tree = ast.parse(fh.read())
+fns = [n for n in ast.walk(tree)
+       if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+       and n.name == "release_summary"]
+if len(fns) != 1:
+    print("ANTI-VACUITY: %d definition(s) of `release_summary`, want exactly 1 "
+          "— arm (b) cannot say which one renders" % (len(fns),))
+    raise SystemExit(1)
+constants = [n.value for n in ast.walk(fns[0])
+             if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+if not constants:
+    print("ANTI-VACUITY: `release_summary` holds no string constant, so arm "
+          "(b)'s haystack is empty and its absence assertion proves nothing")
+    raise SystemExit(1)
+for sentence in sentences:
+    if sentence not in constants:
+        print("ANTI-VACUITY: the rendered head-only sentence %r is not a string "
+              "constant of `release_summary`, so arm (b) is searching a "
+              "different function than the one arm (a) read" % (sentence,))
+        raise SystemExit(1)
+
+OLD = "as the register declares"
+for const in constants:
+    if OLD in const:
+        problems.append("(b) `release_summary` can still render %r — a standing "
+                        "derived from an absent key — in %r" % (OLD, const))
+print("; ".join(problems) if problems else "D-REL24-OK")
+PY
+)"
+DREL24_RC=$?
+DREL24_FAILS=''
+# The run's own rc first, and it is not redundant with the probe's: a
+# non-zero run still writes a body, just an abort's, and the probe would
+# then refuse it for carrying no review-points section — naming a symptom
+# of the failure rather than the failure.
+[ "$DREL24_RUN_RC" -eq 0 ] \
+  || DREL24_FAILS="the run exited rc=$DREL24_RUN_RC, so the body below is an abort's rather than a rendered report's"
+[ "$DREL24_RC" -eq 0 ] \
+  || DREL24_FAILS="${DREL24_FAILS}${DREL24_FAILS:+; }the probe itself exited rc=$DREL24_RC — a traceback, or an anti-vacuity refusal, is not a pass"
+case "$DREL24_OUT" in
+  D-REL24-OK) ;;
+  '') DREL24_FAILS="${DREL24_FAILS}${DREL24_FAILS:+; }the probe printed nothing at all" ;;
+  *)  DREL24_FAILS="${DREL24_FAILS}${DREL24_FAILS:+; }$DREL24_OUT" ;;
+esac
+if [ -z "$DREL24_FAILS" ]; then
+  ok "D-REL24 the head-only standing cites head_only, and release_summary can no longer render the absent-key wording"
+else
+  no "D-REL24 the head-only standing is still derived from an absent key: $DREL24_FAILS"
 fi
 
 echo
