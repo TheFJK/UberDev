@@ -200,6 +200,51 @@ assert policy['roles']['spec-compliance-reviewer']=={
  'route':'deep','risk_floor':'deep','sandbox_ceiling':'read-only',
  'delegation_mode':'leaf','risk_judgment':True
 }
+
+# --- absorbed from tests/child-contract-v2.test.sh (was its lines 15-116) -----
+#
+# That file carried a SECOND schema oracle over the same manifest, and both
+# oracles justified their own removal by naming the other as the surviving copy.
+# They were not duplicates. The five rules below existed ONLY there, so this
+# block is what makes dropping the other one safe. This file is now the single
+# oracle for policy/solve-run-tree-v1.json.
+providers={k:v for k,v in edges.items() if v['kind']=='provider'}
+assert providers
+
+# 1. allowed_workflows is a CLOSED vocabulary. The loop at the top of this file
+#    checks the list is sorted and duplicate-free but not what may be in it, so
+#    a typo'd or invented workflow name passed unnoticed.
+for edge_id,row in providers.items():
+    assert set(row['allowed_workflows']) <= {'solve','turbo','review-pr','simplify'}, edge_id
+
+# 2. The retired pre-v2 spellings must never come back. `inputs` / `input_types`
+#    were replaced by required_inputs / optional_inputs; a row carrying the old
+#    keys is silently ignored by the reader rather than rejected.
+for edge_id,row in providers.items():
+    assert 'inputs' not in row and 'input_types' not in row, edge_id
+
+# 3. format-retry is UNIVERSAL, not per-edge. This file pinned the two keys on
+#    the verify edge alone; the rule is that ANY provider edge declaring
+#    retry.format must also declare both inputs, or the retry cannot be driven.
+for edge_id,row in providers.items():
+    if row.get('retry',{}).get('format'):
+        assert row['optional_inputs']['format_retry']=='boolean', edge_id
+        assert row['optional_inputs']['format_example_path']=='path', edge_id
+
+# 4. The review lens count, DERIVED. The review_edges set earlier in this file is
+#    a hardcoded six and predates the convention lens (#431); deriving the set by
+#    prefix and asserting seven is what catches a lens being added or dropped.
+derived_review_edges={e for e in providers if e.startswith('review_pr.review.')}
+assert len(derived_review_edges)==7, sorted(derived_review_edges)
+
+# 5. The simplify lenses take focus as OPTIONAL and have no additional_focus.
+#    The lens scalar is controller-supplied; making focus required would break
+#    the unfocused invocation, and additional_focus was never implemented.
+for edge_id in ('review_pr.simplify.reuse','review_pr.simplify.quality','review_pr.simplify.efficiency'):
+    row=providers[edge_id]
+    assert 'focus' not in row['required_inputs'], edge_id
+    assert row['optional_inputs'].get('focus')=='optional_string', edge_id
+    assert 'additional_focus' not in row['optional_inputs'], edge_id
 PY
 
 # The four Codex-mirror assertions here (policy byte-equality, launcher
