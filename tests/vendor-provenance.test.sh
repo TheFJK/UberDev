@@ -2594,6 +2594,66 @@ PY
   fi
 fi
 
+# V47 — the HEAD-only decision is reconciled against RFC 0019 (the V31 idiom,
+# mirrored onto the other half of the biconditional).
+#
+# THE CLASS: V31 reconciles the upstreams that carry a `last_reviewed_release`.
+# Every other used upstream now declares `head_only: true` instead (#604 defect
+# 3 — the decision used to live in the ABSENCE of a key, where a deletion and a
+# policy choice look identical). Nothing made the RFC name those upstreams, so
+# an upstream could be flipped to HEAD-only in the register with no adjudication
+# behind it at all: a review point that exists only as a JSON key.
+#
+# SCOPING TO THE AMENDMENT SLICE IS LOAD-BEARING. Both ids already appear
+# elsewhere in this document — §4.3's stance table names them — so an unscoped
+# "is the id in the RFC" check passes today, before the amendment exists, and
+# would keep passing if it were deleted.
+if python3 - "$REGISTER" "$VENDOR_RFC_DOC" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+rfc = open(sys.argv[2], encoding="utf-8").read()
+# `is True`, not truthiness: `head_only: "yes"` and `head_only: 1` are register
+# defects `validate_release_metadata` (tools/vendor/vendor-drift.py) exits 2 for
+# — NOT vendor-check.py, which reads neither release key — and this row must not
+# launder them into a pass.
+head_only = sorted(u for u, m in d["upstreams"].items() if m.get("head_only") is True)
+# Anti-vacuity: zero HEAD-only upstreams is a failure, not a pass. Without this
+# arm, stripping the key from the register would make the loop below iterate
+# over nothing and report success.
+assert head_only, "no upstream declares `head_only: true` — nothing to reconcile"
+HEADING = "## Amendment (2026-08-18, #604)"
+start = rfc.find(HEADING)
+assert start != -1, "RFC 0019 carries no %r heading" % HEADING
+rest = rfc[start + len(HEADING):]
+end = rest.find("\n## ")
+amendment = rest if end == -1 else rest[:end]
+# Anti-vacuity: an EMPTY slice makes every membership test below meaningless in
+# the one direction they cannot report — the loop would red, but on the wrong
+# claim. It goes empty if the heading ever ends the file, or if the `\n## ` cut
+# fires on the block's first byte.
+#
+# There is deliberately no upper bound here. `amendment` is carved out of `rfc`
+# at a non-zero offset, so ANY `len(amendment) < len(rfc)` guard holds by
+# construction: it would read as a runaway-cut check while being incapable of
+# failing. Nor is one needed. The cut is derived from the document — the next
+# `## ` heading, whatever it turns out to be — not from a hardcoded end, so the
+# slice cannot swallow a later block: it runs to EOF exactly when there is no
+# later block to swallow, which is the case today because #604 is the last
+# amendment in the file. Append one and the cut tightens on its own.
+assert len(amendment) > 0, (
+    "the #604 amendment slice is empty (0 of %d bytes)" % len(rfc))
+assert "head_only" in amendment, (
+    "the #604 amendment never names the `head_only` register key its own "
+    "subject is recorded as")
+for u in head_only:
+    assert u in amendment, (
+        "the #604 amendment never names %s, which the register declares "
+        "`head_only: true`" % u)
+PY
+then ok "V47 every head_only upstream is adjudicated inside RFC 0019's #604 amendment"
+else no "V47 a head_only upstream is not reconciled against RFC 0019"
+fi
+
 echo
 echo "== Summary =="
 echo "  passed: $PASS"

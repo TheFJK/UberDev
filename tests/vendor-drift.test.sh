@@ -313,6 +313,12 @@ def step_up(nums):
 
 
 rows = []
+# The older labels this loop generates, kept per upstream so the rows below can
+# name one WITHOUT re-deriving it. D-REL20 and D-REL21 both need "a published
+# tag that is old and is not the newest"; a second `step_down` call in their own
+# builders would be a second answer to the same question, and the day this
+# derivation changes the two would disagree silently.
+older_by_upstream = {}
 for upstream_id in labelled:
     meta = ups[upstream_id]
     slug, label = meta["repo"], meta["last_reviewed_release"]
@@ -324,12 +330,15 @@ for upstream_id in labelled:
                  "refs/tags/%s" % label))
     rows.append((slug, commit, "refs/tags/%s^{}" % label))
     lower = nums
+    olders = []
     for _ in range(2):
         lower = step_down(lower)
         if lower is None:
             raise SystemExit("recorded release %r has no room below it" % label)
         older = renumber(label, lower)
+        olders.append(older)
         rows.append((slug, synthetic(slug, older), "refs/tags/%s" % older))
+    older_by_upstream[upstream_id] = olders
     # ...and one tag that names no version at all, on the HAPPY path. Without it
     # every tag in this suite parses to a version, `release_key` never returns
     # None, and the filter that keeps such a tag out of `max()` filters nothing —
@@ -389,6 +398,9 @@ env = {
     "LEAD_LABEL": lead_label,
     "LEAD_PEEL12": lead_meta["last_reviewed_commit"][:12],
     "LEAD_TAG_COUNT": str(lead_tag_count),
+    # An OLD, non-newest published label on the lead slug — the one D-REL20's
+    # row `a` deletes in process and D-REL21 deletes from the table itself.
+    "OLDER_LABEL": older_by_upstream[lead][0],
     "SLUG_COUNT": str(len(all_slugs)),
     "UNVERSIONED_LABEL": UNVERSIONED,
     "TAGFREE_TAG_COUNT": str(tagfree_tag_count),
@@ -1039,7 +1051,7 @@ echo "== D-REL5: a broken release review point is a malformed register, not an o
 # as D13's missing component field and must land on the same verdict: rc 2, the
 # offending upstream id and field named, before the first subprocess.
 #
-# Three of the six sub-cases are not hypothetical. A label that is not a string,
+# Three of the eleven sub-cases are not hypothetical. A label that is not a string,
 # or one that names no version, would pass any presence-only check, survive the
 # whole tag resolution, and only THEN reach the ordering comparison — where
 # `release_key` has returned None and `None` is not orderable against another
@@ -1056,6 +1068,19 @@ echo "== D-REL5: a broken release review point is a malformed register, not an o
 # found — so a `field`-only assertion passes while the WRONG clause fires, and
 # the sub-cases stop distinguishing anything. Same reason the id is pinned as
 # `upstream <id>`: the bare id is a substring of the slug that carries it.
+#
+# The last five sub-cases are the OTHER half of the same register contract
+# (#604 defect 3). Until it existed, "no release vocabulary" was inferred from
+# an ABSENT key, so deleting `last_reviewed_release` from a used upstream did
+# not break anything visible: the verdict degraded to the non-actionable
+# `head-only`, the report attributed its own silence to a declaration nobody had
+# made, and every other check in the repo stayed green because none of them
+# reads the field. `head_only` makes the decision a positive declaration and the
+# check a biconditional, and these arms are what keep both halves honest —
+# deleting a label reds (`droplabel`), deleting the opt-out reds
+# (`strip_headonly`), declaring both reds (`bothdeclared`), and an opt-out that
+# is merely truthy rather than JSON `true` reds twice over, once for a string
+# and once for the `1` a hand-edit leaves behind.
 #
 # Every sub-case runs in BOTH modes. The guard sits on the same side of the
 # `--verify-bases` return as the component-key loop precisely so the two modes
@@ -1092,7 +1117,12 @@ for spec in "empty|last_reviewed_release|names a version this tool can order|a p
             "unversioned|last_reviewed_release|names a version this tool can order|a label that names no version" \
             "buildmeta|last_reviewed_release|names a version this tool can order|a label whose only digits are build metadata" \
             "halfpoint|last_reviewed_commit|no 40-hex last_reviewed_commit|a label with no commit beside it" \
-            "shortsha|last_reviewed_commit|no 40-hex last_reviewed_commit|a label beside a short sha"; do
+            "shortsha|last_reviewed_commit|no 40-hex last_reviewed_commit|a label beside a short sha" \
+            "droplabel|head_only|declares neither last_reviewed_release nor head_only|a review point deleted from a used upstream" \
+            "bothdeclared|head_only|declares both last_reviewed_release|a review point and the HEAD-only opt-out on one upstream" \
+            "headonly_string|head_only|must be exactly JSON true|the HEAD-only opt-out spelled as a string" \
+            "headonly_number|head_only|must be exactly JSON true|the HEAD-only opt-out spelled as JSON 1" \
+            "strip_headonly|head_only|declares neither last_reviewed_release nor head_only|the HEAD-only opt-out removed from a label-free upstream"; do
   IFS='|' read -r mutation field clause desc <<<"$spec"
   # The mutated upstream id is DERIVED and echoed back, so the assertion below
   # pins the id the tool names against the id the fixture actually broke — a
@@ -1116,15 +1146,24 @@ ups = d.get("upstreams", {})
 used = sorted({c["upstream"] for c in d.get("components", [])
                if c.get("origin") == "third-party"})
 labelled = [u for u in used if ups.get(u, {}).get("last_reviewed_release")]
+unlabelled = [u for u in used if not ups.get(u, {}).get("last_reviewed_release")]
 # Anti-vacuity. Mutating an upstream no component uses would exercise nothing —
 # validation walks the USED set — and a register recording no release label at
 # all has nothing here to break.
 if not labelled:
     raise SystemExit("no USED upstream declares last_reviewed_release — every "
                      "sub-case would mutate a field the tool never reads")
-target = labelled[0]
+if not unlabelled:
+    raise SystemExit("every USED upstream declares last_reviewed_release — the "
+                     "HEAD-only arms below would have no opt-out to corrupt")
+# Which side of the register each mutation breaks. The label arms need an
+# upstream that HAS a review point; the opt-out arms need one that deliberately
+# does not. Both are DERIVED, and `main()` dies at the first offender in
+# `sorted(used)` order, which is why the id is printed rather than assumed.
+LABEL_FREE_MUTATIONS = ("headonly_string", "headonly_number", "strip_headonly")
+target = (unlabelled if mutation in LABEL_FREE_MUTATIONS else labelled)[0]
 meta = ups[target]
-label = meta["last_reviewed_release"]
+label = meta.get("last_reviewed_release")
 
 if mutation == "empty":
     meta["last_reviewed_release"] = ""
@@ -1190,6 +1229,59 @@ elif mutation == "shortsha":
         raise SystemExit("a truncated commit must still be a non-empty string, "
                          "else the type half of the clause answers this "
                          "sub-case and the 40-hex half stays untested")
+elif mutation == "droplabel":
+    # The defect-3 shape, exactly: one line deleted from the register. The
+    # commit is deliberately LEFT in place, so the upstream still looks
+    # half-reviewed — before the biconditional this degraded to a silent
+    # non-actionable `head-only` and disabled the whole release control for
+    # this upstream with nothing anywhere reporting it.
+    if meta.pop("last_reviewed_release", None) is None:
+        raise SystemExit("the labelled upstream carries no last_reviewed_release "
+                         "to delete — this sub-case would assert nothing")
+    if "last_reviewed_commit" not in meta:
+        raise SystemExit("the labelled upstream carries no last_reviewed_commit "
+                         "to leave behind, so this sub-case could not tell a "
+                         "DELETED review point from half a review point")
+elif mutation == "bothdeclared":
+    # The contradiction. A HEAD-only upstream is one with no release vocabulary
+    # to record, so a label beside the opt-out is two register entries claiming
+    # opposite things; picking either silently is how a real review point gets
+    # ignored.
+    if "last_reviewed_release" not in meta:
+        raise SystemExit("the labelled upstream carries no last_reviewed_release "
+                         "for the opt-out to contradict")
+    if "head_only" in meta:
+        raise SystemExit("the labelled upstream ALREADY declares head_only, so "
+                         "this sub-case would add nothing and the contradiction "
+                         "clause would be reached by the committed register")
+    meta["head_only"] = True
+elif mutation in ("headonly_string", "headonly_number"):
+    # Truthy is not the same as declared. `is True` is what rejects these; an
+    # `if meta.get("head_only")` test accepts both and lets a typo stand in for
+    # a decision. JSON `1` is the one a hand-edit actually leaves behind, and it
+    # is the value a `==`-based check cannot tell from `true`.
+    if meta.get("head_only") is not True:
+        raise SystemExit("the label-free upstream %r carries no `head_only: "
+                         "true` to corrupt — the register half of #604 is "
+                         "missing, so this sub-case would assert nothing"
+                         % target)
+    meta["head_only"] = "yes" if mutation == "headonly_string" else 1
+    if meta["head_only"] is True:
+        raise SystemExit("the corrupted opt-out is still JSON true, so this "
+                         "sub-case models no corruption at all")
+elif mutation == "strip_headonly":
+    # The mirror of `droplabel`, and the arm that makes the register edit
+    # itself load-bearing: removing the positive declaration from an upstream
+    # that has no label leaves it declaring nothing, which is the state the
+    # biconditional exists to refuse.
+    if meta.pop("head_only", None) is None:
+        raise SystemExit("the label-free upstream %r carries no head_only to "
+                         "strip — either the register edit missed it or this "
+                         "sub-case is mutating the wrong upstream" % target)
+    if "last_reviewed_release" in meta:
+        raise SystemExit("the upstream this sub-case stripped also carries a "
+                         "label, so it would land on the contradiction clause "
+                         "rather than the 'declares neither' one")
 else:
     raise SystemExit("unknown mutation %r" % mutation)
 
@@ -1405,11 +1497,18 @@ moved_sha = hashlib.sha1(
 moved_sha2 = hashlib.sha1(
     ("moved-again|%s|%s" % (lead_slug, lead_label)).encode("utf-8"),
     usedforsecurity=False).hexdigest()
-if len({moved_sha, moved_sha2, recorded_commit}) != 3:
+if len({moved_sha[:12], moved_sha2[:12], recorded_commit[:12]}) != 3:
     raise SystemExit("the derived 'published elsewhere' commits collide with "
-                     "each other or with the recorded one — D-REL9 would "
-                     "assert no disagreement and D-REL12's re-tag comparison "
-                     "would compare a table with itself")
+                     "each other or with the recorded one IN THE FIRST 12 HEX "
+                     "— the report renders `published_commit[:12]` "
+                     "(vendor-drift.py's `moved` finding), so full-40 "
+                     "distinctness is not enough: D-REL9 would assert no "
+                     "disagreement because both of the commits it names would "
+                     "render as one token, and D-REL12's re-tag pair would "
+                     "render one `upstream publishes ... at ...` line for "
+                     "both runs — the only datum that moves between them — "
+                     "so its re-tag comparison would be comparing a body "
+                     "with itself")
 
 
 def retagged(peel_sha):
@@ -1782,6 +1881,15 @@ for uid in labelfree:
     naming = [ln for ln in lines if "`%s`" % uid in ln]
     if not any("HEAD-only" in ln for ln in naming):
         problems.append("%s is not described as a HEAD-only upstream" % uid)
+    # ...and the sentence must be EARNED. "HEAD-only, as the register declares"
+    # was derived from an ABSENT key: the report affirmed a decision nobody had
+    # made, and would go on affirming it after the review point was deleted by
+    # accident (#604 defect 3). Naming `head_only` binds the sentence to the key
+    # that actually declares it — a substring distinct from the rendered
+    # `HEAD-only`, so this cannot be satisfied by the older wording.
+    if not any("HEAD-only" in ln and "head_only" in ln for ln in naming):
+        problems.append("%s is described as HEAD-only without naming the "
+                        "`head_only` register key that declares it" % uid)
     for ln in naming:
         if recorded in ln:
             problems.append("%s carries another upstream's recorded release "
@@ -1960,12 +2068,25 @@ else
 fi
 
 # D-REL12 — the fingerprint is what decides whether an ALREADY-OPEN issue gets
-# a comment. Without release state in the payload, a freshly cut release with an
-# unchanged file set fingerprints identically to last week: the body is
+# a comment. Without the published tag set in the payload, a freshly cut release
+# with an unchanged file set fingerprints identically to last week: the body is
 # refreshed, the comparison matches, no comment is posted, and the news lands
 # where nobody is looking. Three runs, identical in every input except the
-# published tag set, so the only thing that can move the fingerprint is the
-# release state itself.
+# published tag set, so the tag set is the only thing that can move the
+# fingerprint at all.
+#
+# WHAT THIS ROW PINS — re-derived after #604 widened the payload, because its
+# old rationale was narrower than its assertions. It used to read "release STATE
+# reaches the fingerprint", and that was the honest reading while `releases` was
+# the only place a tag set could leave a mark: a newly published tag was visible
+# to the digest ONLY if it moved a verdict. The payload now carries a per-slug
+# `tags` observation in its own right, so publishing the newer label moves the
+# digest through two carriers at once — that observation, and the `newer`
+# verdict it produces — and this row isolates neither. What it still pins is the
+# property both carriers serve, which is the one that matters to a subscriber: a
+# published tag set that changes reaches the fingerprint, and one that does not
+# leaves it alone. Separating the carriers is D-REL20 row `a`'s job — it deletes
+# a tag that moves no verdict at all, which under the old payload was invisible.
 #
 # These runs carry component drift as well, which the two-section ORDER is
 # asserted on: this is the only scenario in the suite where both sections
@@ -2002,10 +2123,15 @@ TAGS_TABLE="$TAGS_MOVED_NEWER2"
 run_drift "$WORK/drel12-retag2.log" ok "$WATERMARK" "" "[]" --dry-run
 FP_RETAG2="$(fingerprint_of "$DRIFT_OUT")"
 TAGS_TABLE=""
-# Both anti-vacuity arms: the verdict has to be `moved` (not `newer`), and the
-# newest published release has to be a name OTHER than the re-tagged review
-# point — otherwise `newest_commit` alone would move the fingerprint and the
-# comparison would pin nothing.
+# Both anti-vacuity arms, and #604's widening retired neither. The verdict has
+# to be `moved` (not `newer`), and the newest published release has to be a name
+# OTHER than the re-tagged review point — otherwise `newest_commit` alone would
+# move the fingerprint and the comparison would pin nothing. The `tags`
+# observation the payload now carries does not cover this pair either: it holds
+# a count, the newest NAME, and that one name's commit, and a review point
+# re-tagged BELOW the newest release moves none of the three. So the verdict's
+# `published_commit` is still the only carrier here — which is exactly what
+# these two arms exist to guarantee, and why they survive the widening intact.
 grep -qF -e 'published at a different commit' <<<"$DREL12_RETAG_BODY" \
   || DREL12_FAILS="${DREL12_FAILS}${DREL12_FAILS:+; }the re-tag runs do not report a moved review point"
 grep -qF -e "newest \`$NEWER_LABEL\`" <<<"$DREL12_RETAG_BODY" \
@@ -2026,6 +2152,2602 @@ if [ -z "$DREL12_FAILS" ]; then
   ok "D-REL12 release state moves the fingerprint, is stable across identical runs, and is reported first"
 else
   no "D-REL12 the fingerprint does not cover release state: $DREL12_FAILS"
+fi
+
+echo
+echo "== D-REL13: the prose that explains the pre-release rule =="
+
+# D-REL13 — the release rule is explained in three prose sites (`release_key`'s
+# docstring, `is_prerelease`'s docstring, and the `#` comment run above
+# `PRERELEASE_RANK`), and every one of them was making a claim the module does
+# not implement. Prose that contradicts the code is worse than no prose: the
+# next reader "simplifies" the function to match the comment, and the inversion
+# this whole block exists to prevent comes back. So each claim is turned into a
+# predicate and executed here.
+#
+# Six arms, each scoped to the claim ITS site makes — deliberately not one
+# blanket rule, because the two docstrings cite different KINDS of example and
+# one predicate cannot be right for both. `is_prerelease.__doc__` cites
+# OVER-REPORT examples (names where a `-` substring test and `is_prerelease`
+# disagree); the `PRERELEASE_RANK` comment cites a RANKING pair (`v6.4.0-rc1`
+# under `v6.4.0`) where the two AGREE. Applying arm (a)'s predicate to the
+# comment's pair would red on `v6.4.0-rc1` — a correct claim failing a
+# mis-scoped test.
+#
+# Arms (c) and (d) exist because the third site is a COMMENT, and `ast` cannot
+# see comments: a docstring-only predicate would leave it exactly as unguarded
+# as it was. They read the `tokenize.COMMENT` stream instead.
+#
+#   (a) *pre-fix RED* — the docstring cited `v6.4.0+build`, which carries no
+#       `-` at all, so it is not an example of the two answers disagreeing.
+#   (b) *pre-fix RED* — the docstring cited a `0 if sep else 1` field that no
+#       function body contains.
+#   (c) DECLARED REGRESSION GUARD — green on both trees. Falsified by editing
+#       the comment's example pair to two names that do not rank that way.
+#   (d) DECLARED REGRESSION GUARD — green on both trees. Falsified by replacing
+#       `is_prerelease`'s body with `return "-" in name`: the witness arm
+#       empties and the row reds.
+#   (e) DECLARED REGRESSION GUARD — green on both trees. Falsified two ways,
+#       and the second is the one that matters: pinning `allow_pre = False` in
+#       `release_candidates` reds the allow_pre-ON direction, and DELETING the
+#       substring test itself (`substring_mod.is_prerelease =
+#       vendor_drift.is_prerelease`) reds BOTH directions — which is the
+#       property that says this arm is about the substring test rather than
+#       about whatever the correct rule happens to do.
+#   (f) DECLARED REGRESSION GUARD — green on both trees. Falsified by pointing
+#       `release_candidates.__doc__`'s "no version at all" list at a label that
+#       DOES key (`nightly` -> `v6.4.0`): the arm reds naming it. The
+#       code-side mutations (dropping `release_key`'s `if not nums: return
+#       None`, or its `name.split("+", 1)[0]`) were tried first and are NOT
+#       usable as the declared mutation: both kill the `buildmeta`
+#       release-register fixture builder, which surfaces as the suite-wide
+#       `ABORT … exit 99` long before this row runs and so cannot be read as
+#       "this arm reds". The `+` half was falsified out-of-suite instead —
+#       against `core = name` it names `stable+2026`, clean on HEAD.
+#
+# Arms (a)-(d) execute what the prose says the RULE is; (e) executes what it
+# says the CONSEQUENCE of getting it wrong is, (f) the DOMAIN the rule is
+# stated over, and (g) the prose's citations of this row itself. An unexecuted
+# consequence is how this row's own drafts shipped two false sentences in a
+# row: first that an invented pre-release is "silently dropped" (true only
+# while the recorded review point carries no hyphen), then that the invented
+# name is the one KEPT and winning `max()` — which is what the CORRECT rule
+# does with it, since an invented pre-release is a final release. Both were
+# written as prose and believed; (e) is where such a sentence now has to
+# survive being run against the real rule's answer.
+#
+# The (b) rule is NARROW on purpose — a backticked token carrying both ` if `
+# and ` else `, i.e. a quoted conditional EXPRESSION. The obvious wider rule
+# ("any backticked token with whitespace and a Python keyword") was executed
+# against this tree and reds a CORRECT one: it also collects `recorded in
+# candidates` and `recorded in published` from `release_verdict.__doc__`, which
+# are English statements about a relation, not quotations of source, and appear
+# in no body. Narrower and true beats wider and false.
+#
+# The stripper the (b) rule compares against deletes docstring LINE SPANS and
+# comment TAIL SPANS. It deliberately does NOT round-trip the source through
+# `tokenize.untokenize()` and then `str.replace(docstring, "")`: the round-trip
+# reformats the source, the replace silently misses, the docstring survives, and
+# the arm answers "the citation is present" on a tree where it is absent — a
+# vacuous green inside the row whose whole job is to catch vacuous prose.
+# Arm (g) reads this file, so it needs this file's own path — resolved here,
+# absolutely, rather than left as whatever `$0` was spelled as on the command
+# line, so the arm cannot be turned vacuous by the invocation.
+DREL13_SELF="$(cd "$(dirname "$0")" && pwd)/${0##*/}"
+DREL13_OUT="$(python3 - "$DRIFT" "$REGISTER" "$DREL13_SELF" <<'PY'
+import ast
+import importlib.util
+import json
+import re
+import sys
+import tokenize
+
+drift, register, testfile = sys.argv[1], sys.argv[2], sys.argv[3]
+
+modspec = importlib.util.spec_from_file_location("vendor_drift", drift)
+vendor_drift = importlib.util.module_from_spec(modspec)
+modspec.loader.exec_module(vendor_drift)
+
+with open(drift, encoding="utf-8") as fh:
+    source = fh.read()
+# `split("\n")`, never `splitlines()`: this list is indexed by `tokenize` row
+# numbers, and `tokenize` counts `\n` alone while `splitlines()` also breaks on
+# `\f`, `\x0b`, `\x1c`-`\x1e` and `\x85`. One of those anywhere in the module
+# desyncs the two numberings, and the stripper below then truncates the WRONG
+# line — a vacuous green inside the arm whose job is catching vacuous prose.
+srclines = source.split("\n")
+tree = ast.parse(source)
+with open(drift, "rb") as fh:
+    comments = [t for t in tokenize.tokenize(fh.readline)
+                if t.type == tokenize.COMMENT]
+
+CITED = re.compile(r"`([^`\n]+)`")
+VERSIONISH = re.compile(r"^v?\d+(\.\d+)*(-[0-9A-Za-z.]+)?$")
+SCOPES = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+problems = []
+
+
+def stripped_source():
+    """The module with every docstring and comment removed, code intact.
+
+    Line spans for docstrings (an `Expr` holding a `Constant` string is alone on
+    its lines), tail spans for comments (a trailing `#` shares its line with the
+    code the arm is looking for). Never `untokenize` + `str.replace`.
+    """
+    kept = list(srclines)
+    for tok in comments:
+        row, col = tok.start
+        kept[row - 1] = kept[row - 1][:col]
+    drop = set()
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if not isinstance(node, SCOPES) or not body:
+            continue
+        head = body[0]
+        if (isinstance(head, ast.Expr)
+                and isinstance(getattr(head, "value", None), ast.Constant)
+                and isinstance(head.value.value, str)):
+            drop.update(range(head.lineno, head.end_lineno + 1))
+    return "\n".join(t for i, t in enumerate(kept, 1) if i not in drop)
+
+
+def over_reports(name):
+    """True when a `-` substring test and `is_prerelease` disagree about `name`.
+
+    The one-directional claim itself, in one predicate, so arms (d) and (e)
+    cannot drift apart about what "an invented pre-release" means.
+    """
+    return "-" in name and not vendor_drift.is_prerelease(name)
+
+
+def prose():
+    """Every docstring plus every comment — the module's whole claim surface."""
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, SCOPES):
+            doc = ast.get_docstring(node, clean=False)
+            if doc:
+                out.append(doc)
+    out.extend(t.string for t in comments)
+    return "\n".join(out)
+
+
+# (a) the over-report claim, scoped to `is_prerelease.__doc__`.
+doc = vendor_drift.is_prerelease.__doc__ or ""
+cited = [t for t in CITED.findall(doc) if "-" in t or "+" in t]
+if len(cited) < 2:
+    problems.append("(a) is_prerelease.__doc__ cites %d token(s) carrying `-` or "
+                    "`+`, want >=2: %r" % (len(cited), cited))
+if not any("+" in t for t in cited):
+    problems.append("(a) no cited token carries build metadata (`+`), so SemVer "
+                    "10 is claimed and never shown: %r" % (cited,))
+# The count alone is a soft floor: the docstring also mentions the bare `-` it
+# is talking ABOUT, which keys to None and so satisfies the over-report
+# predicate trivially, without being an example of anything. Require two cited
+# tokens that actually NAME a version, so the arm cannot be satisfied by
+# incidental punctuation.
+versioned_cited = [t for t in cited if vendor_drift.release_key(t) is not None]
+if len(versioned_cited) < 2:
+    problems.append("(a) only %d cited token(s) name a version, want >=2 — the "
+                    "rest are incidental mentions, not examples: %r"
+                    % (len(versioned_cited), cited))
+for tok in cited:
+    if not ("-" in tok and not vendor_drift.is_prerelease(tok)):
+        problems.append("(a) cited token %r is not an over-report example "
+                        "('-' in it: %s, is_prerelease: %s)"
+                        % (tok, "-" in tok, vendor_drift.is_prerelease(tok)))
+
+# (b) every cited conditional expression is really in the module's EXECUTABLE
+# source. The haystack is the whole module with docstrings and comments removed
+# — not function bodies alone — because a module-level constant is quotable
+# source too, and the claim under test is "this prose quotes something that
+# exists", not "…something inside a def".
+conditionals = sorted({t for t in CITED.findall(prose())
+                       if " if " in t and " else " in t})
+if not conditionals:
+    problems.append("(b) no conditional expression is cited anywhere in the "
+                    "module's docstrings or comments, so this arm asserts "
+                    "nothing")
+body_source = stripped_source()
+for tok in conditionals:
+    if tok not in body_source:
+        problems.append("(b) the cited conditional expression %r occurs nowhere "
+                        "in the module's executable source" % (tok,))
+
+# (c) the ranking claim the `PRERELEASE_RANK` comment run makes, over its own
+# cited pair. `release_precedence` is what will own precedence once it exists;
+# until then the same answer comes off `release_key`, so this arm is stable
+# across that refactor rather than pinned to it.
+assign_row = None
+for node in tree.body:
+    if isinstance(node, ast.Assign):
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == "PRERELEASE_RANK":
+                assign_row = node.lineno
+whole_line = {t.start[0]: t.string for t in comments
+              if srclines[t.start[0] - 1].lstrip().startswith("#")}
+run = []
+if assign_row is None:
+    problems.append("(c) no module-level `PRERELEASE_RANK` assignment to anchor "
+                    "the comment run on")
+else:
+    row = assign_row - 1
+    while row in whole_line:
+        run.append(whole_line[row])
+        row -= 1
+    run.reverse()
+versioned = [t for t in CITED.findall("\n".join(run)) if VERSIONISH.match(t)]
+precedence = getattr(vendor_drift, "release_precedence", vendor_drift.release_key)
+if len(versioned) != 2:
+    problems.append("(c) the comment run above PRERELEASE_RANK cites %d "
+                    "version-shaped token(s), want exactly 2: %r"
+                    % (len(versioned), versioned))
+else:
+    pre = [t for t in versioned if vendor_drift.is_prerelease(t)]
+    final = [t for t in versioned if not vendor_drift.is_prerelease(t)]
+    if len(pre) != 1:
+        problems.append("(c) the comment's cited pair is not one pre-release and "
+                        "one final: pre=%r final=%r" % (pre, final))
+    else:
+        pre_key, final_key = precedence(pre[0]), precedence(final[0])
+        if pre_key is None or final_key is None:
+            problems.append("(c) %s answers None for the comment's own pair "
+                            "(%r -> %r, %r -> %r)"
+                            % (precedence.__name__, pre[0], pre_key,
+                               final[0], final_key))
+        elif not pre_key < final_key:
+            problems.append("(c) the comment's own example does not rank: %r does "
+                            "not sort below %r" % (pre[0], final[0]))
+
+# (d) the one-directional property itself, module-wide. The corpus is the
+# shipped register's own labels plus a pinned adversarial list — pinned rather
+# than generated because a generator built from `release_key` would agree with
+# whatever `release_key` does.
+with open(register, encoding="utf-8") as fh:
+    registered = json.load(fh)
+corpus = [meta.get("last_reviewed_release")
+          for _, meta in sorted(registered.get("upstreams", {}).items())]
+corpus = [n for n in corpus if isinstance(n, str) and n]
+registered_labels = list(corpus)
+corpus += ["v6.4.0-rc1", "release-1.2.3", "release-1.2.3-rc1",
+           "pr-review-toolkit-v1.2.0", "pr-review-toolkit-v1.3.0-rc1",
+           "v6.4.0+build", "v6.4.0+build-7", "latest", "stable+2026",
+           "stable-nightly", "6.3.0", "v6.4.0+build1", ""]
+under = [n for n in corpus if vendor_drift.is_prerelease(n) and "-" not in n]
+witness = [n for n in corpus if over_reports(n)]
+if under:
+    problems.append("(d) is_prerelease answers True for a name carrying no `-`, "
+                    "so the substring test UNDER-reports after all and the prose "
+                    "is wrong again: %r" % (under,))
+if not witness:
+    problems.append("(d) no name in the corpus over-reports, so the claim all "
+                    "three prose sites make is asserted over nothing")
+
+# (e) the CONSEQUENCE clause the two prose sites state, in both of its
+# directions. The clause needs its own arm because the obvious one-line version
+# of it ("an invented pre-release is silently dropped from the candidate set")
+# is only half the story, and the missing half is the dangerous one.
+#
+# WHERE the misread name lands is what decides which way the answer goes wrong,
+# and the two landings are different failures, not one failure twice:
+#
+#   * as a CANDIDATE — the substring test invents a pre-release out of a
+#     genuinely FINAL release, `allow_pre` is off because the recorded label
+#     carries no hyphen, and the invention is filtered out of a candidate set it
+#     belongs in. The newest release goes unreported;
+#   * as the RECORDED review point — a final label whose hyphen is a word
+#     separator is read as a pre-release, so `allow_pre`, which is computed by
+#     the very test being hypothesised about, turns ON. The GENUINE
+#     pre-releases that flag exists to exclude are then admitted, and one wins
+#     `max()`: the `v6.4.0-rc1` > `v6.4.0` inversion itself.
+#
+# Both are executed against a SECOND module instance whose `is_prerelease` is
+# the substring test, so arms (a)-(d) keep reading the real one and nothing
+# here leaks into them — and both halves assert the DIFFERENTIAL, i.e. that the
+# real rule answers something else. Asserting only the substring instance's
+# answer is what an earlier draft of this arm did, and it guarded nothing:
+# "a final release is kept in the candidate set" is what the CORRECT rule does
+# too, so the half passed unchanged with the substring test deleted outright.
+#
+# The pairs are DERIVED from the same corpus, never typed. The candidate-side
+# name is one the real classifier calls final while the substring test calls it
+# a pre-release; the recorded-side name in the ON direction is the same kind of
+# over-report, and what it wrongly admits is read off `is_prerelease` itself —
+# so both track any change to what counts as a pre-release instead of silently
+# changing meaning under it.
+substrspec = importlib.util.spec_from_file_location("vendor_drift_substring", drift)
+substring_mod = importlib.util.module_from_spec(substrspec)
+substrspec.loader.exec_module(substring_mod)
+substring_mod.is_prerelease = lambda name: "-" in name
+
+# Two distinct synthetic 40-hex commits: the pair only has to differ and to
+# satisfy SHA40_RE, so that `release_verdict` reaches the ranking branch rather
+# than reporting `moved`.
+SHA_RECORDED, SHA_OTHER = "a" * 40, "b" * 40
+keyed = sorted({n for n in corpus if vendor_drift.release_key(n) is not None})
+over_report = [n for n in keyed if over_reports(n)]
+hyphen_free = [n for n in keyed if "-" not in n]
+genuine_pre = [n for n in keyed if vendor_drift.is_prerelease(n)]
+
+
+def outranking_pair(lows, highs):
+    """The first (low, high) drawn from these pools that really ranks that way."""
+    for high in highs:
+        for low in lows:
+            if low == high:
+                continue
+            low_key, high_key = precedence(low), precedence(high)
+            if low_key is not None and high_key is not None and low_key < high_key:
+                return low, high
+    return None, None
+
+
+def readings(recorded, other):
+    """Both classifiers on the same two-tag upstream: (candidates, verdict) each.
+
+    Returned substring-first, real-second — the arm compares the two, because
+    an assertion about the substring instance ALONE is satisfied by whatever
+    the correct rule already does.
+    """
+    published = {recorded: SHA_RECORDED, other: SHA_OTHER}
+    meta = {"last_reviewed_release": recorded,
+            "last_reviewed_commit": SHA_RECORDED}
+    return [(mod.release_candidates(published, recorded),
+             mod.release_verdict("d-rel13e", meta, published))
+            for mod in (substring_mod, vendor_drift)]
+
+
+# (e1) the misread name lands on a CANDIDATE. `allow_pre` is off on both sides,
+# so the only difference is the invention itself.
+plain_recorded, invented = outranking_pair(hyphen_free, over_report)
+if plain_recorded is None:
+    problems.append("(e) the corpus offers no pair with a hyphen-free recorded "
+                    "label outranked by an over-reported name, so the DROPPED "
+                    "direction asserts nothing")
+else:
+    (sub_cands, sub_verdict), (real_cands, real_verdict) = \
+        readings(plain_recorded, invented)
+    if invented in sub_cands:
+        problems.append("(e) with recorded %r carrying no hyphen the substring "
+                        "test should drop %r from the candidate set, but kept "
+                        "it: %r" % (plain_recorded, invented,
+                                    sorted(sub_cands)))
+    elif sub_verdict["actionable"]:
+        problems.append("(e) dropping %r still left an actionable verdict (%r), "
+                        "so the prose's 'invisible to the control that exists to "
+                        "notice it' is not what happens"
+                        % (invented, sub_verdict["state"]))
+    elif invented not in real_cands or not real_verdict["actionable"]:
+        problems.append("(e) dropping %r is no differential: the REAL rule also "
+                        "fails to report it (candidates %r, state %r, actionable "
+                        "%s), so this direction indicts nothing"
+                        % (invented, sorted(real_cands), real_verdict["state"],
+                           real_verdict["actionable"]))
+
+# (e2) the misread name lands on the RECORDED review point, so `allow_pre`
+# turns on and admits a GENUINE pre-release the real rule filters out. Note the
+# admitted name is NOT the over-report: an over-report is a final release, and
+# keeping a final release is exactly what the correct rule does — which is why
+# this half has to be selected off `is_prerelease` instead.
+hyphen_recorded, admitted = outranking_pair(over_report, genuine_pre)
+if hyphen_recorded is None:
+    problems.append("(e) the corpus offers no over-reported recorded label "
+                    "outranked by a genuine pre-release, so the allow_pre-ON "
+                    "direction asserts nothing")
+else:
+    (sub_cands, sub_verdict), (real_cands, real_verdict) = \
+        readings(hyphen_recorded, admitted)
+    if admitted in real_cands:
+        problems.append("(e) the REAL rule already admits %r for recorded %r "
+                        "(candidates %r), so allow_pre is not off and this "
+                        "direction indicts nothing"
+                        % (admitted, hyphen_recorded, sorted(real_cands)))
+    elif real_verdict["actionable"]:
+        problems.append("(e) with %r excluded the REAL rule already calls this "
+                        "upstream actionable (%r), so the substring test's "
+                        "finding is not a false one to begin with"
+                        % (admitted, real_verdict["state"]))
+    elif admitted not in sub_cands:
+        problems.append("(e) the substring test reads recorded %r as a "
+                        "pre-release, so it must turn allow_pre ON and admit "
+                        "%r; the candidate set is %r"
+                        % (hyphen_recorded, admitted, sorted(sub_cands)))
+    elif sub_verdict["newest"] != admitted:
+        problems.append("(e) admitted %r did not win max(): newest is %r"
+                        % (admitted, sub_verdict["newest"]))
+    elif sub_verdict["state"] != "newer":
+        problems.append("(e) %r was reported as newest without the `newer` "
+                        "verdict the prose names: state is %r"
+                        % (admitted, sub_verdict["state"]))
+
+# (f) the ordering DOMAIN the three prose sites rest on. Two more claims the
+# module states in prose and nothing executed, plus the one the register itself
+# stands on:
+#   * `release_candidates.__doc__` names the labels that "name no version at
+#     all" — they must key to None, or the first filter it describes is fiction;
+#   * `release_key`'s SemVer 10 comment says build metadata is stripped before
+#     comparison, so what follows a `+` cannot decide whether a name IS a
+#     version at all;
+#   * `validate_release_metadata` refuses any recorded label `release_key`
+#     cannot order, so every label the shipped register declares must key.
+# The label list is read out of the docstring rather than typed, so the arm
+# tracks the prose it is executing. The register half is empty-tolerant on
+# purpose: RFC 0019's #511 amendment lets a monorepo plugin declare no release
+# label at all, and this row must not pressure the register into inventing one.
+unversioned = []
+scoped = re.search(r"names no version at all \(([^)]*)\)",
+                   vendor_drift.release_candidates.__doc__ or "")
+if scoped is None:
+    problems.append("(f) release_candidates.__doc__ no longer names the labels "
+                    "it calls no version at all, so this arm asserts nothing")
+else:
+    unversioned = CITED.findall(scoped.group(1))
+    if len(unversioned) < 2:
+        problems.append("(f) release_candidates.__doc__ cites %d unorderable "
+                        "label(s), want >=2: %r"
+                        % (len(unversioned), unversioned))
+for name in unversioned:
+    if vendor_drift.release_key(name) is not None:
+        problems.append("(f) release_candidates.__doc__ calls %r no version at "
+                        "all, but release_key orders it as %r"
+                        % (name, vendor_drift.release_key(name)))
+metadata_bearing = [n for n in corpus if "+" in n]
+if not metadata_bearing:
+    problems.append("(f) no name in the corpus carries build metadata, so "
+                    "SemVer 10 is asserted over nothing")
+elif not any(vendor_drift.release_key(n) is not None for n in metadata_bearing):
+    # The equivalence below is symmetric, so a corpus where every `+`-bearing
+    # name keys to None on BOTH sides satisfies it while proving the opposite of
+    # what SemVer 10 says. One positive witness is what makes it a claim.
+    problems.append("(f) no name carrying build metadata names a version at "
+                    "all, so SemVer 10 holds here only vacuously: %r"
+                    % (sorted(metadata_bearing),))
+for name in metadata_bearing:
+    core = name.split("+", 1)[0]
+    if (vendor_drift.release_key(name) is None) \
+            != (vendor_drift.release_key(core) is None):
+        problems.append("(f) build metadata decides whether %r names a version "
+                        "at all (core %r keys %s, the full name keys %s), but "
+                        "SemVer 10 puts it outside the version"
+                        % (name, core,
+                           vendor_drift.release_key(core) is not None,
+                           vendor_drift.release_key(name) is not None))
+for label in registered_labels:
+    if vendor_drift.release_key(label) is None:
+        problems.append("(f) the register declares %r, which release_key cannot "
+                        "order — validate_release_metadata promises it refuses "
+                        "exactly that label" % (label,))
+
+# (g) the prose's citations OF THIS ROW. Two sites now end "D-REL13(e) executes
+# both directions", which is itself an unexecuted claim — and it rots the same
+# way every claim arms (a)-(f) execute rots: rename the row or drop the arm and
+# the sentence quietly points at nothing. Reintroducing the defect one level up
+# from where it was fixed is not a trade this row gets to make, so the citation
+# is executed too: every `D-REL<n>(<arm>)` the module's prose names must be a
+# row this file declares and an arm it really implements.
+with open(testfile, encoding="utf-8") as fh:
+    test_source = fh.read()
+ROW_CITE = re.compile(r"\bD-REL(\d+)\(([a-z])\)")
+cited_rows = sorted(set(ROW_CITE.findall(prose())))
+if not cited_rows:
+    problems.append("(g) the module's prose cites no test row of this file, so "
+                    "this arm asserts nothing")
+for row, arm in cited_rows:
+    if ("== D-REL%s:" % row) not in test_source:
+        problems.append("(g) the module's prose cites row D-REL%s(%s), but %s "
+                        "declares no such row" % (row, arm, testfile))
+    elif ("\n# (%s) " % arm) not in test_source:
+        problems.append("(g) the module's prose cites arm (%s) of D-REL%s, but "
+                        "%s implements no arm by that letter" % (arm, row, testfile))
+
+print("; ".join(problems) if problems else "D-REL13-OK")
+PY
+)"
+DREL13_RC=$?
+DREL13_FAILS=''
+[ "$DREL13_RC" -eq 0 ] \
+  || DREL13_FAILS="the probe itself exited rc=$DREL13_RC — a traceback is not a pass"
+# A silent probe is read as a FAILURE, never as "no problems": an empty capture
+# is what a killed interpreter and a clean tree look like alike, so the clean
+# tree has to say so out loud.
+case "$DREL13_OUT" in
+  D-REL13-OK) ;;
+  '') DREL13_FAILS="${DREL13_FAILS}${DREL13_FAILS:+; }the probe printed nothing at all" ;;
+  *)  DREL13_FAILS="${DREL13_FAILS}${DREL13_FAILS:+; }$DREL13_OUT" ;;
+esac
+if [ -z "$DREL13_FAILS" ]; then
+  ok "D-REL13 every claim the module's prose makes about release names is executable and true"
+else
+  no "D-REL13 the module's prose claims something it does not do: $DREL13_FAILS"
+fi
+
+echo
+echo "== D-REL16: the argv separator =="
+
+# D-REL16 — an upstream's clone url is REGISTER-SUPPLIED (`upstreams.<id>.url`,
+# or the default host plus its `repo` slug), and `run()` hands it to git as bare
+# argv. A url beginning with `-` is then not a repository but an OPTION: git's
+# own `--upload-pack=<cmd>` is executed on the spot, so editing one string in
+# `vendor.json` becomes code execution on whoever runs the weekly job — and the
+# job runs in CI, unattended, with a token. `--` before the url is what makes
+# that unreachable, and it has to be there in BOTH queries. `resolve_head` and
+# `resolve_tags` each hand the same register string to a separate `run()` call,
+# so a separator on one of them leaves the whole path reachable through the
+# other.
+#
+# Asserted from the stub's own LEDGER rather than by grepping the source: a
+# third ls-remote call site added later is caught by this row whether or not
+# whoever adds it remembers the row exists, which is not true of a grep for two
+# known line numbers. Nothing here is typed — the url each invocation carried is
+# matched back to the register's own derived slug list.
+run_drift "$WORK/drel16.log" ok "$WATERMARK" "" "[]" --dry-run
+DREL16_FAILS=''
+[ "$DRIFT_RC" -eq 0 ] \
+  || DREL16_FAILS="the happy-path run whose ledger this row reads exited rc=$DRIFT_RC"
+DREL16_HEADQ=0
+DREL16_TAGSQ=0
+DREL16_BARE=''
+DREL16_UNKNOWN=''
+DREL16_NOURL=''
+while IFS= read -r DREL16_LINE; do
+  case "$DREL16_LINE" in
+    "git ls-remote "*) ;;
+    *) continue ;;
+  esac
+  # Walk past the flags git itself owns. The first token that is neither a flag
+  # nor the separator is the url, and whatever sits immediately in front of it
+  # is the token under test. Reading the POSITION rather than grepping for a
+  # `--` anywhere on the line is deliberate: `--tags` also contains `--`, and a
+  # separator landing after the url protects nothing.
+  #
+  # Walked with parameter expansion rather than `read -r -a`: this file has no
+  # other array, and an array walk is the one shape here that would silently
+  # mean something else under zsh (`read -a` is not zsh's array flag, and zsh
+  # indexes from 1), so it would read as green while testing nothing. A token
+  # that comes out empty — the only way doubled spaces could reach this — falls
+  # to the `*` arm and is reported as "no url token", which is loud.
+  DREL16_REST="${DREL16_LINE#git ls-remote}"
+  DREL16_PREV=''
+  DREL16_URL=''
+  DREL16_TAGQ=0
+  while [ -n "$DREL16_REST" ]; do
+    DREL16_REST="${DREL16_REST# }"
+    DREL16_TOK="${DREL16_REST%% *}"
+    case "$DREL16_TOK" in
+      --tags) DREL16_TAGQ=1; DREL16_PREV="$DREL16_TOK" ;;
+      --)     DREL16_PREV="$DREL16_TOK" ;;
+      *)      DREL16_URL="$DREL16_TOK"; break ;;
+    esac
+    case "$DREL16_REST" in
+      *" "*) DREL16_REST="${DREL16_REST#* }" ;;
+      *)     DREL16_REST='' ;;
+    esac
+  done
+  if [ "$DREL16_TAGQ" -eq 1 ]; then
+    DREL16_TAGSQ=$((DREL16_TAGSQ + 1))
+  else
+    DREL16_HEADQ=$((DREL16_HEADQ + 1))
+  fi
+  if [ -z "$DREL16_URL" ]; then
+    [ -n "$DREL16_NOURL" ] || DREL16_NOURL="$DREL16_LINE"
+    continue
+  fi
+  # Anti-vacuity on the token itself. Whatever the walk just decided was the url
+  # has to name a registered upstream, or "the token after `--`" could be any
+  # string at all and this row would report a pass over a line it never
+  # understood. Same derivation the stub uses to answer the tag query: strip the
+  # scheme, then the host, and what is left is the `repo` slug.
+  DREL16_SLUG="${DREL16_URL#*://}"
+  DREL16_SLUG="${DREL16_SLUG#*/}"
+  grep -qxF -e "$DREL16_SLUG" "$ALL_SLUGS_FILE" \
+    || { [ -n "$DREL16_UNKNOWN" ] || DREL16_UNKNOWN="$DREL16_LINE"; }
+  [ "$DREL16_PREV" = "--" ] \
+    || { [ -n "$DREL16_BARE" ] || DREL16_BARE="$DREL16_LINE"; }
+done < "$WORK/drel16.log"
+[ -z "$DREL16_NOURL" ] \
+  || DREL16_FAILS="${DREL16_FAILS}${DREL16_FAILS:+; }an ls-remote invocation carries no url token at all: $DREL16_NOURL"
+[ -z "$DREL16_UNKNOWN" ] \
+  || DREL16_FAILS="${DREL16_FAILS}${DREL16_FAILS:+; }the token read as the url names no registered upstream: $DREL16_UNKNOWN"
+[ -z "$DREL16_BARE" ] \
+  || DREL16_FAILS="${DREL16_FAILS}${DREL16_FAILS:+; }a register-supplied url reaches git as a bare argument: $DREL16_BARE"
+# ...and the ledger has to carry BOTH shapes. A `--`-carrying HEAD query proves
+# nothing about the tag query, and an empty ledger would let every assertion in
+# the loop above never run at all.
+[ "$DREL16_HEADQ" -gt 0 ] \
+  || DREL16_FAILS="${DREL16_FAILS}${DREL16_FAILS:+; }the ledger logs no HEAD ls-remote at all"
+[ "$DREL16_TAGSQ" -gt 0 ] \
+  || DREL16_FAILS="${DREL16_FAILS}${DREL16_FAILS:+; }the ledger logs no \`--tags\` ls-remote at all"
+if [ -z "$DREL16_FAILS" ]; then
+  ok "D-REL16 both ls-remote queries pass \`--\` before the register-supplied url"
+else
+  no "D-REL16 a register-supplied url is not separated from git's own options: $DREL16_FAILS"
+fi
+
+echo
+echo "== D-REL17: the citations the pre-release prose is built on =="
+
+# ROW NUMBERING, once, for the three rows below and the fixture row after them.
+# The plan for #604 names this row D-REL13; that id was taken by the shipped
+# prose row above, and the module's own prose CITES it — `D-REL13(e)` appears in
+# two docstring/comment sites, and D-REL13(g) executes that citation against
+# this file. Renaming the shipped row to free the id would red the row whose job
+# is catching exactly that rot, so the new rows take the next free ids instead:
+# D-REL17 (citations), D-REL18 (bounds and shape), D-REL19 (precedence), and
+# D-REL14 (the monorepo arm end to end).
+#
+# D-REL17 — defect 4, the half D-REL13 does not reach. D-REL13 executes the RULE
+# each prose site states; this row executes the VOCABULARY the sites are allowed
+# to state it in. The pre-#604 return value was a five-tuple, and it is
+# describable in exactly three spellings: `0 if sep else 1` (a field expression
+# no body ever contained), `pre_nums` (a component that is gone), and the
+# trailing raw-name tiebreak, which moved out of the precedence key into
+# `release_sort_key`. A copy of the old shape that somebody forgot to update has
+# to use one of the three, so their JOINT absence is what a stale copy cannot
+# survive — strictly stronger than grepping for the one phantom literal, which
+# a copy spelling the other two would sail past.
+#
+# The behavioural half is the example the prose is built on: `v6.4.0+build-7` is
+# the name for which a `-` substring test and `is_prerelease` really disagree,
+# and it has to keep being a name for which they disagree, or the sentence that
+# cites it is decoration again.
+DREL17_OUT="$(python3 - "$DRIFT" <<'PY'
+import importlib.util
+import sys
+
+drift = sys.argv[1]
+modspec = importlib.util.spec_from_file_location("vendor_drift", drift)
+vendor_drift = importlib.util.module_from_spec(modspec)
+modspec.loader.exec_module(vendor_drift)
+
+problems = []
+# Hardcoded, never derived from `is_prerelease` itself: a table built by asking
+# the function under test what it thinks would agree with any answer it gave.
+for name, want in (("v6.4.0+build-7", False),
+                   ("release-1.2.3", False),
+                   ("v6.4.0-rc1", True)):
+    got = vendor_drift.is_prerelease(name)
+    if got is not want:
+        problems.append("is_prerelease(%r) is %r, want %r" % (name, got, want))
+# Anti-vacuity: the two final releases above are only WITNESSES to the
+# over-report claim while they carry the `-` a substring test trips on.
+for name in ("v6.4.0+build-7", "release-1.2.3"):
+    if "-" not in name:
+        problems.append("%r carries no `-`, so it witnesses no disagreement "
+                        "between a substring test and is_prerelease" % (name,))
+print("; ".join(problems) if problems else "D-REL17-OK")
+PY
+)"
+DREL17_RC=$?
+DREL17_FAILS=''
+[ "$DREL17_RC" -eq 0 ] \
+  || DREL17_FAILS="the probe itself exited rc=$DREL17_RC — a traceback is not a pass"
+case "$DREL17_OUT" in
+  D-REL17-OK) ;;
+  '') DREL17_FAILS="${DREL17_FAILS}${DREL17_FAILS:+; }the probe printed nothing at all" ;;
+  *)  DREL17_FAILS="${DREL17_FAILS}${DREL17_FAILS:+; }$DREL17_OUT" ;;
+esac
+# The positive control comes FIRST: three of the four greps below are absence
+# assertions, and a mistyped `grep` invocation that matches nothing at all would
+# satisfy every one of them. A pattern known to be present has to be found
+# before an absence means anything.
+grep -qF -e 'def release_key(' "$DRIFT" \
+  || DREL17_FAILS="${DREL17_FAILS}${DREL17_FAILS:+; }the control grep finds no \`def release_key(\` in $DRIFT, so the absence greps below assert nothing"
+for DREL17_GONE in '0 if sep else 1' 'pre_nums' 'trailing `name`'; do
+  if grep -qF -e "$DREL17_GONE" "$DRIFT"; then
+    DREL17_FAILS="${DREL17_FAILS}${DREL17_FAILS:+; }the module still spells the pre-#604 five-tuple: '$DREL17_GONE'"
+  fi
+done
+grep -qF -e 'v6.4.0+build-7' "$DRIFT" \
+  || DREL17_FAILS="${DREL17_FAILS}${DREL17_FAILS:+; }the prose no longer cites the one name for which a \`-\` substring test and is_prerelease disagree"
+if [ -z "$DREL17_FAILS" ]; then
+  ok "D-REL17 the pre-release prose cites a live example and no vocabulary of the retired tuple"
+else
+  no "D-REL17 the pre-release prose cites something the module does not do: $DREL17_FAILS"
+fi
+
+echo
+echo "== D-REL17b: the returned shape, stated once =="
+
+# D-REL17b — criterion 19, the half of defect 4 D-REL17 does not reach. D-REL17
+# asserts the RETIRED tuple's vocabulary is gone; this row asserts the surviving
+# shape is stated in exactly ONE place. Three copies is how defect 4 happened:
+# the `PRERELEASE_RANK` comment restated a five-tuple the module had already
+# stopped returning, nothing compared the copies, and the stale one read as
+# authoritative to whoever grepped it first. Deleting the stale copy fixes one
+# instance; asserting there is only ever one copy is what fixes the class.
+#
+# The three prose sites are the same three D-REL13 reasons over — `release_key`'s
+# docstring, `is_prerelease`'s docstring, and the `#` comment run above
+# `PRERELEASE_RANK` — and this row adds no fourth. Two come straight off
+# `__doc__`; the comment run is anchored on the assignment's own line number, so
+# moving the constant carries the row with it rather than silently emptying it.
+# That anchoring rule, and the `split("\n")`-vs-`splitlines()` reasoning below,
+# are D-REL13's (`:2223-2233`, `:2331-2340`) restated here because the two probes
+# are separate heredocs; a change to how the comment run is found has to land in
+# BOTH, and this row's own subject — uncompared copies of one rule — is why that
+# is called out rather than left to be discovered.
+#
+# TWO PREDICATES, because one cannot be right in both directions, which is the
+# reasoning D-REL13's header sets out at `:2138-2145` applied here. The row makes
+# two opposite claims about the same prose, and the widest rule that is correct
+# for the "restated nowhere else" direction is precisely the wrong rule for the
+# "stated here" direction:
+#
+#   `SHAPE` — the ≤1 / restatement arm. Deliberately WIDE, because a restatement
+#   drifts whatever spelling it wears: a parenthesised, comma-separated component
+#   list in the identifier form `(nums, rank, pre_ids)` AND equally in the value
+#   form `(6, 4, 0)`, or an arity word bound to the tuple (`triple`,
+#   `three-tuple`). A value-form copy planted in the `PRERELEASE_RANK` comment run
+#   is exactly how defect 4 read, so admitting it is the point.
+#
+#   `STATEMENT` — the ≥1 / anti-vacuity arm. Deliberately STRICT: a parenthesised
+#   run of two or more members where every member is an IDENTIFIER. `(nums, rank,
+#   pre_ids)` satisfies it; the worked example `(6, 4, 0)` at
+#   `tools/vendor/vendor-drift.py:236-237` — which illustrates an inversion and
+#   declares nothing — does not. Feeding `SHAPE` to this arm instead is a green
+#   hole: the statement can be deleted outright while the example keeps the arm
+#   satisfied, and the row then reports "stated once, in `release_key`'s
+#   docstring" over a module that states it in zero of the three sites.
+#
+# `STATEMENT` deliberately omits the arity words `SHAPE` admits. "A triple" states
+# the ARITY without naming the fields, and the fields are what the other two sites
+# defer here to read — so the omission demands content, not a spelling. The trade
+# it buys is known and is the safe direction: a statement rewritten without
+# parentheses ("`nums`, then the rank, then the identifiers") reds this row
+# loudly, where the reverse error would have been silent.
+#
+# Naming the bare word "tuple" is a statement under NEITHER predicate: the
+# `PRERELEASE_RANK` comment does exactly that while deferring to `release_key`,
+# and a rule that failed it would be demanding the deferral itself be deleted.
+#
+# ANTI-VACUITY, and it is the whole row: "matches zero of three" and "matches
+# exactly one" are one integer apart, so a pattern broken into matching nothing
+# would read as the green this row is looking for. `STATEMENT` matching NO site
+# is therefore a `SystemExit` — the statement is gone or the predicate is broken,
+# and from in here those are indistinguishable and both fatal. An empty site is
+# fatal rather than a non-match. And because the arms only compose while
+# `STATEMENT` is the strict HALF of `SHAPE`, the containment is asserted rather
+# than assumed: a site that states without mentioning means the two have drifted
+# apart, and neither count can be trusted afterwards.
+DREL17B_OUT="$(python3 - "$DRIFT" <<'PY'
+import ast
+import importlib.util
+import re
+import sys
+import tokenize
+
+drift = sys.argv[1]
+modspec = importlib.util.spec_from_file_location("vendor_drift", drift)
+vendor_drift = importlib.util.module_from_spec(modspec)
+modspec.loader.exec_module(vendor_drift)
+
+with open(drift, encoding="utf-8") as fh:
+    source = fh.read()
+# `split("\n")`, never `splitlines()`, for the reason D-REL13 spells out at
+# length: this list is indexed by `tokenize` row numbers, and `splitlines()`
+# breaks on form feeds and `\x85` too, which desyncs the two numberings.
+srclines = source.split("\n")
+tree = ast.parse(source)
+with open(drift, "rb") as fh:
+    comments = [t for t in tokenize.tokenize(fh.readline)
+                if t.type == tokenize.COMMENT]
+
+assign_row = None
+for node in tree.body:
+    if isinstance(node, ast.Assign):
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == "PRERELEASE_RANK":
+                assign_row = node.lineno
+if assign_row is None:
+    print("ANTI-VACUITY: no module-level `PRERELEASE_RANK` assignment to anchor "
+          "the third prose site on")
+    raise SystemExit(1)
+whole_line = {t.start[0]: t.string for t in comments
+              if srclines[t.start[0] - 1].lstrip().startswith("#")}
+run = []
+row = assign_row - 1
+while row in whole_line:
+    run.append(whole_line[row])
+    row -= 1
+run.reverse()
+
+# The WIDE half — every spelling a drifting copy might wear, value form
+# included. Correct for "restated nowhere else", and a green hole if it is
+# also asked to answer "stated here".
+SHAPE = re.compile(
+    r"\((?:\s*[A-Za-z_0-9]+\s*,)+\s*[A-Za-z_0-9]+\s*\)"
+    r"|\btriple\b"
+    r"|\b(?:two|three|four|five|six|seven|eight|nine|ten|\d+)[-\s]tuple\b")
+# The STRICT half — a component list whose members NAME the fields. Every
+# member must open with a letter or an underscore, which is the whole
+# difference: `(nums, rank, pre_ids)` declares, `(6, 4, 0)` illustrates.
+STATEMENT = re.compile(
+    r"\(\s*[A-Za-z_][A-Za-z_0-9]*\s*(?:,\s*[A-Za-z_][A-Za-z_0-9]*\s*)+\)")
+
+SITES = (("release_key.__doc__", vendor_drift.release_key.__doc__ or ""),
+         ("is_prerelease.__doc__", vendor_drift.is_prerelease.__doc__ or ""),
+         ("the comment run above PRERELEASE_RANK", "\n".join(run)))
+STATES_IT = SITES[0][0]
+for label, text in SITES:
+    if not text.strip():
+        print("ANTI-VACUITY: %s is empty, so this row would assert over two "
+              "sites while reporting on three" % (label,))
+        raise SystemExit(1)
+
+mentioning = [label for label, text in SITES if SHAPE.search(text)]
+stating = [label for label, text in SITES if STATEMENT.search(text)]
+
+if not set(stating) <= set(mentioning):
+    print("ANTI-VACUITY: %r states the shape without mentioning it, so "
+          "`STATEMENT` is no longer the strict half of `SHAPE`. The two arms "
+          "only compose while it is, and neither count means what this row "
+          "reports once they have drifted apart"
+          % (sorted(set(stating) - set(mentioning)),))
+    raise SystemExit(1)
+if not stating:
+    print("ANTI-VACUITY: no site NAMES the returned components — either the "
+          "module's only statement of the shape has been deleted, leaving the "
+          "other two sites deferring to nothing, or `STATEMENT` is broken. "
+          "From here those are indistinguishable and both are fatal; reading "
+          "either as 'restated nowhere' is the vacuous green this arm exists "
+          "to refuse")
+    raise SystemExit(1)
+
+problems = []
+if STATES_IT not in stating:
+    problems.append("the returned components are named at %r but NOT at %s, "
+                    "the one site every other defers to, so the module's "
+                    "authority on its own key states nothing"
+                    % (stating, STATES_IT))
+if len(mentioning) != 1:
+    problems.append("the returned-tuple shape is stated at %d of the three "
+                    "prose sites, want exactly 1 (%s), so a second copy is free "
+                    "to drift from the module: %r"
+                    % (len(mentioning), STATES_IT, mentioning))
+print("; ".join(problems) if problems else "D-REL17b-OK")
+PY
+)"
+DREL17B_RC=$?
+DREL17B_FAILS=''
+[ "$DREL17B_RC" -eq 0 ] \
+  || DREL17B_FAILS="the probe itself exited rc=$DREL17B_RC — a traceback, or an anti-vacuity refusal, is not a pass"
+case "$DREL17B_OUT" in
+  D-REL17b-OK) ;;
+  '') DREL17B_FAILS="${DREL17B_FAILS}${DREL17B_FAILS:+; }the probe printed nothing at all" ;;
+  *)  DREL17B_FAILS="${DREL17B_FAILS}${DREL17B_FAILS:+; }$DREL17B_OUT" ;;
+esac
+if [ -z "$DREL17B_FAILS" ]; then
+  ok "D-REL17b the returned tuple's components are named in release_key's docstring — a named list, not a worked example — and the shape is restated at neither of the other two sites"
+else
+  no "D-REL17b the returned-tuple shape is not stated once, in release_key's docstring, and nowhere else: $DREL17B_FAILS"
+fi
+
+echo
+echo "== D-REL18: the parse's bounds, and the key's shape =="
+
+# D-REL18 — two failure shapes that look like style points and are not.
+#
+# BOUNDS. Every quantifier the parse admits feeds an `int()`, and CPython
+# refuses `int()` on a digit run past `sys.get_int_max_str_digits()` (4300 by
+# default). An unbounded quantifier anywhere upstream of one is therefore an
+# uncaught `ValueError` wearing `fail()`'s "upstream unreachable" exit code — a
+# tag name read as an outage. Bounding it is only half the job: a bound spelled
+# twice (a constant, plus a literal inside the pattern) is a bound that can be
+# raised in one place and not the other, which is how the constant becomes
+# decorative. So the row asserts both directions — each constant is READ at
+# least once, and no repetition bound is spelled as a digit inside a pattern
+# literal at all.
+#
+# SHAPE. The tuple `release_key` returns is stated in exactly one place now
+# (its own docstring). A single statement is only worth having while something
+# reds when the code drifts from it, so the shape itself is pinned here: arity,
+# the type of each element, the rank field's membership, and — the one that
+# matters — that NO element of the key equals the input name. That last
+# assertion is what reds if the raw-name tiebreak is ever smuggled back into the
+# precedence key, which is the drift a shape-describing comment licensed once
+# already.
+DREL18_FAILS=''
+for DREL18_CONST in MAX_TAG_NAME_CHARS MAX_VERSION_COMPONENT_DIGITS \
+                    MAX_PRERELEASE_IDENT_CHARS MAX_DOTTED_TAIL_COMPONENTS; do
+  DREL18_HITS="$(grep -cF -e "$DREL18_CONST" "$DRIFT" || true)"
+  [ "${DREL18_HITS:-0}" -ge 2 ] \
+    || DREL18_FAILS="${DREL18_FAILS}${DREL18_FAILS:+; }$DREL18_CONST occurs on ${DREL18_HITS:-0} line(s), want >=2 (its definition plus at least one read) — a bound nothing reads is decoration"
+done
+# Each entry is `<negative ERE>|<a string it MUST match>`. The control is not
+# optional and it is not ceremony: it caught this pair being written as
+# `\d\{1,[0-9]` first, which finds nothing under a `grep` that reads `\d` as a
+# digit class (ugrep does; GNU grep reads it as a literal `d`) — an absence
+# assertion that can never fire, on one of the two CI-relevant greps, reading
+# exactly like the green this row is looking for. The brace is spelled as the
+# bracket expression `[{]` for the same reason: inside a bracket it is literal
+# under every implementation, with no escape to disagree about. The pattern is
+# also deliberately WIDER than the two forms the parse uses today — any literal
+# repetition bound in any pattern is the failure, not just those two.
+for DREL18_SPEC in '[{]1,[0-9]|{1,18}' \
+                   '[{]0,[0-9]|{0,8}'; do
+  DREL18_PAT="${DREL18_SPEC%%|*}"
+  DREL18_CTL="${DREL18_SPEC#*|}"
+  grep -qE "$DREL18_PAT" <<<"$DREL18_CTL" \
+    || { DREL18_FAILS="${DREL18_FAILS}${DREL18_FAILS:+; }the negative pattern '$DREL18_PAT' does not even match '$DREL18_CTL', so its absence from $DRIFT proves nothing"; continue; }
+  if grep -qE "$DREL18_PAT" "$DRIFT"; then
+    DREL18_FAILS="${DREL18_FAILS}${DREL18_FAILS:+; }a repetition bound is spelled as a literal inside a pattern ('$DREL18_PAT'), so the named constant is not its only spelling"
+  fi
+done
+DREL18_OUT="$(python3 - "$DRIFT" <<'PY'
+import importlib.util
+import sys
+
+drift = sys.argv[1]
+modspec = importlib.util.spec_from_file_location("vendor_drift", drift)
+vendor_drift = importlib.util.module_from_spec(modspec)
+modspec.loader.exec_module(vendor_drift)
+
+problems = []
+missing = [n for n in ("MAX_VERSION_COMPONENT_DIGITS",
+                       "MAX_PRERELEASE_IDENT_CHARS", "VERSION_RE",
+                       "PRERELEASE_RANK", "FINAL_RANK",
+                       "RELEASE_KEY_PRERELEASE_FIELD")
+           if not hasattr(vendor_drift, n)]
+if missing:
+    problems.append("the module declares no %s" % ", ".join(missing))
+else:
+    # The pattern is DERIVED from the constants, not merely accompanied by them.
+    pattern = vendor_drift.VERSION_RE.pattern
+    for const in ("MAX_VERSION_COMPONENT_DIGITS", "MAX_PRERELEASE_IDENT_CHARS"):
+        bound = "{1,%d}" % getattr(vendor_drift, const)
+        if bound not in pattern:
+            problems.append("VERSION_RE.pattern carries no %r, so %s is not the "
+                            "bound it enforces: %r" % (bound, const, pattern))
+
+    # AC 22 — the two claims the comment run above PRERELEASE_RANK still makes,
+    # over the exact pair it names.
+    rank_field = vendor_drift.RELEASE_KEY_PRERELEASE_FIELD
+    pre_key = vendor_drift.release_key("v6.4.0-rc1")
+    final_key = vendor_drift.release_key("v6.4.0")
+    if pre_key is None or final_key is None:
+        problems.append("the comment's own pair keys to None (%r, %r)"
+                        % (pre_key, final_key))
+    else:
+        if not pre_key < final_key:
+            problems.append("`v6.4.0-rc1` does not sort under `v6.4.0`: %r vs %r"
+                            % (pre_key, final_key))
+        if pre_key[rank_field] != vendor_drift.PRERELEASE_RANK:
+            problems.append("`v6.4.0-rc1` does not carry PRERELEASE_RANK at "
+                            "field %d: %r" % (rank_field, pre_key))
+        if final_key[rank_field] != vendor_drift.FINAL_RANK:
+            problems.append("`v6.4.0` does not carry FINAL_RANK at field %d: %r"
+                            % (rank_field, final_key))
+
+    # AC 23 — the shape, over a battery covering every branch of the parse: a
+    # plain final, a dotted pre-release, a word-separator stem, a monorepo
+    # prefix, and a `v`-less spelling.
+    ranks = (vendor_drift.PRERELEASE_RANK, vendor_drift.FINAL_RANK)
+    for name in ("v1.0.0", "v1.0.0-rc.1", "release-1.2.3", "pkg-v1.3.0-rc1",
+                 "6.3.0"):
+        key = vendor_drift.release_key(name)
+        if key is None:
+            problems.append("release_key(%r) is None, so the shape battery "
+                            "asserts nothing about it" % (name,))
+            continue
+        if len(key) != 3:
+            problems.append("release_key(%r) has arity %d, want 3: %r"
+                            % (name, len(key), key))
+            continue
+        nums, rank, pre_ids = key
+        if not isinstance(nums, tuple) or not nums \
+                or not all(isinstance(n, int) for n in nums):
+            problems.append("release_key(%r)[0] is not a non-empty tuple of "
+                            "int: %r" % (name, nums))
+        if rank not in ranks:
+            problems.append("release_key(%r)[1] is %r, want one of %r"
+                            % (name, rank, ranks))
+        if not isinstance(pre_ids, tuple):
+            problems.append("release_key(%r)[2] is not a tuple: %r"
+                            % (name, pre_ids))
+        # The raw name is a TIEBREAK, not precedence. It lives in
+        # `release_sort_key`; smuggling it back in here is what makes
+        # `v6.4.0+build1 > v6.4.0` true again, against SemVer 10.
+        if name in key:
+            problems.append("release_key(%r) carries the raw name as an "
+                            "element: %r" % (name, key))
+print("; ".join(problems) if problems else "D-REL18-OK")
+PY
+)"
+DREL18_RC=$?
+[ "$DREL18_RC" -eq 0 ] \
+  || DREL18_FAILS="${DREL18_FAILS}${DREL18_FAILS:+; }the probe itself exited rc=$DREL18_RC — a traceback is not a pass"
+case "$DREL18_OUT" in
+  D-REL18-OK) ;;
+  '') DREL18_FAILS="${DREL18_FAILS}${DREL18_FAILS:+; }the probe printed nothing at all" ;;
+  *)  DREL18_FAILS="${DREL18_FAILS}${DREL18_FAILS:+; }$DREL18_OUT" ;;
+esac
+if [ -z "$DREL18_FAILS" ]; then
+  ok "D-REL18 every parse bound is a named constant read by the pattern, and the key's shape is pinned"
+else
+  no "D-REL18 a bound or the key's shape is not what the module says it is: $DREL18_FAILS"
+fi
+
+echo
+echo "== D-REL19: release precedence, totality, and the sort key =="
+
+# D-REL19 — defect 1, asserted as LITERALS. The fixture builders above check
+# their orderings with `release_key` itself, which is right for a fixture and
+# useless as a test of the ordering: a wrong fix moves the expectation with the
+# code and every one of those preconditions still holds. So every expected
+# answer below is written out, and none of them is computed from the function
+# under test.
+#
+# What the row pins, and why each is a real failure rather than a curiosity:
+#
+#   * a pre-release must sort UNDER its own final release, in every spelling an
+#     upstream really publishes — `release-1.2.3-rc1` (the stem carries no
+#     digit) and `<plugin>-v1.3.0-rc1` (a monorepo tag, which is what
+#     `anthropics/claude-plugins-official` publishes). Ranked above, the rc wins
+#     `max()` and the weekly job tells the maintainer to adjudicate a release
+#     candidate, every week, with no permitted action behind it;
+#   * SemVer 10 — build metadata is not precedence, so `v6.4.0+build1` and
+#     `v6.4.0` are the same release and neither is `>` the other;
+#   * SemVer 11 — numeric pre-release identifiers compare numerically, so
+#     `rc.2` sorts under `rc.10` rather than over it;
+#   * TOTALITY, over the three shapes that can carry an unbounded run: a long
+#     version core, a long numeric pre-release identifier, and a long chain of
+#     hyphenated prefixes. Each of the first two is an `int()` site, and the
+#     third is the retry loop. `release_key` answers None — "this name carries
+#     no version", the same branch `latest` already takes — and never raises,
+#     because a raise here surfaces as rc 1 from a job whose rc 1 means "an
+#     upstream could not be reached";
+#   * `release_sort_key` is total for EVERY name, not merely at the two call
+#     sites that happen to pre-filter today. A helper whose totality lives in
+#     its callers is the same partial-function bug one indirection out.
+DREL19_OUT="$(python3 - "$DRIFT" <<'PY'
+import importlib.util
+import sys
+import time
+
+drift = sys.argv[1]
+modspec = importlib.util.spec_from_file_location("vendor_drift", drift)
+vendor_drift = importlib.util.module_from_spec(modspec)
+modspec.loader.exec_module(vendor_drift)
+
+problems = []
+RAISED = object()
+
+
+def guard(label, fn, *args):
+    """Call `fn`, reporting a raise as a row failure instead of aborting.
+
+    Not a swallowed error: the exception is the finding. An uncaught one would
+    abort the probe at the first bad answer and hide every later assertion,
+    which is precisely how the totality bug this row exists for stayed
+    invisible — it raised inside a job that reads a raise as an outage.
+    """
+    try:
+        return fn(*args)
+    except Exception as exc:  # noqa: BLE001 - a raise IS this row's finding
+        problems.append("%s: %s raised %s: %s"
+                        % (label, getattr(fn, "__name__", fn),
+                           type(exc).__name__, exc))
+        return RAISED
+
+
+def key(name):
+    return guard("release_key(%.40r)" % (name,), vendor_drift.release_key, name)
+
+
+def keys(a, b):
+    ka, kb = key(a), key(b)
+    if ka is RAISED or kb is RAISED:
+        return None, None
+    if ka is None or kb is None:
+        problems.append("%r or %r names no version (%r, %r), so the ordering "
+                        "claim about them asserts nothing" % (a, b, ka, kb))
+        return None, None
+    return ka, kb
+
+
+def below(a, b):
+    ka, kb = keys(a, b)
+    if ka is None:
+        return
+    if not ka < kb:
+        problems.append("release_key(%r) does not sort below release_key(%r): "
+                        "%r vs %r" % (a, b, ka, kb))
+
+
+def equal_precedence(a, b):
+    ka, kb = keys(a, b)
+    if ka is None:
+        return
+    if ka > kb or kb > ka:
+        problems.append("%r and %r are the same release under SemVer 10, but "
+                        "one outranks the other: %r vs %r" % (a, b, ka, kb))
+
+
+# AC 1 — the inversion the whole defect is about, in both reachable spellings.
+below("release-1.2.3-rc1", "release-1.2.3")
+below("pkg-v1.3.0-rc1", "pkg-v1.3.0")
+below("pkg-v1.2.0", "pkg-v1.3.0-rc1")
+for name, want in (("release-1.2.3-rc1", True), ("release-1.2.3", False),
+                   ("pkg-v1.3.0-rc1", True)):
+    got = guard("is_prerelease(%r)" % (name,), vendor_drift.is_prerelease, name)
+    if got is not RAISED and got is not want:
+        problems.append("is_prerelease(%r) is %r, want %r" % (name, got, want))
+
+# AC 2 — and therefore the `allow_pre` filter stops being a no-op for exactly
+# the names that need it.
+cands = guard("release_candidates", vendor_drift.release_candidates,
+              ["release-1.2.3", "release-1.2.3-rc1"], "release-1.2.3")
+if cands is not RAISED and list(cands) != ["release-1.2.3"]:
+    problems.append("release_candidates kept a pre-release against a final "
+                    "review point: %r" % (cands,))
+
+# AC 3 — SemVer 10, in both directions of the old raw-name tiebreak.
+equal_precedence("v6.4.0+build1", "v6.4.0")
+equal_precedence("v6.3.0", "6.3.0")
+
+# AC 4 — SemVer 11 identifier order, alphanumeric and numeric.
+below("v1.0.0-alpha", "v1.0.0-beta.2")
+below("v1.0.0-beta.2", "v1.0.0-rc.1")
+below("v1.0.0-rc.2", "v1.0.0-rc.10")
+
+# AC 5 — totality over the three shapes that can carry an unbounded run. The
+# wall clock is part of the assertion: a quadratic regression in the retry loop
+# must fail this row rather than hang the suite.
+started = time.monotonic()
+for label, name in (("long version core", "v" + "9" * 5000 + ".0.0"),
+                    ("long numeric pre-release identifier",
+                     "v1.0.0-" + "9" * 5000),
+                    ("long hyphenated prefix chain", "a-" * 5000 + "1.0.0")):
+    got = key(name)
+    if got is not RAISED and got is not None:
+        # Truncated: the offending name is 5000 characters long, and a row
+        # failure nobody can read is one nobody acts on.
+        problems.append("release_key on a %s answers %.60r..., want None"
+                        % (label, got))
+elapsed = time.monotonic() - started
+if elapsed > 5.0:
+    problems.append("the three over-long names took %.2fs to answer, so the "
+                    "parse's cost is a function of an untrusted string's length"
+                    % elapsed)
+# A non-string is a strictly wider contract than any caller needs, and answering
+# it is what keeps `release_sort_key` total below.
+got = key(3.0)
+if got is not RAISED and got is not None:
+    problems.append("release_key on a non-string answers %r, want None" % (got,))
+
+# AC 6 — the newest is COMPUTED, never taken from the order `ls-remote` printed.
+# Asserted over two names of EQUAL precedence, because that is the only case in
+# which the iteration order could decide the answer at all.
+pair = ["v6.4.0+build1", "v6.4.0"]
+try:
+    winner_a = max(pair, key=vendor_drift.release_sort_key)
+    winner_b = max(list(reversed(pair)), key=vendor_drift.release_sort_key)
+except Exception as exc:  # noqa: BLE001 - a raise IS this row's finding
+    problems.append("max(..., key=release_sort_key) raised %s: %s"
+                    % (type(exc).__name__, exc))
+else:
+    if winner_a != winner_b:
+        problems.append("max() over two equal-precedence names depends on the "
+                        "order they were iterated in: %r vs %r"
+                        % (winner_a, winner_b))
+
+# AC 7 — the public contract the two importers of this module rely on.
+for name in ("release_key", "is_prerelease", "release_sort_key"):
+    if not callable(getattr(vendor_drift, name, None)):
+        problems.append("the module exposes no callable %r" % (name,))
+if guard("release_key('latest')", vendor_drift.release_key, "latest") not in (
+        None, RAISED):
+    problems.append("release_key('latest') is not None, so a moving pointer is "
+                    "ordered as a release")
+
+# AC 20 — `release_sort_key` is total, and the flag really is what makes it so.
+mixed = ["latest", "v1.0.0", "nightly", "v0.9.0"]
+unkeyed = [n for n in mixed if vendor_drift.release_key(n) is None]
+keyed = [n for n in mixed if vendor_drift.release_key(n) is not None]
+if not unkeyed or not keyed:
+    problems.append("the mixed list is homogeneous (unkeyed=%r keyed=%r), so "
+                    "totality is asserted over nothing" % (unkeyed, keyed))
+try:
+    if max(["latest", "v1.0.0", "nightly"],
+           key=vendor_drift.release_sort_key) != "v1.0.0":
+        problems.append("max() over a mixed set does not pick the only name "
+                        "that carries a version")
+    max(["latest", "nightly"], key=vendor_drift.release_sort_key)
+    order = sorted(mixed, key=vendor_drift.release_sort_key)
+except Exception as exc:  # noqa: BLE001 - a raise IS this row's finding
+    problems.append("release_sort_key is partial after all: %s: %s"
+                    % (type(exc).__name__, exc))
+else:
+    if set(order[:len(unkeyed)]) != set(unkeyed):
+        problems.append("sorted() does not place every unkeyed name below every "
+                        "keyed one: %r" % (order,))
+
+print("; ".join(problems) if problems else "D-REL19-OK")
+PY
+)"
+DREL19_RC=$?
+DREL19_FAILS=''
+[ "$DREL19_RC" -eq 0 ] \
+  || DREL19_FAILS="the probe itself exited rc=$DREL19_RC — a traceback is not a pass"
+case "$DREL19_OUT" in
+  D-REL19-OK) ;;
+  '') DREL19_FAILS="${DREL19_FAILS}${DREL19_FAILS:+; }the probe printed nothing at all" ;;
+  *)  DREL19_FAILS="${DREL19_FAILS}${DREL19_FAILS:+; }$DREL19_OUT" ;;
+esac
+
+# AC 6, END TO END. The probe above proves `release_sort_key` is
+# order-independent; it cannot prove the TOOL calls it, and that half is not
+# free. Under SemVer 10 the two spellings of one release key EQUALLY, so
+# `max(..., key=release_key)` returns whichever the iteration reached first —
+# and the iteration is over the dict `resolve_tags` built from `ls-remote`
+# output, i.e. the order the remote happened to print. The whole point of
+# computing an order here is that nothing downstream depends on that. So the
+# same tag SET is published twice in two different ORDERS, and the newest tag
+# the report names has to be the same name both times.
+DREL19_TBL_A="$WORK/tags-order-a.tbl"
+DREL19_TBL_B="$WORK/tags-order-b.tbl"
+python3 - "$TAGS_DEFAULT" "$DREL19_TBL_A" "$DREL19_TBL_B" "$LEAD_SLUG" \
+         "$NEWER_LABEL" "$BUILDMETA_LABEL" "$DRIFT" \
+         <<'PY' || { echo "  ABORT — could not derive the iteration-order tables"; exit 99; }
+import hashlib
+import importlib.util
+import sys
+
+(default_tbl, tbl_a, tbl_b, lead_slug, newer_label, buildmeta_label,
+ drift) = sys.argv[1:8]
+
+modspec = importlib.util.spec_from_file_location("vendor_drift", drift)
+vendor_drift = importlib.util.module_from_spec(modspec)
+modspec.loader.exec_module(vendor_drift)
+
+# Both preconditions hold on either side of the fix, so a wrong answer reds the
+# ROW rather than aborting the file: the two names must be distinct strings, and
+# both must name a version, or the observation this arm reads would not carry
+# them at all. That they are the SAME release is asserted as a literal by the
+# probe above, never re-derived here.
+if newer_label == buildmeta_label:
+    raise SystemExit("the two spellings are one string, so no iteration order "
+                     "could tell them apart")
+for label in (newer_label, buildmeta_label):
+    if vendor_drift.release_key(label) is None:
+        raise SystemExit("%r names no version, so it is filtered out of the "
+                         "observation this arm reads" % (label,))
+
+rows = [line.rstrip("\n").split("\t")
+        for line in open(default_tbl, encoding="utf-8") if line.strip()]
+
+
+def synthetic_sha(label):
+    # Not a security primitive — a deterministic id derived from the register.
+    return hashlib.sha1(("order|%s|%s" % (lead_slug, label)).encode("utf-8"),
+                        usedforsecurity=False).hexdigest()
+
+
+pair = [[lead_slug, synthetic_sha(newer_label), "refs/tags/%s" % newer_label],
+        [lead_slug, synthetic_sha(buildmeta_label),
+         "refs/tags/%s" % buildmeta_label]]
+for path, table in ((tbl_a, rows + pair), (tbl_b, rows + pair[::-1])):
+    open(path, "w", encoding="utf-8").write(
+        "".join("%s\t%s\t%s\n" % tuple(r) for r in table))
+PY
+# Anti-vacuity: two identical tables would model no reordering at all, and the
+# comparison below would be a body against itself.
+if cmp -s "$DREL19_TBL_A" "$DREL19_TBL_B"; then
+  DREL19_FAILS="${DREL19_FAILS}${DREL19_FAILS:+; }the two published-tag tables are byte-identical, so neither run reorders anything"
+fi
+# BOTH `max()` sites are read, because they answer two different questions off
+# the same published set and each has its own call: the neutral tag OBSERVATION
+# in `build_report`, and the newest CANDIDATE the adjudication finding names in
+# `release_verdict`. A finding whose named release follows `ls-remote` order
+# also moves the fingerprint between two runs with identical inputs, which is
+# the comment nobody asked for landing on every subscriber.
+DREL19_TAG_A=''
+DREL19_TAG_B=''
+DREL19_REL_A=''
+DREL19_REL_B=''
+for DREL19_ARM in "a|$DREL19_TBL_A" "b|$DREL19_TBL_B"; do
+  TAGS_TABLE="${DREL19_ARM#*|}"
+  run_drift "$WORK/drel19-order-${DREL19_ARM%%|*}.log" ok "$WATERMARK" "" "[]" --dry-run
+  TAGS_TABLE=""
+  [ "$DRIFT_RC" -eq 0 ] \
+    || DREL19_FAILS="${DREL19_FAILS}${DREL19_FAILS:+; }the ${DREL19_ARM%%|*} ordering run exited rc=$DRIFT_RC"
+  DREL19_SEEN_TAG="$(grep -F -e "- \`$LEAD_SLUG\`: " <<<"$DRIFT_OUT" \
+                     | sed -n 's/.*newest `\([^`]*\)`.*/\1/p')"
+  DREL19_SEEN_REL="$(sed -n 's/.*newest published release: `\([^`]*\)`.*/\1/p' \
+                     <<<"$DRIFT_OUT")"
+  case "${DREL19_ARM%%|*}" in
+    a) DREL19_TAG_A="$DREL19_SEEN_TAG"; DREL19_REL_A="$DREL19_SEEN_REL" ;;
+    *) DREL19_TAG_B="$DREL19_SEEN_TAG"; DREL19_REL_B="$DREL19_SEEN_REL" ;;
+  esac
+done
+for DREL19_PAIR in "the newest published tag|$DREL19_TAG_A|$DREL19_TAG_B" \
+                   "the release the finding names|$DREL19_REL_A|$DREL19_REL_B"; do
+  DREL19_WHAT="${DREL19_PAIR%%|*}"
+  DREL19_REST="${DREL19_PAIR#*|}"
+  DREL19_LHS="${DREL19_REST%%|*}"
+  DREL19_RHS="${DREL19_REST#*|}"
+  if [ -z "$DREL19_LHS" ] || [ -z "$DREL19_RHS" ]; then
+    DREL19_FAILS="${DREL19_FAILS}${DREL19_FAILS:+; }$DREL19_WHAT is empty in one of the two runs (a='$DREL19_LHS' b='$DREL19_RHS'), so the comparison asserts nothing"
+  elif [ "$DREL19_LHS" != "$DREL19_RHS" ]; then
+    DREL19_FAILS="${DREL19_FAILS}${DREL19_FAILS:+; }$DREL19_WHAT follows the order the remote printed: '$DREL19_LHS' one way, '$DREL19_RHS' the other"
+  fi
+done
+if [ -z "$DREL19_FAILS" ]; then
+  ok "D-REL19 a pre-release sorts under its own release, build metadata is not precedence, and both keys are total"
+else
+  no "D-REL19 release precedence is wrong: $DREL19_FAILS"
+fi
+
+echo
+echo "== D-REL14: the monorepo release vocabulary, end to end =="
+
+# D-REL14 — the same defect as D-REL19's first arm, driven through the whole
+# tool instead of through its key. `anthropics/claude-plugins-official` is a
+# REGISTERED upstream and it tags `<plugin>-vN.N.N`, so a monorepo release
+# candidate is not a hypothetical: published over a recorded `<plugin>-vN.N.N`
+# it is what the weekly job would demand adjudication of, unclearably, until
+# the final lands.
+#
+# The monorepo spelling has to be SYNTHESIZED — no upstream in the committed
+# register carries one today (the lead's label is a bare `vN.N.N`), so there is
+# nothing to copy. It is still never TYPED: both halves are read out of the
+# register and the fixture aborts unless they really compose into the shape
+# this row claims to be testing — a non-numeric plugin prefix in front of the
+# recorded version, keying to the same version core as the plain spelling.
+#
+# The anti-vacuity is the PAIR of assertions, not either one alone: the fixture
+# proves the candidate really outranks the recorded review point, and the row
+# then demands a `level` verdict for it. A name that outranks the review point
+# and owes no adjudication can only be one the parse classified as a
+# pre-release, so the row cannot pass by the candidate being mis-parsed into
+# something harmless. It deliberately does NOT assert `is_prerelease(mono_rc)`
+# in the fixture: that precondition is false on the unfixed tree, so it would
+# abort the whole file at exit 99 instead of letting this row red.
+MONO_ROOT="$WORK/monorepo-review-point"
+MONO_ENV="$WORK/tags-mono.env"
+TAGS_MONO="$WORK/tags-mono.tbl"
+mkdir -p "$MONO_ROOT/plugins/uberdev"
+python3 - "$REGISTER" "$TAGS_DEFAULT" "$TAGS_MONO" \
+         "$MONO_ROOT/plugins/uberdev/vendor.json" "$MONO_ENV" \
+         "$LEAD_ID" "$LEAD_SLUG" "$LEAD_LABEL" "$RC_LABEL" "$DRIFT" \
+         <<'PY' || { echo "  ABORT — could not derive the monorepo release fixture"; exit 99; }
+import hashlib
+import json
+import importlib.util
+import re
+import shlex
+import sys
+
+(reg, default_tbl, mono_tbl, mono_register, envfile, lead_id, lead_slug,
+ lead_label, rc_label, drift) = sys.argv[1:11]
+
+modspec = importlib.util.spec_from_file_location("vendor_drift", drift)
+vendor_drift = importlib.util.module_from_spec(modspec)
+modspec.loader.exec_module(vendor_drift)
+release_key = vendor_drift.release_key
+
+d = json.load(open(reg, encoding="utf-8"))
+meta = d["upstreams"][lead_id]
+recorded_commit = meta["last_reviewed_commit"]
+
+if re.search(r"\d", lead_id):
+    raise SystemExit("the lead upstream id %r carries a digit, so `<id>-<label>` "
+                     "would not be a plugin PREFIX in front of a version and "
+                     "this fixture would model some other shape" % lead_id)
+mono_label = "%s-%s" % (lead_id, lead_label)
+mono_rc = "%s-%s" % (lead_id, rc_label)
+if mono_rc == mono_label:
+    raise SystemExit("the release candidate and the recorded review point are "
+                     "the same name, so this row would model nothing")
+
+plain_key, mono_key, rc_key = (release_key(lead_label), release_key(mono_label),
+                               release_key(mono_rc))
+if plain_key is None or mono_key is None or rc_key is None:
+    raise SystemExit("one of %r / %r / %r names no version at all (%r, %r, %r)"
+                     % (lead_label, mono_label, mono_rc, plain_key, mono_key,
+                        rc_key))
+# The prefix has to be a PREFIX: the monorepo spelling must carry the same
+# version core as the plain one, or `<id>-` is contributing digits of its own
+# and the row would be about some other name shape. Compared on the version
+# component alone so the precondition holds on both sides of the fix and the
+# ROW is what reds, rather than the fixture aborting the whole suite at exit 99.
+if mono_key[0] != plain_key[0]:
+    raise SystemExit("the monorepo spelling %r does not carry the same version "
+                     "core as the plain %r (%r vs %r)"
+                     % (mono_label, lead_label, mono_key[0], plain_key[0]))
+if not mono_key < rc_key:
+    raise SystemExit("%r does not rank above the recorded %r, so there would be "
+                     "no candidate to adjudicate and this row would pass for "
+                     "the wrong reason" % (mono_rc, mono_label))
+
+rows = [line.rstrip("\n").split("\t")
+        for line in open(default_tbl, encoding="utf-8") if line.strip()]
+if not [r for r in rows if r[0] == lead_slug]:
+    raise SystemExit("the default table publishes nothing for the lead slug %r, "
+                     "so replacing its rows would model no change" % lead_slug)
+# The lead slug's whole tag set is REPLACED: the recorded label is the monorepo
+# one now, and leaving the plain `vN.N.N` tags published would make it a label
+# that is not published at all — the `vanished` verdict, which is a different
+# row's subject.
+rc_sha = hashlib.sha1(("monorepo-rc|%s|%s" % (lead_slug, mono_rc)).encode("utf-8"),
+                      usedforsecurity=False).hexdigest()
+if rc_sha[:12] == recorded_commit[:12]:
+    raise SystemExit("the derived release-candidate commit collides with the "
+                     "recorded one in the first 12 hex, which is what the report "
+                     "renders")
+mono_rows = [r for r in rows if r[0] != lead_slug]
+mono_rows.append([lead_slug, recorded_commit, "refs/tags/%s" % mono_label])
+mono_rows.append([lead_slug, rc_sha, "refs/tags/%s" % mono_rc])
+open(mono_tbl, "w", encoding="utf-8").write(
+    "".join("%s\t%s\t%s\n" % tuple(r) for r in mono_rows))
+
+reg_copy = json.load(open(reg, encoding="utf-8"))
+lead_meta = reg_copy["upstreams"][lead_id]
+lead_meta["last_reviewed_release"] = mono_label
+# Fixture register-copy invariant: an upstream this copy GIVES a label to must
+# not also carry the HEAD-only opt-out, which is a contradiction a register
+# declaring both is refused for. Written unconditionally so the fixture is
+# correct whichever order the two halves of #604 land in.
+lead_meta.pop("head_only", None)
+json.dump(reg_copy, open(mono_register, "w", encoding="utf-8"), indent=2,
+          ensure_ascii=False)
+
+open(envfile, "w", encoding="utf-8").write(
+    "".join("%s=%s\n" % (k, shlex.quote(v))
+            for k, v in sorted({"MONO_LABEL": mono_label,
+                                "MONO_RC": mono_rc}.items())))
+PY
+. "$MONO_ENV"
+
+TAGS_TABLE="$TAGS_MONO"
+DRIFT_ROOT="$MONO_ROOT"
+run_drift "$WORK/drel14.log" ok "$WATERMARK" "" "[]" --dry-run
+DRIFT_ROOT="$REPO_ROOT"
+TAGS_TABLE=""
+DREL14_FAILS=''
+[ "$DRIFT_RC" -eq 0 ] || DREL14_FAILS="rc=$DRIFT_RC"
+if grep -qF -e "$ADJUDICATION_HEADING" <<<"$DRIFT_OUT"; then
+  DREL14_FAILS="${DREL14_FAILS}${DREL14_FAILS:+; }a monorepo-shaped release candidate was reported as a release awaiting adjudication"
+fi
+# Quoted back with the recorded label, which is also what proves the run read
+# the register COPY: the committed register records the plain spelling and would
+# reach a verdict of its own for a different reason.
+grep -qF -e "recorded \`$MONO_LABEL\`; level with the newest published release" <<<"$DRIFT_OUT" \
+  || DREL14_FAILS="${DREL14_FAILS}${DREL14_FAILS:+; }the monorepo review point is not reported level with the newest published release"
+# ...while the neutral tag OBSERVATION still names the candidate as the newest
+# published tag. The two lines look contradictory read quickly, and that seam is
+# the point: a later "fix" that made them agree would pick one policy for both
+# questions.
+grep -qF -e "newest \`$MONO_RC\`" <<<"$DRIFT_OUT" \
+  || DREL14_FAILS="${DREL14_FAILS}${DREL14_FAILS:+; }the tag observation stopped reporting the monorepo release candidate as the newest published tag"
+if [ -z "$DREL14_FAILS" ]; then
+  ok "D-REL14 a monorepo release candidate is observed, but is not an adjudication finding"
+else
+  no "D-REL14 the monorepo release vocabulary is mishandled: $DREL14_FAILS"
+fi
+
+echo
+echo "== D-REL15: the committed register declares a release standing for every used upstream =="
+
+# ---------------------------------------------------------------------------
+# D-REL15 — the register half of the biconditional, over the COMMITTED
+# vendor.json rather than a fixture.
+#
+# WHY A ROW OF ITS OWN, when the anti-vacuity preflight already runs the tool
+# against the committed register and would exit 2 on a register that declares
+# neither key: because that failure arrives as `exit 2` with every row below it
+# unexecuted, and the next editor reads a suite that stopped rather than a
+# claim about the register. This row names the offending upstream and says
+# which side it declared, in the report, next to every other row.
+#
+# The used set is RECOMPUTED with the tool's own selector rather than restated:
+# a typed list of upstream ids is the thing that goes stale the day one is
+# added, and an upstream added with neither key is exactly the mistake the row
+# exists to catch. Presence is tested with `in`, never truthiness, so a
+# present-but-empty label is reported by the tool's orderability clause (D-REL5
+# `empty`) rather than misreported here as an absence.
+# ---------------------------------------------------------------------------
+DREL15_MSG="$(python3 - "$REGISTER" 2>&1 <<'PY'
+import json, sys
+
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+ups = d.get("upstreams", {})
+used = sorted({c["upstream"] for c in d.get("components", [])
+               if c.get("origin") == "third-party"})
+assert used, ("the register declares no third-party components, so the loop "
+              "below would iterate over nothing")
+
+problems = []
+has_label = has_optout = False
+for uid in used:
+    meta = ups.get(uid, {})
+    label = "last_reviewed_release" in meta
+    optout = "head_only" in meta
+    has_label = has_label or label
+    has_optout = has_optout or optout
+    if label and optout:
+        problems.append("upstream %s declares BOTH last_reviewed_release and "
+                        "head_only" % uid)
+    elif not label and not optout:
+        problems.append("upstream %s declares NEITHER last_reviewed_release "
+                        "nor head_only" % uid)
+    if optout and meta["head_only"] is not True:
+        problems.append("upstream %s declares head_only %r, which is not JSON "
+                        "true" % (uid, meta["head_only"]))
+# Printed BEFORE the anti-vacuity gate so a register that really is broken is
+# named, rather than being hidden behind the gate that fires for the same edit.
+print("; ".join(problems))
+# Anti-vacuity, both arms. A register where every used upstream is labelled
+# never exercises the opt-out; one where none is never exercises the label.
+assert has_label, ("no used upstream declares last_reviewed_release — the "
+                   "labelled side of this row covers nothing")
+assert has_optout, ("no used upstream declares head_only — the HEAD-only side "
+                    "of this row covers nothing")
+PY
+)"
+DREL15_RC=$?
+if [ "$DREL15_RC" -eq 0 ] && [ -z "$DREL15_MSG" ]; then
+  ok "D-REL15 every used upstream declares exactly one of last_reviewed_release / head_only, and the opt-out is JSON true"
+else
+  no "D-REL15 the committed register's release standings are incomplete: ${DREL15_MSG:-probe exited $DREL15_RC with no output}"
+fi
+
+echo
+echo "== D-REL22: main()'s gh ledger, and its order =="
+
+# D-REL22 — criterion 11, read off the stub's own LEDGER rather than off main()'s
+# source. The order is load-bearing and invisible to anyone who has not noticed
+# WHY: `existing_fingerprint(issue)` compares against the body
+# `find_tracking_issue` fetched BEFORE `gh issue edit` overwrote it. Re-fetch
+# after the edit and the comparison becomes the new body against the new
+# fingerprint — equal every time, no comment ever again, and the "drift set
+# changed" notification is silently gone for good while every run still looks
+# green.
+#
+# That is exactly the wrong fix #604's fingerprint widening invites. Widening the
+# payload makes more runs post comments; a maintainer reads the extra traffic as
+# noise; "re-read the issue first" is the one-line change that quiets it and
+# breaks the feature. So this row pins the multiset AND the order: one
+# `gh issue list`, one `gh issue edit <n>`, one `gh issue comment <n>`, edit
+# before comment, and NO other `gh` verb at all — from outside, a post-edit
+# re-fetch is just a second READ, whether it is spelled `gh issue view` or a
+# second `gh issue list`, so the row refuses both by refusing everything else.
+#
+# ANTI-VACUITY: the stale-fingerprint arm is the only one that reaches the
+# comment at all — D9 already covers the equal-fingerprint arm that must NOT —
+# so the recorded fingerprint is DERIVED from the live one by rotating every hex
+# digit, which cannot collide with it by construction, and the comment body is
+# asserted to carry the NEW fingerprint. Without that last assertion a run that
+# never reached the comment would satisfy "no other verb" trivially.
+#
+# The fixture issue's number is the one value here that has to be typed — it
+# names nothing outside this row — so it is typed ONCE. Its marker is not:
+# `build_report` emits `MARKER` as the body's first line, so the stub's open
+# issue carries the module's own marker rather than a copy that goes stale the
+# day `MARKER` is versioned, which would send this run down the
+# `gh issue create` path and red the row for a reason it is not about.
+DREL22_NUM=903
+run_drift "$WORK/drel22-fp.log" ok "$MOVED_HEAD" "skills/writing-skills/SKILL.md" "[]" --dry-run
+DREL22_FP="$(fingerprint_of "$DRIFT_OUT")"
+DREL22_MARKER="$(awk 'NR==1{print; exit}' <<<"$DRIFT_OUT")"
+DREL22_STALE=''
+DREL22_FAILS=''
+case "$DREL22_MARKER" in
+  '<!--'*'-->') ;;
+  *) DREL22_FAILS="the rendered body's first line is not the HTML-comment marker find_tracking_issue matches on, so the fixture issue below could not be found: ${DREL22_MARKER:-<empty>}" ;;
+esac
+if [ -n "$DREL22_FAILS" ]; then
+  :
+elif [ -z "$DREL22_FP" ]; then
+  DREL22_FAILS="the report carries no drift-fingerprint line, so there is no fingerprint to make stale"
+else
+  DREL22_STALE="$(python3 - "$DREL22_FP" <<'PY'
+import sys
+
+HEX = "0123456789abcdef"
+fp = sys.argv[1]
+rotated = "".join(HEX[(HEX.index(c) + 1) % 16] for c in fp)
+# Derived, never typed. A hardcoded "stale" fingerprint is one payload change
+# away from being the live one, and this row would then quietly become D9.
+assert rotated != fp, "rotating every hex digit was a fixed point"
+print(rotated)
+PY
+)" || DREL22_FAILS="the stale-fingerprint derivation exited non-zero, so the recorded fingerprint cannot be shown to differ"
+fi
+if [ -z "$DREL22_FAILS" ]; then
+  DREL22_ISSUE='[{"number":'"$DREL22_NUM"',"body":"'"$DREL22_MARKER"'\ndrift-fingerprint: '"$DREL22_STALE"'"}]'
+  run_drift "$WORK/drel22.log" ok "$MOVED_HEAD" "skills/writing-skills/SKILL.md" "$DREL22_ISSUE"
+  [ "$DRIFT_RC" -eq 0 ] \
+    || DREL22_FAILS="${DREL22_FAILS}${DREL22_FAILS:+; }the run exited rc=$DRIFT_RC, so the ledger below is an abort's rather than main()'s: $DRIFT_OUT"
+  # `<verb as the diagnostic names it>|<ERE the ledger is counted with>`.
+  for DREL22_SPEC in "gh issue list|^gh issue list( |\$)" \
+                     "gh issue edit $DREL22_NUM|^gh issue edit $DREL22_NUM( |\$)" \
+                     "gh issue comment $DREL22_NUM|^gh issue comment $DREL22_NUM( |\$)"; do
+    DREL22_VERB="${DREL22_SPEC%%|*}"
+    DREL22_PAT="${DREL22_SPEC#*|}"
+    DREL22_N="$(grep -cE "$DREL22_PAT" "$WORK/drel22.log" || true)"
+    [ "${DREL22_N:-0}" -eq 1 ] \
+      || DREL22_FAILS="${DREL22_FAILS}${DREL22_FAILS:+; }\`$DREL22_VERB\` ran ${DREL22_N:-0} time(s), want exactly 1"
+  done
+  # Line numbers, not a second pass over the counts: "one of each" says nothing
+  # about which ran first, and the wrong order is the whole failure mode.
+  DREL22_EDIT_LN="$(awk -v n="$DREL22_NUM" '$0 ~ "^gh issue edit " n "( |$)" {print NR; exit}' "$WORK/drel22.log")"
+  DREL22_COMMENT_LN="$(awk -v n="$DREL22_NUM" '$0 ~ "^gh issue comment " n "( |$)" {print NR; exit}' "$WORK/drel22.log")"
+  if [ -n "$DREL22_EDIT_LN" ] && [ -n "$DREL22_COMMENT_LN" ]; then
+    [ "$DREL22_EDIT_LN" -lt "$DREL22_COMMENT_LN" ] \
+      || DREL22_FAILS="${DREL22_FAILS}${DREL22_FAILS:+; }the comment (ledger line $DREL22_COMMENT_LN) precedes the edit (line $DREL22_EDIT_LN)"
+  else
+    DREL22_FAILS="${DREL22_FAILS}${DREL22_FAILS:+; }the ledger carries no edit/comment pair to order (edit=${DREL22_EDIT_LN:-none} comment=${DREL22_COMMENT_LN:-none})"
+  fi
+  DREL22_OTHER="$(awk -v n="$DREL22_NUM" '/^gh / && !/^gh issue list( |$)/ && $0 !~ "^gh issue edit " n "( |$)" && $0 !~ "^gh issue comment " n "( |$)"' "$WORK/drel22.log")"
+  [ -z "$DREL22_OTHER" ] \
+    || DREL22_FAILS="${DREL22_FAILS}${DREL22_FAILS:+; }the run made a gh call outside the three-verb ledger, which is what a post-edit re-fetch looks like from here: $DREL22_OTHER"
+  grep -qF -e "New fingerprint \`$DREL22_FP\`" "$WORK/drel22.log" \
+    || DREL22_FAILS="${DREL22_FAILS}${DREL22_FAILS:+; }the comment body does not carry the new fingerprint \`$DREL22_FP\`, so this run did not take the changed-fingerprint arm and asserts nothing about it"
+fi
+if [ -z "$DREL22_FAILS" ]; then
+  ok "D-REL22 a stale fingerprint yields exactly one gh issue list, then edit, then comment, and no second read"
+else
+  no "D-REL22 main()'s gh ledger is not the one criterion 11 pins: $DREL22_FAILS"
+fi
+
+echo
+echo "== D-REL24: the head-only sentence names the key it is read from =="
+
+# D-REL24 — criterion 15, defect 3's prose half. The old sentence — "no recorded
+# release; HEAD-only upstream, as the register declares" — was derived from an
+# ABSENT key. It read identically whether the maintainer had deliberately opted
+# the upstream out or had deleted its review point by accident, and it
+# affirmatively attributed the tool's own silence to a declaration nobody had
+# made. Naming `head_only` is what makes the sentence earned.
+#
+# Two arms, because either alone is satisfied by the defect. Arm (a) alone
+# passes on a sentence naming BOTH ("as `head_only` in the register declares, as
+# the register declares"); arm (b) alone passes on a function that renders no
+# head-only sentence at all.
+#
+# Arm (b) is scoped to what `release_summary` can RENDER — its `str` constants,
+# via `ast` — and deliberately NOT to its source text, which still quotes the old
+# wording in a comment recording why it changed. A source-text predicate would
+# be satisfiable by deleting that comment, i.e. by destroying the record of the
+# fix to make the test green: defect 4's exact shape, one level up from where it
+# was fixed.
+#
+# ANTI-VACUITY, four ways, each a `SystemExit` rather than a quiet non-match:
+# unless the committed register really declares a used `head_only` upstream
+# (else arm (a) iterates over nothing), unless the rendered body carries the
+# review-points section at all, unless `release_summary` resolves to exactly one
+# definition holding at least one string constant, and — the one that ties the
+# arms together — unless every sentence arm (a) read out of the body IS one of
+# the constants arm (b) searches. Without that last gate an `ast` walk that
+# landed on some other function would be searching a haystack with no relation
+# to the line the maintainer is actually shown.
+#
+# That last gate demands EQUALITY between a rendered sentence and a literal, so
+# its bound is known and deliberate: build the sentence with `%`-formatting or
+# an f-string instead of adjacent literals and no constant equals it any more,
+# and the gate refuses a module that still satisfies criterion 15. That is the
+# safe direction — the row reds loudly and is re-tied to the new spelling —
+# whereas relaxing it to a substring test would let arm (b) search a haystack
+# only coincidentally related to the rendered line, which is the failure the
+# gate exists to prevent.
+run_drift "$WORK/drel24.log" ok "$WATERMARK" "" "[]" --dry-run
+# Stashed immediately: `DRIFT_RC` is a shared global, and a later
+# `run_drift` anywhere below would answer for this one.
+DREL24_RUN_RC="$DRIFT_RC"
+DREL24_BODY="$WORK/drel24.body"
+printf '%s\n' "$DRIFT_OUT" > "$DREL24_BODY"
+DREL24_OUT="$(python3 - "$DRIFT" "$REGISTER" "$DREL24_BODY" <<'PY'
+import ast
+import json
+import re
+import sys
+
+drift, register, bodyfile = sys.argv[1], sys.argv[2], sys.argv[3]
+
+with open(register, encoding="utf-8") as fh:
+    registered = json.load(fh)
+upstreams = registered.get("upstreams", {})
+used = sorted({c["upstream"] for c in registered.get("components", [])
+               if c.get("origin") == "third-party"})
+# Derived from the committed register, never typed: a hardcoded upstream id is
+# a claim about the register that stops being true the week it is re-declared.
+head_only = [uid for uid in used
+             if upstreams.get(uid, {}).get("head_only") is True]
+if not head_only:
+    print("ANTI-VACUITY: the committed register declares no used head_only "
+          "upstream, so arm (a) would iterate over nothing")
+    raise SystemExit(1)
+
+with open(bodyfile, encoding="utf-8") as fh:
+    body = fh.read()
+HEADING = "Recorded release review points:"
+if HEADING not in body:
+    print("ANTI-VACUITY: the rendered body carries no %r section, so arm (a) "
+          "has nothing to read a sentence out of" % (HEADING,))
+    raise SystemExit(1)
+
+problems = []
+sentences = []
+for uid in head_only:
+    # The rendered line is ``- `<id>` (`<slug>`): <summary>``, and <summary> is
+    # `release_summary`'s own return value verbatim.
+    hit = re.search(r"^- `%s` \(`[^`]*`\): (.+)$" % re.escape(uid),
+                    body, re.MULTILINE)
+    if hit is None:
+        problems.append("(a) the body renders no review-point line for the "
+                        "head_only upstream %r, so its standing is a silence "
+                        "rather than a statement" % (uid,))
+        continue
+    sentence = hit.group(1)
+    sentences.append(sentence)
+    if "head_only" not in sentence:
+        problems.append("(a) %r's review-point line does not name the "
+                        "`head_only` key its standing is read from: %r"
+                        % (uid, sentence))
+
+with open(drift, encoding="utf-8") as fh:
+    tree = ast.parse(fh.read())
+fns = [n for n in ast.walk(tree)
+       if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+       and n.name == "release_summary"]
+if len(fns) != 1:
+    print("ANTI-VACUITY: %d definition(s) of `release_summary`, want exactly 1 "
+          "— arm (b) cannot say which one renders" % (len(fns),))
+    raise SystemExit(1)
+constants = [n.value for n in ast.walk(fns[0])
+             if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+if not constants:
+    print("ANTI-VACUITY: `release_summary` holds no string constant, so arm "
+          "(b)'s haystack is empty and its absence assertion proves nothing")
+    raise SystemExit(1)
+for sentence in sentences:
+    if sentence not in constants:
+        print("ANTI-VACUITY: the rendered head-only sentence %r is not a string "
+              "constant of `release_summary`, so arm (b) is searching a "
+              "different function than the one arm (a) read" % (sentence,))
+        raise SystemExit(1)
+
+OLD = "as the register declares"
+for const in constants:
+    if OLD in const:
+        problems.append("(b) `release_summary` can still render %r — a standing "
+                        "derived from an absent key — in %r" % (OLD, const))
+print("; ".join(problems) if problems else "D-REL24-OK")
+PY
+)"
+DREL24_RC=$?
+DREL24_FAILS=''
+# The run's own rc first, and it is not redundant with the probe's: a
+# non-zero run still writes a body, just an abort's, and the probe would
+# then refuse it for carrying no review-points section — naming a symptom
+# of the failure rather than the failure.
+[ "$DREL24_RUN_RC" -eq 0 ] \
+  || DREL24_FAILS="the run exited rc=$DREL24_RUN_RC, so the body below is an abort's rather than a rendered report's"
+[ "$DREL24_RC" -eq 0 ] \
+  || DREL24_FAILS="${DREL24_FAILS}${DREL24_FAILS:+; }the probe itself exited rc=$DREL24_RC — a traceback, or an anti-vacuity refusal, is not a pass"
+case "$DREL24_OUT" in
+  D-REL24-OK) ;;
+  '') DREL24_FAILS="${DREL24_FAILS}${DREL24_FAILS:+; }the probe printed nothing at all" ;;
+  *)  DREL24_FAILS="${DREL24_FAILS}${DREL24_FAILS:+; }$DREL24_OUT" ;;
+esac
+if [ -z "$DREL24_FAILS" ]; then
+  ok "D-REL24 the head-only standing cites head_only, and release_summary can no longer render the absent-key wording"
+else
+  no "D-REL24 the head-only standing is still derived from an absent key: $DREL24_FAILS"
+fi
+
+echo
+echo "== D-REL20-D-REL21: the fingerprint covers every fact the body renders =="
+
+# D-REL20 / D-REL21 — #604 defect 2. The fingerprint decides whether an
+# ALREADY-OPEN issue gets a comment (`main()` edits the body first, then
+# compares), so any fact the body renders that the payload does not carry is a
+# body that can change under every subscriber in total silence. The issue's own
+# reproduction: upstream deletes an old tag without moving HEAD. The verdict
+# stays `level`, the actionable-only `releases` map stays empty, the payload is
+# byte-identical, `gh issue edit` runs, the comparison matches, and the
+# `N published tag(s)` line changes with nobody told.
+#
+# The property is a MATERIAL IMPLICATION — `body_differs => fp_differs` — and it
+# is deliberately one-directional. The converse ("the fingerprint moves only
+# when the body does") is NOT asserted, and must not be: a payload that is a
+# strict superset of what the body renders costs at most one redundant comment,
+# while a payload that is a subset costs a silent change. The `oc*` rows below
+# exist to STATE that asymmetry rather than leave it to be rediscovered by
+# somebody narrowing the payload to make a redundant comment go away.
+#
+# Driven in process, over `build_report` directly, because the mutation matrix
+# needs to move one datum at a time — a stubbed `git`/`gh` run can only move
+# whole tag tables and whole diffs, and half these rows have no spelling at that
+# level. D-REL21 then re-proves the issue's literal scenario through the real
+# `--dry-run` invocation, so the in-process rows cannot be green against a
+# `build_report` nothing reaches.
+DREL20_OUT="$(python3 - "$DRIFT" "$REGISTER" "$ADJUDICATION_HEADING" \
+                      "$LEAD_LABEL" "$OLDER_LABEL" "$RC_LABEL" \
+                      "$UNVERSIONED_LABEL" <<'PY'
+import copy, hashlib, importlib.util, json, re, sys
+
+(drift, reg, adjudication_heading, lead_label, older_label, rc_label,
+ unversioned) = sys.argv[1:8]
+
+# The module is the authority on every ordering and every constant this row
+# turns on. A local re-implementation of "which tag is newest" or of the
+# 25-file cap would keep agreeing with itself while drifting from the code the
+# assertions are about.
+modspec = importlib.util.spec_from_file_location("vendor_drift", drift)
+vendor_drift = importlib.util.module_from_spec(modspec)
+modspec.loader.exec_module(vendor_drift)
+build_report = vendor_drift.build_report
+release_verdict = vendor_drift.release_verdict
+release_key = vendor_drift.release_key
+release_sort_key = vendor_drift.release_sort_key
+MAX_LISTED_FILES = vendor_drift.MAX_LISTED_FILES
+FP_LINE = re.compile(r"^%s.*$" % re.escape(vendor_drift.FINGERPRINT_KEY), re.M)
+
+
+def synthetic(*parts):
+    """A derived 40-hex object id. Never a literal: a typed sha stops proving
+    anything the moment the register records a different one."""
+    # Not a security primitive — a deterministic id derived from the register.
+    return hashlib.sha1("|".join(parts).encode("utf-8"),
+                        usedforsecurity=False).hexdigest()
+
+
+register = json.load(open(reg, encoding="utf-8"))
+ups = register.get("upstreams", {})
+components = sorted([c for c in register.get("components", [])
+                     if c.get("origin") == "third-party"],
+                    key=lambda c: c["id"])
+used = sorted({c["upstream"] for c in components})
+slugs = {u: ups[u]["repo"] for u in used}
+labelled = [u for u in used if ups[u].get("last_reviewed_release")]
+labelled_slugs = {slugs[u] for u in labelled}
+# A HEAD-only upstream whose SLUG carries no labelled upstream: the tag query is
+# answered per repository, so an upstream sharing a monorepo with the labelled
+# one cannot be given a published set of its own without moving the lead's.
+head_only = [u for u in used if not ups[u].get("last_reviewed_release")
+             and slugs[u] not in labelled_slugs]
+if not labelled:
+    raise SystemExit("no used upstream declares last_reviewed_release, so the "
+                     "`level` standing rows a/b/oc3/oc4 hold fixed does not "
+                     "exist and every one of them would assert nothing")
+if not head_only:
+    raise SystemExit("no used upstream is HEAD-only on a slug of its own, so "
+                     "row c has no head-only -> level transition to make and "
+                     "oc3/oc4 have no non-actionable verdict to move")
+
+lead, ho = labelled[0], head_only[0]
+lead_slug, ho_slug = slugs[lead], slugs[ho]
+lead_commit = ups[lead]["last_reviewed_commit"]
+if ups[lead]["last_reviewed_release"] != lead_label:
+    raise SystemExit("the shell passed %r as the recorded release, the register "
+                     "records %r — this row would describe one upstream while "
+                     "asserting against another"
+                     % (lead_label, ups[lead]["last_reviewed_release"]))
+if release_key(unversioned) is not None:
+    raise SystemExit("the version-free label %r keys to a version, so row b "
+                     "would move `newest` as well as the count and would stop "
+                     "being the 'a name nobody can order' case" % unversioned)
+if not release_key(older_label) < release_key(lead_label) < release_key(rc_label):
+    raise SystemExit("the derived labels do not straddle the recorded one "
+                     "(%r < %r < %r is false), so row a would delete the newest "
+                     "tag and oc3/oc4 would move one field instead of two"
+                     % (older_label, lead_label, rc_label))
+
+# The observations, all three keyed the way the tool keys them: HEADs and tags
+# per SLUG, verdicts per upstream ID, components per component id.
+heads = {slug: synthetic("head", slug) for slug in sorted(set(slugs.values()))}
+tags = {
+    # `level`: the recorded label is published, at the recorded commit, and
+    # nothing outranks it. Every row below holds that standing fixed except the
+    # ones that deliberately move it.
+    lead_slug: {lead_label: lead_commit,
+                older_label: synthetic(lead_slug, older_label),
+                unversioned: synthetic(lead_slug, unversioned)},
+    # The HEAD-only slug publishes a PRE-RELEASE above its newest final. That is
+    # what splits oc3 from oc4: the tags block's `newest` is chosen over every
+    # name that keys to a version, so it is the pre-release, while the verdict's
+    # `newest` runs through `release_candidates`, which excludes a pre-release
+    # while the review point is not itself one — so it is the final. One field
+    # each, and neither row can pass on the other's datum.
+    ho_slug: {lead_label: synthetic(ho_slug, lead_label),
+              older_label: synthetic(ho_slug, older_label),
+              rc_label: synthetic(ho_slug, rc_label)},
+}
+
+# One drifting component and one declared-only component, so both render. The
+# drifter carries MORE raw paths than the body lists, which is what gives oc2 a
+# path it can swap below the fold.
+drifter, declared_only = components[0], components[1]
+raw_paths = ["%s/f%03d.md" % (drifter["upstream_path"], i)
+             for i in range(MAX_LISTED_FILES + 3)]
+if len(raw_paths) <= MAX_LISTED_FILES:
+    raise SystemExit("the drifting component carries %d raw path(s), which the "
+                     "body lists in full — oc2 has no path past the fold to "
+                     "swap and would be asserting over a visible one"
+                     % len(raw_paths))
+tail_old = sorted(raw_paths)[-1]
+tail_new = "%s/f%03d.md" % (drifter["upstream_path"], 999)
+swapped = sorted([p for p in raw_paths if p != tail_old] + [tail_new])
+if len(swapped) != len(raw_paths) or swapped.index(tail_new) < MAX_LISTED_FILES:
+    raise SystemExit("oc2's swapped-in path lands at index %d of %d, not past "
+                     "the %d the body lists — it would move the rendered file "
+                     "list and stop being an over-coverage row"
+                     % (swapped.index(tail_new), len(swapped),
+                        MAX_LISTED_FILES))
+stances = sorted({c["stance"] for c in components})
+if len(stances) < 2:
+    raise SystemExit("the register records one stance (%r), so row e has no "
+                     "second value to move to" % stances)
+other_stance = [s for s in stances if s != drifter["stance"]][0]
+
+changes = []
+for c in components:
+    slug = slugs[c["upstream"]]
+    record = {"id": c["id"], "repo": slug, "stance": c["stance"],
+              "upstream_path": c["upstream_path"],
+              "base": c["last_reviewed_upstream_commit"],
+              "head": heads[slug], "raw": [], "declared": []}
+    if c["id"] == drifter["id"]:
+        record["raw"] = list(raw_paths)
+    elif c["id"] == declared_only["id"]:
+        record["declared"] = ["%s/DECLARED.md" % c["upstream_path"]]
+    changes.append(record)
+
+
+def base_state():
+    return {"ups": copy.deepcopy(ups), "heads": dict(heads),
+            "tags": copy.deepcopy(tags), "changes": copy.deepcopy(changes)}
+
+
+def by_id(state, cid):
+    return [r for r in state["changes"] if r["id"] == cid][0]
+
+
+def render(state):
+    """One report, with the verdicts RE-DERIVED from the mutated state. Hand-built
+    verdict dicts would let a row assert a standing `release_verdict` never
+    produces — the exact gap between the register and the report this whole
+    suite is about."""
+    verdicts = [release_verdict(u, state["ups"][u], state["tags"][slugs[u]])
+                for u in used]
+    body, fingerprint, _ = build_report(register, state["heads"], state["tags"],
+                                        verdicts, state["changes"])
+    return FP_LINE.sub("", body), fingerprint, body, verdicts
+
+
+def mut_none(s):
+    return s
+
+
+def mut_delete_old_tag(s):
+    del s["tags"][lead_slug][older_label]
+    return s
+
+
+def mut_add_unversioned_tag(s):
+    s["tags"][ho_slug][unversioned] = synthetic(ho_slug, unversioned, "added")
+    return s
+
+
+def mut_declare_a_review_point(s):
+    s["ups"][ho].pop("head_only", None)
+    s["ups"][ho]["last_reviewed_release"] = lead_label
+    s["ups"][ho]["last_reviewed_commit"] = s["tags"][ho_slug][lead_label]
+    return s
+
+
+def mut_advance_drifting_base(s):
+    by_id(s, drifter["id"])["base"] = synthetic("advanced", drifter["id"])
+    return s
+
+
+def mut_change_drifting_stance(s):
+    by_id(s, drifter["id"])["stance"] = other_stance
+    return s
+
+
+def mut_repoint_drifting_repo(s):
+    # The record's `repo` is rendered on the `- upstream:` line and read nowhere
+    # else in `build_report` — `heads` and `tags` are keyed by the caller's slug,
+    # not by this field — so the row moves exactly one rendered datum.
+    record = by_id(s, drifter["id"])
+    record["repo"] = "%s-renamed" % record["repo"]
+    return s
+
+
+def mut_relocate_drifting_upstream_path(s):
+    # `raw` is left exactly as it was, so the file list below the `- upstream:`
+    # line is unmoved and this row is that line's second field alone.
+    record = by_id(s, drifter["id"])
+    record["upstream_path"] = "%s/relocated" % record["upstream_path"]
+    return s
+
+
+def mut_advance_declared_only_base(s):
+    by_id(s, declared_only["id"])["base"] = synthetic("advanced",
+                                                      declared_only["id"])
+    return s
+
+
+def mut_swap_path_below_the_fold(s):
+    by_id(s, drifter["id"])["raw"] = list(swapped)
+    return s
+
+
+def mut_retag_past_the_rendered_prefix(s):
+    published = s["tags"][ho_slug]
+    was = published[rc_label]
+    # Shares the twelve hex the body renders, differs beyond them. Derived by
+    # rotating the last digit rather than ground out, so it cannot fail to
+    # collide the day the seed changes.
+    twin = was[:-1] + ("0" if was[-1] != "0" else "1")
+    if twin[:12] != was[:12] or twin == was:
+        raise SystemExit("oc3's derived twin sha does not share the first 12 "
+                         "hex of %r while differing beyond them, so the row "
+                         "would be moving a datum the body renders" % was)
+    published[rc_label] = twin
+    return s
+
+
+def mut_move_nonactionable_newest_commit(s):
+    s["tags"][ho_slug][lead_label] = synthetic(ho_slug, lead_label, "re-tagged")
+    return s
+
+
+OVER_COVERAGE_RULING = ("over-coverage is the accepted direction; see spec "
+                        "§2.1 — narrowing the payload here is a deliberate "
+                        "decision, not a bug fix")
+
+# The label is DECLARED per row, and the assertion is made against the label
+# rather than against whatever the run happened to do. A matrix that read its
+# expectation off the run would agree with any implementation at all.
+#
+# Rows d, e, g and h are one per field: `base`, `stance`, `repo` and
+# `upstream_path` are the four the component block renders that the old
+# `{head, raw, declared}` payload did not carry, and each is asserted on its own
+# so "the whole record, minus its key" is executed field by field rather than
+# claimed in a comment.
+ROWS = [
+    ("a", "body-visible", "delete one old, non-newest published tag",
+     mut_delete_old_tag),
+    ("b", "body-visible", "publish one more tag naming no version",
+     mut_add_unversioned_tag),
+    ("c", "body-visible", "flip a HEAD-only upstream to a recorded review "
+     "point, moving its verdict head-only -> level",
+     mut_declare_a_review_point),
+    ("d", "body-visible", "advance a drifting component's base, raw set "
+     "identical", mut_advance_drifting_base),
+    ("e", "body-visible", "change a drifting component's stance",
+     mut_change_drifting_stance),
+    ("f", "body-invisible", "no-op re-run", mut_none),
+    ("g", "body-visible", "re-point a drifting component's repo",
+     mut_repoint_drifting_repo),
+    ("h", "body-visible", "relocate a drifting component's upstream_path",
+     mut_relocate_drifting_upstream_path),
+    ("oc1", "over-covered", "change a declared-only component's base",
+     mut_advance_declared_only_base),
+    ("oc2", "over-covered", "swap one raw path that sorts past the listed "
+     "cap, count unchanged", mut_swap_path_below_the_fold),
+    ("oc3", "over-covered", "re-tag the newest published release past the "
+     "twelve hex the body renders", mut_retag_past_the_rendered_prefix),
+    ("oc4", "over-covered", "move a non-actionable verdict's newest_commit",
+     mut_move_nonactionable_newest_commit),
+]
+
+base_body, base_fp, base_raw_body, base_verdicts = render(base_state())
+by_upstream = {v["id"]: v for v in base_verdicts}
+problems = []
+
+# Anti-vacuity, before a single row runs: the two standings every row holds
+# fixed have to actually BE the standings, and the two `newest` answers oc3 and
+# oc4 move have to actually be different names.
+if by_upstream[lead]["state"] != "level":
+    problems.append("the lead upstream's baseline standing is %r, not `level` — "
+                    "rows a and b would be moving a verdict as well as the tag "
+                    "observation" % by_upstream[lead]["state"])
+if by_upstream[ho]["state"] != "head-only":
+    problems.append("the HEAD-only upstream's baseline standing is %r, not "
+                    "`head-only` — row c has no transition to make"
+                    % by_upstream[ho]["state"])
+if by_upstream[ho]["newest"] != lead_label:
+    problems.append("the HEAD-only verdict names %r as its newest release, not "
+                    "the final %r, so oc4 would be moving the same datum the "
+                    "tags block renders and oc3 asserts over"
+                    % (by_upstream[ho]["newest"], lead_label))
+named = [n for n in tags[ho_slug] if release_key(n) is not None]
+if max(named, key=release_sort_key) != rc_label:
+    problems.append("the HEAD-only slug's newest published tag is %r, not the "
+                    "pre-release %r, so oc3 and oc4 exercise one field instead "
+                    "of two" % (max(named, key=release_sort_key), rc_label))
+
+saw_body_move = saw_body_still = False
+for row, label, description, mutate in ROWS:
+    body, fingerprint, raw_body, _ = render(mutate(base_state()))
+    body_differs = body != base_body
+    fp_differs = fingerprint != base_fp
+    saw_body_move = saw_body_move or body_differs
+    saw_body_still = saw_body_still or not body_differs
+    if adjudication_heading in raw_body:
+        problems.append("row %s renders %r, so its movement could be coming "
+                        "from a release FINDING rather than from the "
+                        "observation blocks this row is about"
+                        % (row, adjudication_heading))
+    # Criterion 7, over EVERY row including the over-covered ones. This is the
+    # whole property; the per-label arms below only say which side each row is
+    # declared to land on.
+    if body_differs and not fp_differs:
+        problems.append("row %s (%s) moved the body without moving the "
+                        "fingerprint — an already-open issue would be silently "
+                        "rewritten under every subscriber" % (row, description))
+    if label == "body-visible":
+        if not body_differs:
+            problems.append("row %s (%s) is declared body-visible but rendered "
+                            "an identical body" % (row, description))
+        if not fp_differs:
+            problems.append("row %s (%s) is declared body-visible but left the "
+                            "fingerprint alone" % (row, description))
+    elif label == "body-invisible":
+        if body_differs:
+            problems.append("row %s (%s) is declared body-invisible but moved "
+                            "the body" % (row, description))
+        if fp_differs:
+            problems.append("row %s (%s) is declared body-invisible but moved "
+                            "the fingerprint — two identical runs would comment "
+                            "every week" % (row, description))
+    elif label == "over-covered":
+        if body_differs:
+            problems.append("row %s (%s) is declared over-covered but moved the "
+                            "body, so it is not the case it was written for"
+                            % (row, description))
+        if not fp_differs:
+            problems.append("row %s (%s) left the fingerprint alone: %s"
+                            % (row, description, OVER_COVERAGE_RULING))
+    else:
+        raise SystemExit("row %s carries the unknown label %r" % (row, label))
+
+if not (saw_body_move and saw_body_still):
+    raise SystemExit("the matrix is one-sided (a body move was %sseen, a body "
+                     "left alone was %sseen) — an implication with no false "
+                     "antecedent, or no true one, asserts nothing"
+                     % ("" if saw_body_move else "not ",
+                        "" if saw_body_still else "not "))
+
+print("; ".join(problems) if problems else "D-REL20-OK")
+PY
+)"
+DREL20_RC=$?
+DREL20_FAILS=''
+[ "$DREL20_RC" -eq 0 ] \
+  || DREL20_FAILS="the probe itself exited rc=$DREL20_RC — a traceback, or an anti-vacuity refusal, is not a pass"
+case "$DREL20_OUT" in
+  D-REL20-OK) ;;
+  '') DREL20_FAILS="${DREL20_FAILS}${DREL20_FAILS:+; }the probe printed nothing at all" ;;
+  *)  DREL20_FAILS="${DREL20_FAILS}${DREL20_FAILS:+; }$DREL20_OUT" ;;
+esac
+if [ -z "$DREL20_FAILS" ]; then
+  ok "D-REL20 every mutation that moves the body moves the fingerprint, identical runs move neither, and the over-covered rows are declared"
+else
+  no "D-REL20 the fingerprint does not cover the body: $DREL20_FAILS"
+fi
+
+# D-REL21 — the issue's literal reproduction, through the real invocation shape.
+# Two `--dry-run` runs at the SAME watermark, differing only by one deleted old
+# tag: no HEAD moves, no file changes, the verdict is `level` in both, and the
+# only thing that can differ is the published-tag count the body renders. Before
+# the payload carried `tags` at all, that run pair fingerprinted identically.
+#
+# In process (D-REL20 row `a`) and through `python3 vendor-drift.py --dry-run`
+# are not the same assertion: the in-process rows reach `build_report` directly,
+# so they stay green against a `main()` that never builds the observations it is
+# handed. This row is what pins the whole path.
+TAGS_MINUS_OLD="$WORK/tags-minus-old.tbl"
+python3 - "$TAGS_DEFAULT" "$TAGS_MINUS_OLD" "$LEAD_SLUG" \
+         "$OLDER_LABEL" <<'PY' || { echo "  ABORT — could not derive the deleted-tag table"; exit 99; }
+import sys
+
+src, dest, lead_slug, older_label = sys.argv[1:5]
+kept, dropped = [], 0
+for line in open(src, encoding="utf-8"):
+    if not line.strip():
+        continue
+    slug, sha, ref = line.rstrip("\n").split("\t")
+    name = ref.split("refs/tags/", 1)[1]
+    name = name[:-3] if name.endswith("^{}") else name
+    if slug == lead_slug and name == older_label:
+        dropped += 1
+        continue
+    kept.append((slug, sha, ref))
+# Exactly one, or the row is not the scenario it claims: zero means the table
+# never published the label and both runs would be identical; more than one
+# means the label was annotated and the peel row went with it, which is a
+# different deletion than the one #604 describes.
+if dropped != 1:
+    raise SystemExit("dropping %s/%s removed %d table row(s), not exactly 1"
+                     % (lead_slug, older_label, dropped))
+open(dest, "w", encoding="utf-8").write(
+    "".join("%s\t%s\t%s\n" % r for r in kept))
+PY
+run_drift "$WORK/drel21a.log" ok "$WATERMARK" "" "[]" --dry-run
+DREL21_BODY_A="$DRIFT_OUT"
+DREL21_FP_A="$(fingerprint_of "$DRIFT_OUT")"
+DREL21_RC_A="$DRIFT_RC"
+TAGS_TABLE="$TAGS_MINUS_OLD"
+run_drift "$WORK/drel21b.log" ok "$WATERMARK" "" "[]" --dry-run
+TAGS_TABLE=""
+DREL21_BODY_B="$DRIFT_OUT"
+DREL21_FP_B="$(fingerprint_of "$DRIFT_OUT")"
+DREL21_RC_B="$DRIFT_RC"
+DREL21_FAILS=''
+[ "$DREL21_RC_A" -eq 0 ] && [ "$DREL21_RC_B" -eq 0 ] \
+  || DREL21_FAILS="a run exited non-zero (rc=$DREL21_RC_A / rc=$DREL21_RC_B), so the bodies below are aborts rather than reports"
+# Anti-vacuity, both directions. The count has to actually drop, and the NEWEST
+# release has to be the same name in both runs — a deletion that took the newest
+# tag with it would move the verdict, and the row would be re-proving D-REL12
+# instead of the deleted-old-tag scenario #604 is about.
+grep -qF -e "- \`$LEAD_SLUG\`: $LEAD_TAG_COUNT published tag(s); newest \`$LEAD_LABEL\`" <<<"$DREL21_BODY_A" \
+  || DREL21_FAILS="${DREL21_FAILS}${DREL21_FAILS:+; }the first run does not report $LEAD_TAG_COUNT published tag(s) for $LEAD_SLUG with \`$LEAD_LABEL\` newest"
+grep -qF -e "- \`$LEAD_SLUG\`: $((LEAD_TAG_COUNT - 1)) published tag(s); newest \`$LEAD_LABEL\`" <<<"$DREL21_BODY_B" \
+  || DREL21_FAILS="${DREL21_FAILS}${DREL21_FAILS:+; }the second run does not report one fewer published tag for $LEAD_SLUG with the same newest release"
+grep -qF -e "$ADJUDICATION_HEADING" <<<"$DREL21_BODY_A$DREL21_BODY_B" \
+  && DREL21_FAILS="${DREL21_FAILS}${DREL21_FAILS:+; }a run rendered a release finding, so the fingerprint could have moved through a verdict rather than through the deleted tag"
+[ -n "$DREL21_FP_A" ] && [ -n "$DREL21_FP_B" ] \
+  || DREL21_FAILS="${DREL21_FAILS}${DREL21_FAILS:+; }a run rendered no fingerprint at all"
+[ "$DREL21_FP_A" != "$DREL21_FP_B" ] \
+  || DREL21_FAILS="${DREL21_FAILS}${DREL21_FAILS:+; }deleting one old tag changed the body and not the fingerprint — main() would edit the issue and post no comment"
+if [ -z "$DREL21_FAILS" ]; then
+  ok "D-REL21 an old tag deleted with HEAD unmoved changes the published-tag line and the fingerprint with it"
+else
+  no "D-REL21 the deleted-tag scenario is still silent: $DREL21_FAILS"
+fi
+
+echo
+echo "== D-REL23: the render reads the hashed object, never the raw inputs =="
+
+# D-REL23 — criterion 10, and the half D-REL20 cannot reach. D-REL20 proves the
+# fingerprint covers the body TODAY, mutation by mutation; it cannot prove the
+# NEXT line added to the render will be covered, because a differential row only
+# pins the facts somebody thought to mutate. This row pins the structure that
+# makes coverage automatic instead: `build_report` builds one `observations`
+# object, hashes it, and renders out of that object alone. A fact the body shows
+# is then necessarily a fact the fingerprint hashed, because below the binding
+# there is nothing else left to render from.
+#
+# THE CLOSURE IS THE ROW. The obvious predicate — "no statement below the
+# binding names `heads`, `tags`, `verdicts` or `changes`" — is satisfiable
+# WITHOUT the property: `drifting = [c for c in changes if c["raw"]]` bound above
+# the binding names no parameter below it and still hands the render the very
+# record objects the payload was built from. That is #604 defect 2's actual
+# shape, so the probe taint-closes the parameter names to a fixed point and
+# refuses a load of ANY name in that closure below the binding.
+#
+# FOUR WAYS IN, NOT ONE. Rebinding is the way an alias is usually drawn, and a
+# closure that follows only rebinding has three holes wide enough to walk the
+# raw records through — all three were measured as live bypasses of this row's
+# first draft, which is why they are listed as mechanisms rather than as
+# hypotheticals:
+#
+#   1. REBINDING — `x = y`, `for x in y`, `[... for x in y]`, `with y as x`,
+#      `x: T = y`, `x += y`, `x := y`.
+#   2. A CONTAINER TARGET — `bag["c"] = y` and `bag.c = y` store no `Name` at
+#      all: the only `Name` in the target is `bag`, and it is in LOAD context.
+#      A closure that reads assignment targets off `Name`-in-`Store` therefore
+#      lets the container out untainted while it holds the raw record.
+#   3. A MUTATING CALL — `bag.append(y)` binds nothing anywhere, and the value
+#      is in `bag` afterwards regardless.
+#   4. A NESTED DEFINITION — `def peek(): return changes` binds `peek` to a
+#      closure over the raw input and `def hold(_h=changes)` captures it in a
+#      parameter default. Neither is an assignment, and extracting a nested
+#      render helper at the top of a 150-line function is the ORDINARY refactor,
+#      not an exotic one — it is the shape most likely to reinstate defect 2.
+#
+# Each of the four is executed as a negative control below rather than argued
+# for here. The closure over-approximates deliberately: a definition is tainted
+# when ANYTHING in its subtree — body, decorators, bases, parameter defaults —
+# loads a tainted name, and a mutating call taints the receiver's root name
+# whether or not that method actually keeps its argument. A false positive costs
+# one over-strict red on a tree nobody has written yet; a false negative
+# reinstates defect 2 in silence.
+#
+# IT IS NOT A SOUND ESCAPE ANALYSIS AND DOES NOT CLAIM TO BE. A value handed to
+# a plain function that stores it (`stash(changes)`), or written through
+# `setattr` or `globals()`, walks out uncaught. Those are not shapes a render
+# refactor produces by accident, and claiming otherwise would be the same
+# over-claim this issue exists to remove. If a fifth mechanism is ever
+# demonstrated, widen the closure and add its control — never widen the pass
+# message to cover it.
+#
+# `observations` is the one name the closure never admits, and that is the
+# definition of the cut rather than an exemption carved out of it. The object is
+# built FROM the raw inputs by construction, so admitting it would taint
+# everything derived from it and forbid the render from reading the very object
+# this row requires it to read — a predicate no tree can satisfy reds on every
+# tree and therefore says nothing about the one in front of it.
+#
+# Comprehension targets INSIDE the binding statement are excluded for a
+# different and equally specific reason: Python scopes them to the comprehension
+# they appear in, so they cannot be loaded below it at all, and closing over
+# them would only collide with unrelated render variables that happen to share a
+# name — reporting a name collision as a data-flow violation. Nothing reachable
+# is lost, since any name bound OUTSIDE the binding statement is still closed
+# over, which is exactly where the alias shape above lives.
+#
+# ANTI-VACUITY. The arm that would otherwise prove the scanner found a real
+# function — "a tainted load exists ABOVE the binding" — is unsatisfiable on the
+# tree this row blesses: the restructure moves every bucket BELOW the binding,
+# leaving the docstring and nothing else above it. Four arms that survive it:
+#
+#   1. the seed set is read off `build_report`'s own signature, never typed, and
+#      must still contain `heads`, `tags`, `verdicts` and `changes` — which
+#      subsumes "the closure contains `changes`" and additionally pins that it
+#      got there as a parameter rather than as a coincidence;
+#   2. exactly one top-level statement binds `observations`, and that statement
+#      itself loads at least one seed — so the object really is built from the
+#      raw inputs, and "below the binding" is a well-defined position;
+#   3. `observations` is loaded below the binding, and every statement binding
+#      the render accumulator sits below it too. The first half is weak on its
+#      own — the statement directly below the binding is the `json.dumps` that
+#      hashes it, so the HASH satisfies that arm and the render never has to —
+#      and the accumulator-position half is what actually forbids hoisting the
+#      render above the object and measuring "below the binding" against an
+#      empty tail;
+#   4. SIX NEGATIVE CONTROLS. The same predicate is re-run over six mutated
+#      copies of the tree and must report on every one: a direct read of
+#      `changes` re-injected below the binding, and one per mechanism above —
+#      a rebound alias of `verdicts`, a container target, a mutating call, a
+#      nested closure and a captured parameter default. A guard that cannot be
+#      made to fail is not a guard, and the last five are what prove the CLOSURE
+#      rather than the name list is doing the work.
+DREL23_OUT="$(python3 - "$DRIFT" <<'PY'
+import ast
+import sys
+
+drift = sys.argv[1]
+
+FN = "build_report"
+CUT = "observations"          # the hashed object: the one sanctioned re-binding
+RENDER = "lines"              # the accumulator every rendered line goes into
+SEEDS_REQUIRED = ("heads", "tags", "verdicts", "changes")
+
+# (label, statements above the binding, statements below it, the name the
+# predicate must then report). One per mechanism the closure follows, so every
+# arm of it is EXECUTED here — an arm nobody made fail is an assertion about the
+# scanner, not a check of the tree.
+CONTROLS = (
+    ("direct read", None,
+     'probe_direct = [c for c in changes if c["raw"]]', "changes"),
+    ("rebound alias", "probe_alias = verdicts",
+     "probe_used = sorted(probe_alias)", "probe_alias"),
+    ("container target", 'probe_map = {}\nprobe_map["c"] = changes',
+     'probe_mapped = len(probe_map["c"])', "probe_map"),
+    ("mutating call", "probe_list = []\nprobe_list.append(verdicts)",
+     "probe_listed = len(probe_list[0])", "probe_list"),
+    ("nested closure", "def probe_peek():\n    return changes",
+     "probe_peeked = len(probe_peek())", "probe_peek"),
+    ("captured default", "def probe_hold(_held=changes):\n    return _held",
+     "probe_holds = len(probe_hold())", "probe_hold"),
+)
+
+with open(drift, encoding="utf-8") as fh:
+    SOURCE = fh.read()
+
+
+def loads(node):
+    return {n.id for n in ast.walk(node)
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+
+
+def stores(node):
+    """Names this node binds through a plain `Name` target. NARROW on purpose.
+
+    Position is the only question this answers: which statement re-binds
+    `observations`, and where the render accumulator starts. Both want the
+    plain form alone — `observations["x"] = 1` does not rebind the hashed
+    object and `lines[0] = ...` does not start the render, so widening this to
+    container targets would move the cut point and the render position onto
+    statements that are neither. Value flow is the other question entirely, and
+    `sinks` is what answers that one.
+    """
+    return {n.id for n in ast.walk(node)
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+
+
+def root_name(expr):
+    """The name a subscript/attribute chain ultimately writes through."""
+    while isinstance(expr, (ast.Subscript, ast.Attribute, ast.Starred)):
+        expr = expr.value
+    return expr.id if isinstance(expr, ast.Name) else None
+
+
+def sinks(target):
+    """Every name a target can leave its value reachable from."""
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return set().union(*(sinks(elt) for elt in target.elts))
+    root = root_name(target)
+    return {root} if root is not None else set()
+
+
+def flows(node):
+    """Every (names, value) pair through which a value reaches a new name.
+
+    Rebinding, a container target, a mutating call and a nested definition —
+    the four mechanisms named in the comment above this probe. Missing any one
+    of them is how an alias walks out of the closure carrying a raw input with
+    it, and three of the four were measured doing exactly that.
+    """
+    if isinstance(node, ast.Assign):
+        return [(sinks(t), node.value) for t in node.targets]
+    if isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+        return ([(sinks(node.target), node.value)]
+                if node.value is not None else [])
+    if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+        return [(sinks(node.target), node.iter)]
+    if isinstance(node, ast.NamedExpr):
+        return [(sinks(node.target), node.value)]
+    if isinstance(node, ast.withitem):
+        return ([(sinks(node.optional_vars), node.context_expr)]
+                if node.optional_vars is not None else [])
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        # The whole subtree is the value: body, decorators, bases and parameter
+        # defaults are all places a definition can capture a raw input from.
+        return [({node.name}, node)]
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        root = root_name(node.func.value)
+        return [({root}, node)] if root is not None else []
+    return []
+
+
+def definitions(source):
+    tree = ast.parse(source, filename=drift)
+    return [n for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name == FN]
+
+
+def cut_points(fn):
+    return [i for i, stmt in enumerate(fn.body) if CUT in stores(stmt)]
+
+
+def audit(fn):
+    """(violations, facts) for one `build_report` tree, or (None, reason)."""
+    cuts = cut_points(fn)
+    if len(cuts) != 1:
+        return None, ("%d top-level statement(s) bind `%s`, want exactly 1 — "
+                      "with none, or with two, there is no single point for the "
+                      "render to sit below" % (len(cuts), CUT))
+    cut = cuts[0]
+    seeds = [a.arg for a in
+             fn.args.posonlyargs + fn.args.args + fn.args.kwonlyargs]
+    scoped = {id(n) for n in ast.walk(fn.body[cut])
+              if isinstance(n, ast.comprehension)}
+    tainted = set(seeds)
+    tainted.discard(CUT)
+    moved = True
+    while moved:
+        moved = False
+        for node in ast.walk(fn):
+            # `fn` itself is a definition, and tainting the name of the
+            # function under audit would say nothing about anything inside it.
+            if node is fn or id(node) in scoped:
+                continue
+            for names, value in flows(node):
+                if not loads(value) & tainted:
+                    continue
+                for name in names - {CUT}:
+                    if name not in tainted:
+                        tainted.add(name)
+                        moved = True
+    found = set()
+    for stmt in fn.body[cut + 1:]:
+        for node in ast.walk(stmt):
+            if (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+                    and node.id in tainted):
+                found.add((node.lineno, node.id))
+    facts = {
+        "seeds": seeds,
+        "tainted": tainted,
+        "cut": cut,
+        "binding_loads_seed": bool(loads(fn.body[cut]) & set(seeds)),
+        "reads_cut_below": any(CUT in loads(s) for s in fn.body[cut + 1:]),
+        "render_at": [i for i, s in enumerate(fn.body) if RENDER in stores(s)],
+    }
+    # Seed loads first, then by position. A violation drags derived names in
+    # with it — a render that appends a raw input taints its own accumulator —
+    # and the five lines the failure message has room for are far more useful
+    # spent on the raw inputs than on the accumulator that received them.
+    return sorted(found, key=lambda hit: (hit[1] not in seeds, hit)), facts
+
+
+def control(label, above, below, expected):
+    """Re-run the predicate over a deliberately-broken copy of the tree."""
+    mutant = definitions(SOURCE)[0]
+    cut = cut_points(mutant)[0]
+    injected = ast.parse(above).body if above is not None else []
+    mutant.body[cut:cut] = injected
+    cut += len(injected)
+    mutant.body[cut + 1:cut + 1] = ast.parse(below).body
+    ast.fix_missing_locations(mutant)
+    hits, facts = audit(mutant)
+    if hits is None:
+        return ("negative control (%s) could not be audited: %s"
+                % (label, facts))
+    names = sorted({name for _, name in hits})
+    if expected not in names:
+        return ("negative control (%s) did not fire: with %r below the `%s` "
+                "binding the predicate reported %s, naming no `%s` — a guard "
+                "that cannot be made to fail proves nothing about the tree it "
+                "passes on" % (label, below, CUT, names or "nothing", expected))
+    return None
+
+
+defs = definitions(SOURCE)
+if len(defs) != 1:
+    print("ANTI-VACUITY: %d definition(s) of `%s`, want exactly 1 — the probe "
+          "cannot say which one renders" % (len(defs), FN))
+    raise SystemExit(1)
+
+found, facts = audit(defs[0])
+if found is None:
+    print("ANTI-VACUITY: %s" % (facts,))
+    raise SystemExit(1)
+missing = [p for p in SEEDS_REQUIRED if p not in facts["seeds"]]
+if missing:
+    print("ANTI-VACUITY: `%s` no longer takes %s, so the closure would be "
+          "seeded with something other than the raw inputs this row is about"
+          % (FN, ", ".join(missing)))
+    raise SystemExit(1)
+if not facts["binding_loads_seed"]:
+    print("ANTI-VACUITY: the `%s` binding loads none of `%s`'s parameters, so "
+          "it is not the object built out of them and every position measured "
+          "against it is measured against the wrong statement" % (CUT, FN))
+    raise SystemExit(1)
+
+problems = []
+if not facts["reads_cut_below"]:
+    problems.append("no statement below the `%s` binding loads it, so the "
+                    "render is not reading the hashed object at all" % (CUT,))
+if not facts["render_at"]:
+    problems.append("no statement in `%s` binds `%s`, so the probe cannot tell "
+                    "where the render begins" % (FN, RENDER))
+hoisted = [i for i in facts["render_at"] if i < facts["cut"]]
+if hoisted:
+    problems.append("`%s` is bound at statement %s, ABOVE the `%s` binding at "
+                    "%d — a render that starts above the hashed object is "
+                    "outside everything this row checks"
+                    % (RENDER, hoisted, CUT, facts["cut"]))
+for lineno, name in found[:5]:
+    problems.append("line %d loads `%s` — a raw input of `%s`, or a name the "
+                    "closure derived from one — below the `%s` binding"
+                    % (lineno, name, FN, CUT))
+if len(found) > 5:
+    problems.append("%d further load(s) of names in the closure below the "
+                    "binding" % (len(found) - 5,))
+
+for label, above, below, expected in CONTROLS:
+    failure = control(label, above, below, expected)
+    if failure is not None:
+        print("ANTI-VACUITY: %s" % (failure,))
+        raise SystemExit(1)
+
+print("; ".join(problems) if problems else "D-REL23-OK")
+PY
+)"
+DREL23_RC=$?
+DREL23_FAILS=''
+[ "$DREL23_RC" -eq 0 ] \
+  || DREL23_FAILS="the probe itself exited rc=$DREL23_RC — a traceback, or an anti-vacuity refusal, is not a pass"
+case "$DREL23_OUT" in
+  D-REL23-OK) ;;
+  '') DREL23_FAILS="${DREL23_FAILS}${DREL23_FAILS:+; }the probe printed nothing at all" ;;
+  *)  DREL23_FAILS="${DREL23_FAILS}${DREL23_FAILS:+; }$DREL23_OUT" ;;
+esac
+if [ -z "$DREL23_FAILS" ]; then
+  ok "D-REL23 build_report renders out of the hashed observations object, and no name the closure derives from a raw input — by rebinding, container target, mutating call or nested definition — survives below the binding"
+else
+  no "D-REL23 the render still reaches past the hashed object: $DREL23_FAILS"
 fi
 
 echo
