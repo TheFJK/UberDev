@@ -644,8 +644,16 @@ for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
   else
     TRIAGE_STACK=no
   fi
-  TRIAGE_FILES=$(jq -r '.body // ""' <<<"$ISSUE_JSON" | grep -oE '[A-Za-z0-9_./-]+\.(sh|md|ts|tsx|js|jsx|py|json|yml|yaml|go|rs|java|rb|c|h|cpp|css|html)\b' | sort -u | wc -l | tr -d ' ')
-  echo "triage: #$ISSUE_NUM tier=$TIER($TIER_SOURCE) labels=[$TRIAGE_LABELS] body_chars=$TRIAGE_BODY_CHARS stack_trace=$TRIAGE_STACK files_mentioned=$TRIAGE_FILES title=\"$TITLE\""
+  # Read the count off the DECISION, never re-derive it (#614). This line used
+  # to run its own `grep -oE` over the body — a second, independent copy of a
+  # rule that lived in lib/solve_triage.py, kept in sync by nothing. When the
+  # file rule changed from "every filename-shaped token in the prose" to "the
+  # files this issue says it will CHANGE", the grep kept printing the old
+  # number, so the one signal an operator reads to sanity-check a tier would
+  # have contradicted the tier itself. `scope_files` is that decision's
+  # `file_count`, by construction.
+  TRIAGE_SCOPE_FILES="$(python3 -I -c 'import json,sys; print(json.loads(sys.argv[1])["file_count"],end="")' "$TRIAGE_JSON")"
+  echo "triage: #$ISSUE_NUM tier=$TIER($TIER_SOURCE) labels=[$TRIAGE_LABELS] body_chars=$TRIAGE_BODY_CHARS stack_trace=$TRIAGE_STACK scope_files=$TRIAGE_SCOPE_FILES title=\"$TITLE\""
   TIERS[$_vidx]="$TIER"
   TITLES[$_vidx]="$TITLE"
   RISKS[$_vidx]="$RISK_JSON"

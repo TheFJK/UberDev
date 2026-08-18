@@ -16,6 +16,11 @@ import importlib.util
 import re
 import sys
 
+# One literal for the anti-vacuity probe, used both as a hostile-body row and as
+# the standalone "filtering did not empty a real body" check below — they are the
+# same body by intent, and two copies is how they drift apart.
+ORDINARY_BODY = "update tests/goal.test.sh and the run_manifest module"
+
 
 def load(path):
     spec = importlib.util.spec_from_file_location("solve_triage_under_test", path)
@@ -56,13 +61,18 @@ def main() -> int:
     #    classify() is the only vantage point that sees every path into both fields.
     comp_shape = re.compile(r"[a-z0-9][a-z0-9_-]{0,127}")
     files_shape = re.compile(r"[a-z0-9_.][a-z0-9_./-]{0,255}")
+    # Every path-bearing body here MARKS its path as a change target (#614):
+    # `files` is the declared/marked change scope now, not every filename-shaped
+    # token in the prose, so an unmarked path yields no token at all and the
+    # schema-shape probe below would pass vacuously -- proving nothing about the
+    # filter it exists to exercise.
     hostile_bodies = {
-        "markdown code span with a leading dash": "see `-foo.sh` for the repro",
-        "pasted stack-trace path over the length cap": "at " + ("a" * 300) + ".js:1",
-        "non-ASCII filename surviving casefold": "the file \u0130ndex.js is wrong",
+        "markdown code span with a leading dash": "patch `-foo.sh` for the repro",
+        "pasted stack-trace path over the length cap": "fix the crash at " + ("a" * 300) + ".js:1",
+        "non-ASCII filename surviving casefold": "rename the file \u0130ndex.js",
         "module word over the length cap": "the " + ("m" * 141) + " module is broken",
         "Turkish dotted capital in a module word": "the \u0130stanbul module is broken",
-        "ordinary body": "tests/goal.test.sh and the run_manifest module",
+        "ordinary body": ORDINARY_BODY,
     }
     for label, body in hostile_bodies.items():
         snapshot = {"number": 1, "title": "t", "body": body, "labels": [], "state": "OPEN"}
@@ -75,8 +85,7 @@ def main() -> int:
                 failures.append(f"[{label}] file {tok!r} violates the context-schema shape")
     # The ordinary body must still yield signal — a filter that drops everything
     # would satisfy every assertion above while destroying triage.
-    ordinary = st.classify({"number": 1, "title": "t",
-                            "body": "tests/goal.test.sh and the run_manifest module",
+    ordinary = st.classify({"number": 1, "title": "t", "body": ORDINARY_BODY,
                             "labels": [], "state": "OPEN"}, None, None, None)
     if not ordinary.get("files") or not ordinary.get("components"):
         failures.append("filtering emptied an ordinary body — the guard is over-broad, "
