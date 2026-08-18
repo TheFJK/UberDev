@@ -2233,7 +2233,9 @@ async function runTaskChain(rec, planPath, planFindings) {
   // (`gh issue list --label <finding-label> --state open`), and a
   // merged-but-unfinished original carries no finding label, so nothing
   // re-collects it inside the run. The PR number is on `prsPartial`, so the
-  // shortfall is now VISIBLE; nothing acts on it. Convergence is issue #613.
+  // shortfall is now VISIBLE where it has to be; what visibility does not buy
+  // is re-collection. Re-queueing, with the anti-spin guard it needs, is issue
+  // #613.
   // A pointer to a filed number rather than to "a follow-up issue":
   // an unnamed one cannot be checked, and tests/docs-accuracy.test.sh T16.15
   // checks this one.

@@ -180,6 +180,50 @@ grep -q 'WORKFLOW_ARGS_BEGIN' "$SKILL" \
 grep -q '"Workflow"' "$GOAL_CMD" \
   && pass "G7d commands/goal.md allows the Workflow tool" || fail "G7d commands/goal.md does not list Workflow in allowed-tools"
 
+# G8 (#592) — the partial-chain carrier, JOINED to the two scripts that parse
+# it. The driver is the only party that sees the fleet's per-issue
+# `chainComplete` AND composes the phase-script command lines, and RFC 0012
+# §2.2 constraint 6 forbids it a filesystem, so argv is the whole channel. A
+# flag spelled here and nowhere else is not a carrier — it is an `unknown
+# argument` exit 2 on the first partial cycle — so each half is asserted
+# against the script that consumes it rather than on its own.
+if grep -q -- '--partial-prs=' "$WORKFLOW" && grep -q -- '--partial-prs=\*)' "$WATCH"; then
+  pass "G8a the watch relay's command line carries --partial-prs and lib/goal-watch.sh parses that exact flag"
+else
+  fail "G8a the --partial-prs carrier is spelled on only one side (driver and lib/goal-watch.sh must agree)"
+fi
+if grep -q -- '--partial-issues=' "$WORKFLOW" && grep -q -- '--partial-issues=\*)' "$P3"; then
+  pass "G8b the collect relay's command line carries --partial-issues and lib/goal-phase3.sh parses that exact flag"
+else
+  fail "G8b the --partial-issues carrier is spelled on only one side (driver and lib/goal-phase3.sh must agree)"
+fi
+
+# G8c/G8d — the audit-row FIELD NAME the collect relay is told to read.
+# `uberdev_goal_audit` frames every row as {"ts","event","payload"}; a relay
+# sent to `.data.reason` finds nothing, reports "", and the driver's
+# `rec.reason || col.decision` fallback then publishes the degraded literal
+# "halt" as the halt reason of every Phase-3 breaker. The writer's own framing
+# is asserted too, so this row cannot go vacuous if the payload key is renamed.
+if grep -q '\.payload\.reason' "$WORKFLOW" && grep -q '\.payload\.phase' "$WORKFLOW"; then
+  pass "G8c the collect relay reads .payload.reason and .payload.phase off the breaker row"
+else
+  fail "G8c the collect relay does not name both .payload.reason and .payload.phase"
+fi
+if grep -q '\.data\.reason' "$WORKFLOW"; then
+  fail "G8d the collect relay still points at .data.reason — uberdev_goal_audit writes no such key, so every Phase-3 halt reports the degraded literal 'halt'"
+else
+  pass "G8d no .data.* read survives in the driver"
+fi
+# G8f — a schema property the relay is never TOLD to return is a property that
+# arrives undefined on every call, and the halt would then report its reason
+# with no phase beside it. The instruction list and S.collect must agree.
+grep -qE 'Return via StructuredOutput:[^"]*phase' "$WORKFLOW" \
+  && pass "G8f the collect relay's StructuredOutput list names phase" \
+  || fail "G8f S.collect declares phase but the relay is never told to return it"
+grep -q '"payload":%s' "$REPO_ROOT/plugins/uberdev/lib/goal-state.sh" \
+  && pass "G8e control: uberdev_goal_audit really does frame the row under \"payload\" (so G8c/G8d are discriminating)" \
+  || fail "G8e control: the audit framing no longer writes a \"payload\" key — G8c/G8d now assert against the wrong field name"
+
 # ---------------------------------------------------------------------------
 # N — the nesting budget
 # ---------------------------------------------------------------------------
@@ -276,7 +320,7 @@ function claim(o) {
 }
 function collect(o) {
   return Object.assign({ rc: 0, decision: "converged", candidates: 0, queued: 0,
-    queue: "", fingerprints: "", reason: "", note: "" }, o || {});
+    queue: "", fingerprints: "", reason: "", phase: "", note: "" }, o || {});
 }
 const VERDICTS = { rows: [{ pr: 901, signal: "green" }, { pr: 902, signal: "yellow" }] };
 
@@ -717,6 +761,184 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   const resT = resultOf(recT);
   out.tPrsOpened = (resT && resT.cycles.length) ? resT.cycles[0].prsOpened : null;
 
+  // Runs T2-T8 (#592) — the PARTIAL-CHAIN CARRIER, and the one surface no grep
+  // can see: the COMMAND LINE the driver hands the two phase scripts.
+  //
+  // `chainComplete` has been script-derived and correct since #554 and reached
+  // no consumer. /goal ingested `prsOpened` through a shape-only digit filter
+  // and merged on the numbers, so a PR opened over a task chain that STOPPED
+  // SHORT arrived at the merge gate byte-identical to one opened over a
+  // finished chain, and the run then reported a convergence it had not
+  // achieved. The driver is the only party that sees the fleet's return value
+  // AND composes the phase-script command lines, and RFC 0012 §2.2 constraint 6
+  // forbids it a filesystem — so argv is the whole channel, and these rows read
+  // the emitted flag and the run ledger rather than the presence of a field.
+  function promptFor(record, label) {
+    const c = record.agentCalls.find(function (x) { return x.label === label; });
+    return c ? c.prompt : "";
+  }
+  function fleetReturn(value) {
+    const m = {};
+    m[FLEET_PATH] = value;
+    return m;
+  }
+  function partialReturns() {
+    return {
+      "goal-claim:c1": claim(),
+      "goal-watch:c1:t1": { rc: 0, note: "drained" },
+      "goal-verdicts:c1": VERDICTS,
+      "goal-collect:c1": collect(),
+    };
+  }
+
+  // Run T2 — one chain finished, one stopped short, both delivering a PR. The
+  // POSITIVE half: an arity regression on the digit filter (calling it with a
+  // scalar rather than the array it takes) empties both sets while every
+  // negative control below still passes, which is a silent, green, total
+  // failure. This is the row that reds for it.
+  const recT2 = await run(buildArgs(), {
+    agentReturns: partialReturns(),
+    workflowReturns: fleetReturn({
+      prsOpened: [901, 902],
+      prsPartial: [901],
+      results: [
+        { issue: 11, status: "PR_OPENED", prNumber: 901, prProof: "CONFIRMED", chainComplete: false },
+        { issue: 12, status: "PR_OPENED", prNumber: 902, prProof: "CONFIRMED", chainComplete: true },
+      ],
+    }),
+  });
+  const resT2 = resultOf(recT2);
+  out.t2Issues = resT2 ? resT2.partialIssues : null;
+  out.t2Prs = resT2 ? resT2.partialPrs : null;
+  out.t2CycleIssues = (resT2 && resT2.cycles.length) ? resT2.cycles[0].partialIssues : null;
+  out.t2WatchFlag = promptFor(recT2, "goal-watch:c1:t1").indexOf(" --partial-prs=901") >= 0;
+  out.t2CollectFlag = promptFor(recT2, "goal-collect:c1").indexOf(" --partial-issues=11") >= 0;
+  // The clean-path PR set is untouched by the partial ingest.
+  out.t2PrsOpened = (resT2 && resT2.cycles.length) ? resT2.cycles[0].prsOpened : null;
+
+  // Run T3 — the negative control. Every relay command line stays
+  // byte-identical to today's on a clean cycle: the flag is OMITTED, never
+  // emitted empty, because `--partial-prs=` with no value is a malformed-shape
+  // exit 2 in lib/goal-watch.sh and would halt every converging run.
+  const recT3 = await run(buildArgs(), {
+    agentReturns: partialReturns(),
+    workflowReturns: fleetReturn({
+      prsOpened: [901, 902],
+      prsPartial: [],
+      results: [
+        { issue: 11, status: "PR_OPENED", prNumber: 901, prProof: "CONFIRMED", chainComplete: true },
+        { issue: 12, status: "PR_OPENED", prNumber: 902, prProof: "CONFIRMED", chainComplete: true },
+      ],
+    }),
+  });
+  const resT3 = resultOf(recT3);
+  out.t3Issues = resT3 ? resT3.partialIssues : null;
+  out.t3Clean = promptFor(recT3, "goal-watch:c1:t1").indexOf("--partial-prs=") < 0
+    && promptFor(recT3, "goal-collect:c1").indexOf("--partial-issues=") < 0;
+
+  // Run T4 — three shapes at once, and the row cannot pass by rejecting
+  // everything: the two records with NO `chainComplete` key are not counted
+  // (absent means the record ran no task chain at all — the single-solver path
+  // attaches the field nowhere — and a chain that never ran cannot have stopped
+  // short) while their `chainComplete: false` siblings in the SAME return still
+  // are. Issue 13 delivered no PR, so it owes the issue set a member and the PR
+  // set nothing. And the whole return carries NO `prsOpened` key, so the ledger
+  // cannot be nested inside that block.
+  const recT4 = await run(buildArgs(), {
+    agentReturns: partialReturns(),
+    workflowReturns: fleetReturn({
+      prsPartial: [903],
+      results: [
+        { issue: 11, status: "FAILED" },
+        { issue: 12, status: "PR_OPENED", prNumber: 902, prProof: "CONFIRMED" },
+        { issue: 13, status: "PUSHED_NO_PR", prNumber: 0, prProof: "DISPROVEN", chainComplete: false },
+        { issue: 14, status: "PR_OPENED", prNumber: 903, prProof: "CONFIRMED", chainComplete: false },
+      ],
+    }),
+  });
+  const resT4 = resultOf(recT4);
+  out.t4Issues = resT4 ? resT4.partialIssues : null;
+  out.t4Prs = resT4 ? resT4.partialPrs : null;
+  out.t4CollectFlag = promptFor(recT4, "goal-collect:c1").indexOf(" --partial-issues=13,14") >= 0;
+
+  // Run T5 — halt legibility. lib/goal-phase3.sh's partial-chain refusal reuses
+  // the closed-set breaker reason `solver_failed` with `phase=partial_chain` as
+  // the discriminator, so the phase subfield is the ONLY thing that tells the
+  // two halts apart. It travels as its own field: concatenating it into
+  // haltReason would rewrite the halt strings of the four live emitters that
+  // already put a `phase` in a breaker payload.
+  const recT5 = await run(buildArgs(), {
+    agentReturns: Object.assign(partialReturns(), {
+      "goal-collect:c1": collect({ rc: 1, decision: "halt", reason: "solver_failed",
+        phase: "partial_chain" }),
+    }),
+  });
+  const resT5 = resultOf(recT5);
+  out.t5Reason = resT5 ? resT5.haltReason : null;
+  out.t5Phase = resT5 ? resT5.haltPhase : null;
+
+  // Run T6 — the regression guard for that decision. A breaker that carries a
+  // phase from some OTHER emitter must still report its reason unsuffixed.
+  const recT6 = await run(buildArgs(), {
+    agentReturns: Object.assign(partialReturns(), {
+      "goal-collect:c1": collect({ rc: 1, decision: "halt", reason: "stuck_loop",
+        phase: "merge_barrier" }),
+    }),
+  });
+  const resT6 = resultOf(recT6);
+  out.t6Reason = resT6 ? resT6.haltReason : null;
+  out.t6Phase = resT6 ? resT6.haltPhase : null;
+
+  // Run T7 — and a breaker with no phase at all keeps B28/B29 semantics: the
+  // reason verbatim, the phase empty rather than absent.
+  const recT7 = await run(buildArgs(), {
+    agentReturns: Object.assign(partialReturns(), {
+      "goal-collect:c1": collect({ rc: 1, decision: "halt", reason: "nonconvergence" }),
+    }),
+  });
+  const resT7 = resultOf(recT7);
+  out.t7Reason = resT7 ? resT7.haltReason : null;
+  out.t7Phase = resT7 ? resT7.haltPhase : null;
+
+  // Run T8 — the ledger is RUN-LIFETIME, not per cycle. lib/goal-phase3.sh
+  // truncates the batch-PR registry at loop-back and lib/goal-watch.sh
+  // re-discovers PRs from `gh pr list` on every pass, so a set that reset with
+  // the cycle would stop naming a cycle-1 partial delivery the moment cycle 2
+  // returned a clean fleet — and the convergence gate would then converge the
+  // run on the cycle it was cleanest. The per-cycle record still carries THIS
+  // cycle's set, which is what makes the two observable separately.
+  let t8FleetCalls = 0;
+  const T8_FLEET = {};
+  T8_FLEET[FLEET_PATH] = function () {
+    t8FleetCalls += 1;
+    return (t8FleetCalls === 1)
+      ? { prsOpened: [901], prsPartial: [901],
+          results: [{ issue: 11, status: "PR_OPENED", prNumber: 901, prProof: "CONFIRMED",
+            chainComplete: false }] }
+      : { prsOpened: [903], prsPartial: [],
+          results: [{ issue: 13, status: "PR_OPENED", prNumber: 903, prProof: "CONFIRMED",
+            chainComplete: true }] };
+  };
+  const recT8 = await run(buildArgs(), {
+    agentReturns: {
+      "goal-claim:c1": claim(),
+      "goal-watch:c1:t1": { rc: 0, note: "drained" },
+      "goal-verdicts:c1": VERDICTS,
+      "goal-collect:c1": collect({ rc: 42, decision: "loop", candidates: 1, queued: 1, queue: "13" }),
+      "goal-claim:c2": claim({ dispatch: "13", armed: "13" }),
+      "goal-watch:c2:t1": { rc: 0, note: "drained" },
+      "goal-verdicts:c2": VERDICTS,
+      "goal-collect:c2": collect(),
+    },
+    workflowReturns: T8_FLEET,
+  });
+  const resT8 = resultOf(recT8);
+  out.t8Issues = resT8 ? resT8.partialIssues : null;
+  out.t8Prs = resT8 ? resT8.partialPrs : null;
+  out.t8Cycle2Issues = (resT8 && resT8.cycles.length > 1) ? resT8.cycles[1].partialIssues : null;
+  out.t8Cycle2Carried = promptFor(recT8, "goal-watch:c2:t1").indexOf(" --partial-prs=901") >= 0
+    && promptFor(recT8, "goal-collect:c2").indexOf(" --partial-issues=11") >= 0;
+
   // Runs U/V (#564) — the per-cycle SPEND accumulator, observed as a VALUE.
   //
   // Every run above asserts what the driver DID. None asserted what it CHARGED:
@@ -1110,6 +1332,28 @@ else
   check sNoClaim true                     "B89 the raised projection still halts BEFORE the claim pass"
 
   check tPrsOpened '[902]'                "B90 /goal ingests exactly the fleet post-verification PR set — the disproven number never enters it"
+
+  check t2Issues '[11]'                   "B98a the run ledger names the ISSUE whose solver task chain stopped short — derived from the fleet's per-issue chainComplete, the value no consumer read before"
+  check t2Prs '[901]'                     "B98b the run ledger names its PR, taken from the fleet's own prsPartial subset rather than re-derived: two records claiming ONE number disagreeing about completeness is a collision prsOpened has already settled, and a second derivation here would answer it differently with nothing to compare against"
+  check t2CycleIssues '[11]'              "B98c the cycle record carries the cycle's own partial set"
+  check t2PrsOpened '[901,902]'           "B98d the ingested PR set is unchanged by the partial ingest — both PRs still merge (#554's non-closing trailer is what keeps the unfinished issue open, not a withheld merge)"
+  check t2WatchFlag true                  "B98e the watch relay's COMMAND LINE carries --partial-prs=901 — argv is the only channel from the JS ledger to the shell merge gate, and this is the assertion no grep over either file can make"
+  check t2CollectFlag true                "B98f the collect relay's command line carries --partial-issues=11, which is what makes the convergence gate refuse"
+  check t3Issues '[]'                     "B98g a fleet return whose every chain finished leaves the ledger empty"
+  check t3Clean true                      "B98h ...and NEITHER flag is emitted at all on that clean path: an empty --partial-prs= is a malformed-shape exit 2 in lib/goal-watch.sh, so emitting the flag empty would halt every converging run"
+  check t4Issues '[13,14]'                "B98i a record with NO chainComplete key is not partial (the single-solver path attaches the field nowhere) while a chainComplete:false sibling in the same return still is — the row cannot pass by rejecting everything"
+  check t4Prs '[903]'                     "B98j a partial record that delivered NO pr contributes to the issue set and not to the PR set (0 is the fleet's no-PR sentinel, never a PR number the merge gate could match)"
+  check t4CollectFlag true                "B98k ...and both partial issues reach the collect command line, comma-joined"
+  check t5Reason '"solver_failed"'        "B98l a partial-chain halt reports its real reason: the collect relay reads .payload.reason off the breaker row, where uberdev_goal_audit actually writes it (the shipped .data.reason found nothing, so every Phase-3 halt degraded to the literal decision \"halt\")"
+  check t5Phase '"partial_chain"'         "B98m the phase subfield travels as its OWN field — lib/goal-phase3.sh reuses the closed-set reason solver_failed and discriminates on phase, so without it the two halts are indistinguishable in the result"
+  check t6Reason '"stuck_loop"'           "B98n a breaker carrying some other emitter's phase still reports its reason UNSUFFIXED — haltReason's composition is unchanged, which is what keeps the four live phase-carrying emitters' halt strings byte-identical"
+  check t6Phase '"merge_barrier"'         "B98o ...with that phase surfaced separately"
+  check t7Reason '"nonconvergence"'       "B98p B28/B29 semantics preserved: a breaker with no phase at all still carries its reason verbatim"
+  check t7Phase '""'                      "B98q ...and reports an empty phase rather than an absent one"
+  check t8Issues '[11]'                   "B98r the ledger is RUN-LIFETIME: a cycle-2 fleet with every chain finished does not clear the cycle-1 partial delivery"
+  check t8Prs '[901]'                     "B98s ...nor its PR — lib/goal-watch.sh re-discovers PRs from gh each pass and lib/goal-phase3.sh truncates the batch registry at loop-back, so a set that reset with the cycle would go silent exactly when the run is closest to converging"
+  check t8Cycle2Issues '[]'               "B98t while the cycle-2 RECORD still reports that cycle's own empty set — the two are observable separately, so neither can be mistaken for the other"
+  check t8Cycle2Carried true              "B98u and cycle 2's own relay command lines still carry both flags"
 
   check uSpend '"match"'                  "B91 the per-cycle spend accumulator is charged for the fleet it ran: agentsSpent is the four driver relays plus the two batched fleet relays plus the per-issue fleet cost at the DEFAULT budget (nothing in tests/ read agentsSpent at all before this row; at the default this total cannot tell the envelope-derived per-issue term from a literal, which needs a raised-budget row of its own)"
   check vParity '"match"'                 "B92 a fleet that THREW is charged the same estimate as a fleet that ran — the catch arm is not free, and CB1 is never handed a ceiling to compare against a spend that never happened"

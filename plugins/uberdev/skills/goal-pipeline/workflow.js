@@ -170,6 +170,17 @@ function digitsOnly(list) {
     .filter(function (s) { return /^[0-9]+$/.test(s); });
 }
 
+// #592 — the issue numbers of the fleet records whose task chain stopped short.
+// Returns an ARRAY, so digitsOnly() is called at its real arity: digitsOnly
+// takes a list and answers [] for anything else, so a scalar call would leave
+// the ledger permanently empty while every negative control still passed — a
+// silent, green, total failure.
+function partialIssuesFromResults(results) {
+  return (Array.isArray(results) ? results : [])
+    .filter(function (r) { return r && r.chainComplete === false; })
+    .map(function (r) { return r.issue; });
+}
+
 // The relays return comma-joined scalars (the shell prints one compact JSON
 // line; the schema keeps every list a string so an agent cannot smuggle a
 // nested object through a typed array).
@@ -226,6 +237,11 @@ const S = {
       queue: { type: "string", description: "comma-joined issue numbers surviving into the next cycle" },
       fingerprints: { type: "string", description: "comma-joined 16-hex fingerprints seen this cycle" },
       reason: { type: "string", description: "the circuit-breaker reason when decision=halt, else empty" },
+      // #592 — the SAME row's `phase` subfield, and a separate field on purpose.
+      // lib/goal-phase3.sh's partial-chain refusal reuses the closed-set reason
+      // `solver_failed` and discriminates on `phase` (GOAL_CIRCUIT_BREAKER_REASONS
+      // is closed by RFC 0005 §9), so without this the two halts are one string.
+      phase: { type: "string", description: "the `.payload.phase` subfield of the same goal_circuit_breaker row as reason, else empty" },
       note: { type: "string", description: "<=300 chars" },
     },
   },
@@ -288,6 +304,36 @@ function claimPrompt(cycleNo) {
     + maxCycles + ".";
 }
 
+// #592 — the partial-chain carrier, and the ONE reason it is a command-line
+// flag rather than anything tidier. The fleet's per-issue `chainComplete` is
+// visible in exactly one place: the return value of the nested workflow() call
+// below. The merge gate that has to act on it is not in this script — it is in
+// lib/goal-watch.sh, which re-discovers PRs from `gh pr list` every pass and
+// never sees a JS value at all — and RFC 0012 §2.2 constraint 6 forbids this
+// script the filesystem, so it can neither write a file that gate would read
+// nor reach into a running shell. argv is the whole channel.
+//
+// OMITTED, never emitted empty. `--partial-prs=` with no value is a
+// malformed-shape refusal (exit 2) in lib/goal-watch.sh, and both scripts take
+// a startup refusal as a bug in the caller that composed the command line
+// rather than as something to poll through — so an always-on flag would halt
+// every converging run at the first tick. On a clean cycle the two command
+// lines stay byte-identical to what they were before this issue.
+//
+// Both values are script-derived: they leave the ledger below having passed
+// digitsOnly(), so nothing but digits and commas can reach a command line, and
+// the two scripts re-refuse the shape at their own edge regardless.
+//
+// The ledger these read lives in the run-state block further down (it must span
+// the whole run, not one prompt); these are called from inside the cycle loop,
+// long after that block has run.
+function partialPrsFlag() {
+  return partialPrs.length ? " --partial-prs=" + partialPrs.join(",") : "";
+}
+function partialIssuesFlag() {
+  return partialIssues.length ? " --partial-issues=" + partialIssues.join(",") : "";
+}
+
 function watchPrompt(cycleNo, tickNo) {
   // UBERDEV_GOAL_SOLVERS_SETTLED=1 is load-bearing, not decoration. The
   // nested fleet call is AWAITED before this stage runs, so every solver in the
@@ -298,7 +344,8 @@ function watchPrompt(cycleNo, tickNo) {
     + "Pass timeout: " + watchTimeoutMs + " to the Bash tool — this call is EXPECTED to run for up to "
     + (watchBudgetS > 0 ? watchBudgetS : 480) + " seconds, which is far longer than the tool's default "
     + "timeout, and a timed-out call returns no exit status at all:\n\n"
-    + "  " + envPrefix() + "UBERDEV_GOAL_SOLVERS_SETTLED=1 " + bashCmd(watchSh) + " --goal-id=" + goalId + "\n\n"
+    + "  " + envPrefix() + "UBERDEV_GOAL_SOLVERS_SETTLED=1 " + bashCmd(watchSh) + " --goal-id=" + goalId
+    + partialPrsFlag() + "\n\n"
     + "This is the /uberdev:goal watch pass (cycle " + cycleNo + ", tick " + tickNo + " of at most "
     + maxWatchTicks + "). It polls GitHub, drives the PR state machine and the merge barrier, and exits "
     + "with ONE of three documented codes:\n"
@@ -317,9 +364,25 @@ function watchPrompt(cycleNo, tickNo) {
     + "to 300 characters).";
 }
 
+// The reason read is `.payload.reason`, because that is where
+// `uberdev_goal_audit` writes it — every row is framed
+// {"ts","event","payload"}. The read this replaces went looking for the reason
+// under a `data` object no writer has ever created, so it matched no key at
+// all: the relay reported "" for every halt and the driver's
+// `rec.reason || col.decision` fallback published the degraded literal "halt"
+// as the reason of every Phase-3 breaker.
+//
+// RESIDUAL, filed as #624 rather than left in prose: Phase 3 can exit 1
+// WITHOUT writing a breaker row (`uberdev_dispatch_resolve_env … || exit 1`,
+// above lib/goal-phase3.sh's rehydrate region), and the tail then finds the
+// newest row the RUN wrote — possibly an earlier cycle's. Neither fix belongs
+// here: emitting a row on that path is a change to that script's startup, and
+// bounding the read by identity needs a clock the runtime denies this script
+// (DR-7) on payloads that are not uniformly keyed by cycle.
 function collectPrompt(cycleNo) {
   return "You are a mechanical relay. Run EXACTLY this command via Bash and report what it printed:\n\n"
-    + "  " + envPrefix() + bashCmd(phase3Sh) + " --goal-id=" + goalId + "\n\n"
+    + "  " + envPrefix() + bashCmd(phase3Sh) + " --goal-id=" + goalId
+    + partialIssuesFlag() + "\n\n"
     + "This is the /uberdev:goal collect pass for cycle " + cycleNo + ". It enumerates the cycle's new "
     + "BLOCKER/CRITICAL `review-pr-finding` issues, runs the fingerprint-repeat detector, applies the "
     + "overflow truncation, and evaluates the terminal gates. It prints ONE JSON line "
@@ -327,12 +390,14 @@ function collectPrompt(cycleNo) {
     + "\"candidates\":N,\"queued\":N,\"queue\":\"<csv>\"} and exits 0 (converged) / 42 (loop back) / 1 (halt) "
     + "/ 3 (state error).\n\n"
     + "Copy decision, rc, candidates, queued and queue from that line VERBATIM — do not recompute them and do not "
-    + "second-guess the decision. For `reason`, if and only if the decision is `halt`, report the `.data.reason` "
-    + "field of the LAST goal_circuit_breaker row in \"" + tmpDirAbs + "/goal-" + goalId + ".jsonl\" "
-    + "(read it with `tail`); otherwise report \"\". For `fingerprints`, report the comma-joined 16-hex "
+    + "second-guess the decision. For `reason`, if and only if the decision is `halt`, report the "
+    + "`.payload.reason` field of the LAST goal_circuit_breaker row in \"" + tmpDirAbs + "/goal-" + goalId + ".jsonl\" "
+    + "(read it with `tail`); otherwise report \"\". For `phase`, report the `.payload.phase` field of THAT "
+    + "SAME row — most breakers carry no such key, so report \"\" whenever it is absent, and \"\" whenever "
+    + "the decision is not `halt`. Do NOT merge it into `reason`. For `fingerprints`, report the comma-joined 16-hex "
     + "fingerprints in \"" + tmpDirAbs + "/goal-" + goalId + "-fingerprints.tsv\" whose cycle column equals "
     + cycleNo + ", or \"\" if the file is absent.\n\n"
-    + "Return via StructuredOutput: rc, decision, candidates, queued, queue, fingerprints, reason, note.";
+    + "Return via StructuredOutput: rc, decision, candidates, queued, queue, fingerprints, reason, phase, note.";
 }
 
 function verdictPrompt(cycleNo) {
@@ -362,6 +427,17 @@ let queue = issuesFromArgs.slice();       // the rollover queue, carried across 
 const fingerprintHistory = {};             // fingerprint -> first cycle seen
 const cycleRecords = [];
 const auditEvents = [];
+// #592 — the partial-chain ledger: the issues whose solver task chain STOPPED
+// SHORT this run, and the PRs those short chains still delivered. Run-lifetime
+// beside the queue and the cycle records, for the same structural reason they
+// are: lib/goal-phase3.sh truncates the batch-PR registry at loop-back and
+// lib/goal-watch.sh re-discovers PRs from `gh pr list` on every pass, so a set
+// that reset with the cycle would stop naming a cycle-1 partial delivery the
+// moment a later cycle returned a clean fleet — and the convergence gate would
+// then converge the run on the cycle it looked cleanest. Both are arrays of
+// digit STRINGS (digitsOnly's output), deduped, in first-seen order.
+const partialIssues = [];
+const partialPrs = [];
 const nullsByPhase = {};
 let verdictRows = [];
 let cb1Tripped = false;                    // projected-agent ceiling
@@ -369,6 +445,11 @@ let cb2Tripped = false;                    // budget floor
 let cbWatchTicks = false;                  // watch never settled within the tick bound
 let halted = false;
 let haltReason = "";
+// #592 — the breaker's `phase` subfield, SEPARATE from haltReason and never
+// concatenated into it. Four live emitters already put a `phase` in a breaker
+// payload, so folding it into the reason string would rewrite halt strings
+// that existing readers match on.
+let haltPhase = "";
 let converged = false;
 let agentsSpent = 0;
 let fleetRuns = 0;
@@ -391,7 +472,10 @@ function finalize() {
     converged: converged,
     halted: halted,
     haltReason: haltReason,
+    haltPhase: haltPhase,
     queueRemaining: queue.slice().map(Number),
+    partialIssues: partialIssues.map(Number),
+    partialPrs: partialPrs.map(Number),
     fleetRuns: fleetRuns,
     agentsSpent: agentsSpent,
     cycles: cycleRecords,
@@ -642,6 +726,46 @@ async function runCycle() {
         if (out && typeof out === "object" && Array.isArray(out.prsOpened)) {
           rec.prsOpened = digitsOnly(out.prsOpened).map(Number);
         }
+        // #592 — the partial-chain ingest. Deliberately a SIBLING of the block
+        // above rather than nested inside it: the issue half is derived from
+        // `results`, so a fleet return carrying records but no `prsOpened`
+        // array must still reach the ledger. Nesting it would make the whole
+        // refusal conditional on a field it does not read.
+        //
+        // The two halves come from different members ON PURPOSE.
+        //
+        //   PRs — `out.prsPartial`, the fleet's own filter OF `prsOpened`. Not
+        //   re-derived from `results[].prNumber`: when two records claim ONE
+        //   number and disagree about completeness, `prsOpened` has already
+        //   decided which record owns it and the loser's per-record facts went
+        //   with its discarded claim, so a second derivation here would be a
+        //   second, uncompared copy of that collision rule (#370) and the two
+        //   lists could answer differently with nothing to compare them. Taking
+        //   the published subset also makes `partialPrs ⊆ ingested PRs`
+        //   structural — no number the merge gate never saw can be flagged.
+        //
+        //   Issues — `results[].chainComplete`, because nothing else publishes
+        //   an issue-number list and the convergence gate refuses on ISSUES.
+        //   `=== false` is strict: an ABSENT flag means the record ran no task
+        //   chain at all (the single-solver path attaches it nowhere, and a
+        //   FAILED record never got that far), and a chain that never ran
+        //   cannot have stopped short — `!r.chainComplete` would make every
+        //   trivial-tier PR a partial delivery and refuse every convergence.
+        //
+        // The sets can differ by one issue in exactly that collision case: the
+        // chain stopped short, so the issue is named, while its PR number
+        // belongs to another record. That is the safe direction — the run still
+        // refuses to report convergence.
+        if (out && typeof out === "object") {
+          const cycleIssues = digitsOnly(partialIssuesFromResults(out.results));
+          // "0" is the fleet's no-PR sentinel, never a PR number the merge gate
+          // could match; the issue behind it is still named above.
+          const cyclePrs = digitsOnly(out.prsPartial).filter(function (s) { return s !== "0"; });
+          cycleIssues.forEach(function (s) { if (partialIssues.indexOf(s) < 0) partialIssues.push(s); });
+          cyclePrs.forEach(function (s) { if (partialPrs.indexOf(s) < 0) partialPrs.push(s); });
+          rec.partialIssues = cycleIssues.map(Number);
+          rec.partialPrs = cyclePrs.map(Number);
+        }
       } catch (e) {
         rec.fleet = "threw";
         // A fleet that threw still SPENT. Charging nothing here is what lets the
@@ -773,6 +897,7 @@ async function runCycle() {
 
   rec.decision = col.decision;
   rec.reason = String(col.reason || "");
+  rec.phase = String(col.phase || "");
   rec.candidates = clampInt(col.candidates, 0, 100000, 0);
 
   // Fingerprint bookkeeping lives HERE, in a JS object spanning the run. The
@@ -806,7 +931,11 @@ async function runCycle() {
   }
   halted = true;
   haltReason = rec.reason || col.decision;
-  log("cycle " + cycle + ": halting (" + haltReason + ").");
+  // Reported beside the reason, never inside it. `solver_failed` covers two
+  // distinct Phase-3 halts and `partial_chain` is the only thing that tells
+  // them apart, but the reason string itself is what existing readers match.
+  haltPhase = rec.phase;
+  log("cycle " + cycle + ": halting (" + haltReason + (haltPhase ? ", phase " + haltPhase : "") + ").");
   return false;
 }
 
