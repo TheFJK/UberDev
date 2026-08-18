@@ -308,31 +308,52 @@ payload_arrived 'read -r UBERDEV_ROOT_EDGE_ID' 'x >/dev/null read -r UBERDEV_ROO
 # anchor must occur ('+' = at least once, default exactly 1); a mismatch is
 # FATAL, because a mutation that no longer bites is a vacuous green.
 #
-# The anchor and the replacement travel in the ENVIRONMENT, not in argv, and that
-# is load-bearing on Windows. Git-for-Windows rewrites absolute-POSIX-looking
-# ARGV values into Windows paths at the exec boundary of a NATIVE binary -- here
-# `python.exe` -- before the callee ever sees them, the same mangling
-# tests/workflow-args.test.sh disables at the same boundary for `jq.exe`. Passed
-# on argv, E39's `>/dev/null read -r UBERDEV_ROOT_EDGE_ID` arrived as
+# The REPLACEMENT travels on STDIN, and on Windows that is load-bearing rather
+# than stylistic. Git-for-Windows rewrites absolute-POSIX-looking values into
+# Windows paths at the exec boundary of a NATIVE binary -- here `python.exe` --
+# before the callee ever sees them, the same mangling tests/workflow-args.test.sh
+# documents at the same boundary for `jq.exe`. Handed over as an ARGV value,
+# E39's `>/dev/null read -r UBERDEV_ROOT_EDGE_ID` arrived as
 # `>C:/Program Files/Git/dev/null read -r UBERDEV_ROOT_EDGE_ID`, in which the
 # redirection target is `C:/Program` and the command word is `Files/Git/dev/null`
 # -- so nothing binds, the checker was RIGHT to stay clean, and the row reported
 # `E39: mutant rc=0, want 1` on `shape-checks-windows` while passing everywhere
-# else. Blanket-disabling the conversion is not the fix: `$LAUNCHER` is a REAL
-# host path on the same command line and needs converting, which is why only the
-# two DATA values move. `-I` implies `-E`, which drops PYTHON* variables only;
-# `os.environ` is untouched by it.
+# else.
+#
+# The ENVIRONMENT is not an escape from it. Moving the payload there was tried on
+# this branch and MEASURED on the runner: the arrival guard below fired with
+# `the mutation replacement did not survive the exec boundary intact`, so that
+# boundary converts env values too. Nor is blanket `MSYS_NO_PATHCONV=1` /
+# `MSYS2_ARG_CONV_EXCL='*'` the fix, right though it is in workflow-args, whose
+# native callee takes no path: `$LAUNCHER` is a REAL host path on this very
+# command line and MUST be converted, or python cannot open it.
+#
+# Stdin is immune because bash writes the bytes itself -- no exec boundary stands
+# between the string and the callee -- and this file already proves that channel
+# byte-exact on the same runner, since every mutant reaches `edge_check` the same
+# way. `<<<` appends exactly one newline that was not in the payload, so exactly
+# that one is stripped back off; the inverse is precise, not a heuristic --
+# measured byte-identical against the argv spelling over an empty, a one-line, a
+# multi-line and a newline-terminated payload. No row pins the strip and none
+# can: dropping it only inserts a blank line above the anchor, and all 69 rows
+# stay green (measured). It is stated here as exactness, not as correctness. The
+# ANCHOR stays on argv deliberately: no anchor here carries a path-shaped token,
+# and a mangled one cannot go quiet -- `src.count` drops to 0 and the occurrence
+# assertion below is FATAL.
 mut() {
-  MUT="$(UBERDEV_MUT_ANCHOR="$1" UBERDEV_MUT_REPLACEMENT="$2" python3 -I -B -c '
-import os, sys
+  MUT="$(python3 -I -B -c '
+import sys
 src = open(sys.argv[1], "rb").read().decode("utf-8")
-anchor, replacement, want = os.environ["UBERDEV_MUT_ANCHOR"], os.environ["UBERDEV_MUT_REPLACEMENT"], sys.argv[2]
+anchor, want = sys.argv[2], sys.argv[3]
+replacement = sys.stdin.buffer.read().decode("utf-8")
+if replacement.endswith("\n"):
+    replacement = replacement[:-1]
 hits = src.count(anchor)
 ok = hits >= 1 if want == "+" else hits == int(want)
 if not ok:
     raise SystemExit("mutation anchor occurs %d time(s), want %s: %s" % (hits, want, anchor))
 sys.stdout.buffer.write(src.replace(anchor, replacement).encode("utf-8"))
-' "$LAUNCHER" "${3:-1}")" || { echo "FATAL: launcher mutation failed (see the message above)" >&2; exit 2; }
+' "$LAUNCHER" "$1" "${3:-1}" <<<"$2")" || { echo "FATAL: launcher mutation failed (see the message above)" >&2; exit 2; }
   payload_arrived "$2" "$MUT" || {
     echo "FATAL: the mutation replacement did not survive the exec boundary intact -- the row it feeds would pass vacuously. Wanted: $2" >&2; exit 2; }
 }
@@ -760,9 +781,10 @@ edge_differential E38 "$EXPORT_ANCHOR" \
 # a redirection is allowed anywhere a transparent prefix is.
 #
 # This is the one payload carrying an absolute-POSIX-looking token, so it is the
-# row that depends on `mut` keeping its payload OFF argv -- see the transport
-# note there. Do not spell the target relatively to dodge that: the redirection
-# is what the row exists to pin, and the transport is what has to be right.
+# row that depends on `mut` handing its payload over on STDIN rather than through
+# an exec boundary -- see the transport note there. Do not spell the target
+# relatively to dodge that: the redirection is what the row exists to pin, and
+# the transport is what has to be right.
 edge_differential E39 "$EXPORT_ANCHOR" \
   "$(prepend_line '>/dev/null read -r UBERDEV_ROOT_EDGE_ID <<<"$V"' "$EXPORT_ANCHOR")" 1 1 \
   'bound by read'
