@@ -349,9 +349,11 @@ def declared_scope(body: str) -> list[str] | None:
     Returns a list — possibly EMPTY — whenever any scope block is present, so
     the caller can tell "declared nothing" from "declared no scope".
 
-    A declaration whose tokens are ALL refused by the schema filter is neither:
-    it is an UNREADABLE declaration, and it must not be reported as the empty
-    one. `_schema_safe_files` drops a non-conforming token silently and by
+    A declaration the schema filter cannot read IN FULL is neither: it is an
+    UNREADABLE declaration, and it must not be reported as a complete one. The
+    guard is on the COUNT, not on emptiness — losing one token out of three is
+    the same lie as losing all three, just quieter, because the survivors come
+    back byte-indistinguishable from an honest declaration of that size. `_schema_safe_files` drops a non-conforming token silently and by
     design, so `files=lib/a.sh:42,lib/b.sh:71` — the shape a producer writes the
     moment it forgets to strip the `:line` suffix both issue writers are told in
     prose to strip — arrives here byte-identical to a deliberate `files=`. Bound
@@ -377,7 +379,15 @@ def declared_scope(body: str) -> list[str] | None:
         if token
     }
     files = _schema_safe_files(declared)
-    if declared and not files:
+    # COUNT, not emptiness. `_schema_safe_files` is a pure filter over this
+    # already-deduped set, so a shortfall means tokens were dropped -- and a
+    # PARTLY unreadable declaration under-prices exactly the way a wholly
+    # unreadable one does. Three paths answered as two crosses the rung that
+    # decides between one solver agent and thirty-three, in the never-under-price
+    # direction this module holds everywhere else. A genuinely empty declaration
+    # still answers [] (0 == 0), so "declared no scope" stays distinguishable
+    # from "declared nothing".
+    if len(files) != len(declared):
         return None
     return files
 

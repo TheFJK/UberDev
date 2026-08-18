@@ -596,4 +596,38 @@ assert found >= 4, f"only {found} scope-block literals found — the guard is va
 PY
 PASS=$((PASS+1))
 
+# S12 -- PARTIAL unreadability is not a smaller honest declaration. The
+# all-refused guard already refuses to report an unreadable declaration as the
+# empty one, but it only fires when EVERY token is refused. Drop one token --
+# the `:line` suffix both writers are told in prose to strip is the named,
+# expected producer mistake -- and the survivors come back as a SHORTER list
+# that is byte-indistinguishable from an honest declaration of that size. That
+# is the under-price direction this module states everywhere it must never
+# move in: three paths priced as two crosses the rung that decides between one
+# solver agent and thirty-three.
+python3 -I - "$TRIAGE" <<'PY_S12'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("solve_triage_under_test", sys.argv[1])
+st = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(st)
+
+clean = "<!-- uberdev-scope v=1 files=lib/a.sh,lib/b.sh,lib/c.sh -->"
+assert st.declared_scope(clean) == ["lib/a.sh", "lib/b.sh", "lib/c.sh"], st.declared_scope(clean)
+
+# One token still carries the citation suffix. FILES_TOKEN_RE refuses it.
+partial = "<!-- uberdev-scope v=1 files=lib/a.sh,lib/b.sh:42,lib/c.sh -->"
+got = st.declared_scope(partial)
+assert got is None, (
+    "a partly unreadable declaration must read as UNDECLARED so the prose "
+    f"heuristic still runs, not as a smaller complete one: got {got!r}")
+
+# The two states the tri-state already encoded must not regress.
+assert st.declared_scope("no block here at all") is None
+assert st.declared_scope("<!-- uberdev-scope v=1 files= -->") == [], \
+    "a deliberate empty declaration is still a declaration of no files"
+assert st.declared_scope("<!-- uberdev-scope v=1 files=lib/a.sh:1,lib/b.sh:2 -->") is None, \
+    "the all-refused case must keep answering undeclared"
+PY_S12
+PASS=$((PASS+1))
+
 echo "solve-triage: $PASS passed"
