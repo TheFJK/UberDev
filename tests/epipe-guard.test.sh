@@ -1135,6 +1135,104 @@ else
 fi
 
 echo
+echo "== L0: the shipped-code lint corpus =="
+# The corpus every ported repo-wide guard scans. It is declared and floored HERE,
+# once, so a guard folded in later cannot quietly bring its own narrower walk —
+# the failure mode that made several one-document guards look repo-wide when they
+# were not.
+#
+# SHELL-NESS IS DECIDED BY CONTENT, NOT BY FILENAME. `git ls-files -- '*.sh'`
+# silently drops every shipped hook: hooks/session-start, hooks/session-end,
+# hooks/pre-compact, hooks/inject-brainstorm-answers and lib/rl-curl carry no
+# extension. A corpus that named hooks/ and still globbed '*.sh' would list the
+# directory and read nothing out of it. Matching on the shebang instead means a
+# sixth extension-less surface joins the corpus the day it is added, with no edit
+# here — a hardcoded list of the five would rot on exactly that commit.
+#
+# The reader below takes its input from a herestring, not a pipe: this file is
+# inside E1's own scan set (E3.2 asserts it is not self-exempt), so a
+# `... | grep -q` here would be the very defect this suite exists to stop.
+_lint_shipped_shell() {
+  local rel
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    [ -f "$REPO_ROOT/$rel" ] || continue
+    case "$rel" in
+      *.sh) printf '%s\n' "$rel"; continue ;;
+    esac
+    case "$(head -1 "$REPO_ROOT/$rel" 2>/dev/null)" in
+      '#!'*sh|'#!'*sh\ *) printf '%s\n' "$rel" ;;
+    esac
+  done <<<"$(git -C "$REPO_ROOT" ls-files -- 'plugins/uberdev/*')"
+}
+
+LINT_SH_LIST="$(_lint_shipped_shell)"
+LINT_SH_COUNT="$(grep -c . <<<"$LINT_SH_LIST")"
+LINT_MD_LIST="$(_epipe_md_files)"
+LINT_MD_COUNT="$(grep -c . <<<"$LINT_MD_LIST")"
+
+# Floors carry real headroom below the observed counts: they exist to catch an
+# enumerator that COLLAPSED, not to pin the current inventory. A floor equal to
+# the live count reds on the first legitimate deletion and teaches everyone to
+# raise it without looking, which is how a floor stops being a guard.
+if [ "$LINT_SH_COUNT" -ge 30 ]; then
+  echo "  PASS  L0.1 shipped shell corpus: $LINT_SH_COUNT files (floor 30)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L0.1 shipped shell corpus collapsed to $LINT_SH_COUNT (floor 30) — enumerator regressed"
+  FAIL=$((FAIL + 1))
+fi
+
+if [ "$LINT_MD_COUNT" -ge 100 ]; then
+  echo "  PASS  L0.2 shipped markdown corpus: $LINT_MD_COUNT files (floor 100)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L0.2 shipped markdown corpus collapsed to $LINT_MD_COUNT (floor 100) — enumerator regressed"
+  FAIL=$((FAIL + 1))
+fi
+
+# L0.3 names the five extension-less surfaces one at a time. The floor above
+# cannot catch their loss — dropping all five still leaves the count well over
+# 30 — and they are precisely the files an extension-gated rewrite would lose.
+L0_MISSING=""
+for sentinel in \
+  plugins/uberdev/hooks/session-start \
+  plugins/uberdev/hooks/session-end \
+  plugins/uberdev/hooks/pre-compact \
+  plugins/uberdev/hooks/inject-brainstorm-answers \
+  plugins/uberdev/lib/rl-curl
+do
+  grep -qxF "$sentinel" <<<"$LINT_SH_LIST" || L0_MISSING="$L0_MISSING $sentinel"
+done
+if [ -z "$L0_MISSING" ]; then
+  echo "  PASS  L0.3 all five extension-less shipped shell surfaces are in the corpus"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L0.3 extension-less shipped surfaces missing from the corpus:$L0_MISSING"
+  echo "        cause:  the enumerator went back to matching on filename instead of shebang"
+  FAIL=$((FAIL + 1))
+fi
+
+# L0.4 is the anti-vacuity row for L0.3: it proves the corpus is not merely a
+# '*.sh' glob that happens to satisfy the sentinels by coincidence. At least one
+# member must carry no .sh suffix, or the shebang branch never fired.
+L0_EXTLESS=0
+while IFS= read -r rel; do
+  [ -n "$rel" ] || continue
+  case "$rel" in
+    *.sh) ;;
+    *) L0_EXTLESS=$((L0_EXTLESS + 1)) ;;
+  esac
+done <<<"$LINT_SH_LIST"
+if [ "$L0_EXTLESS" -ge 5 ]; then
+  echo "  PASS  L0.4 the shebang branch fired — $L0_EXTLESS corpus members carry no .sh suffix"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L0.4 only $L0_EXTLESS extension-less members (expected >= 5) — the corpus is filename-gated"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
 echo "==================================================================="
 echo "  PASS=$PASS  FAIL=$FAIL"
 echo "==================================================================="
