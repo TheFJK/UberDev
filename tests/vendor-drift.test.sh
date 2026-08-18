@@ -4403,6 +4403,354 @@ else
 fi
 
 echo
+echo "== D-REL23: the render reads the hashed object, never the raw inputs =="
+
+# D-REL23 — criterion 10, and the half D-REL20 cannot reach. D-REL20 proves the
+# fingerprint covers the body TODAY, mutation by mutation; it cannot prove the
+# NEXT line added to the render will be covered, because a differential row only
+# pins the facts somebody thought to mutate. This row pins the structure that
+# makes coverage automatic instead: `build_report` builds one `observations`
+# object, hashes it, and renders out of that object alone. A fact the body shows
+# is then necessarily a fact the fingerprint hashed, because below the binding
+# there is nothing else left to render from.
+#
+# THE CLOSURE IS THE ROW. The obvious predicate — "no statement below the
+# binding names `heads`, `tags`, `verdicts` or `changes`" — is satisfiable
+# WITHOUT the property: `drifting = [c for c in changes if c["raw"]]` bound above
+# the binding names no parameter below it and still hands the render the very
+# record objects the payload was built from. That is #604 defect 2's actual
+# shape, so the probe taint-closes the parameter names to a fixed point and
+# refuses a load of ANY name in that closure below the binding.
+#
+# FOUR WAYS IN, NOT ONE. Rebinding is the way an alias is usually drawn, and a
+# closure that follows only rebinding has three holes wide enough to walk the
+# raw records through — all three were measured as live bypasses of this row's
+# first draft, which is why they are listed as mechanisms rather than as
+# hypotheticals:
+#
+#   1. REBINDING — `x = y`, `for x in y`, `[... for x in y]`, `with y as x`,
+#      `x: T = y`, `x += y`, `x := y`.
+#   2. A CONTAINER TARGET — `bag["c"] = y` and `bag.c = y` store no `Name` at
+#      all: the only `Name` in the target is `bag`, and it is in LOAD context.
+#      A closure that reads assignment targets off `Name`-in-`Store` therefore
+#      lets the container out untainted while it holds the raw record.
+#   3. A MUTATING CALL — `bag.append(y)` binds nothing anywhere, and the value
+#      is in `bag` afterwards regardless.
+#   4. A NESTED DEFINITION — `def peek(): return changes` binds `peek` to a
+#      closure over the raw input and `def hold(_h=changes)` captures it in a
+#      parameter default. Neither is an assignment, and extracting a nested
+#      render helper at the top of a 150-line function is the ORDINARY refactor,
+#      not an exotic one — it is the shape most likely to reinstate defect 2.
+#
+# Each of the four is executed as a negative control below rather than argued
+# for here. The closure over-approximates deliberately: a definition is tainted
+# when ANYTHING in its subtree — body, decorators, bases, parameter defaults —
+# loads a tainted name, and a mutating call taints the receiver's root name
+# whether or not that method actually keeps its argument. A false positive costs
+# one over-strict red on a tree nobody has written yet; a false negative
+# reinstates defect 2 in silence.
+#
+# IT IS NOT A SOUND ESCAPE ANALYSIS AND DOES NOT CLAIM TO BE. A value handed to
+# a plain function that stores it (`stash(changes)`), or written through
+# `setattr` or `globals()`, walks out uncaught. Those are not shapes a render
+# refactor produces by accident, and claiming otherwise would be the same
+# over-claim this issue exists to remove. If a fifth mechanism is ever
+# demonstrated, widen the closure and add its control — never widen the pass
+# message to cover it.
+#
+# `observations` is the one name the closure never admits, and that is the
+# definition of the cut rather than an exemption carved out of it. The object is
+# built FROM the raw inputs by construction, so admitting it would taint
+# everything derived from it and forbid the render from reading the very object
+# this row requires it to read — a predicate no tree can satisfy reds on every
+# tree and therefore says nothing about the one in front of it.
+#
+# Comprehension targets INSIDE the binding statement are excluded for a
+# different and equally specific reason: Python scopes them to the comprehension
+# they appear in, so they cannot be loaded below it at all, and closing over
+# them would only collide with unrelated render variables that happen to share a
+# name — reporting a name collision as a data-flow violation. Nothing reachable
+# is lost, since any name bound OUTSIDE the binding statement is still closed
+# over, which is exactly where the alias shape above lives.
+#
+# ANTI-VACUITY. The arm that would otherwise prove the scanner found a real
+# function — "a tainted load exists ABOVE the binding" — is unsatisfiable on the
+# tree this row blesses: the restructure moves every bucket BELOW the binding,
+# leaving the docstring and nothing else above it. Four arms that survive it:
+#
+#   1. the seed set is read off `build_report`'s own signature, never typed, and
+#      must still contain `heads`, `tags`, `verdicts` and `changes` — which
+#      subsumes "the closure contains `changes`" and additionally pins that it
+#      got there as a parameter rather than as a coincidence;
+#   2. exactly one top-level statement binds `observations`, and that statement
+#      itself loads at least one seed — so the object really is built from the
+#      raw inputs, and "below the binding" is a well-defined position;
+#   3. `observations` is loaded below the binding, and every statement binding
+#      the render accumulator sits below it too. The first half is weak on its
+#      own — the statement directly below the binding is the `json.dumps` that
+#      hashes it, so the HASH satisfies that arm and the render never has to —
+#      and the accumulator-position half is what actually forbids hoisting the
+#      render above the object and measuring "below the binding" against an
+#      empty tail;
+#   4. SIX NEGATIVE CONTROLS. The same predicate is re-run over six mutated
+#      copies of the tree and must report on every one: a direct read of
+#      `changes` re-injected below the binding, and one per mechanism above —
+#      a rebound alias of `verdicts`, a container target, a mutating call, a
+#      nested closure and a captured parameter default. A guard that cannot be
+#      made to fail is not a guard, and the last five are what prove the CLOSURE
+#      rather than the name list is doing the work.
+DREL23_OUT="$(python3 - "$DRIFT" <<'PY'
+import ast
+import sys
+
+drift = sys.argv[1]
+
+FN = "build_report"
+CUT = "observations"          # the hashed object: the one sanctioned re-binding
+RENDER = "lines"              # the accumulator every rendered line goes into
+SEEDS_REQUIRED = ("heads", "tags", "verdicts", "changes")
+
+# (label, statements above the binding, statements below it, the name the
+# predicate must then report). One per mechanism the closure follows, so every
+# arm of it is EXECUTED here — an arm nobody made fail is an assertion about the
+# scanner, not a check of the tree.
+CONTROLS = (
+    ("direct read", None,
+     'probe_direct = [c for c in changes if c["raw"]]', "changes"),
+    ("rebound alias", "probe_alias = verdicts",
+     "probe_used = sorted(probe_alias)", "probe_alias"),
+    ("container target", 'probe_map = {}\nprobe_map["c"] = changes',
+     'probe_mapped = len(probe_map["c"])', "probe_map"),
+    ("mutating call", "probe_list = []\nprobe_list.append(verdicts)",
+     "probe_listed = len(probe_list[0])", "probe_list"),
+    ("nested closure", "def probe_peek():\n    return changes",
+     "probe_peeked = len(probe_peek())", "probe_peek"),
+    ("captured default", "def probe_hold(_held=changes):\n    return _held",
+     "probe_holds = len(probe_hold())", "probe_hold"),
+)
+
+with open(drift, encoding="utf-8") as fh:
+    SOURCE = fh.read()
+
+
+def loads(node):
+    return {n.id for n in ast.walk(node)
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+
+
+def stores(node):
+    """Names this node binds through a plain `Name` target. NARROW on purpose.
+
+    Position is the only question this answers: which statement re-binds
+    `observations`, and where the render accumulator starts. Both want the
+    plain form alone — `observations["x"] = 1` does not rebind the hashed
+    object and `lines[0] = ...` does not start the render, so widening this to
+    container targets would move the cut point and the render position onto
+    statements that are neither. Value flow is the other question entirely, and
+    `sinks` is what answers that one.
+    """
+    return {n.id for n in ast.walk(node)
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+
+
+def root_name(expr):
+    """The name a subscript/attribute chain ultimately writes through."""
+    while isinstance(expr, (ast.Subscript, ast.Attribute, ast.Starred)):
+        expr = expr.value
+    return expr.id if isinstance(expr, ast.Name) else None
+
+
+def sinks(target):
+    """Every name a target can leave its value reachable from."""
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return set().union(*(sinks(elt) for elt in target.elts))
+    root = root_name(target)
+    return {root} if root is not None else set()
+
+
+def flows(node):
+    """Every (names, value) pair through which a value reaches a new name.
+
+    Rebinding, a container target, a mutating call and a nested definition —
+    the four mechanisms named in the comment above this probe. Missing any one
+    of them is how an alias walks out of the closure carrying a raw input with
+    it, and three of the four were measured doing exactly that.
+    """
+    if isinstance(node, ast.Assign):
+        return [(sinks(t), node.value) for t in node.targets]
+    if isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+        return ([(sinks(node.target), node.value)]
+                if node.value is not None else [])
+    if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+        return [(sinks(node.target), node.iter)]
+    if isinstance(node, ast.NamedExpr):
+        return [(sinks(node.target), node.value)]
+    if isinstance(node, ast.withitem):
+        return ([(sinks(node.optional_vars), node.context_expr)]
+                if node.optional_vars is not None else [])
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        # The whole subtree is the value: body, decorators, bases and parameter
+        # defaults are all places a definition can capture a raw input from.
+        return [({node.name}, node)]
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        root = root_name(node.func.value)
+        return [({root}, node)] if root is not None else []
+    return []
+
+
+def definitions(source):
+    tree = ast.parse(source, filename=drift)
+    return [n for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name == FN]
+
+
+def cut_points(fn):
+    return [i for i, stmt in enumerate(fn.body) if CUT in stores(stmt)]
+
+
+def audit(fn):
+    """(violations, facts) for one `build_report` tree, or (None, reason)."""
+    cuts = cut_points(fn)
+    if len(cuts) != 1:
+        return None, ("%d top-level statement(s) bind `%s`, want exactly 1 — "
+                      "with none, or with two, there is no single point for the "
+                      "render to sit below" % (len(cuts), CUT))
+    cut = cuts[0]
+    seeds = [a.arg for a in
+             fn.args.posonlyargs + fn.args.args + fn.args.kwonlyargs]
+    scoped = {id(n) for n in ast.walk(fn.body[cut])
+              if isinstance(n, ast.comprehension)}
+    tainted = set(seeds)
+    tainted.discard(CUT)
+    moved = True
+    while moved:
+        moved = False
+        for node in ast.walk(fn):
+            # `fn` itself is a definition, and tainting the name of the
+            # function under audit would say nothing about anything inside it.
+            if node is fn or id(node) in scoped:
+                continue
+            for names, value in flows(node):
+                if not loads(value) & tainted:
+                    continue
+                for name in names - {CUT}:
+                    if name not in tainted:
+                        tainted.add(name)
+                        moved = True
+    found = set()
+    for stmt in fn.body[cut + 1:]:
+        for node in ast.walk(stmt):
+            if (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+                    and node.id in tainted):
+                found.add((node.lineno, node.id))
+    facts = {
+        "seeds": seeds,
+        "tainted": tainted,
+        "cut": cut,
+        "binding_loads_seed": bool(loads(fn.body[cut]) & set(seeds)),
+        "reads_cut_below": any(CUT in loads(s) for s in fn.body[cut + 1:]),
+        "render_at": [i for i, s in enumerate(fn.body) if RENDER in stores(s)],
+    }
+    # Seed loads first, then by position. A violation drags derived names in
+    # with it — a render that appends a raw input taints its own accumulator —
+    # and the five lines the failure message has room for are far more useful
+    # spent on the raw inputs than on the accumulator that received them.
+    return sorted(found, key=lambda hit: (hit[1] not in seeds, hit)), facts
+
+
+def control(label, above, below, expected):
+    """Re-run the predicate over a deliberately-broken copy of the tree."""
+    mutant = definitions(SOURCE)[0]
+    cut = cut_points(mutant)[0]
+    injected = ast.parse(above).body if above is not None else []
+    mutant.body[cut:cut] = injected
+    cut += len(injected)
+    mutant.body[cut + 1:cut + 1] = ast.parse(below).body
+    ast.fix_missing_locations(mutant)
+    hits, facts = audit(mutant)
+    if hits is None:
+        return ("negative control (%s) could not be audited: %s"
+                % (label, facts))
+    names = sorted({name for _, name in hits})
+    if expected not in names:
+        return ("negative control (%s) did not fire: with %r below the `%s` "
+                "binding the predicate reported %s, naming no `%s` — a guard "
+                "that cannot be made to fail proves nothing about the tree it "
+                "passes on" % (label, below, CUT, names or "nothing", expected))
+    return None
+
+
+defs = definitions(SOURCE)
+if len(defs) != 1:
+    print("ANTI-VACUITY: %d definition(s) of `%s`, want exactly 1 — the probe "
+          "cannot say which one renders" % (len(defs), FN))
+    raise SystemExit(1)
+
+found, facts = audit(defs[0])
+if found is None:
+    print("ANTI-VACUITY: %s" % (facts,))
+    raise SystemExit(1)
+missing = [p for p in SEEDS_REQUIRED if p not in facts["seeds"]]
+if missing:
+    print("ANTI-VACUITY: `%s` no longer takes %s, so the closure would be "
+          "seeded with something other than the raw inputs this row is about"
+          % (FN, ", ".join(missing)))
+    raise SystemExit(1)
+if not facts["binding_loads_seed"]:
+    print("ANTI-VACUITY: the `%s` binding loads none of `%s`'s parameters, so "
+          "it is not the object built out of them and every position measured "
+          "against it is measured against the wrong statement" % (CUT, FN))
+    raise SystemExit(1)
+
+problems = []
+if not facts["reads_cut_below"]:
+    problems.append("no statement below the `%s` binding loads it, so the "
+                    "render is not reading the hashed object at all" % (CUT,))
+if not facts["render_at"]:
+    problems.append("no statement in `%s` binds `%s`, so the probe cannot tell "
+                    "where the render begins" % (FN, RENDER))
+hoisted = [i for i in facts["render_at"] if i < facts["cut"]]
+if hoisted:
+    problems.append("`%s` is bound at statement %s, ABOVE the `%s` binding at "
+                    "%d — a render that starts above the hashed object is "
+                    "outside everything this row checks"
+                    % (RENDER, hoisted, CUT, facts["cut"]))
+for lineno, name in found[:5]:
+    problems.append("line %d loads `%s` — a raw input of `%s`, or a name the "
+                    "closure derived from one — below the `%s` binding"
+                    % (lineno, name, FN, CUT))
+if len(found) > 5:
+    problems.append("%d further load(s) of names in the closure below the "
+                    "binding" % (len(found) - 5,))
+
+for label, above, below, expected in CONTROLS:
+    failure = control(label, above, below, expected)
+    if failure is not None:
+        print("ANTI-VACUITY: %s" % (failure,))
+        raise SystemExit(1)
+
+print("; ".join(problems) if problems else "D-REL23-OK")
+PY
+)"
+DREL23_RC=$?
+DREL23_FAILS=''
+[ "$DREL23_RC" -eq 0 ] \
+  || DREL23_FAILS="the probe itself exited rc=$DREL23_RC — a traceback, or an anti-vacuity refusal, is not a pass"
+case "$DREL23_OUT" in
+  D-REL23-OK) ;;
+  '') DREL23_FAILS="${DREL23_FAILS}${DREL23_FAILS:+; }the probe printed nothing at all" ;;
+  *)  DREL23_FAILS="${DREL23_FAILS}${DREL23_FAILS:+; }$DREL23_OUT" ;;
+esac
+if [ -z "$DREL23_FAILS" ]; then
+  ok "D-REL23 build_report renders out of the hashed observations object, and no name the closure derives from a raw input — by rebinding, container target, mutating call or nested definition — survives below the binding"
+else
+  no "D-REL23 the render still reaches past the hashed object: $DREL23_FAILS"
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

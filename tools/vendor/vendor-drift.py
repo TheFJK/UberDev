@@ -909,13 +909,34 @@ def tag_observation(published):
             "newest_commit": published[newest] if newest is not None else None}
 
 
-def build_report(register, heads, tags, verdicts, changes):
-    """Render the markdown body plus a stable fingerprint of its drift payload."""
-    drifting = [c for c in changes if c["raw"]]
-    declared_only = [c for c in changes if not c["raw"] and c["declared"]]
-    actionable = sorted([v for v in verdicts if v["actionable"]],
-                        key=lambda v: v["id"])
+def recorded_verdict(observations, upstream_id):
+    """One verdict, read back out of the hashed observations object.
 
+    `build_report` renders every release line from `observations` and never from
+    the `verdicts` list it hashed, so the whole verdict has to be reconstructible
+    from there. The hashed entry omits exactly one field — `id`, because it is
+    the KEY the entry is stored under (`FINGERPRINT_VERDICT_SKIP`) — and putting
+    it back FROM that key is what keeps `release_summary` and
+    `release_finding_lines` taking the same whole verdict they have always taken,
+    instead of each growing a second parameter to carry the id alongside.
+
+    So nothing rendered through here escapes the fingerprint: every field comes
+    from the hashed value, and the one that does not comes from the hashed key.
+
+    The component blocks need no equivalent. They render the id inline, straight
+    off the loop variable, and never hand a whole record to a helper.
+    """
+    return dict(observations["releases"][upstream_id], id=upstream_id)
+
+
+def build_report(register, heads, tags, verdicts, changes):
+    """Render the markdown body plus a stable fingerprint of its drift payload.
+
+    ONE traversal. Everything below the `observations` binding renders out of
+    that object, so "the body carries a fact the fingerprint does not" is
+    unreachable by construction rather than by review — see the bucket block
+    below, and D-REL23, which enforces it structurally.
+    """
     # ONE observations object, hashed whole. Every fact the body renders below
     # has to be reachable from here, because the fingerprint is what decides
     # whether an ALREADY-OPEN issue gets a comment — and main() edits the body
@@ -991,6 +1012,36 @@ def build_report(register, heads, tags, verdicts, changes):
     payload = json.dumps(observations, sort_keys=True)
     fingerprint = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
+    # THE THREE BUCKETS, DERIVED OUT OF THE HASHED OBJECT — never a second
+    # traversal of `changes` and `verdicts`. That second traversal is #604
+    # defect 2's ROOT rather than its symptom: while the render can still reach
+    # the raw inputs, it can render a fact the payload above never carried, and
+    # widening the payload once only settles the instances that existed on the
+    # day it was widened. Reading everything below out of `observations` makes
+    # the coverage structural instead — a fact the body shows is necessarily a
+    # fact the fingerprint hashed, because there is nothing else left to render
+    # from.
+    #
+    # D-REL23 pins exactly that, and it pins it through the TAINT CLOSURE of the
+    # parameter names rather than through their spelling: `drifting = [c for c in
+    # changes if c["raw"]]` names no parameter below this point and still hands
+    # the render the very records the payload was built from, so a predicate that
+    # only looked for the literal names `changes` and `verdicts` would bless the
+    # defect it exists to forbid.
+    #
+    # They are ID LISTS now, not record lists, and the return value is unchanged
+    # by that: both are truthy exactly when non-empty, as the record lists were.
+    drifting = sorted(cid for cid, comp in observations["components"].items()
+                      if comp["raw"])
+    declared_only = sorted(cid for cid, comp in observations["components"].items()
+                           if not comp["raw"] and comp["declared"])
+    # This is the reason `actionable` is hashed rather than skipped: the
+    # adjudication bucket is a function of that field, so an entry without it
+    # would be an entry the render could not rebuild the bucket from. See
+    # FINGERPRINT_VERDICT_SKIP.
+    actionable = sorted(vid for vid, verdict in observations["releases"].items()
+                        if verdict["actionable"])
+
     lines = [MARKER, ""]
     lines.append("# Vendored upstream drift")
     lines.append("")
@@ -1000,8 +1051,8 @@ def build_report(register, heads, tags, verdicts, changes):
     lines.append("")
     lines.append("Upstream HEADs resolved this run:")
     lines.append("")
-    for slug in sorted(heads):
-        lines.append("- `%s` @ `%s`" % (slug, heads[slug]))
+    for slug in sorted(observations["heads"]):
+        lines.append("- `%s` @ `%s`" % (slug, observations["heads"][slug]))
     lines.append("")
 
     # The second observable (#535). HEAD drift and release drift disagree in both
@@ -1012,13 +1063,13 @@ def build_report(register, heads, tags, verdicts, changes):
     # answered by a repository, not by a vendored component.
     lines.append("Upstream tags resolved this run:")
     lines.append("")
-    # Rendered from `tag_observation` — the same call the payload above hashes —
-    # so the three spellings below and the hashed triple cannot come apart. A
-    # second `max(..., key=release_sort_key)` here would be a second answer to
-    # "which tag is newest", and the report and its own fingerprint would then
-    # be able to disagree about it.
-    for slug in sorted(tags):
-        seen = tag_observation(tags[slug])
+    # Rendered from the hashed triple ITSELF — not from a second
+    # `tag_observation` call over the raw tag map. Two calls agree today and are
+    # still two answers to "which tag is newest": the report and its own
+    # fingerprint become able to disagree the moment either one is edited. One
+    # call, made above, read back here.
+    for slug in sorted(observations["tags"]):
+        seen = observations["tags"][slug]
         if not seen["count"]:
             lines.append("- `%s`: no published tags" % slug)
         elif seen["newest"] is None:
@@ -1038,10 +1089,10 @@ def build_report(register, heads, tags, verdicts, changes):
     # release vocabulary" is a standing the report states, not a silence.
     lines.append("Recorded release review points:")
     lines.append("")
-    for verdict in sorted(verdicts, key=lambda v: v["id"]):
+    for vid in sorted(observations["releases"]):
+        verdict = recorded_verdict(observations, vid)
         lines.append("- `%s` (`%s`): %s"
-                     % (verdict["id"], verdict["slug"],
-                        release_summary(verdict)))
+                     % (vid, verdict["slug"], release_summary(verdict)))
     lines.append("")
 
     # Above the component diff: RFC 0019 §7 adjudicates releases, so a release
@@ -1054,8 +1105,9 @@ def build_report(register, heads, tags, verdicts, changes):
         lines.append("RFC 0019 §7 adjudicates releases rather than individual "
                      "commits, so these come before the component diff below.")
         lines.append("")
-        for verdict in actionable:
-            lines.extend(release_finding_lines(verdict))
+        for vid in actionable:
+            lines.extend(
+                release_finding_lines(recorded_verdict(observations, vid)))
 
     if not drifting:
         # The component-scoped sentence is true either way; the `**No drift.**`
@@ -1068,22 +1120,29 @@ def build_report(register, heads, tags, verdicts, changes):
     else:
         lines.append("## Components with upstream changes since their watermark")
         lines.append("")
-        for c in sorted(drifting, key=lambda x: x["id"]):
-            lines.append("### `%s` — stance `%s`" % (c["id"], c["stance"]))
+        for cid in drifting:
+            # The id renders off the KEY, which is why the component blocks need
+            # no `recorded_verdict` equivalent: the one field the hashed entry
+            # drops is the one the loop variable already holds.
+            comp = observations["components"][cid]
+            lines.append("### `%s` — stance `%s`" % (cid, comp["stance"]))
             lines.append("")
-            lines.append("- upstream: `%s` (`%s`)" % (c["repo"], c["upstream_path"]))
-            lines.append("- watermark `%s` -> HEAD `%s`" % (c["base"], c["head"]))
-            shown = sorted(c["raw"])[:MAX_LISTED_FILES]
-            residual = len(c["raw"]) - len(shown)
-            lines.append("- changed upstream files (%d):" % len(c["raw"]))
+            lines.append("- upstream: `%s` (`%s`)"
+                         % (comp["repo"], comp["upstream_path"]))
+            lines.append("- watermark `%s` -> HEAD `%s`"
+                         % (comp["base"], comp["head"]))
+            shown = sorted(comp["raw"])[:MAX_LISTED_FILES]
+            residual = len(comp["raw"]) - len(shown)
+            lines.append("- changed upstream files (%d):" % len(comp["raw"]))
             for path in shown:
                 lines.append("  - `%s`" % path)
             if residual > 0:
                 lines.append("  - …and %d more" % residual)
-            if c["declared"]:
+            if comp["declared"]:
                 lines.append("- declared divergences also touched upstream "
                              "(review, do not merge blindly): %s"
-                             % ", ".join("`%s`" % p for p in sorted(c["declared"])))
+                             % ", ".join("`%s`" % p
+                                         for p in sorted(comp["declared"])))
             lines.append("")
 
     if declared_only:
@@ -1093,9 +1152,10 @@ def build_report(register, heads, tags, verdicts, changes):
                      "RFC 0019 §6 records as never-reconcile. Reported as "
                      "**declared**, not as raw drift.")
         lines.append("")
-        for c in sorted(declared_only, key=lambda x: x["id"]):
+        for cid in declared_only:
+            declared = observations["components"][cid]["declared"]
             lines.append("- `%s` — declared: %s"
-                         % (c["id"], ", ".join("`%s`" % p for p in sorted(c["declared"]))))
+                         % (cid, ", ".join("`%s`" % p for p in sorted(declared))))
         lines.append("")
 
     lines.append("---")
