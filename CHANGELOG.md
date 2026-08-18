@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [0.49.1] — 2026-08-18
 
+### Fixed - the post-fixer push could never land after an APPLIED Phase 1 fixer
+
+Found by running `/uberdev:review-pr` end to end against the consolidated PR
+#627: the Phase 1 fixer returned `APPLIED` and was validated, and Step 6a then
+refused every attempt to publish it.
+
+`reviewed-head.txt` records the head **the review stands on**, and
+`review_track_validated_fixer_head`'s `APPLIED` arm advances it the moment a
+fixer commit is validated. That advance is purely local -- nothing has pushed
+yet. Step 6a is a separate process, so `review_fleet_rehydrate` rebound
+`REVIEWED_HEAD_SHA` off that advanced record and handed it to
+`review_publish_same_repo_pr_head` as `expected_remote_head_sha`. The gate
+asserts `[ "$live_head" = "$expected_remote_head_sha" ]` against the live PR, so
+it compared the post-fix head against a remote still on the pre-fix one and
+returned 79 -- on every run whose Phase 1 fixer applied anything. The fix commit
+stayed local and Phase 3 went on to probe exactly the stale SHA that 6a's own
+error text warns about.
+
+The two values were being treated as "the same fact at different moments"; they
+are not, and they diverge for precisely the window Step 6a runs in.
+
+- `lib/review-fleet-args.sh` now rehydrates `REVIEWED_HEAD_SHA` from its own
+  `published-head.txt` record. The old fallback to the validated head survives
+  only when that record is absent, so a run predating the seed behaves as before.
+- `commands/review-pr.md` seeds `published-head.txt` in the Phase 1 scope fence
+  beside `reviewed-head.txt`, and advances it in Step 6a **after** the push has
+  been proven -- the one place a publication is known to have landed.
+- `tests/review-pr-workflow.test.sh` gains `L8`, which advances the local head
+  through the real tracker and asserts a fresh rehydrate reports the two heads
+  as different. Confirmed red before the change and green after.
+
 ### Fixed - `/turbox` required an issue-body artifact nothing created
 
 Found by `/turbox`'s first live run (against #619), then reworked twice under

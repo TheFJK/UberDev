@@ -4594,6 +4594,74 @@ else
   fail "L7 the reviewed-head seed never reaches the promote fence:$L7_BAD"
 fi
 
+# ---------------------------------------------------------------------------
+# L8 — the PUBLISHED head and the VALIDATED head are two facts, not one.
+#
+# THE DEFECT: _review_fleet_bind_reviewed_head closed with
+# `REVIEWED_HEAD_SHA="${REVIEWED_HEAD_SHA:-$VALIDATED_FIXER_HEAD_SHA}"`, and the
+# APPLIED arm of review_track_validated_fixer_head advances reviewed-head.txt to
+# the post-fix LOCAL head. Step 6a is a fresh shell, so it rehydrated
+# REVIEWED_HEAD_SHA to that advanced value and handed it to
+# review_publish_same_repo_pr_head as `expected_remote_head_sha` — a value the
+# remote cannot hold, because nothing has pushed yet. The gate's
+# `[ "$live_head" = "$expected_remote_head_sha" ]` therefore failed on EVERY run
+# whose Phase 1 fixer APPLIED, so the post-fixer push could never land and
+# Phase 3 went on to probe the stale remote SHA that 6a's own error text warns
+# about. Reproduced live on PR #627.
+#
+# The two facts diverge for exactly one window — after a fixer commits locally
+# and before 6a publishes — which is precisely the window 6a runs in.
+# ---------------------------------------------------------------------------
+L8_BAD=""
+if [ -n "$L7_SEED" ] && [ -n "$L_RESEARCH_DIR" ]; then
+  env -i PATH="$PATH" HOME="${HOME:-$TMP}" bash -c \
+    '. "$1"; review_fleet_write_reviewed_head "$2" "$3"' \
+    _ "$ARGS_LIB" "$L_RESEARCH_DIR/reviewed-head.txt" "$L7_SEED" 2>/dev/null \
+    || L8_BAD="$L8_BAD reviewed-seed-write-failed"
+  env -i PATH="$PATH" HOME="${HOME:-$TMP}" bash -c \
+    '. "$1"; review_fleet_write_published_head "$2" "$3"' \
+    _ "$ARGS_LIB" "$L_RESEARCH_DIR/published-head.txt" "$L7_SEED" 2>/dev/null \
+    || L8_BAD="$L8_BAD published-seed-write-failed"
+
+  # Advance the LOCAL head exactly as an APPLIED fixer does. Nothing pushes, so
+  # the remote still stands on the seed.
+  l_probe "$L_TMP/seed-fast.env" / "$L7_TRACK"
+  [ "$L_PROBE_RC" = 0 ] && [ "$L_PROBE_OUT" = 0 ] \
+    || L8_BAD="$L8_BAD advance-rc='$L_PROBE_OUT'(probe=$L_PROBE_RC)"
+  [ "$(cat "$L_RESEARCH_DIR/reviewed-head.txt" 2>/dev/null)" = "$L7_FIXED" ] \
+    || L8_BAD="$L8_BAD local-head-not-advanced"
+  # The advance must NOT have moved the published record: only a successful
+  # publish may do that.
+  [ "$(cat "$L_RESEARCH_DIR/published-head.txt" 2>/dev/null)" = "$L7_SEED" ] \
+    || L8_BAD="$L8_BAD published-head-moved-without-a-push='$(cat "$L_RESEARCH_DIR/published-head.txt" 2>/dev/null)'"
+
+  # THE ROW. A fresh 6a-shaped shell must see the two heads DISAGREE: local at
+  # the fixer commit, remote still at the seed. Binding both to the advanced
+  # head is the defect, and it is what makes the publish gate unsatisfiable.
+  for l8_seed_env in seed-fast seed-resolved; do
+    if [ "$l8_seed_env" = seed-fast ]; then l8_cwd=/; else l8_cwd="$L_REPO"; fi
+    l_probe "$L_TMP/$l8_seed_env.env" "$l8_cwd" \
+      'printf "%s|%s" "${VALIDATED_FIXER_HEAD_SHA:-}" "${REVIEWED_HEAD_SHA:-}"'
+    [ "$L_PROBE_RC" = 0 ] && [ "$L_PROBE_OUT" = "$L7_FIXED|$L7_SEED" ] \
+      || L8_BAD="$L8_BAD $l8_seed_env='$L_PROBE_OUT'(want '$L7_FIXED|$L7_SEED',rc=$L_PROBE_RC)"
+  done
+
+  # Absent published record => today's behaviour, so a run that predates the
+  # seed is not made worse by the fix.
+  rm -f "$L_RESEARCH_DIR/published-head.txt"
+  l_probe "$L_TMP/seed-fast.env" / 'printf "%s" "${REVIEWED_HEAD_SHA:-}"'
+  [ "$L_PROBE_RC" = 0 ] && [ "$L_PROBE_OUT" = "$L7_FIXED" ] \
+    || L8_BAD="$L8_BAD no-published-record='$L_PROBE_OUT'(rc=$L_PROBE_RC)"
+  rm -f "$L_RESEARCH_DIR/reviewed-head.txt"
+else
+  L8_BAD="$L8_BAD prerequisites-missing"
+fi
+if [ -z "$L8_BAD" ]; then
+  pass "L8 a fixer that advanced the local head leaves the published head where the remote actually is, so 6a's expected_remote_head_sha is satisfiable"
+else
+  fail "L8 the published head is conflated with the validated head:$L8_BAD"
+fi
+
 echo ""
 echo "== Summary =="
 echo "  passed: $PASS"
