@@ -4,10 +4,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TREE="$ROOT/plugins/uberdev/policy/solve-run-tree-v1.json"
 POLICY="$ROOT/plugins/uberdev/policy/model-routing-v1.json"
+# The three prose copies SRT-606.x compares against the pinned unbound-edge set,
+# plus the role-card directory its classifier reads.
+AGENTS_DIR="$ROOT/plugins/uberdev/agents"
+RFC_0016="$ROOT/docs/rfc/0016-contract-markers.md"
+MARKER_REGISTER="$ROOT/tests/contract_markers.py"
+CHILD_DISPATCH="$ROOT/plugins/uberdev/lib/child-dispatch.sh"
 
-python3 -I -B - "$TREE" "$POLICY" <<'PY'
+python3 -I -B - "$TREE" "$POLICY" "$AGENTS_DIR" "$RFC_0016" "$MARKER_REGISTER" "$CHILD_DISPATCH" <<'PY'
 import json,pathlib,re,sys
-tree_path,policy_path=map(pathlib.Path,sys.argv[1:])
+tree_path,policy_path,agents_dir,rfc_path,marker_register_path,child_dispatch_path=\
+    map(pathlib.Path,sys.argv[1:])
 assert tree_path.is_file(), "solve run-tree manifest missing"
 tree=json.loads(tree_path.read_text()); policy=json.loads(policy_path.read_text())
 assert tree['schema_version']==1 and tree['tree_id']=='solve-run-tree-v1'
@@ -138,6 +145,136 @@ assert {edge_id for edge_id,row in edges.items()
 # return vocabulary is at stake -- 31 of the 32 are composable, this one is not.
 assert edges['solve.issue.lead'].get('role') is None
 assert tree['root_edge_id']=='solve.issue.lead'
+# --- SRT-606.x (#606) -- the prose copies of this set's cardinalities, derived.
+#
+# Three files state, in prose, facts about the set pinned above: RFC 0016's
+# `sdd-implementer-status` register row, tests/contract_markers.py's mirror
+# comment on the same register entry, and the composer comment in
+# lib/child-dispatch.sh that explains why the contract-less arm may only POINT.
+# Each was written by hand from a reading of the tree, and by #606 all three had
+# drifted: two named a third role whose card does carry a fenced block, and the
+# third said "the other 31" beside RFC 0016's "all 32" -- two figures that read
+# as a contradiction while each was describing a different subset.
+#
+# These rows recompute every figure from `unbound_provider_edges` above and from
+# the role cards on disk, then require the prose to match. The only membership
+# typed out below is SRT-606.1's two-role set, and that is a claim about the
+# CARDS: it reds the moment either card grows a fenced block or a third card
+# loses one, which is exactly when the prose has to be re-read.
+#
+# DECLARED BOUNDARY. SRT-606.3's unlabelled-integer arm constrains the two
+# cardinalities only, not every digit in the composer block -- issue numbers and
+# contract ids are digits too, and an allow-list of those would be the rotting
+# survey this section exists to retire.
+assert agents_dir.is_dir(), 'SRT-606.0: role-card directory missing: %s' % agents_dir
+sdd_unbound_roles=sorted({edges[e]['role'] for e in unbound_provider_edges
+                          if edges[e].get('role') is not None})
+# SRT-606.0 -- anti-vacuity. An empty harvest makes every membership comparison
+# below trivially true, which is how a guard ends up green beside the very
+# defect it names.
+assert sdd_unbound_roles, 'SRT-606.0: the pinned unbound set harvested no roles at all'
+sdd_role_cards={}
+for sdd_role in sdd_unbound_roles:
+    sdd_card=agents_dir/(sdd_role+'.md')
+    assert sdd_card.is_file(), 'SRT-606.0: unbound role %r has no card at %s' % (sdd_role,sdd_card)
+    sdd_role_cards[sdd_role]=sdd_card.read_text(encoding='utf-8')
+# SRT-606.1 -- the classifier RFC 0016 states, EXECUTED: does the role card carry
+# a fenced block at all? Membership, never a literal count -- a count can stay 2
+# while the two names silently change underneath it.
+sdd_fence_re=re.compile(r'(?m)^[ \t]*```')
+sdd_unfenced_roles=sorted(r for r in sdd_unbound_roles if not sdd_fence_re.search(sdd_role_cards[r]))
+assert set(sdd_unfenced_roles)=={'code-reviewer','pr-test-analyzer'}, \
+    'SRT-606.1: the unbound roles whose card carries no fenced block are %r' % (sdd_unfenced_roles,)
+
+def sdd_flatten(text):
+    """Comment prose as ONE line: markers stripped, wrapping removed.
+
+    Every containment check below reads the flattened form. Where a comment
+    happens to wrap is not a fact about the claim it makes, and a row that reds
+    on a re-flow reports a fault that did not happen. A claim broken MID-TOKEN
+    ('role\\n# card') survives as 'role card' and is seen; one broken mid-WORD
+    does not, and reds loudly rather than passing quietly.
+    """
+    joined=' '.join(re.sub(r'^[ \t]*#[ \t]?','',line) for line in text.splitlines())
+    return re.sub(r'\s+',' ',joined).strip()
+
+def sdd_prose_above(path,anchor,row,require_next=None):
+    """The contiguous run of comment lines immediately above `anchor`, flattened.
+
+    `require_next` disambiguates an anchor that occurs more than once by naming a
+    literal the FOLLOWING line must carry. A non-unique anchor or a collapsed
+    block is FATAL rather than an empty slice: a row that reads nothing passes
+    every containment check written against it.
+    """
+    lines=path.read_text(encoding='utf-8').splitlines()
+    hits=[i for i,line in enumerate(lines)
+          if anchor in line and (require_next is None
+                                 or (i+1<len(lines) and require_next in lines[i+1]))]
+    assert len(hits)==1, '%s: anchor %r occurs %d time(s) in %s' % (row,anchor,len(hits),path)
+    i=hits[0]; block=[]
+    while i>0 and lines[i-1].lstrip().startswith('#'):
+        i-=1; block.append(lines[i])
+    assert len(block)>=5, '%s: the comment block above %r in %s is %d line(s)' % (row,anchor,path,len(block))
+    return sdd_flatten('\n'.join(reversed(block)))
+
+# SRT-606.2 -- both prose copies name exactly that subset and no third role.
+# Anchored on the role NAMES and on a DERIVED count phrase, never on the
+# sentence around them, so a reword stays free while a renumber does not.
+sdd_rfc_rows=[line for line in rfc_path.read_text(encoding='utf-8').splitlines()
+              if line.startswith('| `sdd-implementer-status`')]
+assert len(sdd_rfc_rows)==1, \
+    'SRT-606.2: RFC 0016 carries %d sdd-implementer-status register row(s)' % len(sdd_rfc_rows)
+sdd_rfc_row=sdd_flatten(sdd_rfc_rows[0])
+sdd_prose={'docs/rfc/0016-contract-markers.md':sdd_rfc_row,
+           'tests/contract_markers.py':sdd_prose_above(
+               marker_register_path,'"sdd-implementer-status": [','SRT-606.2',
+               require_next='agents/implementation-worker.md')}
+sdd_count_phrase='%d of the %d' % (len(sdd_unfenced_roles),len(sdd_unbound_roles))
+for sdd_label,sdd_text in sorted(sdd_prose.items()):
+    sdd_named=sorted(r for r in sdd_unbound_roles
+                     if re.search(r'(?<![0-9A-Za-z-])%s(?![0-9A-Za-z-])' % re.escape(r),sdd_text))
+    assert sdd_named==sdd_unfenced_roles, \
+        'SRT-606.2: %s names %r as the unfenced unbound roles; the cards say %r' % (
+            sdd_label,sdd_named,sdd_unfenced_roles)
+    assert sdd_count_phrase in sdd_text, \
+        'SRT-606.2: %s does not state the derived count %r' % (sdd_label,sdd_count_phrase)
+# The classifier has to be written down beside the count, because a count is only
+# checkable against a stated rule -- #606's miscount happened with the rule left
+# implicit, and every reader re-derived a different one.
+assert 'fenced block' in sdd_rfc_row and 'role card' in sdd_rfc_row, \
+    'SRT-606.2: the RFC register row states no classifier for its unfenced-role count'
+# SRT-606.3 -- the composer comment states BOTH cardinalities of the pinned set,
+# each carrying the label that says what it counts, and no bare copy of either.
+# "the other 31" was true of neither: it counted the composable subset while
+# naming an exclusion (sdd.task.implement) that is not in the set at all.
+sdd_composer=sdd_prose_above(
+    child_dispatch_path,
+    "terminal=(b'Return only a response matching the output contract above.",
+    'SRT-606.3')
+assert 'other 31' not in sdd_composer, \
+    'SRT-606.3: the composer comment still says "other 31"'
+sdd_unbound_total=len(unbound_provider_edges)
+sdd_unbound_composable=len([e for e in unbound_provider_edges if edges[e].get('role') is not None])
+for sdd_phrase,sdd_number in (('%d members' % sdd_unbound_total,sdd_unbound_total),
+                              ('%d of which carry a role card' % sdd_unbound_composable,
+                               sdd_unbound_composable)):
+    assert sdd_phrase in sdd_composer, \
+        'SRT-606.3: the composer comment does not state %r' % sdd_phrase
+    sdd_bare=len(re.findall(r'(?<![0-9])%d(?![0-9])' % sdd_number,sdd_composer))
+    assert sdd_bare==sdd_composer.count(sdd_phrase), \
+        'SRT-606.3: %d occurs %d time(s) in the composer comment but %r only %d -- an unlabelled cardinality' % (
+            sdd_number,sdd_bare,sdd_phrase,sdd_composer.count(sdd_phrase))
+assert 'solve.issue.lead' in sdd_composer, \
+    'SRT-606.3: the composer comment does not name the roleless member of the set'
+# The RFC row is the third copy of the same pair and is the one the composer
+# comment was made consistent with, so it is derived here too -- otherwise the
+# pair is free to drift apart in the other direction.
+assert 'all %d unbound provider edges (%d of them ever composed' % (
+    sdd_unbound_total,sdd_unbound_composable) in sdd_rfc_row, \
+    'SRT-606.3: the RFC register row no longer states the derived %d/%d split' % (
+        sdd_unbound_total,sdd_unbound_composable)
+assert 'role: null' in sdd_rfc_row, \
+    'SRT-606.3: the RFC register row no longer names the roleless member by its manifest field'
 for edge_id in review_edges:
     assert edges[edge_id]['required'] is True, edge_id
     assert edges[edge_id]['retry']=={'format':1}, edge_id
