@@ -243,7 +243,7 @@ optimisation — it is the deletion of a proof.**
 |---|---|---|
 | `review` | the 7 Phase-1 reviewers | per-child `capture` verbs → trusted ledger → `post_review_capture_aggregation_inputs` → `post_review_write_aggregate_v2` → `digest` → `prepare-authority` |
 | `fix` | ONE `code-fixer` child | `review_fixer_terminal_outcome` → (`capture-review-terminal` → `validate-review-outcome` \| `publish-unapplied-terminal`) → `validate-residue` → `review_track_validated_fixer_head` → `review_refresh_phase1_scope` |
-| `simplify` | the 3 `code-simplifier` lenses | canonical aggregate → `code_fixer_contract.py encode-aggregate --phase phase2` (the byte-shape oracle, `commands/simplify.md:341-348`) → `digest` → `prepare-authority` |
+| `simplify` | the 3 `code-simplifier` lenses | canonical aggregate → `code_fixer_contract.py encode-aggregate --phase phase2` (the byte-shape oracle, `commands/simplify.md`) → `digest` → `prepare-authority` |
 | `defer` | ONE `findings-to-issues` child | halt handling (`AskUserQuestion`), then the GREEN/YELLOW/RED predicate |
 | `ci-classify` | ONE `ci-failure-classifier` child | `capture-ci-terminal` → `validate-ci-classification` (closed class enum, class/anchor pairing, anchor names a REAL repository file) → the routing scalar the mutating arm keys on |
 | `ci-fix` | ONE `ci-code-fixer` **or** `ci-rebase-handler` child | `capture-ci-terminal` → `validate-ci-mutation-outcome` (parent identity, one commit, subject form, anchor+one-lockfile scope for `fix_code`; head moved, base is ancestor, **remote tip still equals the pinned lease**, and `CONFLICT` when the child left a live rebase with unmerged paths, for `rebase`) → on `APPLIED`/`REBASED`, the single controller-held `--force-with-lease` push at `commands/review-pr.md` **6c.4w.3** |
@@ -255,29 +255,33 @@ optimisation — it is the deletion of a proof.**
 RFC 0012 §3.1's pseudocode proposes two things this implementation rejects, and
 both look harmless:
 
-- **line 153, "haiku writer emits post-impl-review-final.md".** Rejected. The
-  aggregate is published by `post_review_write_aggregate_v2`, a deterministic
-  writer that re-validates the closed seven-edge roster and "does not use any
-  pathname as aggregation authority"
-  (`skills/post-impl-review/SKILL.md:693-697`). Since #381 it IS on disk, at
-  `lib/review-aggregate.sh:330` — so "no on-disk executable to invoke" no longer
-  carries the rejection. What carries it is the seam itself: the controller
-  proves, it never delegates the proof to an LLM. `lib/review-aggregate.sh`
-  exists so the CALLING SESSION can source the builders across its fresh-shell
-  `bash` blocks, which is the opposite of handing them to a relay.
-- **line 157, "push agent (haiku): git push origin HEAD".** Rejected. Pushing
-  goes through `review_publish_same_repo_pr_head` — fence text inside
-  `commands/review-pr.md` (`:1344-1376`, called at `:2373` and `:4013`), so
-  unlike the aggregate writer it is genuinely not an on-disk executable a relay
-  could invoke — and it proves same-repo authority, remote-ref equality,
-  live-PR-head equality, local-HEAD equality and clean residue before it moves
-  a ref.
+- **`haiku writer emits post-impl-review-final.md`.** Rejected. The aggregate is
+  published by `post_review_write_aggregate_v2`, a deterministic writer that
+  re-validates the closed seven-edge roster and "does not use any pathname as
+  aggregation authority" — its own words, in
+  `skills/post-impl-review/SKILL.md`. Since #381 it IS on disk, defined in
+  `lib/review-aggregate.sh` — so "no on-disk executable to invoke" does not
+  carry the rejection, here or in the bullet below. What carries it is the seam
+  itself: the controller proves, it does not delegate the proof to an LLM.
+  `lib/review-aggregate.sh` exists so the CALLING SESSION can source the
+  builders across its fresh-shell `bash` blocks, which is the opposite of
+  handing them to a relay.
+- **`push agent (haiku): git push origin HEAD`.** Rejected, by the same one
+  argument. Pushing goes through `review_publish_same_repo_pr_head`, a shell
+  function defined in `lib/review-fences.sh` and called from the
+  `commands/review-pr.md` fences, and what carries the rejection is what that
+  fence PROVES before it moves a ref: same-repo authority, remote-ref equality,
+  live-PR-head equality, local-HEAD equality and clean residue. An earlier
+  edition of this bullet rejected it on a different ground — that the fence,
+  unlike the aggregate writer, was not a file a relay could invoke at all. That
+  was read off a line number, the line moved, and the sentence went false while
+  still reading as an argument (#606). It is a shell function on disk, like the
+  writer; the seam is what separates them from a relay, not the filesystem.
 
-There is also **no brief relay** (RFC §3.1 line 148). The controller already
-writes the enveloped diff artifact atomically in Bash
-(`review_refresh_phase1_scope`, `lib/review-fences.sh`), so the
-reviewers read *that* path. This deletes an agent and removes an LLM from the
-trust path.
+There is also **no brief relay** (RFC §3.1's `brief agent: gh pr diff`). The
+controller already writes the enveloped diff artifact atomically in Bash
+(`review_refresh_phase1_scope`, `lib/review-fences.sh`), so the reviewers read
+*that* path. This deletes an agent and removes an LLM from the trust path.
 
 ---
 
