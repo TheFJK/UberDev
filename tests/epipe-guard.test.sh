@@ -1135,6 +1135,389 @@ else
 fi
 
 echo
+echo "== L0: the shipped-code lint corpus =="
+# The corpus every ported repo-wide guard scans. It is declared and floored HERE,
+# once, so a guard folded in later cannot quietly bring its own narrower walk —
+# the failure mode that made several one-document guards look repo-wide when they
+# were not.
+#
+# SHELL-NESS IS DECIDED BY CONTENT, NOT BY FILENAME. `git ls-files -- '*.sh'`
+# silently drops every shipped hook: hooks/session-start, hooks/session-end,
+# hooks/pre-compact, hooks/inject-brainstorm-answers and lib/rl-curl carry no
+# extension. A corpus that named hooks/ and still globbed '*.sh' would list the
+# directory and read nothing out of it. Matching on the shebang instead means a
+# sixth extension-less surface joins the corpus the day it is added, with no edit
+# here — a hardcoded list of the five would rot on exactly that commit.
+#
+# The reader below takes its input from a herestring, not a pipe: this file is
+# inside E1's own scan set (E3.2 asserts it is not self-exempt), so a
+# `... | grep -q` here would be the very defect this suite exists to stop.
+_lint_shipped_shell() {
+  local rel
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    [ -f "$REPO_ROOT/$rel" ] || continue
+    case "$rel" in
+      *.sh) printf '%s\n' "$rel"; continue ;;
+    esac
+    case "$(head -1 "$REPO_ROOT/$rel" 2>/dev/null)" in
+      '#!'*sh|'#!'*sh\ *) printf '%s\n' "$rel" ;;
+    esac
+  done <<<"$(git -C "$REPO_ROOT" ls-files -- 'plugins/uberdev/*')"
+}
+
+# The THIRD shipped surface, and the one a shell-plus-markdown corpus silently
+# omits: plugins/uberdev/skills/*/workflow.js. These files carry no shebang and
+# are not markdown, so neither enumerator above reaches them — yet they hold live
+# `gh pr create` / `gh issue view` call sites (scan-fleet/workflow.js:422,
+# solve-fleet/workflow.js:752) and live agent dispatch. Any guard about gh
+# argument shape or agent resolution that scans only shell+markdown is blind to
+# ~9k lines of exactly the code it is about.
+_lint_shipped_js() {
+  git -C "$REPO_ROOT" ls-files -- 'plugins/uberdev/*.js'
+}
+
+LINT_SH_LIST="$(_lint_shipped_shell)"
+LINT_SH_COUNT="$(grep -c . <<<"$LINT_SH_LIST")"
+LINT_MD_LIST="$(_epipe_md_files)"
+LINT_MD_COUNT="$(grep -c . <<<"$LINT_MD_LIST")"
+LINT_JS_LIST="$(_lint_shipped_js)"
+LINT_JS_COUNT="$(grep -c . <<<"$LINT_JS_LIST")"
+
+# Floors carry real headroom below the observed counts: they exist to catch an
+# enumerator that COLLAPSED, not to pin the current inventory. A floor equal to
+# the live count reds on the first legitimate deletion and teaches everyone to
+# raise it without looking, which is how a floor stops being a guard.
+if [ "$LINT_SH_COUNT" -ge 30 ]; then
+  echo "  PASS  L0.1 shipped shell corpus: $LINT_SH_COUNT files (floor 30)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L0.1 shipped shell corpus collapsed to $LINT_SH_COUNT (floor 30) — enumerator regressed"
+  FAIL=$((FAIL + 1))
+fi
+
+if [ "$LINT_MD_COUNT" -ge 100 ]; then
+  echo "  PASS  L0.2 shipped markdown corpus: $LINT_MD_COUNT files (floor 100)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L0.2 shipped markdown corpus collapsed to $LINT_MD_COUNT (floor 100) — enumerator regressed"
+  FAIL=$((FAIL + 1))
+fi
+
+# L0.3 names the five extension-less surfaces one at a time. The floor above
+# cannot catch their loss — dropping all five still leaves the count well over
+# 30 — and they are precisely the files an extension-gated rewrite would lose.
+L0_MISSING=""
+for sentinel in \
+  plugins/uberdev/hooks/session-start \
+  plugins/uberdev/hooks/session-end \
+  plugins/uberdev/hooks/pre-compact \
+  plugins/uberdev/hooks/inject-brainstorm-answers \
+  plugins/uberdev/lib/rl-curl
+do
+  grep -qxF "$sentinel" <<<"$LINT_SH_LIST" || L0_MISSING="$L0_MISSING $sentinel"
+done
+if [ -z "$L0_MISSING" ]; then
+  echo "  PASS  L0.3 all five extension-less shipped shell surfaces are in the corpus"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L0.3 extension-less shipped surfaces missing from the corpus:$L0_MISSING"
+  echo "        cause:  the enumerator went back to matching on filename instead of shebang"
+  FAIL=$((FAIL + 1))
+fi
+
+# L0.4 is the anti-vacuity row for L0.3: it proves the corpus is not merely a
+# '*.sh' glob that happens to satisfy the sentinels by coincidence. At least one
+# member must carry no .sh suffix, or the shebang branch never fired.
+L0_EXTLESS=0
+while IFS= read -r rel; do
+  [ -n "$rel" ] || continue
+  case "$rel" in
+    *.sh) ;;
+    *) L0_EXTLESS=$((L0_EXTLESS + 1)) ;;
+  esac
+done <<<"$LINT_SH_LIST"
+if [ "$L0_EXTLESS" -ge 5 ]; then
+  echo "  PASS  L0.4 the shebang branch fired — $L0_EXTLESS corpus members carry no .sh suffix"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L0.4 only $L0_EXTLESS extension-less members (expected >= 5) — the corpus is filename-gated"
+  FAIL=$((FAIL + 1))
+fi
+
+if [ "$LINT_JS_COUNT" -ge 6 ]; then
+  echo "  PASS  L0.5 shipped javascript corpus: $LINT_JS_COUNT files (floor 6)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L0.5 shipped javascript corpus collapsed to $LINT_JS_COUNT (floor 6) — enumerator regressed"
+  FAIL=$((FAIL + 1))
+fi
+
+# L0.6 is L0.5's anti-vacuity partner and states the reason the JS corpus exists:
+# these files really do carry the gh call sites a shell-only scan would miss. It
+# counts the class rather than pinning a line number, so a call site moving
+# between workflow.js files keeps it green while all of them going away reds it.
+L0_JS_GH=0
+while IFS= read -r rel; do
+  [ -n "$rel" ] || continue
+  l0_n="$(grep -cE 'gh (pr|issue) ' "$REPO_ROOT/$rel" 2>/dev/null)" || l0_n=0
+  L0_JS_GH=$((L0_JS_GH + l0_n))
+done <<<"$LINT_JS_LIST"
+if [ "$L0_JS_GH" -ge 5 ]; then
+  echo "  PASS  L0.6 the javascript corpus carries $L0_JS_GH live gh call sites a shell-only scan would miss"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L0.6 only $L0_JS_GH gh call sites found in the javascript corpus (expected >= 5)"
+  echo "        cause:  either the corpus is empty or the scan stopped reading these files"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== L1: retired terminal-dispatch transports =="
+# Ported from tests/ghostty-dispatch-no-instance-leak.test.sh:55-88 (#31 Ghostty
+# sticky --command=, #85 the five-branch cmux|ghostty|iterm|terminal|nohup
+# dispatcher, RFC 0015). The donor read ONE hardcoded file — solve-launcher.sh —
+# so a transport re-entering through lib/dispatch.sh, lib/child-dispatch.sh or a
+# hook was invisible to it. Here the corpus is L0's.
+#
+# Full-line shell comments are skipped so the retirement can still be DESCRIBED
+# in prose (lib/dispatch.sh and lib/goal-phase0.sh both name `cmux` in comments
+# today). A TRAILING comment is deliberately NOT stripped: a `#` inside a quoted
+# string or a URL is not a comment, and guessing is worse than the rule.
+RETIRED_TRANSPORT_RE='open -na Ghostty --args --command=|cmux new-workspace|osascript -e|tell application "iTerm"|tell application "Terminal"|nohup zsh -l'
+# No backslash appears in the regex, so passing it through `awk -v` is
+# escape-safe (same argument as _EP_AWK above). awk does the comment skip and the
+# match in one pass, so line numbers survive without piping into `grep -v` —
+# this file is inside E1's own scan set and must not use a piped early-exit reader.
+_RT_AWK='
+/^[[:space:]]*#/ { next }
+$0 ~ RE { printf "%s:%d\n", REL, FNR }
+'
+L1_HITS=""
+while IFS= read -r rel; do
+  [ -n "$rel" ] || continue
+  if ! _rt_out="$(awk -v RE="$RETIRED_TRANSPORT_RE" -v REL="$rel" "$_RT_AWK" "$REPO_ROOT/$rel" 2>/dev/null)"; then
+    _rt_out="$rel:0 DETECTOR-ERROR awk exited non-zero while scanning this file"
+  fi
+  [ -z "$_rt_out" ] || L1_HITS="$L1_HITS$_rt_out
+"
+done <<<"$LINT_SH_LIST"
+if [ -z "$L1_HITS" ]; then
+  echo "  PASS  L1.1 no retired terminal-dispatch transport in the $LINT_SH_COUNT-file shipped shell corpus"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L1.1 retired terminal-dispatch transport present in shipped shell:"
+  sed 's/^/        /' <<<"$L1_HITS"
+  echo "        cause:  a transport retired in #85 (cmux / iTerm / Terminal AppleScript / nohup)"
+  echo "                or #31 (Ghostty --args --command=) re-entered the dispatch path"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== L2: the retired codex arm has not returned =="
+# Ported from tests/route-unsupported.test.sh:40-45. The donor's `if grep -n ...;
+# then <report>; exit 1; fi` spelling is deliberate and is carried: the obvious
+# `! grep -q` rewrite is exempt from errexit and scored a false green with the
+# regression actually on disk.
+#
+# Three-way on the grep rc, which the donor collapsed to two: rc=0 violations,
+# rc=1 clean, rc>=2 the detector could not read the file. A subject that cannot
+# be read must not be reported as clean.
+L2_TARGET="plugins/uberdev/lib/solve-launcher.sh"
+if ! grep -qxF "$L2_TARGET" <<<"$LINT_SH_LIST"; then
+  echo "  FAIL  L2.1 $L2_TARGET is not in the L0 shell corpus — this guard has no subject"
+  FAIL=$((FAIL + 1))
+else
+  L2_ARMS="$(grep -nE '^[^#]*\bcodex\b' "$REPO_ROOT/$L2_TARGET")"
+  L2_RC=$?
+  if [ "$L2_RC" -eq 0 ]; then
+    echo "  FAIL  L2.1 retired codex transport re-introduced outside a comment in $L2_TARGET:"
+    sed 's/^/        /' <<<"$L2_ARMS"
+    FAIL=$((FAIL + 1))
+  elif [ "$L2_RC" -eq 1 ]; then
+    echo "  PASS  L2.1 no codex arm outside a comment in $L2_TARGET"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  L2.1 DETECTOR-ERROR: grep exited $L2_RC on $L2_TARGET — the file was NOT checked"
+    FAIL=$((FAIL + 1))
+  fi
+fi
+
+echo
+echo "== L3: quoted-literal-tilde path assignments (#194) =="
+# Ported from tests/using-git-worktrees.test.sh:62, which read one SKILL.md.
+# Tilde expansion is suppressed inside "..." and '...' in bash AND zsh, so
+# `path="~/x"` creates a directory literally named `~` under the cwd.
+#
+# The `=` immediately before the quote is load-bearing, not decoration. Two
+# neighbouring shapes are legitimate and must survive: an unquoted RHS
+# (`path=~/x`, where the tilde really does expand), and a quoted tilde used as a
+# `case` PATTERN with no `=` in front of it — using-git-worktrees/SKILL.md:95
+# matches LOCATION in both its literal and expanded forms, and a ban on "quoted
+# ~/ anywhere" reds four shipped lines, three of them prose.
+TILDE_RE='(^|[^A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*=\$?["'"'"']~'
+TILDE_HITS=""
+TILDE_DENOM=0
+while IFS= read -r rel; do
+  [ -n "$rel" ] || continue
+  [ -f "$REPO_ROOT/$rel" ] || continue
+  _t_d="$(grep -cE -e '[A-Za-z_][A-Za-z0-9_]*=["'"'"']' "$REPO_ROOT/$rel" 2>/dev/null)" || _t_d=0
+  TILDE_DENOM=$((TILDE_DENOM + _t_d))
+  _t_h="$(grep -nE -e "$TILDE_RE" "$REPO_ROOT/$rel" 2>/dev/null)" || _t_h=""
+  [ -z "$_t_h" ] || TILDE_HITS="$TILDE_HITS$rel:$_t_h
+"
+done <<<"$LINT_SH_LIST
+$LINT_MD_LIST"
+if [ -z "$TILDE_HITS" ]; then
+  echo "  PASS  L3.1 no quoted-literal-tilde path assignment in shipped code"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L3.1 quoted-literal-tilde path assignment (#194):"
+  sed 's/^/        /' <<<"$TILDE_HITS"
+  echo "        fix:    build the path with \"\${HOME}/...\""
+  FAIL=$((FAIL + 1))
+fi
+# L3.2 is L3.1's denominator. L3.1 is an ABSENCE assertion over a regex that has
+# never fired, so on its own it cannot distinguish "clean corpus" from "regex
+# that stopped matching anything". Floored well under the live count.
+if [ "$TILDE_DENOM" -ge 3000 ]; then
+  echo "  PASS  L3.2 the tilde scan inspected $TILDE_DENOM quoted-RHS assignments (floor 3000)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L3.2 only $TILDE_DENOM quoted-RHS assignments scanned (floor 3000) — corpus or matcher regressed"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== L4: no non-portable in-place sed flag =="
+# Ported from tests/bump-version.test.sh:250, which read only $BUMP_SH. GNU sed
+# reads the backup suffix ATTACHED (-i.bak); BSD/macOS sed reads the NEXT
+# ARGUMENT as the suffix. Both CI jobs are GNU, so a regression here passes CI
+# and breaks the maintainer's macOS release ritual — it fails on the one machine
+# with no automated check.
+SED_INPLACE_RE='(^|[^[:alnum:]_])sed([[:space:]]+-[[:alnum:]]+)*[[:space:]]+--?i'
+SEDPORT_HITS=""
+SEDPORT_DENOM=0
+while IFS= read -r rel; do
+  [ -n "$rel" ] || continue
+  [ -f "$REPO_ROOT/$rel" ] || continue
+  _s_d="$(grep -cE -e '(^|[^[:alnum:]_])sed[[:space:]]+-' "$REPO_ROOT/$rel" 2>/dev/null)" || _s_d=0
+  SEDPORT_DENOM=$((SEDPORT_DENOM + _s_d))
+  _s_h="$(grep -nE -e "$SED_INPLACE_RE" "$REPO_ROOT/$rel" 2>/dev/null)" || _s_h=""
+  [ -z "$_s_h" ] || SEDPORT_HITS="$SEDPORT_HITS$rel:$_s_h
+"
+done <<<"$LINT_SH_LIST
+$LINT_MD_LIST"
+if [ -z "$SEDPORT_HITS" ]; then
+  echo "  PASS  L4.1 no in-place sed flag in shipped code ($SEDPORT_DENOM flagged sed invocations cleared)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L4.1 non-portable in-place sed flag in shipped code:"
+  sed 's/^/        /' <<<"$SEDPORT_HITS"
+  echo "        fix:    render through a tempfile and copy back — see bv_edit_inplace() in lib/bump-version.sh"
+  FAIL=$((FAIL + 1))
+fi
+if [ "$SEDPORT_DENOM" -ge 20 ]; then
+  echo "  PASS  L4.2 the sed scan inspected $SEDPORT_DENOM flagged sed invocations (floor 20)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L4.2 only $SEDPORT_DENOM flagged sed invocations scanned (floor 20) — corpus or matcher regressed"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== L5: the zsh-NOMATCH echo-ternary transcription trap =="
+# Ported from tests/audit-fixups.test.sh C8 (:242 ban, :280 partner).
+#
+# POLARITY, because it is easy to get backwards: the nested form
+# `echo "<label>: $([[ cond ]] && echo '<a>' || echo '<b>')"` is the BANNED one.
+# It is valid in both shells as written; the defect is that the INNER quote pair
+# is what gets dropped when the line is re-emitted into a generated launcher.
+# Degraded, a parenthesised bare word makes bash die with a syntax error, while
+# zsh under default NOMATCH either aborts with `no matches found:` or silently
+# prints an EMPTY permission mode. The required form hoists both strings into a
+# flat variable via if/else and echoes the variable.
+#
+# The illustrative one-liner is deliberately not written literally in this
+# comment: a verbatim copy would self-match the regex the day the corpus widens.
+NOMATCH_RE='echo "[^"]*\$\(\[\[.*\]\][[:space:]]*&&[[:space:]]*echo[[:space:]]*'"'"
+NOMATCH_HITS=""
+while IFS= read -r rel; do
+  [ -n "$rel" ] || continue
+  [ -f "$REPO_ROOT/$rel" ] || continue
+  _n_h="$(grep -nE -e "$NOMATCH_RE" "$REPO_ROOT/$rel" 2>/dev/null)" || _n_h=""
+  [ -z "$_n_h" ] || NOMATCH_HITS="$NOMATCH_HITS$rel:$_n_h
+"
+done <<<"$LINT_SH_LIST
+$LINT_MD_LIST"
+if [ -z "$NOMATCH_HITS" ]; then
+  echo "  PASS  L5.1 no nested-substitution echo ternary in shipped shell or markdown"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L5.1 nested-substitution echo ternary (zsh-NOMATCH transcription trap):"
+  sed 's/^/        /' <<<"$NOMATCH_HITS"
+  echo "        fix:    hoist the two strings into a flat var via if/else, then echo the var"
+  FAIL=$((FAIL + 1))
+fi
+# L5.2 is the partner the donor shipped and the ban depends on: without it the
+# ban goes quietly green the moment the line it protects is deleted or relabelled.
+# Indentation-tolerant, unlike the donor's column-0 `^echo` anchor.
+if grep -qE '^[[:space:]]*echo "Permission mode: \$PERM_DESC"' \
+     "$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh" 2>/dev/null; then
+  echo "  PASS  L5.2 solve-launcher still prints the flat-var 'Permission mode: \$PERM_DESC'"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L5.2 solve-launcher's flat-var 'Permission mode: \$PERM_DESC' print is gone —"
+  echo "        L5.1 would now be guarding a line that no longer exists"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== L6: no gh-issue write passes an inline --body expansion =="
+# Ported from tests/cluster.test.sh C2.c (security.md Q2). The donor's ANCHORED
+# spelling is carried, NOT tests/solve-fleet-workflow.test.sh:375's bare
+# `grep -q 'body-file'` presence check — that one matches a comment or a doc
+# string and stays green next to a live inline --body.
+#
+# Forbidden: gh issue (close|edit|comment) ... --body "$...
+# Allowed:   --body-file <path> / --body-file -
+#
+# The JS corpus is scanned too. L0.6 measures 18 live gh call sites in
+# plugins/uberdev/skills/*/workflow.js, and those files carry neither a shebang
+# nor a .md suffix — a shell-plus-markdown scan would have missed every one.
+L6_RE='gh issue (close|edit|comment)[^|]*--body "\$'
+L6_ANY_RE='gh issue (close|edit|comment)'
+L6_HITS=""
+L6_DENOM=0
+while IFS= read -r rel; do
+  [ -n "$rel" ] || continue
+  [ -f "$REPO_ROOT/$rel" ] || continue
+  _b_d="$(grep -cE -e "$L6_ANY_RE" "$REPO_ROOT/$rel" 2>/dev/null)" || _b_d=0
+  L6_DENOM=$((L6_DENOM + _b_d))
+  _b_h="$(grep -nE -e "$L6_RE" "$REPO_ROOT/$rel" 2>/dev/null)" || _b_h=""
+  [ -z "$_b_h" ] || L6_HITS="$L6_HITS$rel:$_b_h
+"
+done <<<"$LINT_SH_LIST
+$LINT_MD_LIST
+$LINT_JS_LIST"
+if [ -z "$L6_HITS" ]; then
+  echo "  PASS  L6.1 no gh-issue write passes an inline --body \"\$…\" (security.md Q2)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L6.1 gh-issue write with an inline --body variable expansion:"
+  sed 's/^/        /' <<<"$L6_HITS"
+  echo "        fix:    write the body to a mktemp file, then --body-file <path>"
+  FAIL=$((FAIL + 1))
+fi
+if [ "$L6_DENOM" -ge 24 ]; then
+  echo "  PASS  L6.2 the gh-write scan inspected $L6_DENOM gh issue close/edit/comment call sites (floor 24)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L6.2 only $L6_DENOM gh issue write call sites scanned (floor 24) — corpus regressed"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
 echo "==================================================================="
 echo "  PASS=$PASS  FAIL=$FAIL"
 echo "==================================================================="

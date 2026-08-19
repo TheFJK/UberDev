@@ -4,6 +4,195 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.49.1] — 2026-08-18
+
+### Fixed - the post-fixer push could never land after an APPLIED Phase 1 fixer
+
+Found by running `/uberdev:review-pr` end to end against the consolidated PR
+#627: the Phase 1 fixer returned `APPLIED` and was validated, and Step 6a then
+refused every attempt to publish it.
+
+`reviewed-head.txt` records the head **the review stands on**, and
+`review_track_validated_fixer_head`'s `APPLIED` arm advances it the moment a
+fixer commit is validated. That advance is purely local -- nothing has pushed
+yet. Step 6a is a separate process, so `review_fleet_rehydrate` rebound
+`REVIEWED_HEAD_SHA` off that advanced record and handed it to
+`review_publish_same_repo_pr_head` as `expected_remote_head_sha`. The gate
+asserts `[ "$live_head" = "$expected_remote_head_sha" ]` against the live PR, so
+it compared the post-fix head against a remote still on the pre-fix one and
+returned 79 -- on every run whose Phase 1 fixer applied anything. The fix commit
+stayed local and Phase 3 went on to probe exactly the stale SHA that 6a's own
+error text warns about.
+
+The two values were being treated as "the same fact at different moments"; they
+are not, and they diverge for precisely the window Step 6a runs in.
+
+- `lib/review-fleet-args.sh` now rehydrates `REVIEWED_HEAD_SHA` from its own
+  `published-head.txt` record. The old fallback to the validated head survives
+  only when that record is absent, so a run predating the seed behaves as before.
+- `commands/review-pr.md` seeds `published-head.txt` in the Phase 1 scope fence
+  beside `reviewed-head.txt`, and advances it in Step 6a **after** the push has
+  been proven -- the one place a publication is known to have landed.
+- `tests/review-pr-workflow.test.sh` gains `L8`, which advances the local head
+  through the real tracker and asserts a fresh rehydrate reports the two heads
+  as different. Confirmed red before the change and green after.
+
+### Fixed - `/turbox` required an issue-body artifact nothing created
+
+Found by `/turbox`'s first live run (against #619), then reworked twice under
+review.
+
+`skills/turbox-fleet/SKILL.md` invariant 2 requires that issue text reach an
+agent as a **path** to a private run artifact, never as prompt text. Nothing
+created that artifact. The failure mode was worse than a missing step: a
+controller arriving at Phase 2 with nothing to point at reaches for the obvious
+repair -- paste the body into the prompt -- which is exactly what the invariant
+forbids. The gap pushed toward violating the rule it existed to protect.
+
+The fix lives in the launcher rather than in controller prose, because a step
+the launcher performs cannot be skipped:
+
+- `lib/solve-launcher.sh` now persists `issue-body-<N>.md` on the standard lane
+  from bytes it had **already** fetched and validated for triage -- written with
+  `O_EXCL|O_NOFOLLOW` at `0600` inside the `0700` run dir, `fstat`-checked before
+  close, written in a loop with a final size assertion, and guarded by the same
+  root-directory checks `_uberdev_fetch_issue_json` performs. Previously those
+  bytes were fetched, used for triage, and deleted.
+- Manifest records gain `issue_body_file`, conditional exactly as `context_file`
+  is, so an absent key keeps meaning "this lane produces none" rather than "the
+  relay dropped it".
+- `UBERDEV_ISSUE_BODY_CAP` (64 KiB, matching `_UBERDEV_GOAL_BODY_CAP`) is
+  validated in the shell and again in python, and truncates by **bytes**. An
+  unvalidated cap of `0` wrote a zero-byte requirements document that passed
+  every downstream check and exited 0; a negative one trimmed the body from the
+  end; and character-slicing let a 4-byte-per-character body reach 4x the byte
+  ceiling the cap promises downstream.
+
+Three sites in the skill still told the controller to read the issue body out of
+`context_file` -- the Inputs table read *before* Phase 0, the single-solver path,
+and the spec-writer rung. `context_file` holds the routing decision, not the
+issue. All three corrected; the document no longer contradicts itself.
+
+The stale-agent-card warning now covers `spec-writer` and `spec-reviewer` as well
+as `research-*`. `agents/spec-reviewer.md` describes `issue_body` as "full issue
+text (provided inline in the prompt)", naming the violation as its mechanism. The
+cards are stale about the input's SHAPE -- `issue_body` inline versus the shipped
+`issue_path` contract -- not about the trust rule, which every one of them
+carries. Renaming that shared input is tracked as #623.
+
+New tests: `TX15` in `tests/turbox-fleet.test.sh` (15 shape assertions,
+mutation-tested) and `R13` in `tests/turbox-fleet-runtime.test.sh` (13
+behavioural assertions executing the writer extracted verbatim from the launcher,
+the same technique `R12` uses for the plan envelope).
+
+### Changed - `/solve` tier now prices SCOPE, not citation density (#614)
+
+`lib/solve_triage.py`'s `named_files()` scraped every filename-shaped token out
+of an issue body and called the count the size of the work, so it could not tell
+a file cited as **evidence** from a file the fix will **edit**. Three files is
+the `large` threshold, which gates a 33x solver spend (1 vs 33) — and because
+every writer that files issues into this repo is required to anchor claims with
+`path:line` evidence, the better-evidenced an issue was, the larger it priced.
+Measured against the live backlog the rule returned `large` for **every** open
+issue: 40 of 40 when #614 was filed, 43 of 43 when this landed.
+
+`scope_files()` replaces it, declaration first and prose second:
+
+- Issue writers may declare their own change set with an
+  `<!-- uberdev-scope v=1 files=... -->` block, which is read as fact.
+  `commands/issue.md` and `agents/findings-to-issues.md` both emit one.
+- Absent a declaration, the prose heuristic keeps only clauses that carry a
+  change verb and no exclusion phrase, so an evidence wall scores zero.
+- `lib/solve-launcher.sh`'s operator-facing `triage:` line reads `scope_files`
+  off the decision instead of re-deriving it with its own `grep` — one producer
+  for the count, rather than a second copy kept in sync by nothing.
+
+**This re-tiers most of the backlog**, and tier is what decides how many solver
+agents `/solve` dispatches per issue, so expect the dispatch cost of an
+unchanged issue to move.
+
+### Added - one run-shared repo profile for the research fan-out (#615 Part A)
+
+Design-tier issues used to have every research lens re-derive the same
+repository-wide facts — the rule corpus, the test runner, the dependency
+manifests — once per lens per issue. A single repo-profile agent now derives
+them once per run and every delegating lens reads that artifact instead. The
+profile is content-keyed and cached across runs; `reused` and `cacheWritten`
+ride in the audit trail so a cache with a reader and no writer is observable
+rather than inferred, which is the #308 shape that killed the previous research
+cache.
+
+### Changed - the solver fleet admits work through a sliding window (#615 Part B)
+
+`skills/solve-fleet/workflow.js` chunked the issue list into waves and awaited
+each wave whole, so every wave barriered on its slowest chain: a 2-task issue
+sat idle until the 15-task issue beside it finished research → design →
+implement → deliver, and chain durations vary by an order of magnitude. Nothing
+downstream needed that barrier — each chain owns its own worktree, branch and
+PR, and no chain reads another's result. `concurrency` is now a live ceiling on
+chains in flight rather than a batch size, which bounds live worktrees exactly
+as the barrier did while a lane freed by a fast chain picks up the next issue
+immediately.
+
+### Changed - test suite: prose-locks retired, repo-wide guards consolidated
+
+First tranche of the `tests/` reduction. Roughly two thirds of the assertions in the
+121,793-line suite are **prose-locks** - greps asserting that a particular heading,
+wording or line-ordering still appears in a `.md` prompt surface. They red on every
+reword, catch no runtime defect, and are why a one-line prompt edit costs a 28-minute
+suite run and a multi-file test chase.
+
+A per-assertion classification of all 125 files puts the safely removable total at
+**29,055 lines (24%)** - not the ~90% a raw grep-count suggests. Three adversarial
+passes overrode 16 of 80 file verdicts, two because the deletion would have changed
+shipped behaviour.
+
+- `tests/solve-claim.test.sh` **502 -> 101**. The ~99 structural-grep rows are gone.
+  The file is **not** deleted and must not be: `lib/bump-version.sh:221` binds it as
+  release surface #6 and `:224-233` fails *closed* when it is unreadable, so removing
+  it would refuse every release, every `/merge` release-anchor pass and every `/goal`
+  version bump. What survives is the release ratchet plus the `#123` B1 block, which
+  executes the closing-keyword regex against known-bad and known-good fixtures and is
+  pinned to the shipped bytes by its paired `assert_grep`.
+- `tests/child-contract-v2.test.sh` **688 -> 603**. Its schema oracle over
+  `policy/solve-run-tree-v1.json` is folded into `tests/solve-run-tree.test.sh`, now
+  the single oracle. The two were **not** duplicates and each one's removal had been
+  argued for by naming the other as the survivor - applying both would have left the
+  manifest unguarded. Five rules existed only in the dropped block, including a
+  *derived* review-lens count of 7 where the survivor hardcodes 6.
+
+### Added - `tests/epipe-guard.test.sh` sections L0-L6, the shared lint host
+
+- **L0** declares the shipped-code corpus once, so a guard folded in later cannot
+  bring a narrower walk of its own. Shell-ness is decided by **shebang, not filename**:
+  `git ls-files -- '*.sh'` drops every shipped hook, since `session-start`,
+  `session-end`, `pre-compact`, `inject-brainstorm-answers` and `lib/rl-curl` carry no
+  extension. A third enumerator covers `skills/*/workflow.js` - 8 files holding 18 live
+  `gh pr`/`gh issue` call sites that neither a shell nor a markdown walk reaches.
+- **L1-L6** port six repo-wide guards off single-document donors: retired
+  terminal-dispatch transports, the retired codex arm, quoted-literal-tilde paths
+  (#194), non-portable `sed -i`, the zsh-NOMATCH echo-ternary trap, and gh-issue writes
+  with an inline `--body` expansion. Five of the six previously read exactly one
+  hardcoded file.
+- Every zero-hit ratchet ships a denominator, because an absence assertion cannot tell
+  a clean corpus from a matcher that stopped matching: 4,378 quoted-RHS assignments,
+  36 `sed` invocations, 37 gh write call sites.
+
+### Why
+
+Each ported guard is proven **both directions** against a git-init'd scratch mirror -
+red on a seeded violation, green on its nearest legitimate neighbour. The second half
+is not ceremony: a vacuity audit of the candidate predicates found two that would have
+shipped permanently green. One resolved variables corpus-globally first-match-wins, so
+a seeded 113-byte label description measured 5 bytes and passed; the other required
+backtick-delimited tokens and was therefore blind to the operative `subagent_type:`
+dispatch spelling, leaving 413 of 578 references unchecked. Both are held back until
+their carve-outs are designed. A green guard whose donor has been deleted is strictly
+worse than no guard.
+
+Donors are **not** deleted in this release - coverage is deliberately duplicated until
+the deletion step, so a mistake in a ported predicate cannot silently drop a class.
+
 ## [0.49.0] — 2026-08-18
 
 ### Added - `/turbox`, the standard-mode solver fleet (RFC 0020)

@@ -175,6 +175,19 @@ merge OPEN with the unreached tasks still on it. `/merge` Step 3.4 parses that
 trailer to release the `uberdev:active` claim regardless, so an unfinished issue
 is left re-solvable rather than claimed by nobody.
 
+`chainComplete` reaches `/goal` as well (#592), and every hop is named by
+symbol because the line numbers rot: `finalize()` publishes the partial subset
+of `prsOpened` as `prsPartial`; the partial ledger in
+`skills/goal-pipeline/workflow.js` accumulates that subset, plus the issue
+numbers the same flag names in `results`, for the whole run; and it hands them
+to the two shell gates on the only channel a script forbidden the filesystem
+has — the command line — as `--partial-prs=` and `--partial-issues=`. From
+there the `merge-dispatch-gate` region of `lib/goal-watch.sh` marks the
+`green → merging` decision as a partial delivery, and the `terminal` region of
+`lib/goal-phase3.sh` refuses to emit `goal_converged` while any issue in the
+run delivered a short chain. The PR still merges; what changes is that the run
+stops reporting a convergence it did not achieve.
+
 The solver stops at PR opened. It does not merge and does not chain into a
 review command; that remains `/goal`'s decision.
 

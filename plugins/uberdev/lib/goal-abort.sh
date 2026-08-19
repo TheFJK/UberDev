@@ -39,8 +39,9 @@
 #   exit 2  usage error, or no resolvable goal run
 #
 # No audit rows are emitted. GOAL_AUDIT_EVENT_ENUM is a CLOSED set (RFC 0005
-# D5 — new members require an RFC amendment) and none of its twelve members
-# means "claims released by an out-of-band abort". Inventing a member here, or
+# D5 — new members require an RFC amendment; #592 landed the latest TWO as
+# D592a-event and D592a-delivery) and none of its fifteen members means
+# "claims released by an out-of-band abort". Inventing a member here, or
 # stretching goal_reaper_skipped to cover it, would corrupt the replay semantics
 # every audit consumer depends on. The summary goes to stdout instead.
 

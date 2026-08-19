@@ -1643,6 +1643,18 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
        audit reviewed_head_uncarried data.reason=write_failed
        return 2
      }
+     # THE PUBLISHED head, seeded from the same live-PR value at the same moment.
+     # It is a SECOND fact, not a copy: reviewed-head.txt advances the instant a
+     # fixer commit is validated (locally), while this one may only move when a
+     # push has actually landed. Step 6a hands this value to
+     # review_publish_same_repo_pr_head as `expected_remote_head_sha`, so binding
+     # it to the advanced local head made that gate unsatisfiable on every run
+     # whose Phase 1 fixer APPLIED.
+     review_fleet_write_published_head "$REVIEW_BASE_RUN_DIR/published-head.txt" "$REVIEWED_HEAD_SHA" || {
+       echo "error: /uberdev:review-pr — bound PR #$PR_NUMBER's published head ($REVIEWED_HEAD_SHA) but could not persist it to $REVIEW_BASE_RUN_DIR/published-head.txt; refusing to dispatch fixers whose push the 6a gate could then never satisfy." >&2
+       audit published_head_uncarried data.reason=write_failed
+       return 2
+     }
      # A run dir that IS bound and still cannot take the carrier halts HERE, not
      # at the anchor: the base has already been resolved and the whole review is
      # about to be scoped to it, so a silent non-write would produce a trust
@@ -2623,6 +2635,13 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
      exit 2
    fi
    REVIEWED_HEAD_SHA="$POST_FIXER_HEAD_SHA"
+   # ...and record it, because the promotion above is a shell variable and the
+   # trust fences are separate processes. This is the ONE place a push has been
+   # proven to land, so it is the only place the published head may advance.
+   review_fleet_write_published_head "$RESEARCH_DIR_ABS/published-head.txt" "$POST_FIXER_HEAD_SHA" || {
+     echo "error: /uberdev:review-pr — published PR #$PR_NUMBER at $POST_FIXER_HEAD_SHA but could not record it to $RESEARCH_DIR_ABS/published-head.txt; a later fence would name the pre-push head as the remote's." >&2
+     exit 2
+   }
    ```
 
    The shared publication gate rejects fork PRs and authenticates the PR head

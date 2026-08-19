@@ -698,6 +698,58 @@ else
   fi
 fi
 
+# G35 (#615 Part A) — the repo-profile DELEGATION table is total over the SAME
+# vocabulary the brief table is keyed by, and joined to it in BOTH directions.
+#
+# One direction alone is satisfiable by the bug this row exists for. A missing
+# entry would hand a lens no delegation and quietly leave it re-deriving the
+# invariant half the profile already answered — the exact waste #615 removes,
+# reintroduced silently. An EXTRA entry is the opposite failure: a delegation for
+# a lens that no longer runs, which reads as coverage nothing exercises and is
+# how a retired lens keeps a live-looking contract.
+#
+# The `codebase` entry is asserted PRESENT AND EMPTY on purpose. "" here is the
+# claim "nothing about this lens is repo-invariant", which is a real answer; an
+# absent key would make that indistinguishable from "someone added a lens and
+# forgot this table", which is the whole failure mode.
+LENS_DELEG_KEYS="$(sed -n '/^const LENS_INVARIANT_DELEGATIONS = {/,/^};$/p' "$WORKFLOW" \
+  | sed -n 's/^  "\([A-Za-z0-9_-]*\)":.*/\1/p' | tr -d '\r')"
+LENS_DELEG_BLOCK="$(sed -n '/^const LENS_INVARIANT_DELEGATIONS = {/,/^};$/p' "$WORKFLOW" | tr -d '\r')"
+LENS_DELEG_FN="$(sed -n '/^function lensDelegation(lens) {/,/^}$/p' "$WORKFLOW" | tr -d '\r')"
+G35_MISSING=""
+G35_EXTRA=""
+if [ -z "$LENS_VOCAB_RAW" ] || [ -z "$LENS_DELEG_KEYS" ] || [ -z "$LENS_DELEG_FN" ]; then
+  # Same anti-vacuity guard G34 carries: an empty capture would make every arm
+  # below inspect nothing and report PASS.
+  fail "G35 could not read BASE_LENSES / LENS_INVARIANT_DELEGATIONS / lensDelegation() out of the fleet script — the totality check would inspect nothing"
+else
+  G35_REQUIRED="$(printf '%s\n' "$LENS_VOCAB_RAW" | tr -d '" ' | tr ',' '\n'; printf 'security\n')"
+  while IFS= read -r lens; do
+    [ -n "$lens" ] || continue
+    grep -qxF -- "$lens" <<<"$LENS_DELEG_KEYS" || G35_MISSING="$G35_MISSING $lens"
+  done <<<"$G35_REQUIRED"
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    grep -qxF -- "$key" <<<"$G35_REQUIRED" || G35_EXTRA="$G35_EXTRA $key"
+  done <<<"$LENS_DELEG_KEYS"
+  G35_FN_RETURNS="$(grep -cE '^[[:space:]]*return ' <<<"$LENS_DELEG_FN")"
+  if ! grep -q 'throw new Error("no repo-profile delegation for lens: "' <<<"$LENS_DELEG_FN"; then
+    fail "G35 lensDelegation() does not throw on an unknown lens — an unlisted name would degrade silently"
+  elif [ "$G35_FN_RETURNS" != "1" ]; then
+    fail "G35 lensDelegation() has $G35_FN_RETURNS return statements, want exactly 1 — a second one is a bare fallthrough"
+  elif ! grep -q 'return LENS_INVARIANT_DELEGATIONS\[lens\];' <<<"$LENS_DELEG_FN"; then
+    fail "G35 lensDelegation()'s single return does not read the delegation table"
+  elif [ -n "$G35_MISSING" ]; then
+    fail "G35 a live lens has no repo-profile delegation entry:$G35_MISSING"
+  elif [ -n "$G35_EXTRA" ]; then
+    fail "G35 LENS_INVARIANT_DELEGATIONS carries an entry for a lens that does not run:$G35_EXTRA"
+  elif ! grep -q '^  "codebase": "",$' <<<"$LENS_DELEG_BLOCK"; then
+    fail "G35 the codebase lens has no EXPLICIT empty delegation — 'this lens delegates nothing' must be a written answer, not a missing key"
+  else
+    pass "G35 the repo-profile delegation table is total and joined to the lens vocabulary in both directions, with codebase explicitly delegating nothing"
+  fi
+fi
+
 # G18 — CB1 accounting must move WITH the agent. The proof relay is a real
 # dispatch; a ceiling that does not count it under-projects by one on every run
 # and the "abort before dispatch" guarantee stops being exact. Both doc copies
@@ -1277,6 +1329,12 @@ function task(id, o) {
     summary: "s", blocker: "" }, o || {});
 }
 function approve() { return { verdict: "APPROVE", rc: 0, headline: "h", blockingFindings: [] }; }
+// DELIBERATELY carries NO "repo-profile" entry. The default agent return is {},
+// whose rc is not 0, so every run built on this fixture dispatches the profile
+// and then REFUSES it — which means B47/B48/B49 and every other rendered-lens
+// assertion here reads the DEGRADED prompt: the full pre-#615 brief, with no
+// profile paragraph. The accepted path has its own fixtures (Runs RPA/RPW/RPR),
+// so the two halves are pinned separately instead of one masking the other.
 function mediumReturns() {
   return {
     "manifest-intake": intake([rec(11, "medium"), rec(12, "trivial")]),
@@ -1396,12 +1454,23 @@ function probedNums(record) {
   out.aProofHaiku = !!(proofCall && proofCall.model === "haiku");
   out.aSolversInherit = recA.agentCalls.filter(function (c) { return /^solve:#/.test(c.label || ""); })
     .every(function (c) { return c.model === null; });
+  // #615 Part A — the repo profile exists to feed the research lenses, and a
+  // trivial/small batch dispatches none. Spending an agent to derive a rulebook
+  // nothing in the run will read is the cost defect wearing the other face.
+  out.aNoProfile = !recA.agentCalls.some(function (c) { return c.label === "repo-profile"; });
 
   // Run B — medium tier gets the full design chain; trivial in the same batch does not.
   const recB = await run(buildArgs(), { agentReturns: mediumReturns() });
   const resB = resultOf(recB);
   const cB = h.countAgentsByPhase(recB);
   out.bResearch = cB.research || 0;
+  // #615 Part A — the research PHASE now holds the per-issue lenses PLUS the one
+  // run-shared repo profile. Counted APART, because "the phase got bigger" and
+  // "the lens roster grew" are different facts and only the first is allowed:
+  // the four lenses are four different questions and merging or multiplying them
+  // is the trade this change explicitly refuses.
+  out.bLensAgents = labels(recB).filter(function (l) { return /^research:#/.test(l || ""); }).length;
+  out.bProfileAgents = labels(recB).filter(function (l) { return l === "repo-profile"; }).length;
   out.bDesign = cB.design || 0;
   out.bImplement = cB.implement || 0;
   out.bDesigned = resB ? resB.designedIssues : null;
@@ -2354,9 +2423,16 @@ function probedNums(record) {
   // time the design chain gains a rung — the #370 shape G31 exists to close.
   const DESIGN_BASE = readInt(/designCount \* \((\d+) \+ IMPLEMENT_AGENT_BUDGET - 1\)/, "the design base");
   const FLEET_BUDGET_JS = readInt(/IMPLEMENT_AGENT_BUDGET = clampInt\(CFG\.implementBudget, 4, 96, (\d+)\)/, "the implement budget");
-  const PROJ = 2 + 2 + 1 * (DESIGN_BASE + FLEET_BUDGET_JS - 1);
+  // #615 Part A adds a RUN-level agent — the shared repo profile — and CB1 has
+  // to charge it: a ceiling that under-projects is not a ceiling, which is the
+  // same rule that put the #515 proof relay into the leading 2. Read out of the
+  // script like every other scalar here; only the SHAPE is retyped.
+  const PROFILE_CHARGE = readInt(/const repoProfileAgents = designCount > 0 \? (\d+) : 0;/,
+    "the repo-profile agent charge");
+  const PROJ = 2 + PROFILE_CHARGE + 2 + 1 * (DESIGN_BASE + FLEET_BUDGET_JS - 1);
   out.sDesignBase = DESIGN_BASE;
   out.sBudget = FLEET_BUDGET_JS;
+  out.sProfileCharge = PROFILE_CHARGE;
   const recS1 = await run(buildArgs(null, { maxAgents: PROJ }), { agentReturns: mediumReturns() });
   out.sAtCeiling = !!(resultOf(recS1) && resultOf(recS1).cb1Tripped);
   const recS2 = await run(buildArgs(null, { maxAgents: PROJ - 1 }), { agentReturns: mediumReturns() });
@@ -3549,12 +3625,445 @@ function probedNums(record) {
     resX2.verification.unverified,
     resX2.prsOpened.join(","),
   ].join("/") : "no_result";
+  // #615 Part B — the window's CB2 check must NOT fire on a DRAINED queue. This
+  // run solves every issue; the budget is gone only because they consumed it,
+  // and no issue was ever held back. A lane that tests the budget BEFORE testing
+  // whether anything is left to admit reports a ceiling that stopped nothing —
+  // and cb2Tripped is exactly what a caller reads to decide a run was cut short,
+  // so the false positive strands nothing and misreports everything. The wave
+  // loop could not have this bug (it re-checked once per wave, and there was no
+  // wave after the last one), which is why the check has to be re-earned here.
+  out.x2NoFalseCb2 = resX2 ? [
+    resX2.cb2Tripped,
+    resX2.issueCount,
+    resX2.auditEvents.filter(function (e) { return e.event === "budget_exhausted"; }).length,
+  ].join("/") : "no_result";
+
+  // ------------------------------------------------------------------ #615 A
+  // The run-shared repo profile. Three of the four lenses carry a half that is a
+  // property of the REPOSITORY and not of any issue, and every issue in the run
+  // was re-deriving it. One agent derives it; the lenses read it and compute
+  // their delta. The rows below pin the three things that make that safe rather
+  // than merely cheaper: it is dispatched ONCE for the run (not once per issue),
+  // its write path resolves the MAIN repo root, and EVERY failure arm degrades
+  // to the pre-#615 behaviour instead of pointing a lens at nothing.
+  const profileOut = function (over) {
+    return Object.assign({ profilePath: RD + "/repo-profile.md", rc: 0,
+      reused: false, cacheWritten: true }, over || {});
+  };
+  const rpBase = function (over) {
+    return Object.assign({}, mediumReturns(), {
+      "manifest-intake": intake([rec(11, "medium"), rec(21, "medium")]),
+      "repo-profile": profileOut(),
+      // Issue 21 gets no spec fixture, so its design phase produces nothing
+      // usable and it falls back to the single solver. Its LENS PROMPTS are
+      // built either way, which is all these rows read it for.
+      "solve:#21 (medium)": solved(21, 903),
+      "verify-prs": proof([proofRow(901, "fix/11-x"), proofRow(903, "fix/21-x")]),
+    }, over || {});
+  };
+  const rpArgs = { issues: "11,21", issueCount: 2 };
+
+  // Run RPA — the happy path over TWO design-tier issues.
+  const recRPA = await run(buildArgs(null, rpArgs), { agentReturns: rpBase() });
+  const resRPA = resultOf(recRPA);
+  out.rpaOnce = countLabel(recRPA, "repo-profile");
+  // The write path, read off the RENDERED prompt. RFC 0012 section 3.5 names
+  // this exact trap: under a worktree `--show-toplevel` returns the WORKTREE
+  // top, so a cache written there dies with the worktree and the "fixed" cache
+  // silently has zero writers again — which is what retired the last one (#308).
+  // Both halves are asserted: the required spelling present, the forbidden one
+  // named as forbidden rather than merely absent.
+  const rpaProfileText = promptOf(recRPA, "repo-profile");
+  out.rpaGitCommonDir = rpaProfileText.indexOf("git rev-parse --git-common-dir") >= 0
+    && rpaProfileText.indexOf("`git rev-parse --show-toplevel` is FORBIDDEN") >= 0
+    && rpaProfileText.indexOf("returns the WORKTREE top") >= 0;
+  // The key IS the freshness rule — the ~200-line predicate is what rotted last
+  // time, so inventing a second staleness test is named as forbidden too.
+  out.rpaContentKey = rpaProfileText.indexOf("CONTENT KEY") >= 0
+    && rpaProfileText.indexOf("Do NOT invent a staleness check") >= 0;
+  // Every lens with an invariant half, on BOTH issues, is pointed at the one
+  // artifact and told not to re-derive it.
+  const rpaDelegated = ["research:#11:constraints", "research:#11:test-coverage",
+    "research:#21:constraints", "research:#21:test-coverage"];
+  out.rpaLensesDelegate = rpaDelegated.every(function (label) {
+    const t = promptOf(recRPA, label);
+    return t.indexOf(RD + "/repo-profile.md") >= 0
+      && t.indexOf("treat it as ANSWERED") >= 0
+      && t.indexOf("Your job is the DELTA for THIS issue") >= 0;
+  });
+  // ...and the one lens with NOTHING repo-invariant is left alone: its prompt
+  // must not name an artifact it has no use for.
+  out.rpaCodebaseUntouched = promptOf(recRPA, "research:#11:codebase")
+    .indexOf("repo-profile.md") < 0;
+  // The lens roster is still FOUR questions, not three: the profile feeds them,
+  // it does not replace one. Without this row the cheapest way to pass every
+  // other row here is to delete a lens.
+  out.rpaLensRoster = labels(recRPA).filter(function (l) { return /^research:#11:/.test(l || ""); })
+    .sort().join(",");
+  out.rpaReadyAudit = !!(resRPA && resRPA.auditEvents.some(function (e) {
+    return e.event === "repo_profile_ready" && e.reused === false && e.cached === true; }));
+  out.rpaNoZeroWriterRow = !!(resRPA && !resRPA.auditEvents.some(function (e) {
+    return e.event === "repo_profile_not_cached"; }));
+
+  // Run RPN — the profile agent returns NOTHING. Every lens must fall back to
+  // deriving its own invariant half, which is exactly the pre-#615 prompt, and
+  // the run must still solve. A missing profile costs tokens, never correctness.
+  const recRPN = await run(buildArgs(null, rpArgs), { agentReturns: rpBase({ "repo-profile": null }) });
+  const resRPN = resultOf(recRPN);
+  out.rpnNoLeak = promptOf(recRPN, "research:#11:constraints").indexOf("repo-profile.md") < 0;
+  out.rpnStillBriefed = promptOf(recRPN, "research:#11:constraints")
+    .indexOf("skipping any that do not exist") >= 0;
+  out.rpnAudit = !!(resRPN && resRPN.auditEvents.some(function (e) {
+    return e.event === "repo_profile_null"; }));
+  out.rpnNullCounted = !!(resRPN && resRPN.nullsByPhase && resRPN.nullsByPhase.research >= 1);
+  out.rpnStillSolved = resRPN ? resRPN.counts.prOpened : null;
+
+  // Run RPU — the agent reports a SIBLING path under the run dir. underRunDir()
+  // is a PREFIX check and would accept it, pointing every lens in the run at a
+  // file no rung was ever told to write; the gate is exact string equality
+  // against the script-chosen path, the same rule specRevisionReject() uses.
+  const recRPU = await run(buildArgs(null, rpArgs), {
+    agentReturns: rpBase({ "repo-profile": profileOut({ profilePath: RD + "/repo-profile-v2.md" }) }),
+  });
+  const resRPU = resultOf(recRPU);
+  out.rpuAudit = !!(resRPU && resRPU.auditEvents.some(function (e) {
+    return e.event === "repo_profile_unusable" && e.atExpectedPath === false; }));
+  out.rpuNoLeak = promptOf(recRPU, "research:#11:constraints").indexOf("repo-profile-v2.md") < 0
+    && promptOf(recRPU, "research:#11:constraints").indexOf("repo-profile.md") < 0;
+
+  // Run RPW — derived but NEVER written back: a cache with a reader and no
+  // writer, which is the #308 defect itself. The script cannot stat, so this
+  // reported observation is the only evidence there is, and it has to reach the
+  // audit trail — while the profile itself is still used, because the failure is
+  // about the NEXT run, not this one.
+  const recRPW = await run(buildArgs(null, rpArgs), {
+    agentReturns: rpBase({ "repo-profile": profileOut({ cacheWritten: false }) }),
+  });
+  const resRPW = resultOf(recRPW);
+  out.rpwZeroWriterRow = !!(resRPW && resRPW.auditEvents.some(function (e) {
+    return e.event === "repo_profile_not_cached"; }));
+  out.rpwStillUsed = promptOf(recRPW, "research:#11:constraints")
+    .indexOf(RD + "/repo-profile.md") >= 0;
+  // The REUSE arm must not trip the zero-writer row: nothing was written because
+  // nothing needed writing, which is the cache working, not failing.
+  const recRPR = await run(buildArgs(null, rpArgs), {
+    agentReturns: rpBase({ "repo-profile": profileOut({ reused: true, cacheWritten: false }) }),
+  });
+  const resRPR = resultOf(recRPR);
+  out.rprNoZeroWriterRow = !!(resRPR && !resRPR.auditEvents.some(function (e) {
+    return e.event === "repo_profile_not_cached"; }));
+  out.rprReadyAudit = !!(resRPR && resRPR.auditEvents.some(function (e) {
+    return e.event === "repo_profile_ready" && e.reused === true; }));
+
+  // Run RPB — the budget is gone before the profile is dispatched. agent()
+  // THROWS on a ceiling, and the profile rung sits inside the run-level try, so an
+  // unguarded dispatch would take the whole run into run_threw: no issue
+  // solved, every claim stranded, and an operator told a run threw rather than
+  // that a budget died. The rung therefore guards itself the way verifyClaims
+  // does, degrades to no profile, and lets the window report CB2 cleanly.
+  //
+  // budgetTotal 1 is exact by construction: the intake relay spends it, so the
+  // ceiling lands on the very next dispatch and on nothing else.
+  const recRPB = await run(buildArgs(null, rpArgs), { agentReturns: rpBase(), budgetTotal: 1 });
+  const resRPB = resultOf(recRPB);
+  const rpbSkip = resRPB
+    ? resRPB.auditEvents.filter(function (e) { return e.event === "repo_profile_skipped"; })[0] : null;
+  out.rpbArm = resRPB ? [
+    rpbSkip ? String(rpbSkip.reason) : "no_repo_profile_skipped_row",
+    countLabel(recRPB, "repo-profile"),
+    resRPB.auditEvents.some(function (e) { return e.event === "run_threw"; }),
+    resRPB.cb2Tripped,
+  ].join("/") : "no_result";
+
+  out.rpViolations = [recRPA, recRPN, recRPU, recRPW, recRPR, recRPB]
+    .reduce(function (n, r) { return n + r.violations.length; }, 0);
+
+  // ------------------------------------------------------------------ #615 B
+  // The admission window. `concurrency` is a LIVE CEILING on chains in flight,
+  // not a batch size, and the two runs below are each other's contrast: SW
+  // proves the window SLIDES, SWC proves it is still a CEILING. Either alone is
+  // satisfiable by a broken shape — a hard barrier passes SWC, an unbounded
+  // fan-out passes SW — so both ship or neither means anything.
+  //
+  // Proven by INTERLEAVING, never by label order: label order is identical
+  // under a barrier and under a window, which is exactly why the wave loop
+  // survived this long. Run N above uses the same technique one rung down.
+  const swCfg = { issues: "11,12,13", issueCount: 3, concurrency: 2 };
+  function swReturns() {
+    return {
+      "manifest-intake": intake([rec(11, "trivial"), rec(12, "small"), rec(13, "trivial")]),
+      "solve:#11 (trivial)": solved(11, 901),
+      "solve:#12 (small)": solved(12, 902),
+      "solve:#13 (trivial)": solved(13, 903),
+      "verify-prs": proof([proofRow(901, "fix/11-x"), proofRow(902, "fix/12-x"),
+        proofRow(903, "fix/13-x")]),
+    };
+  }
+  const swSettle = async function (record, want, ms) {
+    const deadline = Date.now() + ms;
+    while (!want(record) && Date.now() < deadline) {
+      await new Promise(function (r) { setTimeout(r, 10); });
+    }
+  };
+  const swSaw = function (record, label) {
+    return record.agentCalls.some(function (c) { return c.label === label; });
+  };
+
+  // Run SW — issue 11 is held open for the whole probe. Under the wave loop this
+  // replaced, chunk() put 11 and 12 in wave 1 and 13 in wave 2, and wave 2 could
+  // not open until the SLOWEST chain of wave 1 had finished research -> design
+  // -> implement -> deliver. So a third chain starting while 11 is still in
+  // flight is only possible once the barrier is gone.
+  let releaseSW;
+  const gateSW = new Promise(function (resolve) { releaseSW = resolve; });
+  const openSW = runOpen(buildArgs(null, swCfg), {
+    agentReturns: swReturns(),
+    agentGate: function (e) { return e.label === "solve:#11 (trivial)" ? gateSW : null; },
+  });
+  await swSettle(openSW.record, function (r) { return swSaw(r, "solve:#13 (trivial)"); }, 5000);
+  // ANTI-VACUITY: the third dispatch only means anything while the first chain
+  // is genuinely still held. A run that had already drained would have logged
+  // WORKFLOW_RESULT, so resultOf() is the proof that it had not.
+  out.swThirdAdmitted = swSaw(openSW.record, "solve:#13 (trivial)")
+    && resultOf(openSW.record) === null;
+  releaseSW();
+  await openSW.done;
+  const resSW = resultOf(openSW.record);
+  out.swAllOpened = resSW ? resSW.counts.prOpened : null;
+  // Completion order here is 12, 13, 11 — the published order must still be the
+  // manifest order, or a consumer would start depending on which chain happened
+  // to finish first.
+  out.swOrder = resSW ? resSW.results.map(function (r) { return r.issue; }).join(",") : null;
+  out.swViolations = openSW.record.violations.length;
+
+  // Run SWC — the bound. Both admitted chains are held, so the window is full
+  // and the third issue must NOT be dispatched. This is the barrier's one real
+  // job (how many worktrees are live at once), and the window has to keep it.
+  let releaseSWC;
+  const gateSWC = new Promise(function (resolve) { releaseSWC = resolve; });
+  const openSWC = runOpen(buildArgs(null, swCfg), {
+    agentReturns: swReturns(),
+    agentGate: function (e) {
+      return /^solve:#1[12] /.test(e.label || "") ? gateSWC : null;
+    },
+  });
+  await swSettle(openSWC.record, function (r) {
+    return swSaw(r, "solve:#11 (trivial)") && swSaw(r, "solve:#12 (small)"); }, 5000);
+  await new Promise(function (r) { setTimeout(r, 120); });
+  out.swcBothHeld = openSWC.record.agentCalls.filter(function (c) {
+    return /^solve:#1[12] /.test(c.label || ""); }).length === 2;
+  out.swcThirdHeldOut = !swSaw(openSWC.record, "solve:#13 (trivial)");
+  releaseSWC();
+  await openSWC.done;
+  const resSWC = resultOf(openSWC.record);
+  out.swcAllOpened = resSWC ? resSWC.counts.prOpened : null;
+  out.swcViolations = openSWC.record.violations.length;
+
+  // Runs CB2A / CB2B — the POSITIVE arm of the breaker, which had no fixture at
+  // all before now. Without it B385 (the drained-queue negative) is satisfiable
+  // by deleting the check outright, which is the guard-versus-violation class:
+  // one row proving it does not fire wrongly, and nothing proving it fires.
+  //
+  // budgetTotal 2 is exact by construction: the intake relay spends one and the
+  // first solver spends the second, so the window is asked to admit issue 2 with
+  // the budget already at zero. Two issues are therefore never admitted and keep
+  // their claims — which is the whole contract — and the composite reads back
+  // the audit row's own account of how far the run got.
+  //
+  // CB2B is the same ceiling with THREE lanes instead of one. Every idle lane
+  // reaches the exhausted check in the same tick, so it is the row that proves
+  // the event is audited ONCE PER RUN rather than once per lane — N identical
+  // rows would report one ceiling as N.
+  const cb2Composite = function (record) {
+    const res = resultOf(record);
+    if (!res) return "no_result";
+    const rows = res.auditEvents.filter(function (e) { return e.event === "budget_exhausted"; });
+    return [
+      res.cb2Tripped,
+      rows.length ? rows[0].admitted : "no_row",
+      rows.length ? rows[0].remaining : "no_row",
+      rows.length,
+      labels(record).filter(function (l) { return /^solve:#/.test(l || ""); }).join(","),
+    ].join("/");
+  };
+  const recCB2A = await run(buildArgs(null, { issues: "11,12,13", issueCount: 3, concurrency: 1 }),
+    { agentReturns: swReturns(), budgetTotal: 2 });
+  out.cb2aArm = cb2Composite(recCB2A);
+  const recCB2B = await run(buildArgs(null, { issues: "11,12,13", issueCount: 3, concurrency: 3 }),
+    { agentReturns: swReturns(), budgetTotal: 2 });
+  out.cb2bArm = cb2Composite(recCB2B);
+  out.cb2Violations = recCB2A.violations.length + recCB2B.violations.length;
+
+  // ------------------------------------------------------------------- #592
+  // prsPartial — the PARTIAL SUBSET of the list /goal ingests. `chainComplete`
+  // has been script-derived and correct since #554, and it reached no consumer:
+  // goal-pipeline reads prsOpened through a shape-only digit filter and merges
+  // on the numbers, so a PR opened over a chain that STOPPED SHORT arrived at
+  // the merge gate byte-identical to one opened over a finished chain.
+  //
+  // Published as a SIBLING LIST rather than left for /goal to re-derive from
+  // results[]: prsOpened already decides which record OWNS a number, and only
+  // that record may speak for it. Two derivations of one rule are two copies
+  // that can disagree (#370), and the collision rows below are the disagreement.
+
+  // ONE medium-tier chain, at a chosen PR number and completeness. The
+  // incomplete arm is the ABSENT-taskCount stop (Run X above): the rung is
+  // recorded BLOCKED, the chain stops, and delivery still runs — the shape that
+  // opens a PR over an unfinished chain, which is the whole subject here. Built
+  // BESIDE mediumReturns() rather than by editing it: ~30 call sites key off
+  // that helper's canonical shape.
+  const chainFor = function (issue, pr, complete, deliverOver) {
+    const D = RD + "/issue-" + issue;
+    const o = {};
+    o["research:#" + issue + ":codebase"] = { artifactPath: D + "/research-codebase.md", rc: 0, headline: "h" };
+    o["research:#" + issue + ":constraints"] = { artifactPath: D + "/research-constraints.md", rc: 0, headline: "h" };
+    o["research:#" + issue + ":test-coverage"] = { artifactPath: D + "/research-test-coverage.md", rc: 0, headline: "h" };
+    o["spec:#" + issue] = { path: D + "/spec.md", rc: 0, headline: "h" };
+    o["spec-review:#" + issue] = approve();
+    o["plan:#" + issue] = { path: D + "/plan.md", rc: 0, headline: "h" };
+    o["impl:#" + issue + ":t1"] = complete ? task(1, { taskCount: 2 }) : task(1);
+    if (complete) {
+      o["review:#" + issue + ":t1:r1"] = approve();
+      o["impl:#" + issue + ":t2"] = task(2);
+      o["review:#" + issue + ":t2:r1"] = approve();
+    }
+    o["deliver:#" + issue] = delivered(issue, pr, deliverOver || {});
+    return o;
+  };
+  // TWO chains in ONE run, so the subset relation is read off a single
+  // published pair instead of being inferred across two runs.
+  const twoChains = function (a, b, rows) {
+    const o = { "manifest-intake": intake([rec(a.issue, "medium"), rec(b.issue, "medium")]) };
+    Object.assign(o, chainFor(a.issue, a.pr, a.complete, a.over));
+    Object.assign(o, chainFor(b.issue, b.pr, b.complete, b.over));
+    o["verify-prs"] = proof(rows);
+    return o;
+  };
+  // JSON, not join(","): an EMPTY list and a missing key both render as "" under
+  // join, and "the field is not published at all" is precisely the state these
+  // rows have to be able to fail on. The NO-FIELD sentinel is what makes that
+  // state say so by name — JSON.stringify(undefined) returns undefined, which
+  // would drop the key out of the fixture's own output and report as a parse
+  // failure rather than as a missing contract.
+  const listOf = function (res, field) {
+    if (!res) return "NO-RESULT";
+    return res[field] === undefined ? "NO-FIELD" : JSON.stringify(res[field]);
+  };
+  const openedOf = function (res) { return listOf(res, "prsOpened"); };
+  const partialOf = function (res) { return listOf(res, "prsPartial"); };
+  const flagsOf = function (res) {
+    return res ? res.results.map(function (r) {
+      return r.issue + ":" + String(r.chainComplete); }).join(",") : "NO-RESULT";
+  };
+
+  // Run PS — the SUBSET. One finished chain, one that stopped short, both
+  // delivering a PR. prsOpened carries both numbers; prsPartial carries exactly
+  // the incomplete one.
+  const recPS = await run(buildArgs(), { agentReturns: twoChains(
+    { issue: 11, pr: 901, complete: true }, { issue: 12, pr: 902, complete: false },
+    [proofRow(901, "fix/11-x"), proofRow(902, "fix/12-x")]) });
+  const resPS = resultOf(recPS);
+  // PREMISE, asserted rather than assumed: the two records really do disagree
+  // about completeness. Without it every row below could pass on a run where
+  // both chains finished and prsPartial was empty for the wrong reason.
+  out.psFlags = flagsOf(resPS);
+  out.psOpened = openedOf(resPS);
+  out.psPartial = partialOf(resPS);
+
+  // Run PN — NO CHAIN AT ALL. The single-solver path attaches `chainComplete`
+  // nowhere, and an ABSENT flag is not an incomplete chain: a record that ran no
+  // task chain cannot have stopped one short. This is the row that separates
+  // `=== false` from `!r.chainComplete`, which would put every trivial-tier PR
+  // in the partial list.
+  const recPN = await run(buildArgs(), { agentReturns: trivialReturns() });
+  const resPN = resultOf(recPN);
+  out.pnFlags = flagsOf(resPN);
+  out.pnOpened = openedOf(resPN);
+  out.pnPartial = partialOf(resPN);
+
+  // Run PX — DISPROVEN. The incomplete chain's PR claim names a branch the relay
+  // contradicts, so #515 downgrades it to PUSHED_NO_PR with prNumber 0. It must
+  // appear in NEITHER list: prsPartial is a subset of prsOpened, and a claim
+  // that verification removed from one cannot survive in the other.
+  const recPX = await run(buildArgs(), { agentReturns: twoChains(
+    { issue: 11, pr: 901, complete: true }, { issue: 12, pr: 902, complete: false },
+    [proofRow(901, "fix/11-x"), proofRow(902, "someone/elses-branch")]) });
+  const resPX = resultOf(recPX);
+  const px12 = resPX ? resPX.results.filter(function (r) { return r.issue === 12; })[0] : null;
+  // PREMISE: the downgrade really happened, and the chain really was incomplete
+  // — so the number's absence below is the subset rule and not a fixture that
+  // never opened a PR.
+  out.pxDowngraded = px12 ? (px12.status + "/" + px12.prNumber + "/" + px12.prProof
+    + "/" + String(px12.chainComplete)) : "NO-RECORD";
+  out.pxOpened = openedOf(resPX);
+  out.pxPartial = partialOf(resPX);
+
+  // Runs PC1 / PC2 — ONE pull request, TWO claimants that DISAGREE about
+  // completeness. This is the pair that separates a list derived from the
+  // collision WINNER from a union over records: a union answers "partial" in
+  // both directions, while prsOpened has already decided that the first record
+  // owns the number and the repeat's per-record facts went with its discarded
+  // claim. The repeat reports an EMPTY branch for the same reason B142's does —
+  // an empty ref cannot be compared, so neither record is disproven and the
+  // collision actually reaches finalize.
+  const collisionChains = function (firstComplete, secondComplete) {
+    return twoChains(
+      { issue: 11, pr: 902, complete: firstComplete },
+      { issue: 12, pr: 902, complete: secondComplete, over: { branch: "" } },
+      [proofRow(902, "fix/11-x")]);
+  };
+  const recPC1 = await run(buildArgs(), { agentReturns: collisionChains(true, false) });
+  const resPC1 = resultOf(recPC1);
+  out.pc1Flags = flagsOf(resPC1);
+  // PREMISE: both records survived verification as live PR claims, so it is the
+  // collision arm that settled the number and not an earlier downgrade.
+  out.pc1Confirmed = resPC1 ? resPC1.verification.confirmed : null;
+  out.pc1Collisions = resPC1 ? resPC1.auditEvents.filter(function (e) {
+    return e.event === "pr_number_collision"; }).length : null;
+  out.pc1Opened = openedOf(resPC1);
+  out.pc1Partial = partialOf(resPC1);
+
+  const recPC2 = await run(buildArgs(), { agentReturns: collisionChains(false, true) });
+  const resPC2 = resultOf(recPC2);
+  out.pc2Flags = flagsOf(resPC2);
+  out.pc2Confirmed = resPC2 ? resPC2.verification.confirmed : null;
+  out.pc2Collisions = resPC2 ? resPC2.auditEvents.filter(function (e) {
+    return e.event === "pr_number_collision"; }).length : null;
+  out.pc2Opened = openedOf(resPC2);
+  out.pc2Partial = partialOf(resPC2);
+
+  // Run PV — the REQUEST-side caller is UNCHANGED. prNumbersToVerify() calls the
+  // same pass with three arguments, and the fourth must be a no-op for it. Run
+  // on a fixture carrying BOTH arms that make the request set differ from the
+  // published one — a claim the ceiling drops and a collision — so a change that
+  // let the new callback disturb the pass shows up in the probe list, not only
+  // in the published one.
+  const pvReturns = {
+    "manifest-intake": intake([rec(11, "trivial"), rec(12, "small"), rec(13, "trivial")]),
+    "solve:#11 (trivial)": claimed(11, 10000001),
+    "solve:#12 (small)": solved(12, 902),
+    "solve:#13 (trivial)": claimed(13, 902, { branch: "" }),
+    "verify-prs": proof([proofRow(902, "fix/12-x")]),
+  };
+  const recPV = await run(buildArgs(null, { issues: "11,12,13", issueCount: 3 }),
+    { agentReturns: pvReturns });
+  const resPV = resultOf(recPV);
+  out.pvProbed = probedNums(recPV);
+  // PREMISE: both arms really fired on this fixture.
+  out.pvArms = resPV ? [
+    resPV.auditEvents.filter(function (e) { return e.event === "pr_claim_above_ceiling"; }).length,
+    resPV.auditEvents.filter(function (e) { return e.event === "pr_number_collision"; }).length,
+  ].join("/") : "NO-RESULT";
+  out.pvOpened = openedOf(resPV);
+  out.pvPartial = partialOf(resPV);
 
   // Every run added above must also be harness-clean — an undeclared opts.phase
   // on a rung these runs are the first to reach shows up here and nowhere else.
   // ENUMERATED, never derived: a new run is NOT covered until it is named here.
   out.newViolations = [recW, recX, recY, recZ, recZ4, recCF, recDS, recDA, recZC, recZD, recFW,
-                       recTR, recPT, recX1, recX2]
+                       recTR, recPT, recX1, recX2, openSW.record, openSWC.record, recCB2A,
+                       recCB2B, recPS, recPN, recPX, recPC1, recPC2, recPV]
     .reduce(function (n, r) { return n + r.violations.length; }, 0);
 
   process.stdout.write(JSON.stringify(out));
@@ -3591,7 +4100,11 @@ else
   check aProofHaiku true     "B10b the #515 PR-existence proof — the SECOND mechanical relay — runs on haiku"
   check aSolversInherit true "B11 solvers inherit the session model (never pinned)"
 
-  check bResearch 3          "B12 medium tier runs 3 research lenses"
+  check aNoProfile true      "B9 (#615) a trivial/small batch spends NO repo-profile agent — nothing in the run would read it"
+
+  check bResearch 4          "B12 (#615) the research phase runs the per-issue lenses plus ONE run-shared repo profile"
+  check bLensAgents 3        "B12b ...and the medium lens roster is still exactly three — the profile is not a fourth lens"
+  check bProfileAgents 1     "B12c ...with the profile dispatched exactly once for the run"
   # spec + spec-review + plan + plan-review = 4 on the CLEAN fixture. The
   # revision round is a fifth design rung and it is CONDITIONAL on a non-APPROVE
   # verdict, so this row is also the proof it stayed conditional — B254/B255 are
@@ -3812,6 +4325,7 @@ else
 
   check sAtCeiling false     "B62 CB1 does NOT trip at exactly the projected agent count"
   check sBelowCeiling true   "B63 CB1 trips one below the projection — the formula is pinned, not just the breaker"
+  check sProfileCharge 1     "B63b (#615) the run-shared repo profile is CHARGED in the CB1 projection — a ceiling that under-projects is not a ceiling"
 
   # G32 — B62/B63 above only bite while Run S's projection still tracks the
   # script, and B262c only bites while the fixture's cap reading is the script's
@@ -4160,7 +4674,86 @@ else
   check x1Arm '"reason_kept/901,902/2/2/901,902"' "B311 a proof relay that THROWS is audited as pr_proof_threw carrying the throw text, probed counts the dispatch that was made, and both claims are retained as UNVERIFIED rather than dropped or downgraded"
   check x2Arm '"budget_exhausted/null/0/2/901,902"' "B356 a relay skipped by the token ceiling audits pr_proof_skipped reason=budget_exhausted, dispatches nothing (probed stays 0), and still classes both retained claims UNVERIFIED"
 
-  check newViolations 0           "B169 zero harness violations across every run added for #561, #562 and #563"
+  # --- #615 Part A: the run-shared repo profile ------------------------------
+  # Every row here is red-first against the pre-#615 tree, which had no such
+  # agent at all. B372 is the one that is NOT about cost: it is the RFC 0012
+  # section 3.5 write-path trap, and getting it wrong is how the previous cache
+  # ended up with zero writers.
+  check rpaOnce 1               "B365 the repo profile is a RUN-level agent: two design-tier issues dispatch exactly ONE"
+  check rpaLensesDelegate true  "B366 ...and every lens with an invariant half, on BOTH issues, is pointed at that one artifact and told not to re-derive it"
+  check rpaCodebaseUntouched true "B367 the codebase lens delegates nothing, so its prompt names no profile it has no use for"
+  check rpaLensRoster '"research:#11:codebase,research:#11:constraints,research:#11:test-coverage"' "B368 ANTI-COLLAPSE: the lens roster is unchanged — the profile FEEDS the lenses, it does not replace one"
+  check rpaReadyAudit true      "B369 a derived-and-cached profile audits repo_profile_ready with reused=false, cached=true"
+  check rpaNoZeroWriterRow true "B370 ...and does NOT audit the zero-writer row"
+  check rpaContentKey true      "B371 the freshness rule is the CONTENT KEY itself — a second staleness predicate is named as forbidden (the ~200 lines that rotted last time)"
+  check rpaGitCommonDir true    "B372 the write path resolves the MAIN repo via --git-common-dir and names --show-toplevel as FORBIDDEN, with the worktree reason (RFC 0012 section 3.5 / #308)"
+  check rpnAudit true           "B373 a null profile agent is audited, never silent"
+  check rpnNullCounted true     "B374 ...and counted in nullsByPhase.research"
+  check rpnNoLeak true          "B375 ...and no lens prompt names a profile that does not exist"
+  check rpnStillBriefed true    "B376 ...each lens keeping the full brief it had before #615 — the degradation is the OLD behaviour, not a lens told nothing"
+  check rpnStillSolved 2        "B377 ...and both issues still solve: a missing profile costs tokens, never correctness"
+  check rpuAudit true           "B378 a SIBLING path under the run dir is refused — underRunDir() is a prefix check, the gate is exact equality with the script-chosen path"
+  check rpuNoLeak true          "B379 ...and neither the reported path nor the expected one reaches a lens prompt"
+  check rpwZeroWriterRow true   "B380 derived-but-never-cached audits repo_profile_not_cached — the #308 zero-writers shape, made observable rather than inferred"
+  check rpwStillUsed true       "B381 ...while the profile is still used this run: the failure is about the NEXT run"
+  check rprNoZeroWriterRow true "B382 a REUSED profile writes nothing and must not trip the zero-writer row — that is the cache working"
+  check rprReadyAudit true      "B383 ...and is recorded as reused"
+  # reason / profile dispatches / did the run throw / did CB2 report instead
+  check rpbArm '"budget_exhausted/0/false/true"' "B384 an exhausted budget SKIPS the profile rung instead of throwing the run through it — agent() throws on a ceiling, and that throw would strand every claim behind a run_threw"
+  check rpViolations 0          "B384b every repo-profile run is harness-clean"
+
+  # --- #615 Part B: the sliding admission window ----------------------------
+  # B357 is the red-first row: it fails outright on the wave loop, where wave 2
+  # cannot open until every chain of wave 1 has settled. B361/B362 are its
+  # opposite half and pass on both trees by construction — they are the pin that
+  # stops "no barrier" degrading into "no bound".
+  check swThirdAdmitted true "B357 the admission window SLIDES: with concurrency=2 over 3 issues, the third chain starts while the first is still in flight"
+  check swAllOpened 3        "B358 ...and every issue still lands its PR once the held chain is released"
+  check swOrder '"11,12,13"' "B359 results keep MANIFEST order, not completion order (12 and 13 finish first here)"
+  check swViolations 0       "B360 ...and the sliding run is harness-clean"
+  check swcBothHeld true     "B361 ANTI-VACUITY for the bound: both lanes really are occupied before the ceiling is probed"
+  check swcThirdHeldOut true "B362 ...and the window is still a LIVE CEILING — with both lanes held, the third chain is not dispatched"
+  check swcAllOpened 3       "B363 releasing the held lanes drains the window and every issue lands"
+  check swcViolations 0      "B364 ...and the ceiling run is harness-clean"
+  check x2NoFalseCb2 '"false/2/0"' "B385 a DRAINED queue never trips CB2: the budget being spent by the issues that finished is not a ceiling that stopped one, and cb2Tripped is what a caller reads to decide a run was cut short"
+  # tripped / admitted / remaining / rows / solvers actually dispatched
+  check cb2aArm '"true/1/2/1/solve:#11 (trivial)"' "B386 CB2 still FIRES with work left: the budget dies after issue 1, the window admits nothing more, and the row says how far it got (the positive arm B385 needs to mean anything)"
+  check cb2bArm '"true/1/2/1/solve:#11 (trivial)"' "B387 ...and with three lanes reaching the exhausted check together it is audited ONCE per run, not once per lane"
+  check cb2Violations 0      "B388 ...and both ceiling runs are harness-clean"
+  # --- #592: prsPartial, the partial subset of the list /goal merges on -------
+  check psFlags '"11:true,12:false"' "B389 PREMISE: the two chains really disagree about completeness, so the rows below are not passing on a run where both finished"
+  check psOpened '"[901,902]"'    "B390 both delivered PRs reach prsOpened — the partial one is published, never withheld"
+  check psPartial '"[902]"'       "B391 prsPartial names exactly the PR whose task chain stopped short — the fact /goal's merge gate had no way to read"
+
+  check pnFlags '"11:undefined,12:undefined"' "B392 PREMISE: the single-solver path attaches no chainComplete at all"
+  check pnOpened '"[901,902]"'    "B393 a record that ran NO task chain is still published in prsOpened"
+  # No backticks in this label: `check` interpolates it inside a double-quoted
+  # string, where a backtick pair is COMMAND SUBSTITUTION — it silently ate the
+  # words between them and ran the contents as a command.
+  check pnPartial '"[]"'          "B394 ...and is ABSENT from prsPartial: an absent flag is not an incomplete chain (the row that separates an equals-false test from a falsy test)"
+
+  check pxDowngraded '"PUSHED_NO_PR/0/DISPROVEN/false"' "B395 PREMISE: the incomplete chain's PR claim really was disproven and downgraded to prNumber 0"
+  check pxOpened '"[901]"'        "B396 a disproven claim leaves prsOpened"
+  check pxPartial '"[]"'          "B397 ...and cannot survive in prsPartial: the partial list is a subset of the published one, never a second opinion about it"
+
+  check pc1Flags '"11:true,12:false"' "B398 PREMISE: one pull request, two claimants, and they DISAGREE about completeness"
+  check pc1Confirmed 2            "B399 PREMISE: both claimants survive verification (an empty branch cannot be disproven), so the collision really does reach finalize"
+  check pc1Collisions 1           "B400 the collision is audited exactly once"
+  check pc1Opened '"[902]"'       "B401 the collided number is emitted exactly once"
+  check pc1Partial '"[]"'         "B402 the WINNER's completeness decides: the first record finished its chain, so the repeat's partial flag goes with its discarded claim"
+
+  check pc2Flags '"11:false,12:true"' "B403 the same fixture with the flags swapped"
+  check pc2Confirmed 2            "B404 PREMISE: both claimants survive here too"
+  check pc2Collisions 1           "B405 one collision event in this direction as well"
+  check pc2Opened '"[902]"'       "B406 ...and the number is still emitted exactly once"
+  check pc2Partial '"[902]"'      "B407 ...and NOW the number is partial, because the winner is the incomplete one — a union over records answers the same in both directions and cannot pass B402 and B407 together"
+
+  check pvProbed '"902"'          "B408 the proof request set is unchanged by the new callback: the ceiling drop is not probed and the collision is asked about once"
+  check pvArms '"1/1"'            "B409 PREMISE: this fixture really does fire BOTH arms — one above-ceiling drop and one collision"
+  check pvOpened '"[10000001,902]"' "B410 finalize still imposes no ceiling, so the dropped claim is published all the same"
+  check pvPartial '"[]"'          "B411 ...and no record on this single-solver fixture is partial"
+
+  check newViolations 0           "B169 zero harness violations across every run added for #561, #562, #563 and #592"
 fi
 
 echo "== S: /goal runs ON the workflow backend — the interim demotion is GONE (RFC 0015 §5) =="

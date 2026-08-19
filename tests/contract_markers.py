@@ -209,16 +209,20 @@ CONTRACTS: dict[str, list[str]] = {
     # declared. #546 retired that wording composer-wide — the contract-less arm
     # now points at the return contract the role card declares — which removes
     # the override on every unbound provider edge but replaces a contract with a
-    # POINTER. Three of the twenty unbound roles (code-reviewer,
-    # pr-test-analyzer, code-simplifier) declare their return shape as a prose
-    # header rather than a fenced line, so for them that pointer resolves
-    # weakly; binding the edges to real output contracts is #578 and the two
-    # SDD cards' own defect is #580. The three register families #517
-    # deferred — including the uberthink one whose registration must delete both
-    # TWIN_ALLOWLIST entries below — are #579. Both gaps are held on the bytes
-    # by tests/sdd-child-inputs.test.sh (AC-14a for the bound arm, AC-14b for
-    # the contract-less one, AC-14 for handler coverage). Nothing here is
-    # behavioural: no test in this repo proves a model EMITS one of these five.
+    # POINTER. 2 of the 20 unbound roles (code-reviewer, pr-test-analyzer)
+    # declare their return shape as a prose header rather than a fenced block,
+    # so for them that pointer resolves weakly; binding the edges to real output
+    # contracts is #578 and the two SDD cards' own defect is #580. The
+    # classifier behind that count is "carries a fenced block in its role card";
+    # SRT-606.1/SRT-606.2 in tests/solve-run-tree.test.sh derive both the subset
+    # and the count from the cards on disk, because this comment named a third
+    # role for as long as the rule stayed implicit (#606). The three register
+    # families #517 deferred — including the uberthink one whose registration
+    # must delete both TWIN_ALLOWLIST entries below — are #579. Both gaps are
+    # held on the bytes by tests/sdd-child-inputs.test.sh (AC-14a for the bound
+    # arm, AC-14b for the contract-less one, AC-14 for handler coverage).
+    # Nothing here is behavioural: no test in this repo proves a model EMITS one
+    # of these five.
     "sdd-implementer-status": [
         "agents/implementation-worker.md",
         "shared/sdd-implementer-output-v1.md",
@@ -289,7 +293,7 @@ CONTRACTS: dict[str, list[str]] = {
         "lib/run_manifest.py",
         "lib/run_manifest.py",
     ],
-    # rank 9 — the events uberdev_goal_audit accepts (13)
+    # rank 9 — the events uberdev_goal_audit accepts (15)
     "goal-audit-event": [
         "lib/goal-state.sh",
         "skills/goal-pipeline/SKILL.md",

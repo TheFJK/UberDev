@@ -32,6 +32,17 @@
 #   V10 — _uberdev_goal_pr_checks_pending withholds on pending, falls through on
 #        an unusable probe (it can never AUTHORISE a merge)
 #   V11 — the SemVer step follows the PR's COMMITS, not just its title
+#   V12 — the partial-chain flag (issue #592): a PR whose solver task chain
+#         stopped short is audited at the moment it LEAVES green for merging, on
+#         BOTH arms that make that transition, and on NEITHER of the arms that
+#         withhold it — identical inputs branching two ways on the carrier alone
+#   V13 — the `--partial-prs` carrier (issue #592): the pass's OWN partial-chain
+#         set reaches this lane on the command line, is shape-refused at the
+#         edge, and marks the `green -> merging` decision row of the one arm
+#         that takes a merge decision. Includes spec row G-592.2, which lives
+#         here rather than in tests/goal.test.sh so that suite keeps a single
+#         owner in this change; both suites are in BOTH `run:` lists of
+#         .github/workflows/test.yml, so the coverage does not move CI job.
 #
 # Portable: bash + git + coreutils + sed/awk/grep only (no python3, no zsh, no
 # jq), so it runs on BOTH CI jobs (ubuntu-latest and windows-latest Git Bash).
@@ -505,28 +516,75 @@ else
   fail "V8.extract: the sliced region does not parse standalone"
 fi
 
-# run_gate <ensure-rc> [checks-pending-rc] — drive the real region with recording
-# stubs. CHECKS_RC defaults to 1 ("nothing pending"), the only state in which
-# /merge may run.
+# run_gate <ensure-rc> [checks-rc] [partial-rc] [merged-rc] [dispatch-rc]
+#          [partial-prs-csv] — drive the real region with recording stubs.
+#
+# Every knob defaults to the constant the pre-#592 harness hardcoded, so all the
+# V8 call sites below keep their exact former meaning: CHECKS_RC 1 ("nothing
+# pending", the only state in which /merge may run), PARTIAL_RC 1 ("the solver
+# chain ran to completion"), MERGED_RC 1 ("not already merged") and DISPATCH_RC 0
+# ("/merge dispatched cleanly"). MERGED_RC and DISPATCH_RC are knobs at all
+# because the hardcoded forms made arm 1 (already-merged/resume) and the
+# dispatch-FAILURE branch unreachable — two of the five arms could not be driven.
+#
+# The new knobs MUST also appear on the `bash -c` env prefix, not merely as
+# locals here: the sliced region runs in a CHILD shell under `set -u`, where a
+# knob left out of the prefix is unbound and the stub referencing it aborts. The
+# `if` around the flag would then take its false branch and every positive V12
+# row below would go VACUOUSLY GREEN — the trap this repo has hit before.
+#
+# The log path carries all six knobs for the same reason: two configurations
+# sharing one path would silently read each other's rows.
+#
+# PARTIAL_PRS (#592) is the sixth knob and is a DIFFERENT carrier from PARTIAL_RC,
+# on purpose. PARTIAL_RC stubs the run-lifetime ledger the audit emit branches on;
+# PARTIAL_PRS is the scalar THIS pass was handed on its command line, which is
+# what marks the decision row. Driving them independently is the only way to show
+# the mark is not silently re-derived from the ledger — see V13.
+#
+# THE CHILD'S STDERR IS PART OF THE CONTRACT, so it is captured into the same log
+# instead of being dropped on /dev/null. The gate's operator-facing lines (the
+# deferral notices, and #592's INCOMPLETE-chain warning) are the only signal an
+# unattended run leaves a human; discarded, they cannot be asserted at all and
+# every "the operator was told" acceptance criterion is unfalsifiable. Ordering is
+# preserved because every writer here appends to one file from one process.
+#
+# The two #592 stubs record the ARGUMENTS they were called with, not just the
+# fact of the call, and the V12 rows below assert on that record. Recording
+# without asserting is dead instrumentation: both helpers take (goal_id, pr),
+# both are defined in lib/goal-state.sh and called from lib/goal-watch.sh, and
+# NOTHING else in the tree compares those two sides — the rows that drive the
+# helpers directly stub the gate away, and the rows here stub the helpers away.
+# That is the "one contract, N uncompared copies" drift class, and for
+# uberdev_goal_pr_is_partial it is fatal rather than cosmetic: swap its two
+# arguments and the real helper int-validates a goal id, returns 1 for every PR,
+# and goal_partial_delivery is never emitted again — while a suite that only
+# checked "a row is absent" stays entirely green.
 run_gate() {
-  local ensure_rc="$1" checks_rc="${2:-1}" log="$WORK/gate-$1-${2:-1}.log"
+  local ensure_rc="$1" checks_rc="${2:-1}" partial_rc="${3:-1}" merged_rc="${4:-1}" dispatch_rc="${5:-0}" partial_prs="${6:-}"
+  local prs_tag; prs_tag="$(printf '%s' "${partial_prs:-none}" | tr ',' '_')"
+  local log="$WORK/gate-$ensure_rc-$checks_rc-$partial_rc-$merged_rc-$dispatch_rc-$prs_tag.log"
   : > "$log"
-  GATE_LOG="$log" ENSURE_RC="$ensure_rc" CHECKS_RC="$checks_rc" bash -c '
+  GATE_LOG="$log" ENSURE_RC="$ensure_rc" CHECKS_RC="$checks_rc" \
+  PARTIAL_RC="$partial_rc" MERGED_RC="$merged_rc" DISPATCH_RC="$dispatch_rc" \
+  PARTIAL_PRS="$partial_prs" bash -c '
     set -u
     GOAL_ID="g1"; pr=""; any_active=0
     _uberdev_goal_batch_green_prs_ordered() { printf "%s\n" 100; }
-    uberdev_goal_pr_is_merged()             { return 1; }
+    uberdev_goal_pr_is_merged()             { return "$MERGED_RC"; }
     uberdev_goal_review_pr_in_flight()      { return 1; }
     uberdev_goal_should_automerge()         { return 0; }
+    uberdev_goal_pr_is_partial()            { printf "ispartial:%s:%s\n" "$1" "$2" >> "$GATE_LOG"; return "$PARTIAL_RC"; }
+    _uberdev_goal_batch_issue_for_pr()      { printf "issuefor:%s:%s\n" "$1" "$2" >> "$GATE_LOG"; printf "%s\n" 42; }
     _uberdev_goal_ensure_version_bump()     { printf "ensure:%s\n"   "$1" >> "$GATE_LOG"; return "$ENSURE_RC"; }
     _uberdev_goal_pr_checks_pending()       { printf "checks:%s\n"   "$1" >> "$GATE_LOG"; return "$CHECKS_RC"; }
-    _uberdev_goal_dispatch_merge()          { printf "dispatch:%s\n" "$1" >> "$GATE_LOG"; return 0; }
-    uberdev_goal_pr_state_transition()      { printf "transition:%s:%s->%s\n" "$2" "$3" "$4" >> "$GATE_LOG"; }
+    _uberdev_goal_dispatch_merge()          { printf "dispatch:%s\n" "$1" >> "$GATE_LOG"; return "$DISPATCH_RC"; }
+    uberdev_goal_pr_state_transition()      { printf "transition:%s:%s->%s:%s\n" "$2" "$3" "$4" "${5:-}" >> "$GATE_LOG"; }
     _uberdev_goal_set_batch_terminal_state(){ printf "batch:%s:%s\n" "$2" "$3" >> "$GATE_LOG"; }
     _uberdev_goal_rebase_collision_chain()  { printf "chain:%s\n" "$2" >> "$GATE_LOG"; }
     uberdev_goal_audit()                    { printf "audit:%s:%s\n" "$1" "${2:-}" >> "$GATE_LOG"; }
     . "$1"
-  ' _ "$GATE" >/dev/null 2>&1
+  ' _ "$GATE" >/dev/null 2>>"$log"
   cat "$log"
 }
 
@@ -716,6 +774,467 @@ assert_eq "$rc" "2" "V11.rc: the PR is bumped and pushed"
 assert_eq "$(origin_subject "$S11" fix/701-mislabelled)" "chore(release): v1.3.0" \
   "V11.kind: the feat: COMMIT drove a MINOR bump (1.2.3 -> 1.3.0), not the title's patch"
 assert_grep "$(audit_log "$S11")" '"kind":"minor"' "V11.audit: the audited kind is minor"
+
+# ---------------------------------------------------------------------------
+# V12 — the partial-chain flag (issue #592).
+#
+# #554 stopped an incomplete chain's PR from carrying `Closes #N`, so the issue
+# now stays OPEN after the PR lands. What nothing did was TELL anyone: the merge
+# gate re-discovers PRs from GitHub every pass and never sees the fleet's return
+# value, so a partial delivery and a converged one were byte-identical to it. The
+# ledger (uberdev_goal_pr_is_partial) is the carrier that closes that gap; this
+# section asserts the DECISION the gate makes off it, not the presence of a field.
+#
+# The pair that matters is V12.partial-dispatches / V12.complete-silent: same
+# inputs, same arm, two outcomes, differing only in the carrier.
+# ---------------------------------------------------------------------------
+echo
+echo "== V12: a partial-chain PR is flagged at the green -> merging transition (#592) =="
+
+# The recorder half. The gate can only read a ledger something wrote, and the one
+# process that sees the fleet's carrier is this script's own entry path — so a
+# refactor that drops the recording call leaves uberdev_goal_pr_is_partial reading
+# an empty ledger and every row below still green.
+#
+# It records $PARTIAL_PRS — the ONE scalar the argument parser resolves (#592
+# task 2) — and that identity is the assertion, not a formatting detail. The two
+# consumers of the carrier in this lane are the ledger write here and the
+# decision-row mark in the merge gate; fed from two different expressions they
+# can disagree, and the disagreement is silent in exactly the direction this
+# issue is about: a run that marks its transitions partial while print_summary
+# counts zero, or the reverse.
+assert_grep "$GOAL_WATCH" 'uberdev_goal_record_partial_prs "\$GOAL_ID" "\$PARTIAL_PRS"' \
+  "V12.record: the watch lane records the resolved partial-PR carrier into the ledger"
+
+# ...and it must be recorded in the right BAND, not merely somewhere in the file.
+# Existence alone is a predicate disjoint from the drift it has to catch (#370):
+# moving this call below the watch loop keeps the grep above green while the
+# ledger is never written, uberdev_goal_pr_is_partial reads an absent file on
+# every pass, and goal_partial_delivery is never emitted in production. The two
+# bounds are both load-bearing:
+#   rehydration  — uberdev_goal_read_run_state is what binds the ambient `cycle`
+#                  the recorder rides, so recording above it loses the cycle;
+#   watch loop   — the merge gate lives inside `while true; do`, so recording at
+#                  or after the loop is a write that can never precede a read.
+# Each anchor is unique in goal-watch.sh today, so `head -n 1` is unambiguous;
+# V12.record-single keeps it that way.
+assert_eq "$(grep -c 'uberdev_goal_record_partial_prs "\$GOAL_ID"' "$GOAL_WATCH")" "1" \
+  "V12.record-single: exactly ONE recording site exists, so its position is the position"
+rec_ln="$(grep -n 'uberdev_goal_record_partial_prs "\$GOAL_ID"' "$GOAL_WATCH" | head -n 1 | cut -d: -f1)"
+rehy_ln="$(grep -n '^uberdev_goal_read_run_state ||' "$GOAL_WATCH" | head -n 1 | cut -d: -f1)"
+loop_ln="$(grep -n '^while true; do' "$GOAL_WATCH" | head -n 1 | cut -d: -f1)"
+if [ -n "$rec_ln" ] && [ -n "$rehy_ln" ] && [ -n "$loop_ln" ] \
+   && [ "$rehy_ln" -lt "$rec_ln" ] && [ "$rec_ln" -lt "$loop_ln" ]; then
+  pass "V12.record-order: the carrier is recorded after run-state rehydration and BEFORE the watch loop"
+else
+  fail "V12.record-order: expected rehydrate (${rehy_ln:-none}) < record (${rec_ln:-none}) < watch loop (${loop_ln:-none})"
+fi
+
+# The read must live INSIDE the sliced region. V8.extract slices by marker name
+# and V12 drives only what the slice contains, so a flag folded outside the
+# markers would be invisible here and the whole section would pass vacuously.
+assert_grep "$GATE" 'uberdev_goal_pr_is_partial' \
+  "V12.read-inside-region: the partial-chain read sits inside the merge-dispatch-gate markers"
+
+# Arm 5 (dispatch success) — the ordinary path a partial PR takes.
+GATE_PARTIAL="$(run_gate 0 1 0)"
+case "$GATE_PARTIAL" in
+  *"dispatch:100"*) pass "V12.partial-dispatches: the merge still happens — #554's landed behaviour is unchanged" ;;
+  *) fail "V12.partial-dispatches: /merge was NOT dispatched for a partial PR (got: [$GATE_PARTIAL])" ;;
+esac
+case "$GATE_PARTIAL" in
+  *"audit:goal_partial_delivery:"*'"goal_id":"g1"'*'"pr":100'*'"issue":42'*'"cycle":'*)
+    pass "V12.partial-dispatches: the row carries the whole published payload — goal_id, pr, issue, cycle" ;;
+  *) fail "V12.partial-dispatches: the goal_partial_delivery payload is not {goal_id,pr,issue,cycle} for pr=100/issue=42 (got: [$GATE_PARTIAL])" ;;
+esac
+# The ledger must be consulted FOR THE PR UNDER MERGE, with the goal id first.
+# Asserting only that a row is present (or absent) leaves the call's arity and
+# order unpinned, and a one-token mis-wiring there is TOTAL SILENT FEATURE DEATH:
+# uberdev_goal_pr_is_partial int-validates its second argument, so swapping the
+# two makes the predicate return 1 for every PR, every flag call takes its
+# `|| return 0` arm, and an unattended run goes back to reporting a converged
+# issue it did not converge — with this whole file still green.
+case "$GATE_PARTIAL" in
+  *"ispartial:g1:100"*)
+    pass "V12.partial-dispatches: the carrier is read as (goal_id, pr) for the PR under merge" ;;
+  *) fail "V12.partial-dispatches: uberdev_goal_pr_is_partial was not called as (g1, 100) (got: [$GATE_PARTIAL])" ;;
+esac
+# Same contract, smaller blast radius: swapping THESE two yields "issue":0 — a
+# wrong-but-valid payload member rather than a dead feature — but the payload is
+# published in SKILL.md and nothing else pins the lookup either.
+case "$GATE_PARTIAL" in
+  *"issuefor:g1:100"*)
+    pass "V12.partial-dispatches: the payload's issue is looked up as (goal_id, pr) too" ;;
+  *) fail "V12.partial-dispatches: _uberdev_goal_batch_issue_for_pr was not called as (g1, 100) (got: [$GATE_PARTIAL])" ;;
+esac
+
+# The other half of the decision: identical inputs, complete chain, no row.
+GATE_COMPLETE="$(run_gate 0 1 1)"
+case "$GATE_COMPLETE" in
+  *"dispatch:100"*) pass "V12.complete-silent: a complete-chain PR still dispatches /merge" ;;
+  *) fail "V12.complete-silent: /merge was NOT dispatched (got: [$GATE_COMPLETE])" ;;
+esac
+case "$GATE_COMPLETE" in
+  *goal_partial_delivery*)
+    fail "V12.complete-silent: a COMPLETE chain was flagged as partial (got: [$GATE_COMPLETE])" ;;
+  *) pass "V12.complete-silent: a complete chain emits nothing — the flag reads the carrier, not the arm" ;;
+esac
+# Silence alone is ambiguous: it reads the same whether the ledger was consulted
+# and answered "complete" or was never consulted at all. This is the assertion
+# that makes the row above mean the former — which is the decision the acceptance
+# bar asks for.
+case "$GATE_COMPLETE" in
+  *"ispartial:g1:100"*)
+    pass "V12.complete-silent: the silence is a DECISION — the carrier was consulted for pr=100 and said complete" ;;
+  *) fail "V12.complete-silent: the carrier was never consulted, so the absent row proves nothing (got: [$GATE_COMPLETE])" ;;
+esac
+
+# Arm 1 (already merged / resume). Unreachable before the MERGED_RC knob existed,
+# and it is a REAL partial-delivery path: a human-merged or resumed PR reaches
+# `merging` without any dispatch at all.
+GATE_PARTIAL_MERGED="$(run_gate 0 1 0 0)"
+case "$GATE_PARTIAL_MERGED" in
+  *"transition:100:green->merging"*"batch:100:MERGING"*)
+    pass "V12.partial-already-merged: the resume arm still transitions and sets the MERGING sentinel" ;;
+  *) fail "V12.partial-already-merged: the resume arm did not run (got: [$GATE_PARTIAL_MERGED])" ;;
+esac
+case "$GATE_PARTIAL_MERGED" in
+  *dispatch:*) fail "V12.partial-already-merged: /merge was re-dispatched against an already-landed PR (got: [$GATE_PARTIAL_MERGED])" ;;
+  *) pass "V12.partial-already-merged: no /merge is dispatched for an already-merged PR" ;;
+esac
+case "$GATE_PARTIAL_MERGED" in
+  *"audit:goal_partial_delivery:"*'"pr":100'*)
+    pass "V12.partial-already-merged: the resume arm flags the partial chain too" ;;
+  *) fail "V12.partial-already-merged: the resume arm merged a partial PR silently (got: [$GATE_PARTIAL_MERGED])" ;;
+esac
+
+GATE_COMPLETE_MERGED="$(run_gate 0 1 1 0)"
+case "$GATE_COMPLETE_MERGED" in
+  *"transition:100:green->merging"*) pass "V12.complete-already-merged-silent: the resume arm ran" ;;
+  *) fail "V12.complete-already-merged-silent: the resume arm did not run (got: [$GATE_COMPLETE_MERGED])" ;;
+esac
+case "$GATE_COMPLETE_MERGED" in
+  *goal_partial_delivery*)
+    fail "V12.complete-already-merged-silent: a complete chain was flagged on the resume arm (got: [$GATE_COMPLETE_MERGED])" ;;
+  *) pass "V12.complete-already-merged-silent: the resume arm emits nothing for a complete chain" ;;
+esac
+
+# The three withholding arms and the dispatch-failure branch must NOT flag: the PR
+# stays green and is re-evaluated next tick, so a pre-transition read would emit
+# one row per tick for a PR that never merged.
+GATE_WITHHELD="$(run_gate 1 1 0)"
+case "$GATE_WITHHELD" in
+  *dispatch:*) fail "V12.withheld-not-flagged: /merge ran despite a failed bump (got: [$GATE_WITHHELD])" ;;
+  *) pass "V12.withheld-not-flagged: a withheld partial PR is not dispatched" ;;
+esac
+case "$GATE_WITHHELD" in
+  *"->merging"*) fail "V12.withheld-not-flagged: the PR left green on a withholding arm (got: [$GATE_WITHHELD])" ;;
+  *) pass "V12.withheld-not-flagged: the PR stays green" ;;
+esac
+case "$GATE_WITHHELD" in
+  *goal_partial_delivery*)
+    fail "V12.withheld-not-flagged: a PR that never left green was flagged as delivered (got: [$GATE_WITHHELD])" ;;
+  *) pass "V12.withheld-not-flagged: nothing is audited for a PR that is still green" ;;
+esac
+
+GATE_DISPATCH_FAILED="$(run_gate 0 1 0 1 1)"
+case "$GATE_DISPATCH_FAILED" in
+  *"dispatch:100"*) pass "V12.dispatch-failed-not-flagged: the dispatch was attempted" ;;
+  *) fail "V12.dispatch-failed-not-flagged: the dispatch branch was never reached (got: [$GATE_DISPATCH_FAILED])" ;;
+esac
+case "$GATE_DISPATCH_FAILED" in
+  *"->merging"*) fail "V12.dispatch-failed-not-flagged: the PR left green on a FAILED dispatch (got: [$GATE_DISPATCH_FAILED])" ;;
+  *) pass "V12.dispatch-failed-not-flagged: a failed dispatch leaves the PR green for a retry" ;;
+esac
+case "$GATE_DISPATCH_FAILED" in
+  *goal_partial_delivery*)
+    fail "V12.dispatch-failed-not-flagged: a failed dispatch emitted a delivery row (got: [$GATE_DISPATCH_FAILED])" ;;
+  *) pass "V12.dispatch-failed-not-flagged: no row is emitted when the merge never started" ;;
+esac
+
+# Flagging must not perturb the serialization interlock — the MERGING sentinel and
+# the collision chain still run, in order, after the transition.
+case "$GATE_PARTIAL" in
+  *"transition:100:green->merging"*"batch:100:MERGING"*"chain:100"*)
+    pass "V12.no-merge-regression: transition -> MERGING sentinel -> collision chain still run in that order" ;;
+  *) fail "V12.no-merge-regression: the merge sequence changed under the flag (got: [$GATE_PARTIAL])" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# V13 — the `--partial-prs` carrier (#592).
+#
+# V12 above proves the LEDGER half: a PR recorded partial in some earlier cycle
+# is audited when it leaves green. This section proves the other half, and they
+# are deliberately different carriers rather than one read twice:
+#
+#   ledger  (goal-<id>-partial-prs.tsv)  — run-lifetime, survives a cycle
+#                                          boundary, drives goal_partial_delivery
+#                                          and print_summary's count;
+#   scalar  (--partial-prs on argv)      — what THIS pass was handed by the
+#                                          fleet, and therefore what the gate
+#                                          KNEW when it took the merge decision.
+#
+# The scalar's independent value is provenance: it still describes the decision
+# on a run whose ledger write failed — precisely the run where the ledger answers
+# "complete" and no delivery row is written at all. So every behavioural row
+# below drives PARTIAL_RC=1 ("the ledger says complete") while varying the
+# scalar; a mark that was silently re-derived from the ledger cannot pass them.
+#
+# Spec row G-592.2 (the argument-shape refusal) lives here rather than in
+# tests/goal.test.sh so that suite keeps a single owner in this change. Both
+# suites are in BOTH `run:` lists of .github/workflows/test.yml, so nothing moves
+# CI job and the Windows leg still executes it.
+# ---------------------------------------------------------------------------
+echo
+echo "== V13: --partial-prs carries the pass's OWN partial-chain set (#592) =="
+
+# The mark is computed INSIDE the sliced region, and THE ANCHOR IS THE EXECUTABLE
+# FORM rather than the bare token. A scalar read folded outside the markers would
+# be invisible to every behavioural row below and the section would pass vacuously
+# against a gate that never saw the carrier — but the region also carries three
+# COMMENT lines naming PARTIAL_PRS, so a bare-token grep greens on the prose
+# alone: delete only the membership test and a token row still passes while just
+# the behavioural rows notice. That is the #370 class V12.record's band guard
+# names — existence is a predicate disjoint from the drift it has to catch.
+# Pinning the padded-haystack line itself reds under BOTH drifts: the
+# comment-only deletion, and a naive *"$pr"* rewrite. ($GATE is V8's slice.)
+assert_grep "$GATE" 'case ",\$\{PARTIAL_PRS:-\}," in \*",\$pr,"\*\) _partial_chain=1' \
+  "V13.read-inside-region: the padded-haystack membership test is INSIDE the merge-dispatch-gate markers"
+
+# ONE ENTRANCE, ONE RESOLUTION SITE. `--partial-prs` on argv is the only channel,
+# and the only one with a producer: skills/goal-pipeline/workflow.js relays on the
+# command line and its envPrefix() exports nothing of the sort. An environment
+# carrier would be an entrance nothing writes AND one that could not be overridden
+# — the relay omits the flag entirely on a clean pass rather than emitting an empty
+# one — so any such variable leaked into the watch process (an operator's shell, a
+# --resume, a debugging session) would silently become THIS pass's partial set and
+# mark complete deliveries partial: the same silent failure #592 exists to fix,
+# pointed the other way. Resolved once, both consumers — the ledger write and the
+# decision-row mark — necessarily agree; resolved twice they can disagree, which is
+# a run that marks its transitions partial while the summary counts zero.
+assert_eq "$(grep -c '^PARTIAL_PRS=""$' "$GOAL_WATCH")" "1" \
+  "V13.one-resolution-site: the carrier is resolved exactly once, at the parser"
+assert_no_grep "$GOAL_WATCH" 'UBERDEV_GOAL_PARTIAL_PRS' \
+  "V13.one-entrance: the carrier has no environment entrance — argv is the only channel with a producer"
+assert_grep "$GOAL_WATCH" '^ *--partial-prs=\*\) PARTIAL_PRS=' \
+  "V13.flag-parsed: --partial-prs=<csv> has its own arm in the argument loop"
+
+# --- G-592.2: the shape refusal, executed against the REAL script -----------
+# This scalar is interpolated into JSON audit payloads downstream (the ledger and
+# the goal_pr_transition row), so the parser is an injection boundary. The refusal
+# must ALSO be distinguishable from the pre-existing catch-all: both exit 2, so a
+# row asserting only the status is vacuous — it passes against a build that never
+# grew the flag at all and simply fell through to `unknown argument`.
+AS_TMP="$WORK/argshape"
+mkdir -p "$AS_TMP"
+AS_ERR="$WORK/argshape.err"
+AS_RC=0
+argshape() {
+  AS_RC=0
+  : > "$AS_ERR"
+  # The env is scrubbed rather than inherited: CLAUDE_PLUGIN_ROOT is exported by
+  # this suite. With no plugin root the script refuses at run-state rehydration
+  # (exit 3) — well past the parser, which is all these rows need.
+  (
+    unset CLAUDE_PLUGIN_ROOT UBERDEV_PLUGIN_ROOT PLUGIN_ROOT UBERDEV_GOAL_ID
+    export UBERDEV_TMPDIR="$AS_TMP"
+    exec bash "$GOAL_WATCH" "$@"
+  ) >/dev/null 2>"$AS_ERR" || AS_RC=$?
+}
+
+# Same runner, but with an environment variable shaped like the carrier exported
+# into the child. Nothing in the tree writes it; it exists here only as the thing
+# a leak would look like.
+argshape_env() {
+  local seed="$1"; shift
+  AS_RC=0
+  : > "$AS_ERR"
+  (
+    unset CLAUDE_PLUGIN_ROOT UBERDEV_PLUGIN_ROOT PLUGIN_ROOT UBERDEV_GOAL_ID
+    export UBERDEV_TMPDIR="$AS_TMP" UBERDEV_GOAL_PARTIAL_PRS="$seed"
+    exec bash "$GOAL_WATCH" "$@"
+  ) >/dev/null 2>"$AS_ERR" || AS_RC=$?
+}
+
+argshape '--partial-prs=1;rm -rf /'
+assert_eq "$AS_RC" "2" "V13.G-592.2-malformed: a non-numeric --partial-prs value exits 2"
+assert_grep    "$AS_ERR" 'malformed --partial-prs' "V13.G-592.2-malformed: the refusal names the flag whose shape was wrong"
+assert_no_grep "$AS_ERR" 'unknown argument'        "V13.G-592.2-malformed: it is the SHAPE refusal, not the catch-all arm"
+
+argshape '--partial-prs=,100'
+assert_eq "$AS_RC" "2" "V13.G-592.2-leading-comma: a leading separator exits 2"
+assert_grep "$AS_ERR" 'malformed --partial-prs' "V13.G-592.2-leading-comma: refused by the shape guard"
+argshape '--partial-prs=100,'
+assert_eq "$AS_RC" "2" "V13.G-592.2-trailing-comma: a trailing separator exits 2"
+assert_grep "$AS_ERR" 'malformed --partial-prs' "V13.G-592.2-trailing-comma: refused by the shape guard"
+argshape '--partial-prs=1,,2'
+assert_eq "$AS_RC" "2" "V13.G-592.2-empty-member: an empty member exits 2"
+assert_grep "$AS_ERR" 'malformed --partial-prs' "V13.G-592.2-empty-member: refused by the shape guard"
+
+# The accept half deliberately does NOT pin a status: what follows the parser
+# depends on whether a plugin root is resolvable in the invoking environment. What
+# it pins is that the value was not REFUSED, and that neither message was printed.
+argshape '--partial-prs=100,901'
+if [ "$AS_RC" != "2" ]; then
+  pass "V13.G-592.2-accepts: a digits-and-commas value passes the parser (rc=$AS_RC, refusal=2)"
+else
+  fail "V13.G-592.2-accepts: a well-formed --partial-prs value was refused with exit 2"
+fi
+assert_no_grep "$AS_ERR" 'malformed --partial-prs' "V13.G-592.2-accepts: no shape complaint for a well-formed value"
+assert_no_grep "$AS_ERR" 'unknown argument'        "V13.G-592.2-accepts: the flag is recognised, not swallowed by the catch-all"
+
+# Negative control for the pair above: the catch-all still fires, and still says
+# something different. Without this row "the two messages differ" is untested in
+# the direction that matters — a build where BOTH refusals print "malformed".
+argshape '--not-a-flag=1'
+assert_eq "$AS_RC" "2" "V13.G-592.2-unknown-flag: an unrecognised flag still exits 2"
+assert_grep    "$AS_ERR" 'unknown argument'        "V13.G-592.2-unknown-flag: the catch-all is intact"
+assert_no_grep "$AS_ERR" 'malformed --partial-prs' "V13.G-592.2-unknown-flag: the shape refusal did not swallow it"
+
+# Both flags together — the shape this lane is actually invoked with once Task 4's
+# relay lands. The parse loop is order-independent by construction, so the risk is
+# small; the row costs one line and makes "the two arms coexist" explicit rather
+# than inferred from two single-flag runs.
+argshape '--goal-id=g1' '--partial-prs=100,901'
+if [ "$AS_RC" != "2" ]; then
+  pass "V13.G-592.2-both-flags: --goal-id and --partial-prs parse together (rc=$AS_RC, refusal=2)"
+else
+  fail "V13.G-592.2-both-flags: the production argument shape was refused with exit 2"
+fi
+assert_no_grep "$AS_ERR" 'unknown argument' "V13.G-592.2-both-flags: neither flag fell through to the catch-all"
+
+# The environment is NOT a carrier, and this is behavioural rather than a second
+# reading of the V13.one-entrance grep. The value handed in is injection-shaped:
+# if the parser read the environment at all the shape guard would refuse it and
+# exit 2 — turning a variable that no producer in this tree sets into a
+# run-halting `watch_script_error` (skills/goal-pipeline/workflow.js maps a
+# non-{0,42} status from this script to a halt). Refusing a leaked export is not
+# the safe direction here, because the relay cannot override it: Task 4 omits
+# `--partial-prs` entirely on a clean pass rather than emitting an empty one, so
+# an exported value would become every pass's partial set with nothing able to
+# clear it. Not seeing it is the safe direction, and this row is what pins it.
+argshape_env '1;rm -rf /'
+if [ "$AS_RC" != "2" ]; then
+  pass "V13.env-inert: an exported UBERDEV_GOAL_PARTIAL_PRS never reaches the shape guard (rc=$AS_RC, refusal=2)"
+else
+  fail "V13.env-inert: a value no producer sets halted the watch lane through the argv refusal"
+fi
+assert_no_grep "$AS_ERR" 'malformed --partial-prs' \
+  "V13.env-inert: and it draws no complaint either — the environment is not an entrance to this carrier"
+
+# --- the marked decision row -------------------------------------------------
+# PARTIAL_RC=1 throughout: the LEDGER says "complete" in every configuration
+# below, so nothing here can pass by reading it.
+GATE_MARK="$(run_gate 0 1 1 1 0 100)"
+case "$GATE_MARK" in
+  *"dispatch:100"*) pass "V13.mark-still-merges: a partial PR is still dispatched to /merge — #554's landed behaviour is unchanged" ;;
+  *) fail "V13.mark-still-merges: /merge was withheld from a partial PR (got: [$GATE_MARK])" ;;
+esac
+case "$GATE_MARK" in
+  *"transition:100:green->merging:1"*)
+    pass "V13.mark-marks-the-row: the green->merging decision carries the partial-chain marker" ;;
+  *) fail "V13.mark-marks-the-row: the transition was written UNMARKED for a partial PR (got: [$GATE_MARK])" ;;
+esac
+# AC 4's operator line. Asserted here and nowhere else in the tree: an unattended
+# run's only human-visible trace of an incomplete delivery is this line.
+case "$GATE_MARK" in
+  *"covers an INCOMPLETE task chain"*)
+    pass "V13.mark-warns: the operator is told, on stderr, that the PR being merged covers an incomplete chain" ;;
+  *) fail "V13.mark-warns: nothing was printed for an operator watching an unattended run (got: [$GATE_MARK])" ;;
+esac
+# Provenance, and the reason this section exists at all: the ledger answered
+# "complete" for this very PR, so the mark and the warning came from the scalar
+# this pass was handed. A mark re-derived from the ledger reds both rows above.
+case "$GATE_MARK" in
+  *goal_partial_delivery*)
+    fail "V13.mark-is-independent: the ledger emitted a delivery row although PARTIAL_RC said complete (got: [$GATE_MARK])" ;;
+  *) pass "V13.mark-is-independent: the ledger said COMPLETE and the row was still marked — the carrier is the scalar, not the ledger" ;;
+esac
+case "$GATE_MARK" in
+  *"ensure:100"*"checks:100"*"dispatch:100"*)
+    pass "V13.mark-order: flagging does not perturb ensure -> checks -> dispatch" ;;
+  *) fail "V13.mark-order: the gate's ordering changed under the mark (got: [$GATE_MARK])" ;;
+esac
+
+# --- the three ways a PR must stay UNMARKED ----------------------------------
+# `merging:` is a PREFIX of `merging:1`, so "the transition ran" and "it ran
+# unmarked" are two assertions, not one; only the absence of `:1` is the negative.
+GATE_EMPTY="$(run_gate 0 1 1 1 0 "")"
+case "$GATE_EMPTY" in
+  *"dispatch:100"*) pass "V13.empty-unmarked: the clean path still dispatches to /merge" ;;
+  *) fail "V13.empty-unmarked: /merge was not dispatched on the clean path (got: [$GATE_EMPTY])" ;;
+esac
+case "$GATE_EMPTY" in
+  *"transition:100:green->merging:1"*)
+    fail "V13.empty-unmarked: a PR was marked partial with an EMPTY carrier (got: [$GATE_EMPTY])" ;;
+  *) pass "V13.empty-unmarked: an empty carrier marks nothing" ;;
+esac
+case "$GATE_EMPTY" in
+  *"transition:100:green->merging:"*) pass "V13.empty-unmarked: the transition still happened, with an empty fifth field" ;;
+  *) fail "V13.empty-unmarked: the transition did not run at all (got: [$GATE_EMPTY])" ;;
+esac
+case "$GATE_EMPTY" in
+  *"covers an INCOMPLETE task chain"*)
+    fail "V13.empty-unmarked: the operator was warned about a complete chain (got: [$GATE_EMPTY])" ;;
+  *) pass "V13.empty-unmarked: no warning is printed for a complete delivery" ;;
+esac
+
+GATE_NONMEMBER="$(run_gate 0 1 1 1 0 999)"
+case "$GATE_NONMEMBER" in
+  *"transition:100:green->merging:1"*)
+    fail "V13.nonmember-unmarked: PR 100 was marked from a set that does not contain it (got: [$GATE_NONMEMBER])" ;;
+  *) pass "V13.nonmember-unmarked: a PR outside the carrier is not marked" ;;
+esac
+
+# The padded-haystack guard. A plain *"$pr"* match marks PR 100 when the set is
+# {1000}; this repo has shipped that exact bug class before.
+GATE_SUBSTRING="$(run_gate 0 1 1 1 0 1000)"
+case "$GATE_SUBSTRING" in
+  *"transition:100:green->merging:1"*)
+    fail "V13.substring-unmarked: PR 100 was marked because 100 is a SUBSTRING of 1000 (got: [$GATE_SUBSTRING])" ;;
+  *) pass "V13.substring-unmarked: membership is by whole number, not by substring" ;;
+esac
+case "$GATE_SUBSTRING" in
+  *"covers an INCOMPLETE task chain"*)
+    fail "V13.substring-unmarked: the substring match also reached the operator line (got: [$GATE_SUBSTRING])" ;;
+  *) pass "V13.substring-unmarked: no warning for a PR that is not in the set" ;;
+esac
+
+# ...and the positive control for the same guard: membership inside a LIST, at a
+# position that is neither first nor last, is what production actually passes.
+GATE_INLIST="$(run_gate 0 1 1 1 0 "99,100,101")"
+case "$GATE_INLIST" in
+  *"transition:100:green->merging:1"*)
+    pass "V13.member-in-list: a member in the middle of a CSV carrier is marked" ;;
+  *) fail "V13.member-in-list: a genuine member was missed inside a list (got: [$GATE_INLIST])" ;;
+esac
+
+# The resume arm takes no merge DECISION — it finalizes a PR that landed outside
+# this run — so it transitions unmarked. The ledger-driven delivery row (V12)
+# still covers it; this row keeps the decision-row marker bound to the decision.
+GATE_RESUME="$(run_gate 0 1 1 0 0 100)"
+case "$GATE_RESUME" in
+  *"transition:100:green->merging:1"*)
+    fail "V13.resume-unmarked: the resume arm marked a decision it did not take (got: [$GATE_RESUME])" ;;
+  *) pass "V13.resume-unmarked: the already-merged arm transitions unmarked" ;;
+esac
+case "$GATE_RESUME" in
+  *"transition:100:green->merging:"*) pass "V13.resume-unmarked: the resume arm still transitions" ;;
+  *) fail "V13.resume-unmarked: the resume arm did not run (got: [$GATE_RESUME])" ;;
+esac
+
+# A withheld PR never leaves green, so neither the marker nor the warning may
+# appear — otherwise an unattended run is told a merge happened that did not.
+GATE_HELD="$(run_gate 1 1 1 1 0 100)"
+case "$GATE_HELD" in
+  *"->merging"*) fail "V13.withheld-silent: a withheld PR left green (got: [$GATE_HELD])" ;;
+  *) pass "V13.withheld-silent: a withheld partial PR stays green" ;;
+esac
+case "$GATE_HELD" in
+  *"covers an INCOMPLETE task chain"*)
+    fail "V13.withheld-silent: the operator was told a withheld PR was being merged (got: [$GATE_HELD])" ;;
+  *) pass "V13.withheld-silent: no merge, no warning — the line is bound to the decision" ;;
+esac
 
 echo
 echo "== Summary =="

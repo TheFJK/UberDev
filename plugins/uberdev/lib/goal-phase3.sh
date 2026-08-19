@@ -16,11 +16,20 @@
 #   42 — loop back: goal_cycle_completed emitted, candidates merged into the
 #        rollover queue, `cycle` bumped, merge barrier re-seeded.
 #   1  — halt: a circuit breaker fired (max_cycles, nonconvergence,
-#        solver_failed, queue_empty_not_converged, gh_api_failed).
+#        solver_failed, queue_empty_not_converged, gh_api_failed). `solver_failed`
+#        covers TWO distinct halts, told apart by the `phase` subfield on the
+#        breaker payload rather than by a second reason (RFC 0005 §9 keeps
+#        GOAL_CIRCUIT_BREAKER_REASONS a CLOSED set): the failed-issue count, and
+#        `phase=partial_chain` — a run whose PRs are all terminal but whose
+#        solver task chain stopped short on at least one of them (#592).
 #   3  — run-state could not be rehydrated or persisted.
+#   2  — a STARTUP refusal, raised before any state is read: an unrecognised
+#        flag, or a `--partial-issues` value that is not digits-and-commas.
+#        Both are bugs in the caller that composed the command line
+#        (skills/goal-pipeline/workflow.js), never a transient to poll through.
 #
 # CONTRACT
-#   bash lib/goal-phase3.sh [--goal-id=<id>]
+#   bash lib/goal-phase3.sh [--goal-id=<id>] [--partial-issues=<csv>]
 
 set -u
 
@@ -36,12 +45,44 @@ set -u
 UBERDEV_PLUGIN_ROOT="${UBERDEV_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}"
 
 GOAL_ID_CLI=""
+# #592 — the issue numbers THIS PASS was handed whose solver task chain stopped
+# short, comma-separated. Same carrier, same reasoning as lib/goal-watch.sh's
+# `--partial-prs`: skills/goal-pipeline/workflow.js is the only party that sees
+# the fleet's per-issue `chainComplete` and it may not touch the filesystem
+# (RFC 0012 §2.2, constraint 6), so argv is the only channel from the ledger to
+# this gate. The environment is deliberately NOT a second entrance — a leaked
+# variable would become every pass's partial set and refuse to converge a run
+# that did converge, which is this issue's own bug pointed the other way.
+#
+# This scalar is the CLI half only. The durable half — everything this RUN
+# already refused or already merged partial — is unioned in after the shape
+# refusal below, in the `partial-union` region.
+PARTIAL_ISSUES=""
 for _arg in "$@"; do
   case "$_arg" in
     --goal-id=*) GOAL_ID_CLI="${_arg#--goal-id=}" ;;
+    --partial-issues=*) PARTIAL_ISSUES="${_arg#--partial-issues=}" ;;
     *) echo "goal-phase3: unknown argument '$_arg'" >&2; exit 2 ;;
   esac
 done
+# Shape refusal, and it is an INJECTION BOUNDARY rather than tidiness: this
+# scalar is interpolated into a JSON audit payload (the partial-chain breaker
+# row below) and into an operator line, so anything that is not digits-and-commas
+# is refused here, at the edge, before it can reach a writer. The empty-member /
+# leading / trailing separator forms are refused too, so the CSV can never carry
+# an empty "member".
+#
+# The message is deliberately DISTINCT from the catch-all above. Both exit 2, so
+# the status alone cannot tell a malformed value from an unrecognised flag — and
+# a build that never grew this flag at all would satisfy a status-only test by
+# falling through to `unknown argument`.
+case "$PARTIAL_ISSUES" in
+  "") ;;
+  *[!0-9,]*|,*|*,,*|*,)
+    printf "goal-phase3: malformed --partial-issues value '%s' — expected a comma-separated list of issue numbers\n" \
+      "$PARTIAL_ISSUES" >&2
+    exit 2 ;;
+esac
 [ -n "$GOAL_ID_CLI" ] && export UBERDEV_GOAL_ID="$GOAL_ID_CLI"
 
 # >>> region: rehydrate
@@ -54,6 +95,68 @@ GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
 uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 3" >&2; exit 3; }
 uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # re-derive backend/env (idempotent, D8); not persisted
 # <<< region: rehydrate
+
+# >>> region: partial-union
+# D4a — the RESUME-STICKY half of the #592 carrier, and the reason the CLI flag
+# alone is not enough. `--resume` re-enters a run with an empty in-memory ledger
+# and an empty argv set, so a resumed pass would re-evaluate the SAME all-terminal
+# state and announce the convergence an earlier pass of the same run already
+# refused. uberdev_goal_partial_issues_from_audit re-derives that set from the
+# run's own audit jsonl — which phase 0 deliberately does not truncate on a
+# resume — so no sidecar is added and neither the state_init truncate list nor
+# the reaper's cleanup inventory moves.
+#
+# It sits in its OWN region, run outside `terminal`, for two reasons that are
+# both load-bearing:
+#   * ORDER — it must run AFTER the digits-and-commas refusal above. The helper's
+#     vocabulary is WIDER than digits (`pr-<n>` / `pr-unknown` name a partial
+#     delivery this run could not map back to an issue), and its contract forbids
+#     re-filtering that output down to digits: dropping those members lets the run
+#     converge on a set it never achieved. So the refusal guards the FLAG VALUE,
+#     and this union lands after it, never through it.
+#   * REACH — the terminal region is sliced and executed standalone by the test
+#     fixtures, and it must read ONE already-resolved scalar. Marking this block
+#     as a region of its own is what lets a fixture execute the union itself
+#     rather than infer it from the source (tests/goal-pipeline-zsh.test.sh P3h,
+#     tests/goal.test.sh G-592.4.union-*).
+#
+# The helper's rc is NOT swallowed: rc 1 means the goal id was refused as unsafe,
+# so this pass genuinely cannot re-derive what it must not converge on. It
+# degrades to the CLI set — halting here would strand a run whose argv set is
+# already correct — but it says so, because "nothing was partial" and "the
+# re-derivation never ran" otherwise print the same empty string, and that
+# collapse is the whole bug this carrier exists to close. The helper's own
+# stderr breadcrumbs (unreadable jsonl, failed extraction) are likewise left
+# alone rather than redirected to /dev/null.
+if ! _prior_partial="$(uberdev_goal_partial_issues_from_audit "${GOAL_ID:-}")"; then
+  printf 'goal-phase3: could not re-derive this run'"'"'s partial-chain set (goal id %s refused) — a resumed pass may under-report\n' \
+    "${GOAL_ID:-<unset>}" >&2
+  _prior_partial=""
+fi
+#
+# The union DEDUPES, and that is not tidiness either. The two halves overlap by
+# construction — the argv set names the issues the fleet reported partial this
+# pass, and the audit set names the ones this run already refused or already
+# merged partial, which is the same issue one pass later — so a plain
+# concatenation would put `11,11` in the operator line and in the breaker row's
+# `partial_issues` field that the NEXT pass reads back. Same padded-haystack
+# `case` the helper's own dedupe uses, and a heredoc-fed loop rather than a pipe:
+# bash runs every stage of a pipeline in a subshell and would discard the
+# accumulator with no diagnostic.
+if [ -n "$_prior_partial" ]; then
+  while IFS= read -r _partial_member; do
+    [ -n "$_partial_member" ] || continue
+    case ",${PARTIAL_ISSUES:-}," in *",$_partial_member,"*) continue ;; esac
+    if [ -n "${PARTIAL_ISSUES:-}" ]; then
+      PARTIAL_ISSUES="$PARTIAL_ISSUES,$_partial_member"
+    else
+      PARTIAL_ISSUES="$_partial_member"
+    fi
+  done <<EOF
+$(printf '%s' "$_prior_partial" | tr ',' '\n')
+EOF
+fi
+# <<< region: partial-union
 
 # ONE EXIT slot, two jobs. As a single process there is exactly one EXIT trap
 # available for the whole phase, so it must BOTH clean up $findings_err AND emit
@@ -299,8 +402,61 @@ terminal_count="$(printf '%s\n' "$terminal_prs" | grep -c . || true)"
 # the v0.34.0 rollover-WIPE fix — the wipe was fixed; convergence-evaluates-
 # first-and-ignores-the-queue was not.)
 if [ "${#new_candidates[@]}" = "0" ] && [ "$terminal_count" = "$all_pr_count" ] && [ "${#queue[@]}" -eq 0 ]; then
+  # Issue #592 — the convergence REFUSAL. Every PR reaching a terminal state is
+  # exactly what a partial delivery looks like from here: #554 stopped such a PR
+  # from closing its issue, but it still merges and it still lands terminal, so
+  # the calculus above cannot tell it from a finished one. $PARTIAL_ISSUES is the
+  # value that can — the fleet's own per-issue verdict, relayed on argv and
+  # unioned with everything this run already refused or already merged partial —
+  # so it gates the convergence claim rather than decorating it.
+  #
+  # Guarding the CONVERGENCE branch only is deliberate. A cycle with real work
+  # left (non-empty candidates or a non-empty rollover queue) must still fall
+  # through to the loop-back: pre-empting it here would strand issues that were
+  # about to be dispatched, and the run gets this same check on the pass that
+  # actually reaches convergence.
+  #
+  # `solver_failed` + `phase=partial_chain` rather than a new breaker reason:
+  # GOAL_CIRCUIT_BREAKER_REASONS is a CLOSED set (RFC 0005 §9) and a partial
+  # chain IS a solver that did not finish; the `phase` subfield discriminates,
+  # exactly as lib/goal-watch.sh reuses `stuck_loop` with a distinguishing
+  # `phase` rather than minting a tenth reason. The row is also
+  # what makes the refusal STICKY — uberdev_goal_partial_issues_from_audit reads
+  # this exact shape back, so a `--resume` re-halts here instead of converging
+  # five minutes after the run refused to.
+  if [ -n "${PARTIAL_ISSUES:-}" ]; then
+    uberdev_goal_audit goal_circuit_breaker \
+      "{\"reason\":\"solver_failed\",\"phase\":\"partial_chain\",\"cycle\":$cycle,\"partial_issues\":\"$PARTIAL_ISSUES\",\"prs\":$all_pr_count}"
+    # Worded for the WHOLE member vocabulary — a member may name a PR rather than
+    # an issue (uberdev_goal_partial_issues_from_audit's contract), and an
+    # unattended run's operator only ever sees this line.
+    printf 'goal: NOT converged — the solver task chain fell short on issue(s)/PR(s) %s\n' "$PARTIAL_ISSUES" >&2
+    printf 'goal: this run cannot re-queue them — a landed partial delivery is permanent for the run — and --resume re-derives the same set from the run audit trail and halts here again, by design. Finish the outstanding tasks in a new run before treating this goal as converged.\n' >&2
+    _uberdev_goal_reap_zombies || true
+    print_summary "$cycle"
+    exit 1
+  fi
+  # Past the refusal, the run really is converging — but a PR whose solver chain
+  # stopped short and was NOT relayed (a pass that never saw the fleet's verdict)
+  # still reaches a terminal state exactly like a complete one, so the ledger
+  # count rides on the SAME row as the convergence claim and a reader can never
+  # see the claim without the caveat.
+  # The re-validation is not theatre: it is the only thing between a future
+  # change in the counter and an unparseable audit row (the repo's own
+  # `jq length … || echo 0` lesson — a count read with no shape check maps a
+  # crashed producer to a plausible number). Here a non-numeric or empty value
+  # degrades to 0 AND the row stays parseable JSON — but it says so on stderr
+  # first, because "the counter broke" and "nothing was partial" print the same
+  # `0` and that collapse is the entire bug this issue exists to fix.
+  partial_count="$(uberdev_goal_count_partial_prs "$GOAL_ID")" || partial_count=""
+  case "$partial_count" in
+    ''|*[!0-9]*)
+      printf 'goal-phase3: partial-chain count unusable (%s) — reporting 0 in goal_converged\n' \
+        "${partial_count:-<empty>}" >&2
+      partial_count=0 ;;
+  esac
   uberdev_goal_audit goal_converged \
-    "{\"cycle\":$cycle,\"prs\":$all_pr_count}"
+    "{\"cycle\":$cycle,\"prs\":$all_pr_count,\"partial\":$partial_count}"
   print_summary "$cycle"
   uberdev_goal_cleanup_run_state || true   # #171 — reap run-state sidecars on terminal exit
   exit 0

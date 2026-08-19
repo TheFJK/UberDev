@@ -226,6 +226,33 @@ ck "skill documents the never-source rule" "grep -qi 'executable\*\*, never sour
 ck "skill never sources the lib"        "[ \$(grep -cE '(^|[^a-z])(source|\.) +\"?\\\$LIB' '$SKILL') -eq 0 ]"
 ck "command never sources the lib"      "[ \$(grep -cE '(^|[^a-z])(source|\.) +\"?\\\$LIB' '$CMD') -eq 0 ]"
 
+echo "== TX15: the issue-body channel is locked end to end =="
+# The step this locks was MISSING on the first live run: invariant 2 demanded a
+# path to an artifact nothing created, and the tempting repair was to paste the
+# body into the prompt -- the exact thing the invariant forbids. The suite has
+# to ratchet it for the same reason it ratchets agent names: a gap here fails at
+# Phase 2, mid-run, after the claims are already written.
+#
+# Needles deliberately avoid a `$` so the eval in ck() cannot expand one under
+# `set -u` -- the bug this very section shipped on its first draft.
+ck "launcher persists an issue-body artifact"   "[ \$(grep -c 'issue-body-' '$LAUNCHER') -ge 1 ]"
+ck "launcher caps the persisted body"           "[ \$(grep -c 'UBERDEV_ISSUE_BODY_CAP' '$LAUNCHER') -ge 2 ]"
+ck "the cap defaults to 64 KiB in ONE place"    "[ \$(grep -c 'UBERDEV_ISSUE_BODY_CAP:=65536' '$LAUNCHER') -eq 1 ]"
+ck "launcher writes it O_EXCL"                  "[ \$(grep -c 'O_EXCL' '$LAUNCHER') -ge 1 ]"
+ck "launcher writes it at 0600"                 "[ \$(grep -c '0o600' '$LAUNCHER') -ge 1 ]"
+ck "manifest carries issue_body_file"           "[ \$(grep -c 'issue_body_file' '$LAUNCHER') -ge 2 ]"
+ck "skill names issue_body_file"                "[ \$(grep -c 'issue_body_file' '$SKILL') -ge 3 ]"
+ck "skill states context_file is NOT the body"  "grep -q 'NOT the issue body' '$SKILL'"
+# The regression that shipped: three sites told the controller to read the issue
+# body out of context_file. None may come back.
+ck "no site reads the body from context_file"   "[ \$(grep -c 'issue body from its .context_file' '$SKILL') -eq 0 ]"
+ck "controller is told not to re-fetch it"      "[ \$(grep -c 're-fetch the body' '$SKILL') -ge 1 ]"
+ck "controller is told not to open it itself"   "[ \$(grep -c 'never open the file' '$SKILL') -ge 1 ]"
+ck "an absent issue_body_file is audited"       "grep -q 'issue_body_missing' '$SKILL'"
+ck "stale-card warning names spec-reviewer"     "grep -q 'agents/spec-reviewer.md' '$SKILL'"
+ck "stale-card warning names spec-writer"       "grep -q 'agents/spec-writer.md' '$SKILL'"
+ck "research phase names the inputs it passes"  "grep -q 'Every lens gets the same three inputs' '$SKILL'"
+
 echo
 echo "== Summary =="
 echo "  PASS=$PASS  FAIL=$FAIL"

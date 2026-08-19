@@ -1245,3 +1245,91 @@ when it protects a consumer that cannot be updated in lockstep; the producer and
 every consumer of this register live in this repository, and `C-MEASURE` is the
 contract that the new required record is present. The unchanged literal is a
 decision, not an oversight.
+
+## Amendment (2026-08-18, #604) — HEAD-only is a declaration, not an absence
+
+> **Amends the review-point paragraph of the 2026-08-13 (#511) amendment and the
+> §4.3-label paragraph of the 2026-08-14 (#534) amendment. Both record the
+> decision that an upstream is adjudicated at HEAD as the deliberate *absence* of
+> `last_reviewed_release`; it is now recorded positively, as the register key
+> `head_only: true`. Every stance, watermark, measurement and review point in
+> this document is unchanged — only where the decision is written down changes.**
+> Status of this amendment: **Accepted, implemented.**
+
+### The decision used to live in a missing line
+
+The #511 amendment says `upstreams.pr-review-toolkit` gains its review point and
+"deliberately **no** `last_reviewed_release`", and the #534 amendment repeats the
+reasoning where it explains why §4.3's label invents no release tag. Both are
+still the right decision, and both recorded it in the one place that cannot carry
+one: nowhere.
+
+An absent key states nothing. Before this amendment, deleting
+`last_reviewed_release` from `upstreams.superpowers` produced a register that was
+byte-for-byte the shape this RFC described as a considered choice.
+`vendor-check.py`'s contracts stayed green — they read neither key — and the
+drift report went on rendering that upstream as HEAD-only, attributing its own
+silence to a policy nobody wrote. Two suites did red, and neither for a reason
+that generalises: `tests/vendor-provenance.test.sh` (row V31) and the tag
+fixture in `tests/vendor-drift.test.sh` each assert that *some* upstream carries
+a release label, and they tripped only because `superpowers` was the register's
+sole labelled one. Neither asks whether an upstream declared anything, so a
+second labelled upstream would have absorbed the deletion in silence — an
+accident of arity is not a control.
+`validate_release_metadata` closes the hole for every used upstream
+independently, and the section below records what the same mutation does now. A
+decision inferred from a missing line is indistinguishable from an accident,
+which is the failure mode the register exists to prevent, applied to the register
+itself.
+
+So the rule is a **biconditional**, not a default. Every upstream a component
+declares states its release standing positively, and states exactly one of them:
+
+- `last_reviewed_release` — the release label that was adjudicated; or
+- `head_only: true` — this upstream publishes no releases to adjudicate.
+
+Declaring neither is a hard failure; declaring both is a hard failure, because
+the two contradict each other and nothing can decide which one was meant.
+`head_only` is checked by identity against JSON `true`, never by truthiness: a
+`"yes"` or a leftover `1` would otherwise let a hand-edit stand in for a decision
+this document is supposed to have made.
+
+### What each upstream declares
+
+| Upstream | Release standing | Why |
+| --- | --- | --- |
+| `superpowers` | `last_reviewed_release: v6.3.0` | `obra/superpowers` ships tagged releases; `v6.3.0` is the review point the #511 amendment adjudicated. |
+| `pr-review-toolkit` | `head_only: true` | A plugin inside the `anthropics/claude-plugins-official` monorepo, which publishes no tags at all — `git ls-remote --tags` against it returns nothing. There is no release vocabulary here to draw a label from, this plugin's or any other's, and inventing one would be exactly the fabrication this register exists to prevent. |
+| `code-simplifier` | `head_only: true` | The same monorepo and the same absence of a release vocabulary. Retained as a declared upstream because UberDev ships this plugin's licence text and `agents/code-simplifier.md` descends from it. |
+
+Naming `code-simplifier` here is not a formality. It was the upstream whose
+HEAD-only standing had never been written down anywhere at all — the #511
+amendment reasoned only about `pr-review-toolkit` — so its release control was
+switched off by a silence that no sentence in this RFC had ever justified.
+
+`superpowers` is unaffected by this amendment. It keeps the `v6.3.0` review point
+recorded by #511, and the biconditional forbids it from also declaring
+`head_only`: an upstream cannot both have adjudicated a release and publish none.
+
+### What enforces it
+
+`validate_release_metadata` in `tools/vendor/vendor-drift.py` runs the
+biconditional over every used upstream before any network work, and exits with
+the usage code rather than the failure code — a register that does not state its
+own release standing is a repository defect, not an upstream outage.
+
+The register carries the same reasoning in prose, and this amendment certifies
+one note, not both. `upstreams.pr-review-toolkit`'s note cites the #511
+amendment, and that citation stays right: what is superseded is *where* the
+decision is recorded, not the reasoning behind it. A plugin inside a monorepo
+that publishes no tags still has no release to name, and the register now says so
+as a key rather than as a silence.
+
+`upstreams.code-simplifier`'s note cites no amendment at all, and one sentence in
+it is already retracted: it infers from measured similarity that "its component
+points there", meaning `pr-review-toolkit`. §4.3's *"A correction the measurement
+forced — now reversed by a better measurement"* overturned that inference on blob
+identity, and the register agrees with §4.3 rather than with its own note — the
+component for `agents/code-simplifier.md` declares `code-simplifier`. That
+sentence is superseded where it stands; only the HEAD-only half of the note is
+current, and this amendment vouches for that half alone.

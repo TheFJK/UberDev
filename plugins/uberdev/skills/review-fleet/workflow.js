@@ -63,9 +63,9 @@ export const meta = { "name": "review-fleet", "description": "Shared Workflow-na
 //                   post_review_write_aggregate_v2 publishes the canonical
 //                   aggregate (a deterministic writer that re-validates the
 //                   closed roster and "does not use any pathname as aggregation
-//                   authority", skills/post-impl-review/SKILL.md:693-697;
-//                   defined at lib/review-aggregate.sh:330), then digest +
-//                   prepare-authority.
+//                   authority" — its own words, in
+//                   skills/post-impl-review/SKILL.md; defined in
+//                   lib/review-aggregate.sh), then digest + prepare-authority.
 //       fix      -> Bash runs review_fixer_terminal_outcome (defined in
 //                   lib/review-fences.sh, called by all four fixer fences),
 //                   which branches on the disposition record: capture +
@@ -77,25 +77,31 @@ export const meta = { "name": "review-fleet", "description": "Shared Workflow-na
 //                   a re-flow of the file it points into.
 //       simplify -> Bash runs code_fixer_contract.py encode-aggregate
 //                   --phase phase2, the byte-shape oracle
-//                   (commands/simplify.md:341-348), then prepare-authority.
+//                   (commands/simplify.md), then prepare-authority.
 //       defer    -> Bash owns the halt (AskUserQuestion) and the verdict.
 //     Collapsing two stages into one Workflow call is not an optimisation, it
 //     is a deletion of a proof. Do not do it.
 //  4. NO PUSH, NO ANCHOR, NO LABEL, NO VERDICT. RFC 0012 §3.1's pseudocode
-//     lines 153 and 157 propose a haiku writer for the aggregate and a haiku
-//     agent for `git push origin HEAD`. Both are rejected here. The aggregate
-//     review_publish_same_repo_pr_head is fence text inside commands/review-pr.md
-//     (:1344-1376, called at :2373 and :4013) — not an on-disk executable a
-//     relay could invoke at all — and it proves same-repo authority, remote-ref
-//     equality, live-PR-head equality, local-HEAD equality and clean residue
-//     before it moves a ref. post_review_write_aggregate_v2 IS on disk since
-//     #381 (lib/review-aggregate.sh:330), so that argument does not carry it;
-//     what does is (1) above — the controller proves, it does not delegate the
-//     proof to an LLM. review-aggregate.sh exists so the CALLING SESSION can
-//     source it across its fresh-shell `bash` blocks, which is the opposite of
-//     handing it to a relay. Both stay in the calling session.
-//  5. NO BRIEF RELAY. RFC §3.1 line 148 has a brief agent shell out to
-//     `gh pr diff` and write the enveloped brief. Not here: the controller
+//     proposes `haiku writer emits post-impl-review-final.md` and
+//     `push agent (haiku): git push origin HEAD`. Both are rejected here, and
+//     by ONE argument rather than two: (1) above — the controller proves, it
+//     does not delegate the proof to an LLM. Both are shell functions the
+//     calling session owns — post_review_write_aggregate_v2 in
+//     lib/review-aggregate.sh since #381, review_publish_same_repo_pr_head in
+//     lib/review-fences.sh, called from the commands/review-pr.md fences — and
+//     they live there so the CALLING SESSION can source them across its
+//     fresh-shell `bash` blocks, which is the opposite of handing them to a
+//     relay. What carries the push rejection specifically is what that fence
+//     PROVES before it moves a ref: same-repo authority, remote-ref equality,
+//     live-PR-head equality, local-HEAD equality and clean residue. An earlier
+//     edition rejected it on a different ground instead — that the fence, unlike
+//     the aggregate writer, was not a file a relay could invoke at all. That was
+//     read off a line number, the line moved, and the sentence went false while
+//     still reading as an argument (#606). It is a shell function on disk, like
+//     the writer; the seam is what separates them from a relay, not the
+//     filesystem.
+//  5. NO BRIEF RELAY. RFC §3.1's `brief agent: gh pr diff` proposal has an
+//     agent shell out and write the enveloped brief. Not here: the controller
 //     already writes the enveloped diff artifact atomically in Bash
 //     (review_refresh_phase1_scope, lib/review-fences.sh), so the
 //     reviewers read THAT path. This deletes an agent and removes an LLM from

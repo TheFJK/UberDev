@@ -68,6 +68,22 @@ assert_no_grep() {
   fi
 }
 
+# String equality, reported per row. Used by blocks that run the lib inside one
+# subshell and assert on the labelled values it printed — the shape that keeps a
+# behavioural block from collapsing into a single coarse pass/fail.
+assert_eq() {
+  local got="$1" want="$2" desc="$3"
+  if [ "$got" = "$want" ]; then
+    echo "  PASS  $desc"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc"
+    echo "        got:  [$got]"
+    echo "        want: [$want]"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # B1 — batch registry CRUD (register, set-state, list-ordered, all-terminal).
 # ---------------------------------------------------------------------------
@@ -693,6 +709,213 @@ assert_grep "$GOAL_WATCH" '_uberdev_goal_batch_green_prs_ordered "\$GOAL_ID" \| 
 assert_grep "$GOAL_WATCH" '_uberdev_goal_set_batch_terminal_state "\$GOAL_ID" "\$pr" MERGING' "B18.flips-to-merging"
 # The phantom-label gate must NOT appear as a live jq select in the lib.
 assert_no_grep "$GOAL_LIB"  'select\(\. == "review-pr:green"\)'                              "B18.no-phantom-green-gate-in-lib"
+
+# ---------------------------------------------------------------------------
+# P1 — #592 partial-chain ledger: goal-<id>-partial-prs.tsv and its readers.
+#
+# The solver fleet knows whether an issue's task chain ran to completion. The
+# merge gate does not: it re-discovers PRs from GitHub each pass and never sees the
+# fleet's return value. The fact therefore needs an on-disk carrier the shell
+# lane owns, and these rows lock that carrier's contract BEFORE any gate reads
+# it. Every helper below runs inside the watch loop, so the failure modes that
+# matter are "stalls the goal" (a fail-loud write) and "corrupts the payload"
+# (an empty count), not "returns the wrong answer once".
+#
+# The block runs the real lib in ONE subshell with its own tmpdir and prints
+# labelled values; the assertions are made out here so each row reports
+# individually instead of collapsing into a single block-level pass/fail.
+# ---------------------------------------------------------------------------
+echo "== P1: partial-chain ledger helpers (#592) =="
+P1_TMP="$(mktemp -d)"
+P1_ERR="$P1_TMP/p1-stderr.log"
+: > "$P1_ERR"
+P1_OUT="$(
+  set -u
+  # Redirect from INSIDE the substitution: a `) 2>"$P1_ERR"` on the closing
+  # paren would land outside the `P1_OUT="` quote and split it.
+  exec 2>"$P1_ERR"
+  export UBERDEV_TMPDIR="$P1_TMP"
+  export UBERDEV_GOAL_ID="p1audit"
+  . "$DISPATCH_LIB"
+  . "$GOAL_LIB"
+  # goal-watch.sh has `cycle` in scope from uberdev_goal_read_run_state; mirror
+  # that so the cycle column is exercised with a real value, not the fallback.
+  cycle=7
+  rows() { if [ -f "$1" ]; then awk 'END{print NR+0}' "$1"; else printf '0\n'; fi; }
+
+  # -- record ---------------------------------------------------------------
+  uberdev_goal_state_init p1a >/dev/null
+  _p1a="$UBERDEV_TMPDIR/goal-p1a-partial-prs.tsv"
+  uberdev_goal_record_partial_prs p1a "901,902"; printf 'rec_rc=%s\n' "$?"
+  printf 'rec_rows=%s\n' "$(rows "$_p1a")"
+  printf 'rec_shape=%s\n' "$(awk -F'\t' \
+    '{ if (NF==3 && $1 ~ /^[0-9]+$/ && $2=="7" && $3 ~ /^[0-9]+$/) ok++ }
+     END { if (NR>0 && ok==NR) print "ok"; else print "bad" }' "$_p1a")"
+  # Re-recording the same set is what every tick and every resume does.
+  uberdev_goal_record_partial_prs p1a "901,902"; printf 'idem_rc=%s\n' "$?"
+  printf 'idem_rows=%s\n' "$(rows "$_p1a")"
+
+  # No state_init at all: the --resume path (lib/goal-phase0.sh:307 skips
+  # state_init), where a goal started before this change has every OTHER
+  # sidecar and not this one.
+  uberdev_goal_record_partial_prs p1b "903"; printf 'create_rc=%s\n' "$?"
+  printf 'create_rows=%s\n' "$(rows "$UBERDEV_TMPDIR/goal-p1b-partial-prs.tsv")"
+
+  # Empty CSV — what a healthy cycle returns — is a clean no-op, not an error.
+  uberdev_goal_state_init p1c >/dev/null
+  uberdev_goal_record_partial_prs p1c ""; printf 'empty_rc=%s\n' "$?"
+  printf 'empty_rows=%s\n' "$(rows "$UBERDEV_TMPDIR/goal-p1c-partial-prs.tsv")"
+
+  # A malformed member is skipped with a breadcrumb, never an abort: this runs
+  # in the watch loop, where a fail-loud write stalls the whole goal.
+  uberdev_goal_state_init p1d >/dev/null
+  uberdev_goal_record_partial_prs p1d "901,abc,902"; printf 'bad_rc=%s\n' "$?"
+  printf 'bad_prs=%s\n' "$(awk -F'\t' '{printf "%s ", $1}' \
+    "$UBERDEV_TMPDIR/goal-p1d-partial-prs.tsv" 2>/dev/null | sed 's/ *$//')"
+
+  # -- is_partial (the predicate the merge gate branches on) -----------------
+  uberdev_goal_pr_is_partial p1a 901;    printf 'isp_hit=%s\n' "$?"
+  uberdev_goal_pr_is_partial p1a 999;    printf 'isp_miss=%s\n' "$?"
+  uberdev_goal_pr_is_partial p1z 901;    printf 'isp_nofile=%s\n' "$?"
+  uberdev_goal_pr_is_partial p1a "nine"; printf 'isp_badarg=%s\n' "$?"
+
+  # -- count -----------------------------------------------------------------
+  # Distinctness is asserted against HAND-SEEDED duplicates: record() dedupes on
+  # the way in, so a counter that merely counted LINES would still look right if
+  # it were only ever fed through record().
+  uberdev_goal_state_init p1e >/dev/null
+  printf '901\t1\t1700000000\n902\t1\t1700000001\n901\t2\t1700000002\n' \
+    > "$UBERDEV_TMPDIR/goal-p1e-partial-prs.tsv"
+  printf 'count_distinct=%s\n' "$(uberdev_goal_count_partial_prs p1e)"
+  _p1_absent="$(uberdev_goal_count_partial_prs p1z)"; printf 'count_absent_rc=%s\n' "$?"
+  # Bracketed so the assertion is string equality against `0` and an EMPTY value
+  # (which is what makes the goal_converged payload unparseable) reads as [].
+  printf 'count_absent=[%s]\n' "$_p1_absent"
+
+  # -- batch registry PR->issue lookup ---------------------------------------
+  # cols: pr<TAB>issue<TAB>ts<TAB>state. Every column is numeric-looking here,
+  # so a reader keyed on the wrong index cannot accidentally return the issue.
+  uberdev_goal_state_init p1f >/dev/null
+  printf '100\t42\t1700000000\t7\n101\t43\t1700000001\t7\n' \
+    > "$UBERDEV_TMPDIR/goal-p1f-batch-prs.tsv"
+  printf 'issue_hit=%s\n'    "$(_uberdev_goal_batch_issue_for_pr p1f 100)"
+  printf 'issue_hit2=%s\n'   "$(_uberdev_goal_batch_issue_for_pr p1f 101)"
+  printf 'issue_miss=%s\n'   "$(_uberdev_goal_batch_issue_for_pr p1f 999)"
+  printf 'issue_nofile=%s\n' "$(_uberdev_goal_batch_issue_for_pr p1z 100)"
+  printf 'issue_badarg=%s\n' "$(_uberdev_goal_batch_issue_for_pr p1f "one-hundred")"
+
+  # The rc is the ONLY thing that separates the placeholder `0` from a genuine
+  # lookup, and every read above discards it: a `$( )` used as a printf argument
+  # throws the exit status away. Capture it on its own — `$?` after
+  # `X="$( )"` is the substitution's rc, not printf's.
+  _p1v="$(_uberdev_goal_batch_issue_for_pr p1f 100)";           printf 'issue_hit_rc=%s\n'    "$?"
+  _p1v="$(_uberdev_goal_batch_issue_for_pr p1f 999)";           printf 'issue_miss_rc=%s\n'   "$?"
+  _p1v="$(_uberdev_goal_batch_issue_for_pr p1z 100)";           printf 'issue_nofile_rc=%s\n' "$?"
+  _p1v="$(_uberdev_goal_batch_issue_for_pr p1f "one-hundred")"; printf 'issue_badarg_rc=%s\n' "$?"
+  # "the row exists but its issue column is junk" — the one case the contract
+  # calls an ERROR rather than a silent 0, and the only one no fixture reaches.
+  # Appended AFTER the reads above so their rows stay untouched.
+  printf '102\tabc\t1700000002\t7\n' >> "$UBERDEV_TMPDIR/goal-p1f-batch-prs.tsv"
+  _p1v="$(_uberdev_goal_batch_issue_for_pr p1f 102)";           printf 'issue_junk_rc=%s\n'   "$?"
+  printf 'issue_junk=%s\n' "$_p1v"
+
+  # -- the cycle column: explicit argument, ambient fallback, degradation -----
+  # Every row above runs under the ambient `cycle=7` the watch lane supplies, so
+  # without these the documented fallbacks are prose with nothing executing
+  # them. The column is a DIAGNOSTIC, never a key, so garbage must degrade to 0
+  # and still leave the row the merge gate keys on.
+  uberdev_goal_state_init p1h >/dev/null
+  # The `set -u` caller the contract promises to support: no cycle in scope at
+  # all. Nested subshell so the rows above keep their cycle=7.
+  ( unset cycle; uberdev_goal_record_partial_prs p1h "904" ); printf 'nocycle_rc=%s\n' "$?"
+  printf 'nocycle_col2=%s\n' "$(awk -F'\t' 'NR==1{print $2}' \
+    "$UBERDEV_TMPDIR/goal-p1h-partial-prs.tsv")"
+  uberdev_goal_state_init p1i >/dev/null
+  ( cycle="two"; uberdev_goal_record_partial_prs p1i "905" ); printf 'badcycle_rc=%s\n' "$?"
+  printf 'badcycle_col2=%s\n' "$(awk -F'\t' 'NR==1{print $2}' \
+    "$UBERDEV_TMPDIR/goal-p1i-partial-prs.tsv")"
+  # The explicit third argument is how a caller OUTSIDE the watch lane names its
+  # cycle instead of hoping one is ambient. It must win over the ambient scalar,
+  # which is still 7 here.
+  uberdev_goal_state_init p1j >/dev/null
+  uberdev_goal_record_partial_prs p1j "906" 11; printf 'argcycle_rc=%s\n' "$?"
+  printf 'argcycle_col2=%s\n' "$(awk -F'\t' 'NR==1{print $2}' \
+    "$UBERDEV_TMPDIR/goal-p1j-partial-prs.tsv")"
+  # An explicit garbage argument degrades exactly like an ambient one, and does
+  # NOT silently fall through to the ambient 7.
+  uberdev_goal_state_init p1k >/dev/null
+  uberdev_goal_record_partial_prs p1k "907" "eleven"; printf 'argbad_rc=%s\n' "$?"
+  printf 'argbad_col2=%s\n' "$(awk -F'\t' 'NR==1{print $2}' \
+    "$UBERDEV_TMPDIR/goal-p1k-partial-prs.tsv")"
+
+  # -- regression: the new file + the new reader do not perturb the barrier ---
+  uberdev_goal_state_init p1g >/dev/null
+  uberdev_goal_register_batch_pr p1g 100 42 >/dev/null
+  uberdev_goal_register_batch_pr p1g 101 43 >/dev/null
+  uberdev_goal_record_partial_prs p1g "100,101"
+  uberdev_goal_batch_all_terminal p1g; printf 'reg_pending=%s\n' "$?"
+  _uberdev_goal_set_batch_terminal_state p1g 100 GREEN >/dev/null
+  _uberdev_goal_set_batch_terminal_state p1g 101 GREEN >/dev/null
+  uberdev_goal_batch_all_terminal p1g; printf 'reg_terminal=%s\n' "$?"
+  printf 'barrier_start_ts=%s\n' "$(_uberdev_goal_now_secs)" \
+    >> "$UBERDEV_TMPDIR/goal-p1g-runstate"
+  uberdev_goal_barrier_breaker_check p1g 3600; printf 'reg_barrier_quiet=%s\n' "$?"
+  printf 'barrier_start_ts=1\n' >> "$UBERDEV_TMPDIR/goal-p1g-runstate"
+  uberdev_goal_barrier_breaker_check p1g 1; printf 'reg_barrier_fires=%s\n' "$?"
+)"
+
+# Herestring-fed, no pipeline: a `| head -1` here would be one pipefail switch
+# away from an EPIPE-poisoned rc (tests/epipe-guard.test.sh, #313). The switch
+# is deliberately not spelled out in this comment either — the guard's scope
+# gate greps raw file bytes, so naming it in prose would arm the guard over
+# every pre-existing pipeline in this file.
+p1_field() {
+  awk -v k="$1" 'index($0, k "=") == 1 { print substr($0, length(k) + 2); exit }' <<<"$P1_OUT"
+}
+
+assert_eq "$(p1_field rec_rc)"           "0"        "P1.record-appends-returns-zero"
+assert_eq "$(p1_field rec_rows)"         "2"        "P1.record-appends-one-row-per-member"
+assert_eq "$(p1_field rec_shape)"        "ok"       "P1.record-appends-pr-cycle-numeric-ts"
+assert_eq "$(p1_field idem_rc)"          "0"        "P1.idempotent-returns-zero"
+assert_eq "$(p1_field idem_rows)"        "2"        "P1.idempotent-two-rows-not-four"
+assert_eq "$(p1_field create_rc)"        "0"        "P1.record-creates-file-returns-zero"
+assert_eq "$(p1_field create_rows)"      "1"        "P1.record-creates-file-without-state-init"
+assert_eq "$(p1_field empty_rc)"         "0"        "P1.empty-csv-noop-returns-zero"
+assert_eq "$(p1_field empty_rows)"       "0"        "P1.empty-csv-writes-no-row"
+assert_eq "$(p1_field bad_rc)"           "0"        "P1.bad-member-failsoft-returns-zero"
+assert_eq "$(p1_field bad_prs)"          "901 902"  "P1.bad-member-failsoft-records-the-valid-members"
+assert_grep "$P1_ERR" "record_partial_prs.*abc"     "P1.bad-member-failsoft-stderr-breadcrumb"
+assert_eq "$(p1_field isp_hit)"          "0"        "P1.is-partial-zero-for-a-recorded-pr"
+assert_eq "$(p1_field isp_miss)"         "1"        "P1.is-partial-one-for-an-unrecorded-pr"
+assert_eq "$(p1_field isp_nofile)"       "1"        "P1.is-partial-one-when-the-tsv-is-absent"
+assert_eq "$(p1_field isp_badarg)"       "1"        "P1.is-partial-one-for-a-non-numeric-argument"
+assert_eq "$(p1_field count_distinct)"   "2"        "P1.count-distinct-counts-a-duplicate-pr-once"
+assert_eq "$(p1_field count_absent_rc)"  "0"        "P1.count-absent-returns-zero"
+assert_eq "$(p1_field count_absent)"     "[0]"      "P1.count-absent-prints-exactly-zero"
+assert_eq "$(p1_field issue_hit)"        "42"       "P1.batch-issue-for-pr-reads-column-2"
+assert_eq "$(p1_field issue_hit2)"       "43"       "P1.batch-issue-for-pr-is-keyed-on-the-pr-row"
+assert_eq "$(p1_field issue_miss)"       "0"        "P1.batch-issue-for-pr-zero-for-an-unregistered-pr"
+assert_eq "$(p1_field issue_nofile)"     "0"        "P1.batch-issue-for-pr-zero-when-the-registry-is-absent"
+assert_eq "$(p1_field issue_badarg)"     "0"        "P1.batch-issue-for-pr-zero-for-a-non-numeric-argument"
+assert_eq "$(p1_field issue_hit_rc)"     "0"        "P1.batch-issue-for-pr-rc-zero-only-for-a-real-issue-number"
+assert_eq "$(p1_field issue_miss_rc)"    "1"        "P1.batch-issue-for-pr-rc-one-for-an-unregistered-pr"
+assert_eq "$(p1_field issue_nofile_rc)"  "1"        "P1.batch-issue-for-pr-rc-one-when-the-registry-is-absent"
+assert_eq "$(p1_field issue_badarg_rc)"  "1"        "P1.batch-issue-for-pr-rc-one-for-a-non-numeric-argument"
+assert_eq "$(p1_field issue_junk)"       "0"        "P1.batch-issue-for-pr-zero-when-the-issue-column-is-junk"
+assert_eq "$(p1_field issue_junk_rc)"    "1"        "P1.batch-issue-for-pr-rc-one-when-the-issue-column-is-junk"
+assert_eq "$(p1_field nocycle_rc)"       "0"        "P1.record-returns-zero-with-no-cycle-in-scope"
+assert_eq "$(p1_field nocycle_col2)"     "0"        "P1.record-degrades-an-absent-cycle-to-zero"
+assert_eq "$(p1_field badcycle_rc)"      "0"        "P1.record-returns-zero-with-a-garbage-ambient-cycle"
+assert_eq "$(p1_field badcycle_col2)"    "0"        "P1.record-degrades-a-garbage-ambient-cycle-to-zero"
+assert_eq "$(p1_field argcycle_rc)"      "0"        "P1.record-returns-zero-with-an-explicit-cycle-argument"
+assert_eq "$(p1_field argcycle_col2)"    "11"       "P1.record-explicit-cycle-argument-wins-over-the-ambient-scalar"
+assert_eq "$(p1_field argbad_rc)"        "0"        "P1.record-returns-zero-with-a-garbage-cycle-argument"
+assert_eq "$(p1_field argbad_col2)"      "0"        "P1.record-degrades-a-garbage-cycle-argument-to-zero-not-to-the-ambient"
+assert_eq "$(p1_field reg_pending)"      "1"        "P1.no-batch-tsv-regression-pending-is-not-terminal"
+assert_eq "$(p1_field reg_terminal)"     "0"        "P1.no-batch-tsv-regression-all-green-is-terminal"
+assert_eq "$(p1_field reg_barrier_quiet)" "1"       "P1.no-batch-tsv-regression-barrier-quiet-inside-timeout"
+assert_eq "$(p1_field reg_barrier_fires)" "0"       "P1.no-batch-tsv-regression-barrier-fires-past-timeout"
+rm -rf "$P1_TMP" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Summary

@@ -20,14 +20,16 @@
       "license_file": "licenses/pr-review-toolkit-Apache-2.0.txt",
       "last_reviewed_commit": "920824c3e9509890fbec03ba6097014222393022",
       "last_reviewed_on": "2026-08-10",
-      "note": "No last_reviewed_release: this upstream is a plugin inside a monorepo with no release vocabulary, so there is no tag to name. A release label invented for it would be the fabrication this register exists to prevent."
+      "head_only": true,
+      "note": "head_only: this upstream is a plugin inside a monorepo with no release vocabulary, so there is no tag to name. A release label invented for it would be the fabrication this register exists to prevent (RFC 0019, #511 amendment)."
     },
     "code-simplifier": {
       "repo": "anthropics/claude-plugins-official",
       "plugin": "code-simplifier",
       "license": "Apache-2.0",
       "license_file": "licenses/code-simplifier-Apache-2.0.txt",
-      "note": "Retained as a declared upstream because UberDev ships this plugin's licence text. The vendored code-simplifier agent measurably descends from the pr-review-toolkit copy of the same agent (115 differing diff lines against pr-review-toolkit vs 137 against this plugin; only the pr-review-toolkit copy carries the block `description:` with worked examples that our copy is built on), so its component points there."
+      "head_only": true,
+      "note": "Retained as a declared upstream because UberDev ships this plugin's licence text. The vendored code-simplifier agent measurably descends from the pr-review-toolkit copy of the same agent (115 differing diff lines against pr-review-toolkit vs 137 against this plugin; only the pr-review-toolkit copy carries the block `description:` with worked examples that our copy is built on), so its component points there. head_only: same monorepo, same absence of a release vocabulary; the decision is now spelled as a key rather than left to this prose."
     }
   },
   "permanent_divergences": [

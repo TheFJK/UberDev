@@ -1179,13 +1179,49 @@ review_fleet_write_reviewed_head() {
   ( umask 077 && printf '%s\n' "$sha" >"$target" ) || return 2
 }
 
+# review_fleet_write_published_head TARGET SHA
+# review_fleet_read_published_head  PATH -> "<40-hex>"
+#
+# The head that is ON THE REMOTE -- a different fact from the head the review
+# stands on, and deliberately a different symbol so neither writer can be
+# mistaken for the other by a reader or by the scope-fence scanner that counts
+# them. Same validation as the reviewed-head pair; only the noun differs.
+#
+# ONE WRITER OF RECORD FOR EACH EVENT: the Phase 1 scope fence seeds this from
+# the live PR head, and Step 6a advances it only after
+# review_publish_same_repo_pr_head has proven a push landed. A fixer commit
+# advances the REVIEWED head and must never touch this one.
+review_fleet_write_published_head() {
+  [ "$#" -eq 2 ] || return 2
+  review_fleet_write_reviewed_head "$1" "$2"
+}
+
+review_fleet_read_published_head() {
+  [ -r "${1:-}" ] || {
+    echo "error: review-fleet published head missing: ${1:-}" >&2
+    return 2
+  }
+  review_fleet_read_reviewed_head "$1"
+}
+
 review_fleet_read_reviewed_head() {
   [ -r "${1:-}" ] || {
     echo "error: review-fleet reviewed head missing: ${1:-}" >&2
     return 2
   }
-  local recorded
-  IFS= read -r recorded <"$1" || return 2
+  local recorded=""
+  # NOT `|| return 2`. `read` reports failure for BOTH a zero-byte file and a
+  # final line with no trailing newline, and returning on its status made those
+  # two -- the exact corruption modes the published-head refusal branch names --
+  # the only ones that failed in COMPLETE SILENCE, while a full line that merely
+  # failed the 40-hex check got a diagnostic. Judge the CONTENT instead: an
+  # unterminated "abc" still lands in `recorded` and falls through to the
+  # shape check below, which names it.
+  IFS= read -r recorded <"$1" || :
+  [ -n "$recorded" ] || {
+    echo "error: review-fleet reviewed head is empty or holds no readable line: $1" >&2
+    return 2
+  }
   [ "${#recorded}" -eq 40 ] || {
     echo "error: review-fleet reviewed head is not a 40-hex SHA: ${recorded:-<empty>}" >&2
     return 2
@@ -2111,6 +2147,44 @@ _review_fleet_bind_reviewed_head() {
   # a state the promote gate is written for, a 39-hex head is not.
   VALIDATED_FIXER_HEAD_SHA="$(review_fleet_read_reviewed_head \
     "$research_dir/reviewed-head.txt" 2>/dev/null)" || VALIDATED_FIXER_HEAD_SHA=
+  # THE PUBLISHED head is a DIFFERENT fact from the validated one, and the
+  # difference is the whole of what the post-fixer publication gate checks.
+  #
+  # `reviewed-head.txt` advances the moment a fixer commit is validated, which
+  # is LOCAL. Nothing has pushed at that point, so the remote still stands where
+  # it did. Step 6a is a fresh shell: it rehydrated REVIEWED_HEAD_SHA off the
+  # advanced record and handed it to review_publish_same_repo_pr_head as
+  # `expected_remote_head_sha`, a value the remote cannot hold -- so
+  # `[ "$live_head" = "$expected_remote_head_sha" ]` failed on EVERY run whose
+  # Phase 1 fixer APPLIED, the fix commit never reached the PR, and Phase 3 went
+  # on to probe the stale SHA that 6a's own error text warns about.
+  #
+  # So the published head gets its own record, written only where a push really
+  # happened, and it is what REVIEWED_HEAD_SHA rehydrates from. The old fallback
+  # survives ONLY for a run that predates the seed: absent the record, behaviour
+  # is exactly what it was.
+  if [ -z "${REVIEWED_HEAD_SHA:-}" ] && [ -r "$research_dir/published-head.txt" ]; then
+    # PRESENT-BUT-UNREADABLE IS NOT ABSENT, and the difference is the whole
+    # value of this carrier. The readability guard above means the only way to
+    # reach this failure branch is a record that EXISTS and does not validate --
+    # a zero-byte or truncated file from an interrupted session or a full disk,
+    # which is exactly the fresh-shell world the record was added for. Falling
+    # through to the validated head there would hand Step 6a the fixer-advanced
+    # LOCAL head again and reinstate the very gate failure this record prevents,
+    # silently and on the corrupt path only. So the name is left EMPTY and the
+    # consumer refuses with its own message; the reader's diagnostic is NOT
+    # redirected away, because a carrier that cannot be read has to say so.
+    if ! REVIEWED_HEAD_SHA="$(review_fleet_read_published_head \
+        "$research_dir/published-head.txt")"; then
+      # The reader names WHAT is wrong with the bytes; this names what the run
+      # loses because of it, which is the half an operator needs: the publish
+      # gate is about to refuse on an empty expected-remote head, and the reason
+      # is this record rather than anything about the PR.
+      echo "error: review-fleet could not read the published head from $research_dir/published-head.txt; leaving REVIEWED_HEAD_SHA empty so the publication gate refuses rather than falling back to the fixer-advanced local head" >&2
+      REVIEWED_HEAD_SHA=
+      return 0
+    fi
+  fi
   REVIEWED_HEAD_SHA="${REVIEWED_HEAD_SHA:-$VALIDATED_FIXER_HEAD_SHA}"
   return 0
 }

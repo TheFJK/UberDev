@@ -897,8 +897,15 @@ try:
     # NAME a vocabulary. role_raw is opaque bytes here (read verbatim above,
     # never parsed) and the directive is appended LAST, so any vocabulary named
     # on this arm silently overrides whatever the card declared. That override
-    # was issue 517's root cause on sdd.task.implement and issue 546's on the
-    # other 31 unbound provider edges.
+    # was issue 517's root cause on sdd.task.implement, and issue 546's on the
+    # unbound provider edges: that set has 32 members, 31 of which carry a role
+    # card and therefore reach this arm. The remaining member, solve.issue.lead,
+    # is the run root and has no role card, so _uberdev_child_prepare composes no
+    # prompt for it and it reads no terminal directive at all. sdd.task.implement
+    # is not in that set at all any more -- it carries the sdd-implementer-v1
+    # output contract and takes the bound arm above. Both cardinalities are
+    # derived from the pinned set and compared against this comment by SRT-606.3
+    # in tests/solve-run-tree.test.sh.
     terminal=(b'Return only a response matching the output contract above.\n'
       if contract_raw else b'Return only a response matching the return contract your role card declares above.\n')
     directive=(b'\n\n## Immutable routed execution directive\n'
