@@ -22,6 +22,8 @@ RESEARCH_CODEBASE="$ROOT/plugins/uberdev/agents/research-codebase.md"
 RESEARCH_TEST_COVERAGE="$ROOT/plugins/uberdev/agents/research-test-coverage.md"
 RESEARCH_CONSTRAINTS="$ROOT/plugins/uberdev/agents/research-constraints.md"
 RESEARCH_SECURITY="$ROOT/plugins/uberdev/agents/research-security.md"
+RESEARCH_PATTERNS="$ROOT/plugins/uberdev/agents/research-patterns.md"
+RESEARCH_PRIOR_ART="$ROOT/plugins/uberdev/agents/research-prior-art.md"
 PLANNING_OUTPUT_SHIM="$ROOT/plugins/uberdev/lib/planning_research_output.py"
 
 PASS=0
@@ -58,7 +60,9 @@ for required in \
   "$RESEARCH_CODEBASE" \
   "$RESEARCH_TEST_COVERAGE" \
   "$RESEARCH_CONSTRAINTS" \
-  "$RESEARCH_SECURITY"; do
+  "$RESEARCH_SECURITY" \
+  "$RESEARCH_PATTERNS" \
+  "$RESEARCH_PRIOR_ART"; do
   if [[ ! -r "$required" ]]; then
     printf 'FATAL: required file missing or unreadable: %s\n' "$required" >&2
     exit 2
@@ -535,7 +539,7 @@ for role, (path, key, planning_filename, general_filename) in expected.items():
         "mode_key": "research_mode",
         "default_mode": "general",
         "general": {
-            "required_inputs": ["issue_body", "working_dir", "summary_dir"],
+            "required_inputs": ["issue_path", "working_dir", "summary_path"],
             "output_filename": general_filename,
         },
         "planning": {
@@ -588,7 +592,7 @@ expected_security = {
     "mode_key": "research_mode",
     "default_mode": "general",
     "general": {
-        "required_inputs": ["issue_body", "working_dir", "summary_dir"],
+        "required_inputs": ["issue_path", "working_dir", "summary_path"],
         "output_filename": "security.md",
     },
     "planning": {
@@ -681,6 +685,199 @@ then
   PASS=$((PASS + 1))
 else
   printf '%s\n' '  FAIL F2f constraints role still uses stale RFC-/ADR- filename globs'
+  FAIL=$((FAIL + 1))
+fi
+
+printf '%s\n' '== F2g research cards declare the general-mode wire input keys =='
+# The six general-research cards are pasted into the child prompt VERBATIM and
+# are the ONLY contract a directly-dispatched research agent reads. A card that
+# names a key the dispatcher never sends is not cosmetic drift: `issue_body`
+# told the child to expect inline issue TEXT, which is exactly the interpolation
+# the orchestrator's trust boundary forbids, and `summary_dir` told it to append
+# a basename to what the wire passes as a full file path. This comparator reads
+# the wire from child-callsite-contracts-v1 rather than hardcoding it, so the
+# cards are compared against the dispatcher instead of against a second copy.
+# NOTE: the planning-mode contract property `issue_body_required` is a schema
+# key, not a wire key, and is deliberately outside this predicate.
+if python3 - \
+    "$ORCHESTRATOR" \
+    "$RESEARCH_CODEBASE" \
+    "$RESEARCH_PATTERNS" \
+    "$RESEARCH_PRIOR_ART" \
+    "$RESEARCH_CONSTRAINTS" \
+    "$RESEARCH_SECURITY" \
+    "$RESEARCH_TEST_COVERAGE" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+orchestrator_text = Path(sys.argv[1]).read_text(encoding="utf-8")
+callsites = re.search(
+    r"<!-- BEGIN child-callsite-contracts-v1 -->\s*```json\s*(.*?)\s*```\s*<!-- END child-callsite-contracts-v1 -->",
+    orchestrator_text,
+    re.S,
+)
+if not callsites:
+    raise SystemExit("orchestrator: missing child-callsite-contracts-v1")
+wire = json.loads(callsites.group(1))
+
+cards = {
+    "orchestrator.research.codebase": (sys.argv[2], "codebase.md"),
+    "orchestrator.research.patterns": (sys.argv[3], "patterns.md"),
+    "orchestrator.research.prior_art": (sys.argv[4], "prior-art.md"),
+    "orchestrator.research.constraints": (sys.argv[5], "constraints.md"),
+    "orchestrator.research.security": (sys.argv[6], "security.md"),
+    "orchestrator.research.test_coverage": (sys.argv[7], "test-coverage.md"),
+}
+
+for edge, (path, general_filename) in cards.items():
+    if edge not in wire:
+        raise SystemExit(f"{edge}: not declared in child-callsite-contracts-v1")
+    wire_inputs = list(wire[edge]["inputs"])
+    if wire_inputs != ["issue_path", "working_dir", "summary_path"]:
+        raise SystemExit(f"{edge}: unexpected general-research wire inputs {wire_inputs!r}")
+
+    text = Path(path).read_text(encoding="utf-8")
+    name = Path(path).name
+
+    for stale in ("`issue_body`", "full text of the GitHub issue", f"<summary_dir>/{general_filename}"):
+        if stale in text:
+            raise SystemExit(f"{name}: stale general-mode input contract: {stale!r}")
+    for misuse in ("<summary_path>/", "`summary_path`/", "$summary_path/"):
+        if misuse in text:
+            raise SystemExit(f"{name}: summary_path used as a directory prefix: {misuse!r}")
+
+    # Cards with no planning mode have no legitimate use of the old key at all.
+    if "### Planning mode" not in text:
+        for stale in ("issue_body", "summary_dir"):
+            if stale in text:
+                raise SystemExit(f"{name}: prose-only card still mentions {stale!r}")
+
+    region = re.search(r"(?ms)^### General mode \(default\)$(.*?)(?=^#{2,3} )", text)
+    if region is None:
+        region = re.search(r"(?ms)^## Inputs\b.*?$(.*?)(?=^## )", text)
+    if region is None:
+        raise SystemExit(f"{name}: no general-mode input declaration found")
+    declared = region.group(1)
+
+    for key in wire_inputs:
+        if f"`{key}`" not in declared:
+            raise SystemExit(f"{name}: general-mode inputs do not declare `{key}`")
+    for stale in ("`issue_body`", "`summary_dir`"):
+        if stale in declared:
+            raise SystemExit(f"{name}: general-mode inputs still declare {stale}")
+    # The trust boundary has to travel WITH the rename: a path to untrusted text
+    # is only safe if the card also says what may not be done with the contents.
+    for phrase in ("untrusted", "child prompt"):
+        if phrase not in declared.lower():
+            raise SystemExit(f"{name}: issue_path trust boundary missing {phrase!r}")
+PY
+then
+  printf '%s\n' '  PASS F2g all six research cards match the dispatcher wire keys and carry the trust boundary'
+  PASS=$((PASS + 1))
+else
+  printf '%s\n' '  FAIL F2g research cards drifted from the general-research wire contract'
+  FAIL=$((FAIL + 1))
+fi
+
+printf '%s\n' '== F2h every shipped dispatcher of those cards passes the same wire keys =='
+# F2g compares the CARDS against one dispatcher. That is exactly half the
+# contract: these cards are pasted verbatim into a directly-dispatched child, and
+# more than one shipped surface dispatches them. When #623 renamed the cards to
+# `issue_path` / `summary_path`, the orchestrator already matched and the
+# turbox-fleet controller did not -- it still handed every lens a `summary_dir`
+# DIRECTORY, a key the card no longer names, with no test in the repo able to see
+# it. That is the "one contract, N uncompared copies" class this issue exists to
+# close, so the guard has to enumerate the copies rather than assume there is one.
+#
+# Two predicates, and both have to hold:
+#   1. COMPLETENESS -- the set of shipped files that name a general-research
+#      agent equals the register below. A new dispatcher reds this and forces
+#      its author to classify it, which is the only way copy N+1 gets compared.
+#   2. PER-DISPATCHER -- inside a dispatcher, no markdown section that names a
+#      general-research agent may also name `summary_dir` or bare `issue_body`.
+#      Section scoping (not whole-file) is deliberate: `summary_dir` is still a
+#      legitimate key on the planning-research and subagent-driven-dev handoffs,
+#      which live in their own sections. `issue_body_file` is a different token
+#      and stays legal -- the word boundary is load-bearing.
+if python3 - "$ROOT" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+
+# Register: every shipped file that names a general-research agent, and whether
+# it DISPATCHES one. Keep this list in sync when a new surface is added.
+REGISTER = {
+    "plugins/uberdev/skills/brainstorm/SKILL.md": True,
+    "plugins/uberdev/skills/orchestrator/SKILL.md": True,
+    "plugins/uberdev/skills/turbox-fleet/SKILL.md": True,
+    # Names the role to say it MIRRORS its job inline; never dispatches the card.
+    "plugins/uberdev/skills/solve-fleet/workflow.js": False,
+    # Uses the role name as a report label for a global pass; not a dispatch.
+    "plugins/uberdev/skills/uberscan-pipeline/report.py": False,
+}
+
+LENSES = ("codebase", "patterns", "prior-art", "constraints", "security", "test-coverage")
+AGENT_RE = re.compile(r"research-(?:" + "|".join(LENSES) + r")\b")
+
+scan_roots = [root / "plugins/uberdev/skills", root / "plugins/uberdev/commands",
+              root / "plugins/uberdev/lib", root / "plugins/uberdev/hooks"]
+found = set()
+for scan_root in scan_roots:
+    if not scan_root.is_dir():
+        continue
+    for path in scan_root.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        if AGENT_RE.search(text):
+            found.add(path.relative_to(root).as_posix())
+
+expected = set(REGISTER)
+if found != expected:
+    added = sorted(found - expected)
+    gone = sorted(expected - found)
+    raise SystemExit(
+        "general-research dispatcher register is stale: "
+        f"unregistered={added} missing={gone}. Classify each new surface in "
+        "REGISTER (True if it dispatches a research-* card) so its input keys "
+        "are compared against the cards."
+    )
+
+for rel, dispatches in sorted(REGISTER.items()):
+    if not dispatches:
+        continue
+    text = (root / rel).read_text(encoding="utf-8")
+    if "summary_path" not in text:
+        raise SystemExit(f"{rel}: dispatches a research card but never names `summary_path`")
+    for section in re.split(r"(?m)^(?=#{2,6} )", text):
+        if not AGENT_RE.search(section):
+            continue
+        heading = section.splitlines()[0].strip() if section.strip() else "(preamble)"
+        if "summary_dir" in section:
+            raise SystemExit(
+                f"{rel}: section {heading!r} dispatches a general-research card but "
+                "names `summary_dir`; the card's general mode requires `summary_path`, "
+                "a regular FILE, and appending a basename to it is the bug #623 fixed"
+            )
+        if re.search(r"\bissue_body\b", section):
+            raise SystemExit(
+                f"{rel}: section {heading!r} dispatches a general-research card but "
+                "names `issue_body`; the wire key is `issue_path` (`issue_body_file` "
+                "is a different token and stays legal)"
+            )
+PY
+then
+  printf '%s\n' '  PASS F2h all registered research dispatchers agree with the cards on the wire keys'
+  PASS=$((PASS + 1))
+else
+  printf '%s\n' '  FAIL F2h a shipped research dispatcher drifted from the card contract'
   FAIL=$((FAIL + 1))
 fi
 
