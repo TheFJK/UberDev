@@ -342,7 +342,7 @@ if [[ ${#ISSUE_NUMS[@]} -eq 0 ]]; then
   echo "Usage: /uberdev:solve|/uberdev:turbo|/uberdev:turbox <issue-number> [<issue-number>...] [--trivial|--small|--full] [--auto] [--force]"
   exit 1
 fi
-# --full is an alias for medium/large (keeps current behavior)
+# --full is an alias for the design rung (keeps current behavior)
 [[ "$OVERRIDE" == "full" ]] && OVERRIDE="medium"
 
 # Unknown tokens are rejected by solve_triage.py; no warn-and-ignore path is
@@ -543,8 +543,8 @@ CEILING=""
 if [ -r "${UBERDEV_PLUGIN_ROOT:-}/lib/config-read.sh" ]; then
   # shellcheck source=/dev/null
   . "${UBERDEV_PLUGIN_ROOT}/lib/config-read.sh"
-  FLOOR="$(uberdev_read_enum solve_tier_floor SOLVE_TIER_FLOOR "trivial|small|medium|large" "")"
-  CEILING="$(uberdev_read_enum solve_tier_ceiling SOLVE_TIER_CEILING "trivial|small|medium|large" "")"
+  FLOOR="$(uberdev_read_enum solve_tier_floor SOLVE_TIER_FLOOR "trivial|small|medium" "")"
+  CEILING="$(uberdev_read_enum solve_tier_ceiling SOLVE_TIER_CEILING "trivial|small|medium" "")"
 fi
 FLOOR_RANK="$(uberdev_tier_rank "$FLOOR")"
 CEILING_RANK="$(uberdev_tier_rank "$CEILING")"
@@ -796,7 +796,10 @@ fi
 
 # TURBO MODE banner — print once before the per-issue loop if any tier is
 # medium (deduped: a 3-medium batch must not stack three identical banners;
-# break after the first medium hit).
+# break after the first medium hit). `medium` is the whole design rung since
+# #619 collapsed `large` into it, so this scan can no longer miss a batch: an
+# all-`large` /turbo used to run the orchestrator and print NO banner at all,
+# because no tier in it was spelled `medium`.
 if [[ "$AUTO_MODE" == "1" ]]; then
   for n in "${!ISSUE_NUMS[@]}"; do
     if [[ "${TIERS[$n]}" == "medium" ]]; then

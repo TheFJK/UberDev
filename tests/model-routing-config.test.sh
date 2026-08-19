@@ -154,7 +154,7 @@ EOF
   [ "$UBERDEV_ROUTING_SHADOW" = true ] || exit 1
   [ "$UBERDEV_ROUTING_ROLES" = "{\"code-reviewer\":\"deep\"}" ] || exit 1
   [ "$UBERDEV_ROUTING_WORKFLOWS" = "{\"solve\":\"quality\"}" ] || exit 1
-  [ "$(uberdev_read_enum solve_tier_floor SOLVE_TIER_FLOOR "trivial|small|medium|large" trivial)" = medium ] || exit 1
+  [ "$(uberdev_read_enum solve_tier_floor SOLVE_TIER_FLOOR "trivial|small|medium" trivial)" = medium ] || exit 1
 '
 [ "$_STATUS" -eq 0 ] && pass "R2d: omitted Codex keys fall through per-key to Claude" || fail "R2d: per-key Codex/Claude complement: $_LAST_STDERR"
 
@@ -179,7 +179,7 @@ EOF
   uberdev_read_model_routing
   [ "$UBERDEV_ROUTING_MODE" = adaptive ] || exit 1
   [ "$UBERDEV_ROUTING_SERVICE_TIER" = default ] || exit 1
-  [ "$(uberdev_read_enum solve_tier_floor SOLVE_TIER_FLOOR "trivial|small|medium|large" trivial)" = trivial ] || exit 1
+  [ "$(uberdev_read_enum solve_tier_floor SOLVE_TIER_FLOOR "trivial|small|medium" trivial)" = trivial ] || exit 1
 '
 [ "$_STATUS" -eq 0 ] && pass "R2e: explicit UBERDEV_CONFIG_FILE remains the sole file" || fail "R2e: explicit config isolation"
 

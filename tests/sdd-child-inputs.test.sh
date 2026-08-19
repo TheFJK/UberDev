@@ -137,7 +137,7 @@ print(json.dumps({
     "workflow": "solve",
     "phase": "lead",
     "role": "lead",
-    "task_tier": "large",
+    "task_tier": "medium",
     "risk_signals": [],
     "issue_or_pr": 42,
     "issue_num": 42,
@@ -157,7 +157,7 @@ print(json.dumps({
     "workflow": "solve",
     "backend": "background",
     "issue_num": 42,
-    "task_tier": "large",
+    "task_tier": "medium",
     "risk_signals": [],
 }, separators=(",", ":")))
 PY
@@ -656,7 +656,7 @@ for row in provider_rows:
     }, row
     instance = row["instance_id"]
     route, minimum, effort, sandbox, _, _ = expectations[instance]
-    assert (row["backend"], row["issue"], row["tier"]) == ("background", 42, "large")
+    assert (row["backend"], row["issue"], row["tier"]) == ("background", 42, "medium")
     child = Path(row["prompt"]).parent
     assert child.name == instance
     assert Path(row["prompt"]).name == "prompt.txt" and Path(row["prompt"]).is_file()
@@ -699,7 +699,7 @@ for instance, (route, _, effort, sandbox, role, phase) in expectations.items():
     assert [row["event"] for row in events] == ["route_decided", "agent_started", "completed"], events
     for row in events:
         assert row["agent_id"] == instance and row["backend"] == "background"
-        assert row["workflow"] == "solve" and row["task_tier"] == "large"
+        assert row["workflow"] == "solve" and row["task_tier"] == "medium"
         assert row["parent_run_id"] == "sdd-receipt-root"
         assert row["role"] == role and row["phase"] == phase
         # Same #381 RULING 1 consequence as the decision block above: the

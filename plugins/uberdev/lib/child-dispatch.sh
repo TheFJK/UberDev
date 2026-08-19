@@ -157,7 +157,7 @@ uberdev_prepare_run_carrier() {
   case "$workflow" in review-pr|simplify) ;; *) _uberdev_child_error 'standalone workflow must be review-pr or simplify'; return 2 ;; esac
   case "$subject" in ''|*[!0-9]*) _uberdev_child_error 'subject id must be a non-negative integer'; return 2 ;; esac
   [ "$workflow" = simplify ] || [ "$subject" -gt 0 ] || { _uberdev_child_error 'review-pr requires a positive PR number'; return 2; }
-  case "$tier" in trivial|small|medium|large) ;; *) _uberdev_child_error 'invalid task tier'; return 2 ;; esac
+  case "$tier" in trivial|small|medium) ;; *) _uberdev_child_error 'invalid task tier'; return 2 ;; esac
   # A new standalone carrier owns a new routing decision. Never inherit the
   # exported resolved backend from an earlier shell invocation; inherited
   # decisions arrive only through UBERDEV_RUN_CARRIER_JSON and bypass this

@@ -103,13 +103,14 @@ a PR.
 **(a)** Parse the relayed JSON. Read the manifest at `manifestPathAbs`.
 
 **(b)** Split the issues by tier. `trivial` and `small` take the single-solver
-path (Phase 1c). `medium` and `large` take the design path (Phases 2–6).
+path (Phase 1c). `medium` — the ceiling since #619 — takes the design path
+(Phases 2–6).
 
 **(c) TB1 — project before dispatching anything:**
 
 ```bash
 bash "$LIB" project-agents --small <count of trivial+small> \
-                           --design <count of medium+large> \
+                           --design <count of medium> \
                            --implement-budget <implementBudget> \
                            --max <maxAgents>
 ```
@@ -269,7 +270,7 @@ returned.
    and `--turbo` semantics (auto-accept the
    recommendation; no clarifying-question loop). Writes
    `<runDirAbs>/issue-<N>/spec.md`.
-2. **`uberdev:spec-reviewer`** — always on for medium and large. Returns
+2. **`uberdev:spec-reviewer`** — always on for the design rung. Returns
    `APPROVE | REVISIONS_REQUIRED | REJECT` plus findings on disk.
 3. **`uberdev:spec-reviser`** — **at most ONE revision round, ever.** On any
    non-`APPROVE` verdict, dispatch it once with the reviewer's findings path

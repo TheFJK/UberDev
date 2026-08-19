@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| **Status** | Accepted — **AMENDED 2026-08-05** (see §0) |
+| **Status** | Accepted — **AMENDED 2026-08-05 (§0) and 2026-08-19 (§0A)** |
 | **Author** | TheFJK |
 | **Created** | 2026-07-09 |
 | **Tier** | Large, multi-release optimization program |
@@ -97,6 +97,76 @@ a routing engine before there is a dispatch path that can enforce it.**
 
 ---
 
+## 0A. AMENDMENT — 2026-08-19: the tier ladder is THREE rungs, and the file rule counts scope
+
+**Issues #614 and #619. Applies to §4 (Terminology), §5.5 (Top-level route
+policy) and §6 (Real `/solve` auto-triage). The rules those sections state were
+correct as of this RFC's date; the shipped classifier now differs from them in
+two ways, and both are load-bearing.**
+
+### 0A.1 `large` is gone — `trivial | small | medium`, and `medium` is the ceiling
+
+§4 names four task tiers and §5.5 gives `large` its own lead-route row
+(`frontier` / `ultra`). **#619 deleted the rung.** Nothing downstream had ever
+distinguished it from `medium`: `lib/solve-launcher.sh` branches
+`trivial)` / `small)` / catch-all with no `large)` arm, and
+`skills/solve-fleet/workflow.js` gave `medium` and `large` the same design
+phases. What the split did cost was eight triage rules, a closed `allowed_rule`
+alternation in `lib/agent-dispatch.sh`, a `lead_routes` row, and a fixture
+corpus — all kept correct to produce a value no consumer read.
+
+Only **two** of the eight rules were deleted — the two whose predicate the
+surviving arms already exclude: `≥3 scope files` fails `small`'s `≤2` and
+`trivial`'s `≤1`, and a risk signal fails both arms' `not risks`, so either way
+the issue reaches `medium` with no rule required.
+
+The other **six are re-targeted at `medium`, not deleted**: the five design
+labels (`epic`, `needs-discussion`, `architectural`, `architecture`,
+`infrastructure`) now emit `medium-label:*`, and `refactor` plus breadth emits
+`medium:cross-cutting-refactor`. They are orthogonal to the lighter arms rather
+than excluded by them — a labelled issue that also carries `bug` or a
+reproduction satisfies the `small` arm on its own — so `classify()` checks them
+as a **design floor** that pre-empts both arms. Deleting them would have dropped
+such an issue two rungs, and `needs-discussion` on a short `docs` body three.
+
+Note that "this repository does not define those labels" is **not** an argument
+available here: `lib/solve_triage.py` is marketplace-shipped and
+`lib/solve-launcher.sh` runs `gh issue view --json labels` against whatever repo
+`gh` resolves, so a consumer's label set is exactly as reachable as this one's.
+
+Measured on 44 open issues the collapse moved 17 from `large` to `medium` and
+nothing below it — but that sample is blind to the distinction above, because
+this backlog defines none of the six labels. The discriminating evidence is a
+property sweep: over 279,040 generated snapshots (label sets × bodies × titles ×
+floor/ceiling/override combinations) the new classifier's tier equals the old
+four-rung one's under the map `large → medium` for every input, and differs for
+none.
+
+`policy/model-routing-v1.json` lost its `large` `lead_routes` row in the same
+commit as `lib/model_routing.py`'s `expected_tiers` set: a mismatch between them
+is `invalid_policy`, which fails `load_policy` rather than one classification.
+
+### 0A.2 The file rule counts DECLARED OR CHANGE-MARKED scope, not named files
+
+§6 rules 1–3 say "at least three distinct named files/modules" and "at most two
+named files". That was a scrape of every filename-shaped token in the issue
+prose, and **#614 replaced it**: `lib/solve_triage.py:scope_files()` reads a
+producer-declared `<!-- uberdev-scope v=1 files=... -->` block as fact, and
+absent one counts only paths a clause MARKS as a change target. A `path:line`
+citation is evidence, not scope.
+
+The reason is that this repo REQUIRES its issue writers to anchor claims with
+`path:line` evidence, so the old rule priced the best-evidenced issues highest:
+measured on the live backlog it returned the top rung for **every** open issue
+(40 of 40 when #614 was filed, 43 of 43 when the fix landed).
+
+Read §6 as: rule 1 is deleted, and rules 2–3 count scope files rather than named
+files. The rest of §6 — the clamp order, the recorded matched rules, and
+"conflicting signals resolve toward the higher tier" — is unchanged and still
+live.
+
+---
+
 ## 1. Decision
 
 UberDev will use **end-to-end adaptive execution** for detached leads and delegated agents. A deterministic policy will select the least expensive GPT-5.6 route that satisfies the task's complexity and risk floor. The policy will control model, reasoning effort, sandbox, and service tier as separate values and will record every decision.
@@ -150,7 +220,7 @@ The optimization program MUST NOT:
 
 ## 4. Terminology
 
-- **Task tier:** UberDev workflow depth: `trivial`, `small`, `medium`, or `large`.
+- **Task tier:** UberDev workflow depth: `trivial`, `small`, `medium`, or `large`. *(Superseded by §0A.1 — `large` was deleted in #619; the ladder is three rungs.)*
 - **Logical route:** Vendor-neutral capability class chosen by UberDev.
 - **Provider route:** Concrete model, effort, service tier, and sandbox resolved for Codex or Claude.
 - **Ambient selection:** Model/effort inherited from the parent Codex session. It is not an explicit UberDev route pin.
@@ -262,6 +332,9 @@ The implementation MUST use explicit model slugs rather than the moving `gpt-5.6
 | `medium` | `quality` | `frontier` |
 | `large` | `frontier` | `ultra` |
 
+*(Superseded by §0A.1: the `large` row was removed from
+`policy/model-routing-v1.json` in #619 — `medium` is the top lead tier.)*
+
 `/turbo` MUST use the same route as `/solve`. Unattended execution is not itself a reason to buy more reasoning. A user MAY force any supported route at or above the effective risk floor; the resolver records the override and still preserves sandbox and permission policy.
 
 High-risk signals include security, authentication, authorization, cryptography, concurrency, data loss, schema migration, release infrastructure, force-push behavior, public API compatibility, and destructive operations. High-risk roles MUST have a minimum route of `deep`.
@@ -284,6 +357,10 @@ The launcher MUST stop assigning `medium` before evaluating its own signals. Cla
 2. **Trivial:** not large/high-risk; no stack trace; at most one named file; body under 300 characters after Markdown stripping; and either a trivial label (`typo`, `docs`, `documentation`, `chore`, `good-first-issue`) or a title match (`typo`, `rename`, `bump`, `version`, `readme`).
 3. **Small:** not large/high-risk; at most two named files; body under 4,000 characters; and at least one concrete reproduction/error signal such as a stack trace, scoped `bug` label, or explicit reproduce/expected/actual/error markers.
 4. **Medium:** everything else.
+
+*(Superseded by §0A: rule 1 is deleted (#619) and "named files" in rules 2–3 now
+means files in the DECLARED or change-marked scope (#614), never every filename
+the prose cites. The shipped rules live in `lib/solve_triage.py`.)*
 
 The resolver then applies `solve_tier_floor` and `solve_tier_ceiling`. Every decision records matched rules, raw tier, clamped tier, and source. Conflicting signals resolve toward the higher tier.
 

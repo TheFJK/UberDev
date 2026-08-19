@@ -1,6 +1,6 @@
 ---
 name: orchestrator
-description: "Writer-subagent orchestrator for /solve and /turbo medium/large tier. Drives a 5-phase pipeline (research fanout → Q&A [interactive unless --turbo] → spec-writer → spec-reviewer [always-on for medium/large] → plan-writer → plan-reviewer [always-on] → subagent-driven-dev). Use when /solve or /turbo prompt invokes /uberdev:orchestrator. Standalone invocation also works for ad-hoc design tasks."
+description: "Writer-subagent orchestrator for /solve and /turbo medium tier. Drives a 5-phase pipeline (research fanout → Q&A [interactive unless --turbo] → spec-writer → spec-reviewer [always-on for medium] → plan-writer → plan-reviewer [always-on] → subagent-driven-dev). Use when /solve or /turbo prompt invokes /uberdev:orchestrator. Standalone invocation also works for ad-hoc design tasks."
 ---
 
 # Writer-Subagent Orchestrator
@@ -44,7 +44,7 @@ The skill is invoked from `/solve` or `/turbo` prompts as:
 
 Parse args:
 - `--turbo` → skip Phase 2 Q&A; auto-pick recommendation in spec-writer dispatch
-- `--paranoid` → DEPRECATED no-op. Spec-reviewer is now always-on for medium AND large. Flag is still accepted for back-compat; orchestrator emits a one-line `notice: --paranoid is deprecated; spec-reviewer always runs for medium/large` warning when seen. Removal target: v1.0.0.
+- `--paranoid` → DEPRECATED no-op. Spec-reviewer is now always-on for the `medium` design rung. Flag is still accepted for back-compat; orchestrator emits a one-line `notice: --paranoid is deprecated; spec-reviewer always runs for medium` warning when seen. Removal target: v1.0.0.
 - `solve issue #N` → fetch issue body via `gh issue view N --json title,body,labels,number`
 
 The structured, non-text `resolver_decision` carrier is optional through the T40-3/T40-5 foundation; T40-6 will supply it. When present, it is governed by the Phase-0 contract below and is never parsed from issue text or from these CLI tokens.
@@ -131,7 +131,7 @@ Exit code is `2`, which propagates through `solve-pipeline`'s `claude --bg` exec
 8. Capture the already-validated Phase-0 resolver state. Every later reference to routing risk reads only `validated_risk_signals` from `validated_resolver_decision`; serialize that array once as compact `validated_risk_signals_json`. The issue-derived tier calculation in step 7 is not a routing-risk source.
 9. Apply the terminal tier gate below before entering Phase 1.
 
-`solve-pipeline` owns the primary tier split: its trivial/small prompts are tier-native and MUST NOT invoke this orchestrator. The Phase-0 gate is a defensive fail-closed boundary for a standalone or misrouted invocation. If the resolved tier is `trivial` or `small`, hand control back to the caller's `solve-pipeline` tier-native workflow and **return immediately**. This is a terminal handoff, not a child dispatch: do not call Task, Skill, or an agent from this orchestrator, and **MUST NOT enter Phase 1** or any later orchestrator phase. If the tier is `medium` or `large`, continue normally; their behavior is unchanged.
+`solve-pipeline` owns the primary tier split: its trivial/small prompts are tier-native and MUST NOT invoke this orchestrator. The Phase-0 gate is a defensive fail-closed boundary for a standalone or misrouted invocation. If the resolved tier is `trivial` or `small`, hand control back to the caller's `solve-pipeline` tier-native workflow and **return immediately**. This is a terminal handoff, not a child dispatch: do not call Task, Skill, or an agent from this orchestrator, and **MUST NOT enter Phase 1** or any later orchestrator phase. If the tier is `medium` — the ceiling since #619 collapsed `large` into it — continue normally; that behavior is unchanged.
 
 <!-- BEGIN orchestrator-tier-gate-v1 -->
 ```json
@@ -143,8 +143,7 @@ Exit code is `2`, which propagates through `solve-pipeline`'s `claude --bg` exec
   ],
   "defensive_phase0_action": "terminal_handoff_return",
   "continue_tiers": [
-    "medium",
-    "large"
+    "medium"
   ],
   "forbidden_after_handoff": [
     "phase1_research",
@@ -370,7 +369,7 @@ The receiving skill uses the same context for its own provider edges. It never c
 
 ### Phase 1 research cache — deleted (decision record, #308 / RFC 0012 §3.5)
 
-Earlier revisions carried a ~200-line artifact-reuse short-circuit here: a freshness predicate over `.uberdev/research/issue-<N>/<topic>.md` that gated per-topic reuse of cached research before the fanout. It was deleted after a live repo-wide grep verified the cache had **zero writers**: fresh runs write only to `$UBERDEV_RESEARCH_ROOT/<RUN_ID>/` (Phase 0), `/issue` stopped persisting research under `issue-<N>/` back in issue #14 (the last readers of that path were retired in #518), and no other phase, agent, or skill ever wrote those paths — the predicate could never fire and was pure dead weight on every medium/large run.
+Earlier revisions carried a ~200-line artifact-reuse short-circuit here: a freshness predicate over `.uberdev/research/issue-<N>/<topic>.md` that gated per-topic reuse of cached research before the fanout. It was deleted after a live repo-wide grep verified the cache had **zero writers**: fresh runs write only to `$UBERDEV_RESEARCH_ROOT/<RUN_ID>/` (Phase 0), `/issue` stopped persisting research under `issue-<N>/` back in issue #14 (the last readers of that path were retired in #518), and no other phase, agent, or skill ever wrote those paths — the predicate could never fire and was pure dead weight on every design-rung run.
 
 Binding rules for any future reintroduction:
 
@@ -380,11 +379,11 @@ Binding rules for any future reintroduction:
 
 ### Phase 1: research fanout (parallel)
 
-This phase is **medium/large only**. Its Phase-0 precondition excludes `trivial` and `small`; reaching this heading with either bypass tier is a control-flow violation and no research call may be issued.
+This phase is **medium only**. Its Phase-0 precondition excludes `trivial` and `small`; reaching this heading with either bypass tier is a control-flow violation and no research call may be issued.
 
-For `medium`/`large`, dispatch `research-codebase`, `research-patterns`, `research-prior-art`, `research-constraints`, `research-security`, and `research-test-coverage` — always dispatched fresh because the cache short-circuit is deleted. Issue every routed call in the current cap slice before entering its shared wait barrier.
+For `medium`, dispatch `research-codebase`, `research-patterns`, `research-prior-art`, `research-constraints`, `research-security`, and `research-test-coverage` — always dispatched fresh because the cache short-circuit is deleted. Issue every routed call in the current cap slice before entering its shared wait barrier.
 
-**Per-repo fanout cap.** Before dispatching the medium/large
+**Per-repo fanout cap.** Before dispatching the medium
 fanout's 6 research subagents, source
 `${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh` and call
 `CAP=$(uberdev_read_int_in_range fanout_concurrency.research UBERDEV_FANOUT_RESEARCH 1 50 6)`.
@@ -491,7 +490,7 @@ edge_id: orchestrator.brainstorm.qa
 model_invocation: false
 ```
 
-**This phase is the only signal that distinguishes `/solve` from `/turbo` for medium/large tier.** Every other phase (research, spec-writer, spec-reviewer, plan-writer, plan-reviewer, subagent-driven-dev, finish-branch auto-PR) is unattended in both modes. Skipping Phase 2 in non-turbo mode collapses `/solve` into `/turbo`. **Do not skip.**
+**This phase is the only signal that distinguishes `/solve` from `/turbo` for medium tier.** Every other phase (research, spec-writer, spec-reviewer, plan-writer, plan-reviewer, subagent-driven-dev, finish-branch auto-PR) is unattended in both modes. Skipping Phase 2 in non-turbo mode collapses `/solve` into `/turbo`. **Do not skip.**
 
 **Non-turbo (interactive — DEFAULT when `--turbo` is absent):** You MUST ask 3-5 clarifying questions, one at a time, via `AskUserQuestion`, and store the answers in `qa_answers`. Do NOT proceed to Phase 3 until the user has answered. Use the research bundle to inform the questions (e.g. "research-codebase found that file X follows pattern A but the issue suggests pattern B; which?"). Persist the normalized answers as private `$RESEARCH_DIR_ABS/qa-answers.md` and set `qa_answers_path`. If an answer reveals a scope shift, issue exactly one narrow `research-codebase` follow-up; do not re-run the full fanout:
 
@@ -654,10 +653,10 @@ Max 2 attempts total. If `a2` also fails verification, fall back to **in-main sp
 4. Set `spec_path` to that ABSOLUTE file path. Log `phase=spec-writer fallback=in-main`.
 5. Continue to Phase 3.5 / Phase 4 normally.
 
-### Phase 3.5: spec-reviewer (always-on for medium and large)
+### Phase 3.5: spec-reviewer (always-on for medium)
 
 Trigger:
-- tier == `medium` OR tier == `large` → ALWAYS run (always-on per #11 design — replaces the prior --paranoid gate)
+- tier == `medium` → ALWAYS run (always-on per #11 design — replaces the prior --paranoid gate; `medium` is the whole design rung since #619)
 - tier == `small` or `trivial` → skip (these tiers don't go through orchestrator)
 
 If `--paranoid` was passed, log the deprecation notice from the Args section but otherwise proceed — the flag is a no-op.
@@ -737,7 +736,7 @@ If `verdict: REJECT` → abort with diagnostic.
 
 ### Phase 4: plan-writer
 
-This phase is **medium/large only**. The Phase-0 terminal tier gate makes every planning-research call and `plan-writer` dispatch below unreachable for `trivial` and `small`.
+This phase is **medium only**. The Phase-0 terminal tier gate makes every planning-research call and `plan-writer` dispatch below unreachable for `trivial` and `small`.
 
 #### Root-owned planning-research fanout (parallel)
 
@@ -919,7 +918,7 @@ uberdev_design_dispatch orchestrator.plan.write orchestrator-plan-write-a1 plan-
 uberdev_design_wait orchestrator-plan-write-a1 600
 ```
 
-The handoff carries no model or effort. The resolver applies the approved tier-aware Plan Writer policy from the immutable root context: medium uses the policy's deep planning route, large uses its frontier route, and large high-risk may escalate to Sol Ultra. Explicit forced Sol Ultra still propagates tree-wide. The `plan-writer` role remains a leaf and never creates descendants.
+The handoff carries no model or effort. The resolver applies the Plan Writer policy from the immutable root context: the role floors at the policy's `deep` route on every tier and escalates to its declared `high_risk_route` when the run carries a risk signal and escalation is enabled. (The per-rank ladder this sentence used to describe went with the routing engine in #381; the tier that fed it went with #619.) Explicit forced Sol Ultra still propagates tree-wide. The `plan-writer` role remains a leaf and never creates descendants.
 
 Parse status first; its BLOCKED return is required-planning terminal and must contain empty artifact fields. Otherwise, plan-writer returns artifact_path ABSOLUTE under working_dir; treat a relative return as a verification failure.
 
@@ -955,7 +954,7 @@ If `a3` still fails verification, fall back to **in-main plan synthesis** (do no
 4. Set plan_path to that ABSOLUTE file path. Log phase=plan-writer fallback=in-main.
 5. Continue to Phase 5.
 
-### Phase 4.5: plan-reviewer (always-on for medium and large)
+### Phase 4.5: plan-reviewer (always-on for medium)
 
 After plan-writer's verification passes, dispatch `plan-reviewer` and wait:
 
@@ -1056,7 +1055,7 @@ After Phase 5 (`subagent-driven-dev`) returns control:
 
    Findings are advisory at the `finish-branch` boundary — `finish-branch` does NOT block on `REVISIONS_REQUIRED`. `/uberdev:review-pr` writes the trust trail directly to the PR.
 
-**Large-tier note:** On large tier, the `pr-test-analyzer` pre-merge dispatch is owned by `subagent-driven-dev` Step 4.5 — see SDD for the gate, artifact path, and integration. The orchestrator no longer owns this dispatch. The small/medium cascade goes Phase 5 → finish-branch directly.
+**Design-rung note:** On `medium` tier, the `pr-test-analyzer` pre-merge dispatch is owned by `subagent-driven-dev` Step 4.5 — see SDD for the gate, artifact path, and integration. The orchestrator no longer owns this dispatch. It used to be gated on `large`; #619 deleted that rung and the gate moved to `medium` with it, rather than being left unreachable. The trivial/small cascade goes Phase 5 → finish-branch directly.
 
 This section names the chain explicitly so that a model reading only the orchestrator skill understands the full end-to-end pipeline. The orchestrator's job is complete when the trust trail from `/uberdev:review-pr` is written; not when Phase 5 returns.
 
@@ -1066,8 +1065,7 @@ This section names the chain explicitly so that a model reading only the orchest
 |---|---|---|---|---|---|---|
 | trivial | (orchestrator should not be invoked) | — | — | — | — | — |
 | small | 1 (codebase only) | none | none | N/A (orchestrator bypassed) | — (orch not invoked) | — |
-| medium | 6 (always fresh) | always | always | 3 base (+ security when high-risk) | post-PR-push (via /review-pr Phase 1) | — |
-| large | 6 (always fresh) | always | always | 3 base (+ security when high-risk) | post-PR-push (via /review-pr Phase 1) | pre-merge (dispatched from `subagent-driven-dev` Step 4.5) |
+| medium | 6 (always fresh) | always | always | 3 base (+ security when high-risk) | post-PR-push (via /review-pr Phase 1) | pre-merge (dispatched from `subagent-driven-dev` Step 4.5) |
 
 `--turbo` orthogonally skips Phase 2 Q&A (replaced with auto-pick + questions.md log). Tier classification rule: same as `/solve` triage table (read from issue labels + body).
 

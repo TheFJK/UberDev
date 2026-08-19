@@ -412,14 +412,14 @@ def validate(payload):
  if not isinstance(metadata,dict) or frozenset(metadata) not in {frozenset(metadata_base),frozenset(metadata_base|{"triage_decision"})}: raise ValueError()
  if not isinstance(metadata["run_id"],str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",metadata["run_id"]): raise ValueError()
  if not isinstance(metadata["repository_id"],str) or not metadata["repository_id"] or metadata["workflow"] not in {"solve","turbo","review-pr","simplify"} or not isinstance(metadata["backend"],str): raise ValueError()
- if type(metadata["issue_num"]) is not int or metadata["issue_num"]<0 or (metadata["workflow"]!="simplify" and metadata["issue_num"]==0) or metadata["task_tier"] not in {"trivial","small","medium","large"}: raise ValueError()
+ if type(metadata["issue_num"]) is not int or metadata["issue_num"]<0 or (metadata["workflow"]!="simplify" and metadata["issue_num"]==0) or metadata["task_tier"] not in {"trivial","small","medium"}: raise ValueError()
  if not isinstance(metadata["risk_signals"],list) or any(item not in risks for item in metadata["risk_signals"]): raise ValueError()
  if "triage_decision" in metadata:
   triage=metadata["triage_decision"]
   triage_keys={"schema_version","issue","raw_tier","clamped_tier","effective_tier","tier","source","matched_rules","risk_signals","file_count","files","component_count","components"}
   if not isinstance(triage,dict) or set(triage)!=triage_keys or triage.get("schema_version")!=1: raise ValueError()
   if triage.get("issue")!=metadata["issue_num"] or triage.get("effective_tier")!=metadata["task_tier"] or triage.get("tier")!=metadata["task_tier"] or triage.get("risk_signals")!=metadata["risk_signals"]: raise ValueError()
-  if triage.get("raw_tier") not in {"trivial","small","medium","large"} or triage.get("clamped_tier") not in {"trivial","small","medium","large"} or triage.get("source") not in {"computed","floor","ceiling","override"}: raise ValueError()
+  if triage.get("raw_tier") not in {"trivial","small","medium"} or triage.get("clamped_tier") not in {"trivial","small","medium"} or triage.get("source") not in {"computed","floor","ceiling","override"}: raise ValueError()
   if not isinstance(triage.get("matched_rules"),list) or not all(isinstance(x,str) and x for x in triage["matched_rules"]): raise ValueError()
   files=triage.get("files"); components=triage.get("components"); rules=triage.get("matched_rules")
   if not isinstance(files,list) or not isinstance(components,list): raise ValueError()
@@ -428,7 +428,7 @@ def validate(payload):
   if any(not isinstance(x,str) or not re.fullmatch(r"[a-z0-9_.][a-z0-9_./-]{0,255}",x) for x in files): raise ValueError()
   if any(not isinstance(x,str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,127}",x) for x in components): raise ValueError()
   if any(not isinstance(x,str) or not re.fullmatch(r"[a-z0-9][a-z0-9:_-]{0,127}",x) for x in rules): raise ValueError()
-  allowed_rule=re.compile(r"(?:large-label:(?:epic|needs-discussion|architectural|architecture|infrastructure)|large:(?:three-files|multi-component-high-risk|cross-cutting-refactor)|trivial:bounded-explicit-signal|small:concrete-reproduction|medium:fallback|escalation-label:(?:small|medium|large)|(?:floor|ceiling|override):(?:trivial|small|medium|large))")
+  allowed_rule=re.compile(r"(?:trivial:bounded-explicit-signal|small:concrete-reproduction|medium:fallback|medium:cross-cutting-refactor|medium-label:(?:epic|needs-discussion|architectural|architecture|infrastructure)|escalation-label:(?:small|medium)|(?:floor|ceiling|override):(?:trivial|small|medium))")
   if len(rules)!=len(set(rules)) or any(not allowed_rule.fullmatch(x) for x in rules): raise ValueError()
   if len(json.dumps(triage,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode("utf-8"))>32768: raise ValueError()
  if request.get("workflow")!=metadata["workflow"] or request.get("backend")!=metadata["backend"] or request.get("task_tier")!=metadata["task_tier"] or request.get("risk_signals",[])!=metadata["risk_signals"]: raise ValueError()

@@ -330,7 +330,7 @@ _isolate '
 solve_tier_floor: medium
 ---
 EOF
-  out="$(uberdev_read_enum solve_tier_floor SOLVE_TIER_FLOOR "trivial|small|medium|large" trivial)"
+  out="$(uberdev_read_enum solve_tier_floor SOLVE_TIER_FLOOR "trivial|small|medium" trivial)"
   [ "$out" = "medium" ] || exit 1
 '
 [ $? -eq 0 ] && pass "U3a: valid enum medium accepted" || fail "U3a: enum medium rejected"
@@ -341,7 +341,7 @@ _isolate '
 solve_tier_floor: SMALL
 ---
 EOF
-  out="$(uberdev_read_enum solve_tier_floor SOLVE_TIER_FLOOR "trivial|small|medium|large" trivial)"
+  out="$(uberdev_read_enum solve_tier_floor SOLVE_TIER_FLOOR "trivial|small|medium" trivial)"
   [ "$out" = "trivial" ] || exit 1
 '
 [ $? -eq 0 ] && pass "U3b: case-sensitive reject SMALL -> default trivial" || fail "U3b: SMALL not rejected"
@@ -382,11 +382,16 @@ _isolate '
   [ "$(uberdev_tier_rank trivial)" = "0" ] || exit 1
   [ "$(uberdev_tier_rank small)"   = "1" ] || exit 1
   [ "$(uberdev_tier_rank medium)"  = "2" ] || exit 1
-  [ "$(uberdev_tier_rank large)"   = "3" ] || exit 1
   [ "$(uberdev_tier_name 0)"       = "trivial" ] || exit 1
-  [ "$(uberdev_tier_name 3)"       = "large" ] || exit 1
+  [ "$(uberdev_tier_name 2)"       = "medium" ] || exit 1
   [ -z "$(uberdev_tier_rank Trivial)" ] || exit 1
   [ -z "$(uberdev_tier_name 9)" ]       || exit 1
+  # The rung #619 deleted is out of domain in BOTH directions. Rank 3 answering
+  # anything would resurrect a fourth name the triage vocabulary can no longer
+  # produce, and a rankable `large` would let an operator set a clamp that
+  # uberdev_clamp_tier then silently declines to apply (see U6 below).
+  [ -z "$(uberdev_tier_rank large)" ]   || exit 1
+  [ -z "$(uberdev_tier_name 3)" ]       || exit 1
 '
 [ $? -eq 0 ] && pass "U5: tier rank/name round-trip + reject capitalised + reject out-of-domain" \
   || fail "U5: tier rank/name round-trip failed"
@@ -394,18 +399,23 @@ _isolate '
 echo
 echo "== U6: uberdev_clamp_tier =="
 _isolate '
-  [ "$(uberdev_clamp_tier small medium large)" = "medium" ] || exit 1   # floor lifts
-  [ "$(uberdev_clamp_tier large trivial small)" = "small" ] || exit 1   # ceiling drops
-  [ "$(uberdev_clamp_tier medium trivial large)" = "medium" ] || exit 1 # in-band passthrough
-  [ "$(uberdev_clamp_tier large medium "")"     = "large" ] || exit 1   # only-floor (ceiling unset)
+  [ "$(uberdev_clamp_tier small medium "")"     = "medium" ] || exit 1  # floor lifts
+  [ "$(uberdev_clamp_tier medium trivial small)" = "small" ] || exit 1  # ceiling drops
+  [ "$(uberdev_clamp_tier small trivial medium)" = "small" ] || exit 1  # in-band passthrough
+  [ "$(uberdev_clamp_tier medium small "")"     = "medium" ] || exit 1  # only-floor (ceiling unset)
   [ "$(uberdev_clamp_tier trivial "" small)"    = "trivial" ] || exit 1 # only-ceiling above tier
-  [ "$(uberdev_clamp_tier medium large small)"  = "medium" ] || exit 1  # inverted -> passthrough
+  [ "$(uberdev_clamp_tier small medium trivial)" = "small" ] || exit 1  # inverted -> passthrough
+  # An UNRANKABLE clamp is ignored in SILENCE -- there is no warn arm for it,
+  # unlike the inverted pair below. That is why every enum literal feeding this
+  # ladder had to shrink with #619: leave one saying `large` and an operator can
+  # still set the clamp, and it will simply stop being applied.
+  [ "$(uberdev_clamp_tier small large "")"      = "small" ] || exit 1
 '
 [ $? -eq 0 ] && pass "U6: clamp_tier matrix passes (floor/ceiling/inverted/asymmetric)" \
   || fail "U6: clamp_tier matrix failed"
 
 _isolate '
-  uberdev_clamp_tier medium large small >/dev/null
+  uberdev_clamp_tier small medium trivial >/dev/null
 '
 grep -qE "floor_gt_ceiling" <<<"$_LAST_STDERR" \
   && pass "U6b: inversion emits floor_gt_ceiling reason" \
@@ -469,8 +479,8 @@ assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh" \
   'uberdev_clamp_tier "\$TIER" "\$FLOOR" "\$CEILING"' \
   "I1c: solve-pipeline calls uberdev_clamp_tier with TIER/FLOOR/CEILING"
 assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh" \
-  'trivial\|small\|medium\|large' \
-  "I1d: solve-pipeline enum allows all four tier names"
+  'trivial\|small\|medium' \
+  "I1d: solve-pipeline enum allows all three tier names"
 
 echo
 echo "== I2: dispatch timeout-wrap resolution (v0.22.0) =="
@@ -605,8 +615,8 @@ auto_install_aliases: false
 integration_branch: develop
 ---
 EOF
-  out_floor="$(uberdev_read_enum solve_tier_floor SOLVE_TIER_FLOOR "trivial|small|medium|large" "")"
-  out_ceiling="$(uberdev_read_enum solve_tier_ceiling SOLVE_TIER_CEILING "trivial|small|medium|large" "")"
+  out_floor="$(uberdev_read_enum solve_tier_floor SOLVE_TIER_FLOOR "trivial|small|medium" "")"
+  out_ceiling="$(uberdev_read_enum solve_tier_ceiling SOLVE_TIER_CEILING "trivial|small|medium" "")"
   out_fanout="$(uberdev_read_int_in_range fanout_concurrency.research UBERDEV_FANOUT_RESEARCH 1 50 6)"
   [ -z "$out_floor" ] || exit 1
   [ -z "$out_ceiling" ] || exit 1
@@ -625,7 +635,7 @@ auto_confirm: true
 solve_tier_floor: medium
 ---
 EOF
-  out_floor="$(uberdev_read_enum solve_tier_floor SOLVE_TIER_FLOOR "trivial|small|medium|large" "")"
+  out_floor="$(uberdev_read_enum solve_tier_floor SOLVE_TIER_FLOOR "trivial|small|medium" "")"
   [ "$out_floor" = "medium" ] || exit 1
 '
 [ $? -eq 0 ] && pass "I7c: deprecated auto_confirm + new solve_tier_floor coexist" \

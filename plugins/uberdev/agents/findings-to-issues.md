@@ -553,8 +553,8 @@ cost decision in `/solve` from a guess into a fact: `lib/solve_triage.py` reads
 the block and sizes the solver fleet off it, and falls back to scraping paths
 out of the prose only when it is absent. That fallback is what this agent's own
 output used to defeat — a finding body is a wall of `path:line` evidence, so
-every issue filed here scraped three or more paths and priced as `large` (33
-solvers) whatever the finding was. Emit it **immediately before** the
+every issue filed here scraped three or more paths and priced at the top rung
+(33 solvers) whatever the finding was. Emit it **immediately before** the
 fingerprint marker, and never between that marker and its meta trailer. Both
 halves are CONVENTION, not a constraint any reader imposes: `lib/solve_triage.py`
 finds this block with a whole-body search after stripping fenced blocks, and the

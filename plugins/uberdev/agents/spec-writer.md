@@ -96,10 +96,9 @@ Do not use web search or other MCP tools. All external research has already been
 
 7. **Determine tier and next-phase recommendation.**
 
-   - `tier_hint: large` — if the change touches ≥5 files OR introduces a new skill/agent
-   - `tier_hint: medium` — if the change touches 2–4 files
+   - `tier_hint: medium` — if the change touches ≥2 files OR introduces a new skill/agent (`medium` is the ceiling since #619 collapsed `large` into it)
    - `tier_hint: small` — if the change touches ≤1 file
-   - `next_phase_recommendation: review` — if you flagged any high-stakes risk in the spec (an advisory signal; spec-reviewer is always-on for medium/large regardless)
+   - `next_phase_recommendation: review` — if you flagged any high-stakes risk in the spec (an advisory signal; spec-reviewer is always-on for medium regardless)
    - `next_phase_recommendation: abort` — only if a hard constraint makes the change infeasible
    - `next_phase_recommendation: auto` — otherwise
 
@@ -120,7 +119,7 @@ decisions:
   - { key: Q2, choice: "...", rationale: "..." }
 risks:
   - "<short risk statement>"
-tier_hint: small | medium | large
+tier_hint: small | medium
 next_phase_recommendation: auto | review | abort
 ```
 
@@ -139,4 +138,4 @@ Rules:
 - **Research file unreadable** — log which path failed at the top of the spec under `## Open questions`; continue with available data; add a risk entry.
 - **Unable to determine author** — fall back to `working_dir`'s git remote URL owner, then `Unknown`.
 - **Malformed return (parse failure at orchestrator)** — on re-dispatch the orchestrator prepends a format example; honour it exactly and re-emit the full YAML block as the last thing in your reply.
-- **High-stakes risk** — set `next_phase_recommendation: review` to flag the spec for reviewer attention. This is advisory only: spec-reviewer is always-on for medium/large, so it runs regardless — the signal just surfaces the risk in the writer's return. Examples of high-stakes risks: breaking changes to public CLI surface, changes to shared state without locking, new external dependencies without pinned versions, removal of a user-facing feature.
+- **High-stakes risk** — set `next_phase_recommendation: review` to flag the spec for reviewer attention. This is advisory only: spec-reviewer is always-on for medium, so it runs regardless — the signal just surfaces the risk in the writer's return. Examples of high-stakes risks: breaking changes to public CLI surface, changes to shared state without locking, new external dependencies without pinned versions, removal of a user-facing feature.

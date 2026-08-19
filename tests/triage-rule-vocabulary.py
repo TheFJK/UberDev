@@ -20,9 +20,9 @@ fixture corpus, and both `assert_rule_tokens` call sites wired (G7).
 WHY NOT A `CONTRACT:` MARKER. The #371 register (tests/contract_markers.py)
 compares copies that are the SAME TOKEN SET written in two languages. These two
 are not: the validator writes the clamp rules as a FACTORED CROSS PRODUCT
-(`(?:floor|ceiling|override):(?:trivial|small|medium|large)`), so a member
-extractor reads seven tokens off it where the producer declares twelve, and a
-marker parked there would report permanent false drift. Mutual containment is
+(`(?:floor|ceiling|override):(?:trivial|small|medium)`), so a member extractor
+reads six tokens off it where the producer declares nine, and a marker parked
+there would report permanent false drift. Mutual containment is
 the real relation, and it needs an executable comparator — this file.
 
 Usage: python3 -I tests/triage-rule-vocabulary.py <solve_triage.py> <agent-dispatch.sh>
@@ -34,11 +34,25 @@ import re
 import sys
 
 FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures" / "solve-routing"
-# 6 fixed + 12 clamp/override (floor|ceiling|override x 4 tiers) + 5 large-label
-# + 3 escalation-label (small|medium|large; `trivial` is deliberately NOT an
-# escalation target -- see the G3 canary list below, which pins that exclusion
-# from the validator side).
-MIN_DECLARED_TOKENS = 26
+# 4 fixed + 9 clamp/override (floor|ceiling|override x 3 tiers) + 5
+# medium-label (the design labels) + 2 escalation-label (small|medium;
+# `trivial` is deliberately NOT an escalation target -- see the G3 canary list
+# below, which pins that exclusion from the validator side).
+#
+# It was 26 until #619 collapsed the `large` rung into `medium`, which is a NET
+# loss of six:
+#   * GONE (6): `large:three-files` and `large:multi-component-high-risk`, whose
+#     predicates the surviving arms already exclude, plus the four the tier
+#     vocabulary derived -- floor:large, ceiling:large, override:large and
+#     escalation-label:large.
+#   * RENAMED, not deleted (6): the five `large-label:*` became `medium-label:*`
+#     and `large:cross-cutting-refactor` became `medium:cross-cutting-refactor`.
+#     Those six pin a FLOOR that nothing else in the classifier expresses, so
+#     dropping them would under-price rather than collapse. Counting them out of
+#     this floor is how the first cut of #619 shipped a two-rung downgrade with
+#     the guard green -- the number is a ratchet, so it has to move for a real
+#     deletion and stay put for a rename.
+MIN_DECLARED_TOKENS = 20
 
 
 def load(path):

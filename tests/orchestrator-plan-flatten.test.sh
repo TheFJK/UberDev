@@ -310,7 +310,7 @@ expected = {
     "caller_contract": "solve-pipeline-tier-native",
     "bypass_tiers": ["trivial", "small"],
     "defensive_phase0_action": "terminal_handoff_return",
-    "continue_tiers": ["medium", "large"],
+    "continue_tiers": ["medium"],
     "forbidden_after_handoff": [
         "phase1_research",
         "phase2_qa",
@@ -341,13 +341,13 @@ for marker in (
         raise SystemExit(f"Phase 0 terminal gate missing {marker!r}")
 if re.search(r"(?i)small.{0,80}dispatch|dispatch.{0,80}small", phase1.group(1)):
     raise SystemExit("operative small-tier Phase-1 dispatch remains")
-if "medium/large only" not in phase1.group(1):
-    raise SystemExit("Phase 1 lacks medium/large-only precondition")
-if "medium/large only" not in phase4.group(1):
-    raise SystemExit("Phase 4 lacks medium/large-only precondition")
+if "medium only" not in phase1.group(1):
+    raise SystemExit("Phase 1 lacks medium-only precondition")
+if "medium only" not in phase4.group(1):
+    raise SystemExit("Phase 4 lacks medium-only precondition")
 
 # Execute the documented phase-entry state machine. Bypass tiers must have no
-# reachable research/planning dispatches; both full tiers retain both sites.
+# reachable research/planning dispatches; the one full tier retains both sites.
 def reachable_dispatches(tier: str) -> list[str]:
     if tier in contract["bypass_tiers"]:
         return []
@@ -358,7 +358,7 @@ def reachable_dispatches(tier: str) -> list[str]:
 for tier in ("trivial", "small"):
     if reachable_dispatches(tier):
         raise SystemExit(f"{tier} can reach orchestrator dispatches")
-for tier in ("medium", "large"):
+for tier in ("medium",):
     if reachable_dispatches(tier) != [
         "phase1_research", "phase4_planning_research", "plan_writer"
     ]:
@@ -2096,7 +2096,7 @@ fi
 
 printf '%s\n' '== F10 the plan-document header is ONE contract across its three carriers =='
 # #531. The plan-header template has three uncompared copies: write-plan/SKILL.md
-# (the standalone skill), agents/plan-writer.md (the copy the routed medium/large
+# (the standalone skill), agents/plan-writer.md (the copy the routed medium-tier
 # pipeline actually emits from) and skills/orchestrator/SKILL.md (the in-main
 # fallback's prose enumeration). Porting upstream's `Spec:` pointer into the first
 # alone leaves /solve and /turbo emitting Spec-less plans with a fully green

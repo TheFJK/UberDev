@@ -182,7 +182,7 @@ _EFFECTIVE_POLICIES = frozenset({"adaptive", "forced", "inherit"})
 _ENFORCEMENT_EVIDENCE = frozenset(
     {"explicit_argv", "validated_profile", "provider_reported", "ambient_unverified"}
 )
-_TASK_TIERS = frozenset({"trivial", "small", "medium", "large"})
+_TASK_TIERS = frozenset({"trivial", "small", "medium"})
 _REASONING_EFFORTS = frozenset({"low", "medium", "high", "max", "ultra"})
 _SERVICE_TIERS = frozenset({"default", "fast", "flex"})
 _LOGICAL_ROUTES = frozenset({"economy", "standard", "quality", "deep", "frontier", "ultra"})

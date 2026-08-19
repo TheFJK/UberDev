@@ -11,8 +11,8 @@
 #   uberdev_read_string        KEY ENV_VAR REGEX DEFAULT
 #   uberdev_read_model_routing
 #                              -> exports validated RFC 0013 routing config
-#   uberdev_tier_rank          TIER_NAME            -> 0|1|2|3|""
-#   uberdev_tier_name          RANK                 -> trivial|small|medium|large
+#   uberdev_tier_rank          TIER_NAME            -> 0|1|2|""
+#   uberdev_tier_name          RANK                 -> trivial|small|medium
 #   uberdev_clamp_tier         TIER FLOOR CEILING   -> clamped tier name
 #   uberdev_emit_workflow_args PIPELINE [KEY=VALUE ...]
 #                              -> v1 Workflow args envelope between
@@ -302,7 +302,7 @@ uberdev_read_int_in_range() {
 }
 
 # uberdev_read_enum KEY ENV_VAR ALLOWED_PIPE_LIST DEFAULT
-# ALLOWED_PIPE_LIST: pipe-separated values, e.g. "trivial|small|medium|large".
+# ALLOWED_PIPE_LIST: pipe-separated values, e.g. "trivial|small|medium".
 # Exact-match (case-sensitive); typoed capitalisation is rejected by design (D7 paranoia).
 uberdev_read_enum() {
   local key="$1" env_var="$2" allowed="$3" default="$4"
@@ -772,13 +772,16 @@ _uberdev_routing_source() {
   printf '%s\t%s' "$source" "$canonical"
 }
 
-# uberdev_tier_rank TIER_NAME -> integer rank (0..3) on stdout, "" on unknown.
+# uberdev_tier_rank TIER_NAME -> integer rank (0..2) on stdout, "" on unknown.
+# THREE rungs since #619 collapsed `large` into `medium`. An unranked name is
+# NOT an error here — uberdev_clamp_tier passes an unrankable clamp through in
+# silence — so every enum literal that feeds this ladder has to shrink with it,
+# or an operator's `solve_tier_floor: large` would parse and then stop applying.
 uberdev_tier_rank() {
   case "$1" in
     trivial) printf '0' ;;
     small)   printf '1' ;;
     medium)  printf '2' ;;
-    large)   printf '3' ;;
     *)       printf '' ;;
   esac
 }
@@ -789,7 +792,6 @@ uberdev_tier_name() {
     0) printf 'trivial' ;;
     1) printf 'small' ;;
     2) printf 'medium' ;;
-    3) printf 'large' ;;
     *) printf '' ;;
   esac
 }

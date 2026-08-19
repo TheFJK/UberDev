@@ -23,7 +23,7 @@ When invoked from `orchestrator/SKILL.md` Phase 5, this skill accepts:
 - `plan_path` (required, absolute) — the implementation plan to execute.
 - `spec_path` (optional, absolute) — the design spec the plan was derived from. Required to enable the Step 4.5 pre-merge `pr-test-analyzer` dispatch (the analyzer reads acceptance criteria verbatim from this file).
 - `summary_dir` (optional, absolute, trailing slash) — the orchestrator's `$RESEARCH_DIR_ABS/`. Required to enable the Step 4.5 pre-merge `pr-test-analyzer` dispatch.
-- `tier` (optional, one of `trivial`/`small`/`medium`/`large`) — used to gate Step 4.5. Only `large` runs the dispatch; all other tiers skip silently.
+- `tier` (optional, one of `trivial`/`small`/`medium`) — used to gate Step 4.5. Only `medium` runs the dispatch; all other tiers skip silently. The gate named `large` until #619 deleted that rung; it moved to `medium` with it rather than being left unreachable, so the pre-merge test review still runs on every issue that used to reach it.
 
 Inputs other than `plan_path` are additive and backward-compatible: pre-#92 manual SDD invocations continue to work unchanged (Step 4.5 is a no-op when `spec_path`, `summary_dir`, or `tier` is absent).
 
@@ -126,7 +126,7 @@ path. The four stable routing edges are:
 | `sdd.task.implement` | `implementation-worker` | required |
 | `sdd.task.spec_review` | `spec-compliance-reviewer` | required |
 | `sdd.task.quality_review` | `code-reviewer` | required |
-| `sdd.premerge.test_review` | `pr-test-analyzer` | advisory; large tier only |
+| `sdd.premerge.test_review` | `pr-test-analyzer` | advisory; `medium` tier only |
 
 Before any helper call, validate all instance dimensions and canonicalize the
 task ownership lists. Ownership paths arrive repo-relative, but child inputs
@@ -602,7 +602,7 @@ inspects every sibling, boundedly unwinds each non-successful child, preserves
 the first wait failure, and atomically resets all prepared/receipt state before
 the next batch. Receipt fields are held in parallel shell arrays, never encoded
 into delimiter-sensitive path strings. A required wait/review failure blocks the task. The
-large-tier test-review edge preserves Step 4.5's advisory logging behavior.
+design-rung test-review edge preserves Step 4.5's advisory logging behavior.
 These four SDD edges do not declare `retry.format`, so they never call
 `uberdev_child_inputs_format_retry`; retry attempts rebuild their exact edge
 inputs through `uberdev_child_inputs_build` instead.
@@ -655,7 +655,7 @@ digraph when_to_use {
    i. Mark every task in the wave complete in TodoWrite.
    j. **Mark wave complete.** No additional accumulation required at the SDD layer — `/uberdev:review-pr` Phase 1, chained post-push from `finish-branch`, computes its own `changed_paths` and `commit_range` against the pushed PR.
 
-   **Step 4.5 — Pre-merge `pr-test-analyzer` dispatch (large-tier only, requires `spec_path` and `summary_dir`).** Runs once after all waves complete and before the Step 5 handoff. If `tier == "large"` AND `spec_path` is non-empty AND `summary_dir` is non-empty, securely pre-create the regular artifact file (the handoff validator rejects directory-valued context and requires absolute artifact paths to exist), then dispatch edge `sdd.premerge.test_review` to role `pr-test-analyzer`, stage `test-review`, attempt 1:
+   **Step 4.5 — Pre-merge `pr-test-analyzer` dispatch (`medium`-tier only, requires `spec_path` and `summary_dir`).** Runs once after all waves complete and before the Step 5 handoff. If `tier == "medium"` AND `spec_path` is non-empty AND `summary_dir` is non-empty, securely pre-create the regular artifact file (the handoff validator rejects directory-valued context and requires absolute artifact paths to exist), then dispatch edge `sdd.premerge.test_review` to role `pr-test-analyzer`, stage `test-review`, attempt 1:
 
 ```bash
 SDD_TEST_REVIEW_SCOPE="$(sdd_plan_scope "$plan_path")" || return 2
@@ -691,7 +691,7 @@ edge_id: sdd.finish_branch
 model_invocation: false
 ```
 
-5. Hand off to `uberdev:finish-branch` (no flag arg). The branch close-out detects unattended mode via the inherited `UBERDEV_TURBO=1` environment variable from the selected dispatch backend — under that signal, `finish-branch` auto-selects "Push and Create PR" without prompting (#97). For large tier, `pr-test-analyzer` was dispatched in Step 4.5 (above) and its findings are now on disk at `<summary_dir>/pr-test-analyzer-<plan-scope>.md`. `finish-branch` will discover and include them in the PR body's `## Reviewer findings summary` section. Post-implementation reviewer fanout is hosted by `/uberdev:review-pr` Phase 1 (chained from `finish-branch` after PR push); no reviewer *fanout* is dispatched from `subagent-driven-dev` itself (see Step 4.5 for the carve-out vs the retired `uberdev:post-impl-review` fanout).
+5. Hand off to `uberdev:finish-branch` (no flag arg). The branch close-out detects unattended mode via the inherited `UBERDEV_TURBO=1` environment variable from the selected dispatch backend — under that signal, `finish-branch` auto-selects "Push and Create PR" without prompting (#97). For `medium` tier, `pr-test-analyzer` was dispatched in Step 4.5 (above) and its findings are now on disk at `<summary_dir>/pr-test-analyzer-<plan-scope>.md`. `finish-branch` will discover and include them in the PR body's `## Reviewer findings summary` section. Post-implementation reviewer fanout is hosted by `/uberdev:review-pr` Phase 1 (chained from `finish-branch` after PR push); no reviewer *fanout* is dispatched from `subagent-driven-dev` itself (see Step 4.5 for the carve-out vs the retired `uberdev:post-impl-review` fanout).
 
    **Rulings roll-up.** Before that handoff, read the run's `rulings.md` and emit every line it holds under a `## Rulings I made` heading, in write order, each still carrying what it costs if wrong — the roll-up is exhaustive: if the file holds a ruling, this list holds it. That is what goes in this run's final message.
    The same `## Rulings I made` block also goes into the `## Summary` body composed for the `finish-branch` Option-2 PR, not only into the message this run ends with: `finish-branch` collects `post-impl-review-*.md` and `pr-test-analyzer*.md` from the run directory and nothing else, so `rulings.md` reaches whoever reviews the PR only because this step writes it there.
@@ -881,7 +881,7 @@ Ownership map:
 
 === AFTER ALL WAVES ===
 
-[For large tier: SDD Step 4.5 dispatches pr-test-analyzer pre-merge before the finish-branch handoff]
+[For medium tier: SDD Step 4.5 dispatches pr-test-analyzer pre-merge before the finish-branch handoff]
 
 [Hand off to uberdev:finish-branch — which pushes the PR and chains into /uberdev:review-pr Phase 1 (6 reviewer agents, advisory — roster owned by post-impl-review/SKILL.md)]
 ```

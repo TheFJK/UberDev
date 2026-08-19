@@ -4,7 +4,7 @@ must resolve to a real edge in the run-tree manifest (issue #536).
 
 THE CLASS. `plugins/uberdev/lib/solve-launcher.sh` set
 `UBERDEV_ROOT_EDGE_ID="solve.lead.$TIER"`, and `$TIER` is one of
-trivial|small|medium|large — so every value that line could produce named an
+trivial|small|medium — so every value that line could produce named an
 edge that does not exist in `plugins/uberdev/policy/solve-run-tree-v1.json`
 (whose only `solve.lead.*` edges are `.orchestrator`, `.brainstorm` and
 `.finish_branch`). Nothing read the variable, so nothing ever noticed. This is

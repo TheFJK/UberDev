@@ -187,11 +187,15 @@ const issuesFromArgs = String(CFG.issues || "")
 // question a membership map cannot answer. Spelled ONCE — TIERS is derived,
 // never written out a second time, because two hand-kept copies of one
 // vocabulary drift the moment a tier is added to one of them.
-const TIER_ORDER = ["trivial", "small", "medium", "large"];
+const TIER_ORDER = ["trivial", "small", "medium"];
 const TIERS = TIER_ORDER.reduce(function (m, t) { m[t] = 1; return m; }, {});
-// Tiers that get the script-orchestrated design phases. `large` is an alias
-// the triage table may emit; `--full` normalises to medium in the launcher.
-const DESIGN_TIERS = { medium: 1, large: 1 };
+// Tiers that get the script-orchestrated design phases. `medium` is the top
+// rung and `--full` normalises to it in the launcher. A fourth `large` name
+// used to sit beside it in here and nowhere else: it selected the same phases,
+// so the only thing it could ever change was the escalation gate below, where
+// it silently made every escalation from a `large`-dispatched solver a
+// NOT_AN_UPGRADE rejection. #619 deleted it.
+const DESIGN_TIERS = { medium: 1 };
 
 // ------------------ the task chain's CLOSED status vocabulary ------------------
 // It used to be documented in prose here and then assigned as a bare string
@@ -497,7 +501,7 @@ const S = {
           required: ["issue", "tier", "promptFile"],
           properties: {
             issue: { type: "integer" },
-            tier: { type: "string", enum: ["trivial", "small", "medium", "large"] },
+            tier: { type: "string", enum: ["trivial", "small", "medium"] },
             promptFile: { type: "string" },
             contextFile: { type: "string" }, // schema-prop-unread: an optional manifest field copied verbatim; the solver prompt is built from promptFile
             // The launcher's triage risk signals for this issue, relayed one hop
@@ -628,7 +632,7 @@ const S = {
       // otherwise solved, and dropping a real pull request out of /goal's queue.
       // The vocabulary check therefore lives in applyEscalation(), where a
       // refusal costs one audit row and nothing else.
-      escalatedTier: { type: "string", description: "optional: a HIGHER tier than the one this run was dispatched at, if the work turned out to need it (trivial|small|medium|large). Recorded for the next classification; this run's ceremony does not change." },
+      escalatedTier: { type: "string", description: "optional: a HIGHER tier than the one this run was dispatched at, if the work turned out to need it (trivial|small|medium). Recorded for the next classification; this run's ceremony does not change." },
       escalationReason: { type: "string", description: "required whenever escalatedTier is set: what you found that the triage rules could not see. An unexplained escalation is not recorded." },
       summary: { type: "string", description: "<=400 chars, what was changed and why" },
       blocker: { type: "string", description: "why it stopped, when status is REFUSED or FAILED" },
@@ -714,7 +718,7 @@ function intakePrompt() {
   return "Run EXACTLY this via Bash — mechanical relay, do not interpret the contents:\n\n"
     + '  cat "' + manifestPathAbs + '"\n\n'
     + "The file is JSON written by lib/solve-launcher.sh: "
-    + '{"schema_version":1,"auto_mode":<bool>,"issues":[{"issue":<int>,"tier":"trivial|small|medium|large",'
+    + '{"schema_version":1,"auto_mode":<bool>,"issues":[{"issue":<int>,"tier":"trivial|small|medium",'
     + '"prompt_file":"<abs path>","context_file":"<abs path, optional>",'
     + '"risk_signals":["<string>", ...]}, ...]}.\n\n'
     + "Return via StructuredOutput: rc (0 if the file was readable and parsed as that shape, else 1) "

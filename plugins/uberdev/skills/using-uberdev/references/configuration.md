@@ -8,7 +8,7 @@ UberDev reads optional project config from `.codex/uberdev.local.md` when presen
 
 ```yaml
 ---
-solve_tier_default: small        # one of: small, medium, large
+solve_tier_default: small        # one of: small, medium
 review_depth: full               # one of: quick, full
 parallel_solve: true
 auto_install_aliases: true       # Claude Code only: auto-install the short-form aliases (see aliases-sync.sh for the canonical set) at SessionStart (default: true; env override: UBERDEV_NO_AUTO_ALIAS=1). Codex uses $uberdev-cmd-* skills instead.
@@ -35,8 +35,8 @@ model_routing:
 solve_auto: false                # PERMISSION BYPASS. true (or --auto, or SOLVE_AUTO=1) resolves the pair --dangerously-skip-permissions --permission-mode bypassPermissions, so no tool prompts at all — destructive ones included. On the default workflow backend the per-issue solvers inherit THIS session's permission tier instead of receiving the pair (RFC 0015 §6 R-1b); it reaches a child's argv only on --backend=wezterm|background. Default false; env: SOLVE_AUTO
 
 # --- /solve tier clamp ---
-solve_tier_floor: small          # one of: trivial, small, medium, large; clamps auto-triage UP to floor; default unset (no lower clamp); env: SOLVE_TIER_FLOOR
-solve_tier_ceiling: medium       # one of: trivial, small, medium, large; clamps auto-triage DOWN to ceiling; default unset (no upper clamp); env: SOLVE_TIER_CEILING
+solve_tier_floor: small          # one of: trivial, small, medium; clamps auto-triage UP to floor; default unset (no lower clamp); env: SOLVE_TIER_FLOOR
+solve_tier_ceiling: medium       # one of: trivial, small, medium; clamps auto-triage DOWN to ceiling; default unset (no upper clamp); env: SOLVE_TIER_CEILING
 
 # --- per-phase parallel fanout caps ---
 # dot-path refs: fanout_concurrency.research, fanout_concurrency.post_impl_review, fanout_concurrency.merge_strategy, fanout_concurrency.conflict_resolver, fanout_concurrency.turbox
@@ -217,9 +217,11 @@ dispatch. Together with `UBERDEV_MODEL_ROUTING_MODE` and
 
 **`solve_tier_floor` / `solve_tier_ceiling`:** clamp the
 `/solve` auto-triage tier into `[floor, ceiling]`. Both keys take an
-enum value from `{trivial, small, medium, large}`. Asymmetric clamps
-are supported (set only floor or only ceiling). If `floor > ceiling`,
-one stderr warning fires (`floor_gt_ceiling`) and BOTH are ignored.
+enum value from `{trivial, small, medium}` — three rungs since #619
+collapsed `large` into `medium`. Asymmetric clamps are supported (set
+only floor or only ceiling). If `floor > ceiling`, one stderr warning
+fires (`floor_gt_ceiling`) and BOTH are ignored. A value outside the
+enum is rejected at read time; it is NOT silently ignored later.
 Env overrides: `SOLVE_TIER_FLOOR`, `SOLVE_TIER_CEILING`. Default:
 unset on both sides.
 

@@ -417,7 +417,7 @@ grep -q 'review_pr.post_impl_review' "$ROOT/plugins/uberdev/commands/review-pr.m
 # The `solve.issue.lead` grep above proves only that the id is PRESENT. It stayed
 # green for the whole life of the defect: the launcher's live assignment read
 # UBERDEV_ROOT_EDGE_ID="solve.lead.$TIER", and since the tier is one of
-# trivial|small|medium|large, EVERY value that line could produce named an edge
+# trivial|small|medium, EVERY value that line could produce named an edge
 # absent from the manifest -- while nothing anywhere read the variable. That is
 # the #370 shape ("one contract, N uncompared copies") on the shell-runtime side;
 # #510 closed the manifest side with tests/solve-run-tree-scope.test.sh.

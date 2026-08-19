@@ -23,7 +23,7 @@ Planning-research artifacts are eligible for consumption only after the path che
 You receive these inputs in your prompt:
 
 - `spec_path` — path to the design spec to plan against (written by `spec-writer` or `spec-reviser`)
-- `tier` — `small | medium | large` (controls plan granularity and review recommendation)
+- `tier` — `small | medium` (controls plan granularity and review recommendation)
 - `working_dir` — absolute path to the worktree root
 - `summary_path` — absolute private regular-file summary artifact for this plan-writing attempt; its canonical parent is the trusted current run directory
 - `validation_path` — absolute path to the orchestrator-supplied `lib/planning_research_output.py` executable
@@ -195,7 +195,7 @@ shasum -a 256 <plan_path> | awk '{print substr($1,1,8)}'
 
 ### Step 6: Determine next-phase recommendation
 
-- `next_phase_recommendation: review` — if the plan touches ≥ 10 tasks OR the supplied research/local self-check leaves unresolved issues (an advisory signal; plan-reviewer is always-on for medium/large regardless).
+- `next_phase_recommendation: review` — if the plan touches ≥ 10 tasks OR the supplied research/local self-check leaves unresolved issues (an advisory signal; plan-reviewer is always-on for medium regardless).
 - `next_phase_recommendation: abort` — only if a hard constraint makes the plan infeasible (e.g. the spec requires a file that is permanently denylisted).
 - `next_phase_recommendation: auto` — otherwise.
 

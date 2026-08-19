@@ -26,7 +26,7 @@ def classify(tier, risks=None, **extra):
 # invocation, so the resolver was deleted rather than left unreachable, and
 # `tier_routes` was validated-but-unread policy data that went with it.
 # LOST COVERAGE, stated plainly: the per-tier concrete ladder
-# (trivial/small->deep/high, medium->frontier/max, large->ultra/ultra), the
+# (trivial/small->deep/high, medium->frontier/max), the
 # forced-parent pair inheritance, and the adaptive-vs-inherit split. Nothing
 # enforces per-rank routing any more, so there is nothing left to assert about
 # it -- see RFC 0013 (2026-08-05 amendment).
@@ -40,10 +40,10 @@ check('tier_routes' in policy['roles']['plan-writer'], False)
 
 # plan-writer floors at `deep` on every tier, and escalates to its declared
 # high_risk_route when a risk signal is present and escalation is enabled.
-for tier in ('trivial','small','medium','large'):
+for tier in ('trivial','small','medium'):
  check(classify(tier),'deep')
 check(classify('small',['security']),'ultra')
-check(classify('large',['security']),'ultra')
+check(classify('medium',['security']),'ultra')
 check(classify('small',['security'],project_routing={'risk_escalation':False}),'deep')
 check(classify('small',['security'],environment={'UBERDEV_MODEL_ROUTING_RISK_ESCALATION':False}),'deep')
 check(policy['roles']['plan-writer']['high_risk_route'],'ultra')
@@ -53,7 +53,7 @@ for mutate in ('unknown-high-risk-route','missing-high-risk-route','unconditiona
  if mutate=='unknown-high-risk-route': row['high_risk_route']='bogus'
  elif mutate=='missing-high-risk-route': del row['high_risk_route']
  elif mutate=='unconditional-ultra': row['route']='ultra'
- elif mutate=='tier-routes-readded': row['tier_routes']={'trivial':'deep','small':'deep','medium':'frontier','large':'ultra'}
+ elif mutate=='tier-routes-readded': row['tier_routes']={'trivial':'deep','small':'deep','medium':'frontier'}
  else: row['surprise']=True
  try: m._validate_policy(bad)
  except m.RouteError as e: check(e.code,'invalid_policy')

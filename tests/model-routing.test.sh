@@ -152,7 +152,6 @@ check(policy["lead_routes"] == {
     "trivial": {"default": "standard", "high_risk": "deep"},
     "small": {"default": "standard", "high_risk": "deep"},
     "medium": {"default": "quality", "high_risk": "frontier"},
-    "large": {"default": "frontier", "high_risk": "ultra"},
 }, "lead route matrix drifted")
 check(policy["fallback_order"] == ["ultra", "frontier", "deep", "quality", "standard", "economy"], "fallback order drifted")
 # The reasoning-effort vocabulary lib/config-read.sh validates project configs
@@ -225,10 +224,16 @@ expect_error("invalid_policy", lambda: module.load_policy(FIXTURES / "policy-dup
 
 # classify_minimum_route: the live floor classifier. Lead tiers, high-risk
 # escalation, role floors, judgment-bearing escalation, and the closed error set.
-for tier, expected in (("trivial", "standard"), ("small", "standard"), ("medium", "quality"), ("large", "frontier")):
+# THREE lead tiers since #619 collapsed `large` into `medium`. `medium` is the
+# ceiling, so `quality` / `frontier` is the top of the lead ladder.
+for tier, expected in (("trivial", "standard"), ("small", "standard"), ("medium", "quality")):
     check(classify(request(task_tier=tier)) == expected, f"default tier floor failed: {tier}")
-for tier, expected in (("trivial", "deep"), ("small", "deep"), ("medium", "frontier"), ("large", "ultra")):
+for tier, expected in (("trivial", "deep"), ("small", "deep"), ("medium", "frontier")):
     check(classify(request(task_tier=tier, risk_signals=["security"])) == expected, f"high-risk tier floor failed: {tier}")
+# The deleted rung is not merely unrouted, it is REFUSED -- lead_routes is the
+# tier vocabulary this classifier validates against, so a stale `large` from any
+# caller fails loudly instead of silently defaulting.
+expect_error("invalid_task_tier", lambda: classify(request(task_tier="large")))
 check(classify(request(role="code-simplifier", phase="review")) == "standard", "quality role floor failed")
 check(classify(request(role="triage-scout", phase="triage")) == "economy", "economy role floor failed")
 # A monitor role carries no risk judgment, so a risk signal must not lift it.
@@ -254,10 +259,10 @@ expect_error("invalid_risk_signal", lambda: classify(request(risk_signals=[7])))
 expect_error("unknown_role", lambda: classify(request(role="no-such-agent")))
 expect_error("invalid_request", lambda: classify(request(project_routing={"risk_escalation": "yes"})))
 # Underscore spellings of declared signals normalize; undeclared ones do not.
-check(classify(request(task_tier="large", risk_signals=["data_loss"])) == "ultra", "underscore risk signal did not normalize")
+check(classify(request(task_tier="medium", risk_signals=["data_loss"])) == "frontier", "underscore risk signal did not normalize")
 # Classification never mutates the policy it was handed.
 before = json.dumps(policy, sort_keys=True)
-classify(request(task_tier="large", risk_signals=["security"]))
+classify(request(task_tier="medium", risk_signals=["security"]))
 check(json.dumps(policy, sort_keys=True) == before, "classify_minimum_route mutated the policy")
 
 print(f"model-routing: PASS ({checks} checks)")

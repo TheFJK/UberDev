@@ -95,11 +95,35 @@ is the documentation surface.
 |------|----------------------------|------------------|
 | **trivial** | Labels: `typo`, `docs`, `documentation`, `chore`, `good-first-issue`. Body <300 chars after stripping markdown. Title matches `typo\|rename\|bump\|version\|readme`. No stack trace. Single file named. | minimal edit → test (if touched code is tested) → PR. **No brainstorm, no multi-step plan.** Phase 1 of `/uberdev:review-pr` runs the post-impl reviewer fanout and Phase 2 runs the simplify lenses after the PR opens. |
 | **small** | Clear reproduction + error message. Localized to one module/package. Estimated ≤50 LOC. Labels: `bug` (scoped) or none. Not cross-cutting. | lightweight TodoWrite plan (3–6 tasks) → TDD → PR. **No brainstorm.** Phase 1 of `/uberdev:review-pr` runs the post-impl reviewer fanout and Phase 2 runs the simplify lenses after the PR opens. |
-| **medium/large** | Large: epic/discussion/architecture/infrastructure labels, ≥3 named files, multi-component high risk, or refactor plus ≥2 components/cross-cutting marker. Bare `refactor` is not sufficient. Medium is the fallback. | Full `/uberdev:brainstorm` → `/uberdev:write-plan` → `/uberdev:subagent-driven-dev` → `/uberdev:review-pr` pipeline. |
+| **medium** | The fallback rung, and since #619 the ceiling — anything the two lighter rows do not claim lands here. In practice that is any issue carrying a risk signal, a stack trace, ≥3 files in its **declared or change-marked scope** (#614 — a `path:line` citation is evidence, not scope), or prose too long for the `trivial` bound. Plus a **design floor** that pre-empts the two lighter rows rather than falling through them: a design label (`epic` / `needs-discussion` / `architectural` / `architecture` / `infrastructure`), or `refactor` with breadth (≥2 named components or an explicit cross-cutting phrase). | Full `/uberdev:brainstorm` → `/uberdev:write-plan` → `/uberdev:subagent-driven-dev` → `/uberdev:review-pr` pipeline. |
 
 `lib/solve_triage.py` computes raw tier and closed risk signals, then applies
 floor, ceiling, and the explicit tier override last without erasing risks. It
 rejects oversized snapshots instead of truncating them and emits canonical JSON.
+
+There used to be a fourth `large` rung above `medium`, forced by eight rules.
+**#619 collapsed it into `medium`**: no consumer ever told the two apart — the
+launcher's tier `case` has no `large)` arm and `skills/solve-fleet/workflow.js`
+gave both names the same design phases — so the split cost eight rules, a closed
+validator alternation, a policy row and a fixture corpus while changing nothing
+downstream.
+
+The rung went; **six of the eight rules did not**. They split by whether the
+surviving rows already exclude their predicate:
+
+- **Deleted (2)** — `≥3 scope files` and `a risk signal across components` are
+  exactly what the `trivial` and `small` rows above already exclude, so an issue
+  matching either reaches `medium` with no rule required.
+- **Re-targeted at `medium` (6)** — the five design labels
+  (`epic` / `needs-discussion` / `architectural` / `architecture` /
+  `infrastructure`, emitting `medium-label:*`) and `refactor` plus breadth
+  (≥2 named components or an explicit cross-cutting phrase, emitting
+  `medium:cross-cutting-refactor`). These are **orthogonal** to the lighter rows
+  rather than excluded by them — an `epic` can carry a `bug` label and a
+  cross-cutting `refactor` can ship a clean reproduction — so they are checked
+  as a **design floor** that pre-empts both. Dropping them would not merge two
+  rungs; it would let a labelled issue fall two, or three from `needs-discussion`
+  on a short `docs` body.
 
 ### The ratchet is one-way (#532)
 
@@ -119,7 +143,12 @@ can act on it:
   mis-triage is read off the pull request rather than inferred from it;
 - the `uberdev:tier-<to>` label on the issue. `classify()` reads that label and
   **raises `raw_tier`** on the next dispatch, recording `escalation-label:<tier>`
-  in `matched_rules`.
+  in `matched_rules`. Because that label is a **durable** write on a live issue,
+  retiring a rung does not retire the labels already out there: `#619` aliases
+  the retired `uberdev:tier-large` onto the new ceiling `medium` rather than
+  letting it parse as an unknown tier, which would silently discard a recorded
+  mis-triage and re-dispatch the issue at whatever its body computes — a
+  downgrade, which is the one thing this channel is built not to express.
 
 On the `workflow` backend the same claim also rides the solver's structured
 return (`escalatedTier` / `escalationReason`), where it is checked and audited —
@@ -205,7 +234,7 @@ rolls back every claim acquired in the run.
 
 Tier-appropriate prompts (trivial/small heredocs commit and hand off to
 `uberdev:finish-branch`, `--turbo` forwarded on the auto-mode branch;
-medium/large dispatches `/uberdev:orchestrator`), then serial dispatch via
+medium dispatches `/uberdev:orchestrator`), then serial dispatch via
 `uberdev_dispatch_one` in `ceil(N / cap)` waves with one
 `solve_bg_fanout_wave_started` audit event per wave. Dispatch failures roll
 back that issue's claim (with a B3 ownership re-check so a racing teammate's

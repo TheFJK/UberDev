@@ -4,7 +4,7 @@
 
 **Personal Claude Code marketplace — opinionated GitHub-workflow slash commands.**
 
-[![Version](https://img.shields.io/badge/version-0.49.1-blue)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.50.0-blue)](./CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8B5CF6)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Repo Agnostic](https://img.shields.io/badge/repo--agnostic-yes-success)](#configuration)
@@ -37,7 +37,7 @@ UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-scou
 
 | Command | What it does |
 |---|---|
-| **`/solve <issue#>`** | Runs an autonomous solver per issue as a worktree-isolated agent in the session's Workflow runtime (watch with `/workflows`). Tier-aware: trivial issues skip design; medium/large get a parallel research fan-out → spec → plan → implement chain. Detached transports remain available via `--backend=`. |
+| **`/solve <issue#>`** | Runs an autonomous solver per issue as a worktree-isolated agent in the session's Workflow runtime (watch with `/workflows`). Tier-aware: trivial issues skip design; medium gets a parallel research fan-out → spec → plan → implement chain. Detached transports remain available via `--backend=`. |
 | **`/turbo <issue#>`** | Unattended `/solve`. Same pipeline, but the brainstorm phase auto-accepts the lead agent's recommendation and Q&A is resolved against the research bundle. Use when you trust the recommendation and want issue → PR with no babysitting. |
 | **`/turbox <issue#>`** | Unattended `/turbo` in **standard mode**: this session orchestrates the fleet through the `Task` tool instead of the Workflow runtime, so the implementation phase runs **waves of parallel implementers over disjoint file sets** — which the Workflow lane's leaf agents structurally cannot do. Research, design and delivery fan out across issues too. Parallel-issue cap **3**. Costs session context; buys wall-clock. (RFC 0020) |
 | **`/issue <description>`** | Creates a well-investigated, deduped, label-validated GitHub issue from a one-line ask. 2-scout fanout (codebase + triage) runs in <30 s, with conventional-commit titling and template-by-type. |
@@ -161,7 +161,7 @@ Auto-classifies a GitHub issue into a tier, then spawns an agent with a tier-app
 |---|---|---|
 | **trivial** | Labels `typo`/`docs`/`chore`/`good-first-issue`. Body <300 chars. Single file named. | Direct edit → test if touched code is tested → `/uberdev:simplify` → PR |
 | **small** | Clear repro + error. Localized to one module. ≤50 LOC. | Lightweight TodoWrite plan (3–6 tasks) → TDD → `/uberdev:simplify` → PR |
-| **medium / large** *(default)* | Labels `epic`/`architectural`/`infrastructure`. ≥3 files mentioned. Cross-package. | `/uberdev:orchestrator` (research fanout → optional Q&A → spec-writer → spec-reviewer (always-on for medium+) → plan-writer → plan-reviewer) → `/uberdev:subagent-driven-dev` wave dispatch → `/uberdev:review-pr` |
+| **medium** *(default, and the ceiling)* | The fallback rung — anything the two rows above do not claim. In practice: a risk signal, a stack trace, ≥3 files in the issue's **declared or change-marked scope** (a `path:line` citation is evidence, not scope), a design label (`epic`/`needs-discussion`/`architectural`/`architecture`/`infrastructure`), or `refactor` plus cross-cutting breadth. | `/uberdev:orchestrator` (research fanout → optional Q&A → spec-writer → spec-reviewer (always-on at this rung) → plan-writer → plan-reviewer) → `/uberdev:subagent-driven-dev` wave dispatch → `/uberdev:review-pr` |
 
 > **Misclassification is recoverable** — the spawned agent can escalate to `/uberdev:orchestrator` mid-flight if the scope proves larger than triaged. When in doubt, defaults to medium.
 
@@ -170,7 +170,7 @@ Auto-classifies a GitHub issue into a tier, then spawns an agent with a tier-app
 ```bash
 /solve 123 --trivial                  # force trivial tier
 /solve 123 --small                    # force small tier
-/solve 123 --full                     # force medium/large
+/solve 123 --full                     # force medium (the top rung)
 /solve 123 --auto                     # permission BYPASS pair: --dangerously-skip-permissions --permission-mode bypassPermissions (no tool prompts)
 /workflows                             # monitor active /solve and /turbo solver fleets
 ```
@@ -187,7 +187,7 @@ Auto-classifies a GitHub issue into a tier, then spawns an agent with a tier-app
         └── #7  small                                      solve (worktree) -> PR
 ```
 
-For a medium/large issue the plan is written as numbered tasks (`## Task <n>:`),
+For a medium-tier issue the plan is written as numbered tasks (`## Task <n>:`),
 and the implement phase walks them **one at a time** in a single shared
 worktree: an implementer commits the task, a reviewer reads `git show HEAD`
 against that task, and up to three fix rounds amend the same commit. Only when
@@ -215,7 +215,7 @@ and are monitored through visible WezTerm panes or the printed PID / log / resul
 
 ## `/turbo` — unattended issue resolution
 
-Identical to `/solve` for trivial / small. For medium / large, the brainstorm phase **auto-accepts the lead agent's recommendation** instead of asking clarifying questions, and Phase 2 Q&A becomes non-blocking — clarifying answers are auto-picked from the research-bundle synthesis and written to `questions.md` for audit.
+Identical to `/solve` for trivial / small. For medium, the brainstorm phase **auto-accepts the lead agent's recommendation** instead of asking clarifying questions, and Phase 2 Q&A becomes non-blocking — clarifying answers are auto-picked from the research-bundle synthesis and written to `questions.md` for audit.
 
 | Combo | Brainstorm Q&A | Tool gating |
 |---|---|---|
@@ -461,7 +461,7 @@ Machine-readable provenance — upstream repo, pinned commit, vendoring date, up
 
 Upstream `obra/superpowers` gates implementation behind a user-approval HARD-GATE: brainstorm halts, asks "does this look right so far?", and waits for sign-off before any subagent runs. Per-section approval prompts and a 3-iteration review-loop cap follow the same pattern.
 
-UberDev rejects all of those. User gates trade quality for ceremony — every pause shifts review burden onto a non-expert reader (you) and adds wall-clock cost. Quality wins from **parallel research fanout** (six research agents in one shot), **always-on reviewers** (`spec-reviewer` runs on medium/large tier per orchestrator Phase 3.5; `plan-reviewer` runs on every plan per Phase 4.5), and a **post-push `/review-pr` Phase 1 `post-impl-review` fanout** (seven advisory reviewers — correctness, silent-failure, type-design, comment/doc, PR-test, convention-compliance, and general quality lenses — run in one or more cap-controlled waves, with every child in each wave dispatched before its first wait; simplification is `/review-pr` Phase 2).
+UberDev rejects all of those. User gates trade quality for ceremony — every pause shifts review burden onto a non-expert reader (you) and adds wall-clock cost. Quality wins from **parallel research fanout** (six research agents in one shot), **always-on reviewers** (`spec-reviewer` runs on medium tier per orchestrator Phase 3.5; `plan-reviewer` runs on every plan per Phase 4.5), and a **post-push `/review-pr` Phase 1 `post-impl-review` fanout** (seven advisory reviewers — correctness, silent-failure, type-design, comment/doc, PR-test, convention-compliance, and general quality lenses — run in one or more cap-controlled waves, with every child in each wave dispatched before its first wait; simplification is `/review-pr` Phase 2).
 
 </details>
 
