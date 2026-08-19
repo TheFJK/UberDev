@@ -283,6 +283,55 @@ if grep -qF '_uberdev_goal_pr_for_issue_jq' "$GOAL_LIB"; then
 else
   assert_eq "helper" "MISSING" "#301 both the live finder and the snapshot finder call the shared ranking helper"
 fi
+# #603 — the corroboration ledger must reach the SNAPSHOT route too. The watch
+# loop resolves every issue through this twin, not through the live finder, so a
+# fix that only taught `uberdev_goal_find_pr_for_issue` about the ledger would
+# leave production entirely unchanged while goal.test.sh's BT73g went green —
+# the two-uncompared-copies class this section already exists to prevent.
+#
+# The snapshot carries the executed reproducer: a stranger's PR about an HTTP
+# 500 error page (#901, `fix/500-error-page`) alongside the solver's own #880.
+# Highest-number-wins hands issue 500 to the stranger unless something
+# corroborates.
+SNAP603='[{"number":901,"closingIssuesReferences":[],"headRefName":"fix/500-error-page"},
+      {"number":880,"closingIssuesReferences":[],"headRefName":"feat/500-real-solver"}]'
+SNAP603_DIR="$(mktemp -d 2>/dev/null || printf '/tmp/goal-snap603-%s' "$$")"
+mkdir -p "$SNAP603_DIR"
+# The ledger is seeded through the SHIPPED recorder rather than by writing the
+# TSV by hand: a hand-written fixture would keep passing after a column reorder
+# that broke every real writer.
+UBERDEV_TMPDIR="$SNAP603_DIR" bash -c \
+  '. "$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh"; uberdev_goal_record_solver_prs snap603 "500:880" 1' \
+  >/dev/null 2>&1
+# GONE = the recorded PR (#880) has left the open set — closed by a human, or a
+# number the #515 proof pass could not verify (markUnverifiable KEEPS the number
+# on http 0/401/429/5xx) and so never zeroed. Only the solver's real, still-open
+# round-2 PR is here.
+SNAP603_GONE='[{"number":950,"closingIssuesReferences":[],"headRefName":"fix/500-round2"}]'
+_snap603_run() {   # _snap603_run <goal-id> <body>
+  UBERDEV_TMPDIR="$SNAP603_DIR" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" SNAP="$SNAP603" \
+    SNAP_GONE="$SNAP603_GONE" \
+    UBERDEV_GOAL_ID="$1" SNAP_GH_CALLS="$SNAP_GH_CALLS" PATH="$SNAP_BIN:$PATH" \
+    bash -c '. "$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh"; '"$2"
+}
+got="$(_snap603_run no-such-goal 'uberdev_goal_find_pr_for_issue_from_json 500 "$SNAP"')"
+assert_eq "$got" "901" "#603 from_json: with NO record the head-ref guess is unchanged — the namesake still wins (the row that proves the fix is evidence, not a narrower fallback)"
+got="$(_snap603_run snap603 'uberdev_goal_find_pr_for_issue_from_json 500 "$SNAP"')"
+assert_eq "$got" "880" "#603 from_json: the fleet's own record beats the same-numbered stranger branch"
+got="$(_snap603_run snap603 'uberdev_goal_find_pr_for_issue_from_json 501 "$SNAP"')"
+assert_eq "$got" "" "#603 from_json: the record is scoped to its own issue — issue 501 is still resolved by the guess (and matches nothing here)"
+# The record RANKS above the guess, it does not REPLACE it. This is the route
+# the watch loop actually resolves through, and a miss on it is terminal: with
+# UBERDEV_GOAL_SOLVERS_SETTLED=1 the settled arm fails the issue on tick 1 and
+# goal-phase3's solver_failed breaker then halts the WHOLE run. So a recorded
+# number that names nothing open must fall through to the guess — the presence
+# of evidence may never resolve to LESS than its absence would have.
+got="$(_snap603_run snap603 'uberdev_goal_find_pr_for_issue_from_json 500 "$SNAP_GONE"')"
+assert_eq "$got" "950" "#603 from_json: a record naming a PR that has left the open set degrades to the head-ref guess, never to 'no PR'"
+got_none="$(_snap603_run no-such-goal 'uberdev_goal_find_pr_for_issue_from_json 500 "$SNAP_GONE"')"
+assert_eq "$got" "$got_none" "#603 from_json: the ledger cannot manufacture a resolution miss — same snapshot, same answer with and without a record"
+rm -rf "$SNAP603_DIR"
+
 # Zero network: the shim at the front of PATH was never invoked by ANY of the
 # probes above. A regression back to `gh pr list` per resolution trips this.
 assert_eq "$([ -e "$SNAP_GH_CALLS" ] && printf yes || printf no)" "no" \

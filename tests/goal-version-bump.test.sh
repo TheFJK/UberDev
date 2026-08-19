@@ -1122,6 +1122,64 @@ fi
 assert_no_grep "$AS_ERR" 'malformed --partial-prs' \
   "V13.env-inert: and it draws no complaint either — the environment is not an entrance to this carrier"
 
+# --- V14: the `--solver-prs` corroboration carrier (#603) --------------------
+# The head-ref fallback in lib/goal-state.sh selects a PR purely on branch NAME,
+# so a stranger's `fix/500-error-page` binds to issue 500 and `| max` hands the
+# issue to it. The only party that knows which PR the fleet actually opened for
+# which issue is skills/goal-pipeline/workflow.js — which is forbidden the
+# filesystem — so the pairs ride this flag, exactly like `--partial-prs` above,
+# and the watch lane lands them in the ledger the finder reads.
+#
+# Same three properties as V13, because the same three things can go wrong: the
+# flag has its OWN parse arm (not a catch-all fall-through), the value is
+# shape-refused at the edge before it reaches a writer or a jq program, and the
+# refusal message names the flag so it is distinguishable from the catch-all.
+echo "== V14: --solver-prs carries the fleet's issue->PR record (#603) =="
+assert_grep "$GOAL_WATCH" '^ *--solver-prs=\*\) SOLVER_PRS=' \
+  "V14.flag-parsed: --solver-prs=<csv> has its own arm in the argument loop"
+assert_grep "$GOAL_WATCH" 'uberdev_goal_record_solver_prs "\$GOAL_ID" "\$SOLVER_PRS"' \
+  "V14.recorded: the resolved scalar is landed in the ledger by the watch lane"
+assert_eq "$(grep -c 'uberdev_goal_record_solver_prs "\$GOAL_ID"' "$GOAL_WATCH")" "1" \
+  "V14.one-resolution-site: exactly one recording call, so the ledger and the finder cannot be fed from two expressions"
+
+argshape '--solver-prs=500:880;rm -rf /'
+assert_eq "$AS_RC" "2" "V14.malformed: an injection-shaped --solver-prs value exits 2"
+assert_grep    "$AS_ERR" 'malformed --solver-prs' "V14.malformed: the refusal names the flag whose shape was wrong"
+assert_no_grep "$AS_ERR" 'unknown argument'       "V14.malformed: it is the SHAPE refusal, not the catch-all arm"
+
+# The pair separator is load-bearing: a bare list of digits would record issue
+# numbers as PR numbers and hand every issue the wrong PR, silently.
+argshape '--solver-prs=880'
+assert_eq "$AS_RC" "2" "V14.pairless: a bare number (no <issue>:<pr> pair) exits 2"
+assert_grep "$AS_ERR" 'malformed --solver-prs' "V14.pairless: refused by the shape guard"
+argshape '--solver-prs=,500:880'
+assert_eq "$AS_RC" "2" "V14.leading-comma: a leading separator exits 2"
+argshape '--solver-prs=500:880,'
+assert_eq "$AS_RC" "2" "V14.trailing-comma: a trailing separator exits 2"
+argshape '--solver-prs=500:880,,501:881'
+assert_eq "$AS_RC" "2" "V14.empty-member: an empty member exits 2"
+argshape '--solver-prs=500:'
+assert_eq "$AS_RC" "2" "V14.empty-pr: a pair with no PR half exits 2"
+
+# Accept half: like V13, it pins that the value was NOT refused rather than a
+# status that depends on whether a plugin root is resolvable here.
+argshape '--goal-id=g1' '--solver-prs=500:880,501:881'
+if [ "$AS_RC" != "2" ]; then
+  pass "V14.accepts: a well-formed pair list passes the parser (rc=$AS_RC, refusal=2)"
+else
+  fail "V14.accepts: the production argument shape was refused with exit 2"
+fi
+assert_no_grep "$AS_ERR" 'malformed --solver-prs' "V14.accepts: no shape complaint for a well-formed value"
+assert_no_grep "$AS_ERR" 'unknown argument'       "V14.accepts: the flag is recognised, not swallowed by the catch-all"
+
+# All three flags together — the shape the lane is actually invoked with.
+argshape '--goal-id=g1' '--partial-prs=100,901' '--solver-prs=500:880'
+if [ "$AS_RC" != "2" ]; then
+  pass "V14.all-flags: --goal-id, --partial-prs and --solver-prs parse together (rc=$AS_RC, refusal=2)"
+else
+  fail "V14.all-flags: the production argument shape was refused with exit 2"
+fi
+
 # --- the marked decision row -------------------------------------------------
 # PARTIAL_RC=1 throughout: the LEDGER says "complete" in every configuration
 # below, so nothing here can pass by reading it.

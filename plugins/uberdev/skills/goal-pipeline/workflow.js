@@ -181,6 +181,65 @@ function partialIssuesFromResults(results) {
     .map(function (r) { return r.issue; });
 }
 
+// #603 — the fleet's issue->PR record, rendered as `<issue>:<pr>` pairs.
+//
+// WHY IT IS NEEDED AT ALL. lib/goal-state.sh's PR finder falls back to matching
+// a PR's HEAD BRANCH NAME against `<type>/<issue>-`, and that arm has nothing
+// behind it: a PR about an HTTP 500 error page on `fix/500-error-page` satisfies
+// it exactly for issue 500, and `| max` then hands the issue to that PR even
+// with the solver's own lower-numbered PR open beside it. Neither `--json`
+// projection carries an author, and the claim comment records the WORKTREE
+// directory name rather than the head ref, so nothing in the shell lane could
+// corroborate the guess. These pairs are the evidence, and they exist in
+// exactly one place: the fleet's return value, here.
+//
+// DERIVED FROM `results[]`, NOT FILTERED THROUGH `prsOpened`. The two answer
+// different questions — `prsOpened` is "which PRs did this cycle open", this is
+// "which PR belongs to which issue" — and only `results[]` carries the second.
+// Riding `prsOpened` would also make a fleet return that omits it (a shape the
+// #592 ingest below deliberately tolerates) lose corroboration for every issue
+// in the cycle, and losing corroboration means falling back to the guess this
+// exists to replace.
+//
+// COLLISIONS ARE DROPPED, never resolved by picking one. Two records naming the
+// SAME PR number disagree about who owns it, and one issue named twice with
+// different numbers disagrees with itself; corroborating either from a coin
+// flip would bind an issue to a PR nobody opened for it, which is the very
+// defect. Dropping leaves those issues on the head-ref guess — the pre-#603
+// behaviour, and the only degradation direction that is safe here, because a
+// finder that answered "no PR" would fail the issue on the first watch tick.
+//
+// prNumber 0 is the fleet's no-PR sentinel (PUSHED_NO_PR, FAILED, a claim the
+// #515 proof pass DISPROVED and zeroed) and is excluded by the digit test plus
+// the positive check: `0` is digits, so the string filter alone would let it
+// through and corroborate an issue with a number no PR can have.
+function solverPairsFromResults(results) {
+  // Pass 1 — resolve each ISSUE to at most one PR. "" is the conflict marker: an
+  // issue named twice with two different numbers disagrees with itself and gets
+  // no pair at all.
+  const byIssue = {};
+  (Array.isArray(results) ? results : []).forEach(function (r) {
+    if (!r) return;
+    const issue = String(r.issue).trim();
+    const pr = String(r.prNumber).trim();
+    if (!/^[0-9]+$/.test(issue) || !/^[0-9]+$/.test(pr)) return;
+    if (Number(issue) <= 0 || Number(pr) <= 0) return;
+    byIssue[issue] = (byIssue[issue] === undefined || byIssue[issue] === pr) ? pr : "";
+  });
+  // Pass 2 — count DISTINCT issues per PR, over the RESOLVED map rather than the
+  // raw records. Counting raw occurrences would let a record repeated verbatim
+  // (same issue, same PR) read as a two-issue collision and drop a pair that is
+  // not in conflict with anything.
+  const issuesPerPr = {};
+  Object.keys(byIssue).forEach(function (i) {
+    if (byIssue[i] === "") return;
+    issuesPerPr[byIssue[i]] = (issuesPerPr[byIssue[i]] || 0) + 1;
+  });
+  return Object.keys(byIssue)
+    .filter(function (i) { return byIssue[i] !== "" && issuesPerPr[byIssue[i]] === 1; })
+    .map(function (i) { return i + ":" + byIssue[i]; });
+}
+
 // The relays return comma-joined scalars (the shell prints one compact JSON
 // line; the schema keeps every list a string so an agent cannot smuggle a
 // nested object through a typed array).
@@ -333,6 +392,17 @@ function partialPrsFlag() {
 function partialIssuesFlag() {
   return partialIssues.length ? " --partial-issues=" + partialIssues.join(",") : "";
 }
+// #603 — same OMITTED-never-empty discipline as the two above: `--solver-prs=`
+// with no value is a malformed-shape refusal (exit 2) in lib/goal-watch.sh, and
+// the driver composed the command line, so a startup refusal is a bug in the
+// caller rather than something to poll through. On a cycle with no attributable
+// pair the command line stays byte-identical to what it was before this issue.
+// Every member left this ledger having passed the digit test in
+// solverPairsFromResults, so nothing but digits, colons and commas can reach a
+// command line — and lib/goal-watch.sh re-refuses the shape at its own edge.
+function solverPrsFlag() {
+  return solverPrs.length ? " --solver-prs=" + solverPrs.join(",") : "";
+}
 
 function watchPrompt(cycleNo, tickNo) {
   // UBERDEV_GOAL_SOLVERS_SETTLED=1 is load-bearing, not decoration. The
@@ -345,7 +415,7 @@ function watchPrompt(cycleNo, tickNo) {
     + (watchBudgetS > 0 ? watchBudgetS : 480) + " seconds, which is far longer than the tool's default "
     + "timeout, and a timed-out call returns no exit status at all:\n\n"
     + "  " + envPrefix() + "UBERDEV_GOAL_SOLVERS_SETTLED=1 " + bashCmd(watchSh) + " --goal-id=" + goalId
-    + partialPrsFlag() + "\n\n"
+    + partialPrsFlag() + solverPrsFlag() + "\n\n"
     + "This is the /uberdev:goal watch pass (cycle " + cycleNo + ", tick " + tickNo + " of at most "
     + maxWatchTicks + "). It polls GitHub, drives the PR state machine and the merge barrier, and exits "
     + "with ONE of three documented codes:\n"
@@ -449,6 +519,14 @@ const auditEvents = [];
 // digit STRINGS (digitsOnly's output), deduped, in first-seen order.
 const partialIssues = [];
 const partialPrs = [];
+// #603 — the issue->PR corroboration ledger, `<issue>:<pr>` strings in
+// first-seen order. Run-lifetime for the same reason its neighbours are: the
+// pass that finally resolves a cycle-1 PR can be three cycles later, and a set
+// that reset with the cycle would leave that pass back on the head-ref guess.
+// First record for an issue wins — a later cycle re-solving the same issue is
+// not a correction of the earlier one, and overwriting would retro-attribute a
+// PR that is already registered and under review.
+const solverPrs = [];
 const nullsByPhase = {};
 let verdictRows = [];
 let cb1Tripped = false;                    // projected-agent ceiling
@@ -487,6 +565,7 @@ function finalize() {
     queueRemaining: queue.slice().map(Number),
     partialIssues: partialIssues.map(Number),
     partialPrs: partialPrs.map(Number),
+    solverPrs: solverPrs.slice(),
     fleetRuns: fleetRuns,
     agentsSpent: agentsSpent,
     cycles: cycleRecords,
@@ -776,6 +855,18 @@ async function runCycle() {
           cyclePrs.forEach(function (s) { if (partialPrs.indexOf(s) < 0) partialPrs.push(s); });
           rec.partialIssues = cycleIssues.map(Number);
           rec.partialPrs = cyclePrs.map(Number);
+          // #603 — the corroboration ingest. A SIBLING of the partial ingest,
+          // not a clause of it: the pairs must be published on a cycle whose
+          // every chain ran to completion, which is precisely the cycle the
+          // partial ledger stays empty for.
+          const cyclePairs = solverPairsFromResults(out.results);
+          cyclePairs.forEach(function (s) {
+            if (solverPrs.indexOf(s) < 0
+                && !solverPrs.some(function (k) { return k.split(":")[0] === s.split(":")[0]; })) {
+              solverPrs.push(s);
+            }
+          });
+          rec.solverPrs = cyclePairs.slice();
         }
       } catch (e) {
         rec.fleet = "threw";

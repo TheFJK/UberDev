@@ -25,9 +25,10 @@
 #
 # Those three are the statuses the LOOP produces. Two STARTUP refusals sit before
 # it, both reached before any agent exists and so before there is anything to
-# reap: 2 for an argument this script will not accept (an unrecognised flag, or a
-# `--partial-prs` value that is not digits-and-commas) and 3 for run-state that
-# cannot be rehydrated. workflow.js maps every status outside {0, 42, 1} to
+# reap: 2 for an argument this script will not accept (an unrecognised flag, a
+# `--partial-prs` value that is not digits-and-commas, or a `--solver-prs` value
+# that is not a comma-separated list of `<issue>:<pr>` pairs) and 3 for run-state
+# that cannot be rehydrated. workflow.js maps every status outside {0, 42, 1} to
 # haltReason `watch_script_error` and halts the goal, which is the intended
 # reading — the driver composed the command line, so a refusal of it is a bug in
 # the driver, not a transient the run should poll through.
@@ -35,7 +36,7 @@
 # Operator abort is INT (Ctrl-C), which still reaps and exits 130.
 #
 # CONTRACT
-#   bash lib/goal-watch.sh [--goal-id=<id>] [--partial-prs=<csv>]
+#   bash lib/goal-watch.sh [--goal-id=<id>] [--partial-prs=<csv>] [--solver-prs=<pairs>]
 #
 # Run it under bash >= 4: the verdict locator
 # (uberdev_goal_locate_review_pr_audit_by_pr, lib/goal-state.sh) iterates
@@ -79,10 +80,26 @@ GOAL_ID_CLI=""
 # expressions and disagree, which would be a run that marks its transitions
 # partial while its summary counts zero, or the reverse.
 PARTIAL_PRS=""
+# #603 — the issue->PR pairs THIS run's solver fleet reported, as
+# `<issue>:<pr>[,<issue>:<pr>…]`. Same carrier and same reasoning as
+# --partial-prs above: skills/goal-pipeline/workflow.js is the one party that
+# sees the fleet's per-issue `results[]`, RFC 0012 §2.2 constraint 6 forbids it
+# the filesystem, and lib/goal-state.sh's PR finder — which runs in this shell —
+# is the consumer. argv is the whole channel.
+#
+# WHAT IT BUYS. Without it the finder's fallback arm picks a PR for an issue on
+# BRANCH NAME alone, so a stranger's `fix/500-error-page` binds to issue 500 and
+# `| max` hands the issue to it over the solver's own PR. With it the finder
+# selects on the number the fleet actually opened.
+#
+# OMITTED, never emitted empty, and the environment is deliberately not a second
+# entrance — both for the reasons spelled out for --partial-prs above.
+SOLVER_PRS=""
 for _arg in "$@"; do
   case "$_arg" in
     --goal-id=*) GOAL_ID_CLI="${_arg#--goal-id=}" ;;
     --partial-prs=*) PARTIAL_PRS="${_arg#--partial-prs=}" ;;
+    --solver-prs=*) SOLVER_PRS="${_arg#--solver-prs=}" ;;
     *) echo "goal-watch: unknown argument '$_arg'" >&2; exit 2 ;;
   esac
 done
@@ -105,6 +122,38 @@ case "$PARTIAL_PRS" in
       "$PARTIAL_PRS" >&2
     exit 2 ;;
 esac
+# #603 — the same injection boundary for the pair list, one level deeper because
+# the members are PAIRS. The whole-scalar arm cannot express "every member is
+# <digits>:<digits>": `500:880,881` passes a character-class check and would then
+# record issue 881 with no PR at all, so each member is re-checked after the
+# split. The colon is load-bearing and its absence is refused rather than
+# tolerated — a bare number would be read as an issue with an empty PR half and
+# hand that issue the wrong answer silently, which is the failure #603 exists to
+# remove pointed the other way.
+#
+# `while IFS= read -r` over a herestring, never `for p in $SOLVER_PRS`: zsh does
+# not word-split an unquoted scalar and would run the body ONCE over the whole
+# string (a bashism this repo has shipped twice), and this file is read under
+# both shells.
+_SOLVER_PRS_BAD=0
+case "$SOLVER_PRS" in
+  "") ;;
+  *[!0-9,:]*|,*|*,,*|*,) _SOLVER_PRS_BAD=1 ;;
+  *)
+    while IFS= read -r _sp_pair; do
+      case "$_sp_pair" in
+        ""|*[!0-9:]*|:*|*:|*:*:*) _SOLVER_PRS_BAD=1 ;;
+        *:*) ;;
+        *) _SOLVER_PRS_BAD=1 ;;
+      esac
+    done <<<"$(printf '%s\n' "$SOLVER_PRS" | tr ',' '\n')"
+    ;;
+esac
+if [ "$_SOLVER_PRS_BAD" -ne 0 ]; then
+  printf "goal-watch: malformed --solver-prs value '%s' — expected a comma-separated list of <issue>:<pr> pairs\n" \
+    "$SOLVER_PRS" >&2
+  exit 2
+fi
 [ -n "$GOAL_ID_CLI" ] && export UBERDEV_GOAL_ID="$GOAL_ID_CLI"
 
 # #171 fresh-shell rehydration — re-source libs (idempotent via _UBERDEV_*_LOADED
@@ -133,6 +182,15 @@ uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase
 # fail-soft: a ledger write that fails must not stall the whole goal.
 uberdev_goal_record_partial_prs "$GOAL_ID" "$PARTIAL_PRS" \
   || printf 'goal: recording the partial-chain PR set failed — the merge gate will not flag this pass\n' >&2
+# #603 — land the pass's issue->PR corroboration beside it, and before step 2a
+# resolves a single issue: the finder reads this ledger, so a record written
+# after the resolution would corroborate nothing this pass. Fail-soft for the
+# same reason as the line above — a ledger write that fails must not stall the
+# whole goal, and the finder degrades to the head-ref guess it used before this
+# carrier existed rather than to "no PR", which under the settled-fleet arm
+# would fail the issue and halt the run.
+uberdev_goal_record_solver_prs "$GOAL_ID" "$SOLVER_PRS" \
+  || printf 'goal: recording the solver PR set failed — PR resolution falls back to the head-ref guess this pass\n' >&2
 uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # re-derive backend/env (idempotent, D8); not persisted
 
 # ---------------------------------------------------------------------------

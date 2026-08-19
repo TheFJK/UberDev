@@ -452,7 +452,9 @@ echo "== G19: lib/goal-state.sh shape =="
 # uberdev_goal_review_pr_in_flight (in-flight gate for Phase 2b + 2c) and
 # uberdev_goal_agent_stuck_on_dialog (60s activity-window detector via
 # audit-log row-count proxy); issue #329 adds the gh-failure counter reader so
-# Phase 2 can distinguish "no PR" from "PR lookup unavailable".
+# Phase 2 can distinguish "no PR" from "PR lookup unavailable"; issue #603 adds
+# the solver-PR corroboration ledger's writer and reader, which is what stops the
+# head-ref fallback binding an issue to a same-numbered stranger branch.
 for fn in uberdev_goal_state_init uberdev_goal_pr_state_transition uberdev_goal_issue_state_transition \
           uberdev_goal_read_trust_signal uberdev_goal_check_fingerprint_repeat uberdev_goal_should_automerge \
           uberdev_goal_audit uberdev_goal_locate_review_pr_audit \
@@ -466,6 +468,8 @@ for fn in uberdev_goal_state_init uberdev_goal_pr_state_transition uberdev_goal_
           uberdev_goal_register_batch_pr \
           uberdev_goal_batch_all_terminal \
           uberdev_goal_batch_unblock_wait_clear \
+          uberdev_goal_record_solver_prs \
+          uberdev_goal_solver_pr_for_issue \
           uberdev_goal_gh_failure_count; do
   assert_grep "$GOAL_LIB" "^${fn}\\(\\)" "G19.public.${fn}"
 done
@@ -501,8 +505,8 @@ assert_no_grep "$GOAL_LIB" '\bbash -c'                                   "G19.no
 assert_grep "$GOAL_CMD" '--i-know-what-im-doing'                         "G19.r12-mentioned-once"
 
 echo
-echo "== G20: version bump locked (0.50.3) =="
-assert_version_bump "$REPO_ROOT" "0.50.3"
+echo "== G20: version bump locked (0.51.4) =="
+assert_version_bump "$REPO_ROOT" "0.51.4"
 assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.30\.0'               "G20.solve-claim-no-old-version"
 
 assert_grep "$GOAL_P0" 'uberdev_dispatch_resolve_env'     "G20b.phase0-wires-resolve-env (#175 SSOT anchor)"
@@ -2754,7 +2758,7 @@ assert_eq "$(uberdev_goal_find_pr_for_issue 300)" "" "BT73d.find-pr-head-prefix-
 assert_eq "$(uberdev_goal_find_pr_for_issue 30)" "4343" "BT73d.find-pr-head-prefix-isolation-fix-30-matches"
 MOCK_PR_LIST_JSON='[]'
 
-# BT73e — the `$byclose // $byhead` ranking survives the widening: a LOWER-
+# BT73e — the `$byclose // $bycorr // $byhead` ranking survives the widening: a LOWER-
 # numbered PR that genuinely closes N still outranks a HIGHER-numbered PR that
 # merely carries a `fix/N-` head, because a re-used branch must never beat a
 # real closes-link (#290.4(b), now that far more branch names can match).
@@ -2786,6 +2790,81 @@ for _bt73f_sym in solver_failed uberdev_goal_count_failed_issues FINDING_LABEL; 
     "named" "BT73f.header-names-${_bt73f_sym}"
   assert_grep "$GOAL_P3" "$_bt73f_sym" "BT73f.${_bt73f_sym}-resolves-in-goal-phase3"
 done
+
+# BT73g — the head-ref fallback is a GUESS, and #603 is what the guess costs when
+# something else in the repository happens to be named for the same number. The
+# arm selects purely on NAME, so a PR about an HTTP 500 error page on branch
+# `fix/500-error-page` binds to issue 500 — and `| max` hands the issue to it
+# even when the real solver PR is sitting right beside it on a lower number.
+#
+# The corroboration is the fleet's OWN record of which PR it opened for which
+# issue, carried into the watch lane on argv and landed in a per-goal ledger.
+# It is a third RANK between the closes-link and the guess, never a replacement
+# for the guess: `$byclose // $bycorr // $byhead`. Both directions are pinned
+# below — the record wins whenever it resolves (ii), and the guess still answers
+# whenever it does not (iii, iii-b) — because a head-ref miss under /goal is
+# TERMINAL on the first tick (BT73f), so an arm that could resolve to nothing
+# where the guess resolved to something would convert a wrong-PR bug into a
+# whole-run halt.
+_bt73g_prev_goal_id="${UBERDEV_GOAL_ID:-}"
+MOCK_PR_LIST_JSON='[{"number":901,"closingIssuesReferences":[],"headRefName":"fix/500-error-page"},{"number":880,"closingIssuesReferences":[],"headRefName":"feat/500-real-solver"}]'
+# (i) the unchanged half — no ledger row, so the guess runs exactly as before and
+# `| max` still picks the stranger. This is the row that proves the fix is the
+# LEDGER and not a silent narrowing of the fallback.
+UBERDEV_GOAL_ID=bt73g-none
+assert_eq "$(uberdev_goal_find_pr_for_issue 500)" "901" \
+  "BT73g.no-record-guess-unchanged"
+# (ii) with the fleet's record, the authoritative PR OUTRANKS the name match —
+# and it does so from BELOW on number, so `| max` alone cannot produce 880.
+UBERDEV_GOAL_ID=bt73g
+uberdev_goal_record_solver_prs bt73g "500:880" 1
+assert_eq "$(uberdev_goal_find_pr_for_issue 500)" "880" \
+  "BT73g.record-beats-head-ref-namesake"
+# (iii) an EXPIRED record — one naming a PR that is no longer in the open list
+# — DEGRADES to the guess; it must never refuse. Evidence RANKS above the
+# guess, it does not REPLACE it. Under /goal a resolution miss is terminal on
+# the first tick (BT73f), so a ledger row that resolves to nothing would let the
+# presence of evidence manufacture a whole-run halt the guess alone would never
+# have had — strictly worse than the wrong-PR bug this issue is about. The
+# stranger binding here is the unchanged pre-#603 behaviour.
+MOCK_PR_LIST_JSON='[{"number":901,"closingIssuesReferences":[],"headRefName":"fix/500-error-page"}]'
+assert_eq "$(uberdev_goal_find_pr_for_issue 500)" "901" \
+  "BT73g.expired-record-degrades-to-the-guess"
+# (iii-b) the JOIN that makes "the ledger can never manufacture a resolution
+# miss" a comparison rather than a claim: the SAME snapshot resolved with no
+# record at all must answer identically. A `$bycorr`-replaces-`$byhead`
+# regression reds here ("" vs 901), and row (iii) above keeps the pair from
+# passing vacuously on a double-empty.
+UBERDEV_GOAL_ID=bt73g-none
+_bt73g_noledger="$(uberdev_goal_find_pr_for_issue 500)"
+UBERDEV_GOAL_ID=bt73g
+assert_eq "$(uberdev_goal_find_pr_for_issue 500)" "$_bt73g_noledger" \
+  "BT73g.ledger-never-manufactures-a-resolution-miss"
+# (iv) an explicit GitHub closes-link still outranks the ledger: that link is a
+# deliberate human/producer statement about this issue, not a name collision,
+# and #290.4(b)'s ranking must survive the corroboration.
+MOCK_PR_LIST_JSON='[{"number":12,"closingIssuesReferences":[{"number":500}],"headRefName":"chore/unrelated"},{"number":880,"closingIssuesReferences":[],"headRefName":"feat/500-real-solver"}]'
+assert_eq "$(uberdev_goal_find_pr_for_issue 500)" "12" \
+  "BT73g.closes-link-still-outranks-the-record"
+# (v) the ledger is per-ISSUE: a record for 500 must not silence the guess for a
+# different issue in the same goal.
+MOCK_PR_LIST_JSON='[{"number":777,"closingIssuesReferences":[],"headRefName":"fix/501-other"}]'
+assert_eq "$(uberdev_goal_find_pr_for_issue 501)" "777" \
+  "BT73g.record-scoped-to-its-own-issue"
+# (vi) ledger reader shape: an unrecorded issue is empty + rc 1, never a stale
+# neighbour's number.
+_bt73g_out="$(uberdev_goal_solver_pr_for_issue bt73g 999)"; _bt73g_rc=$?
+assert_eq "$_bt73g_out" "" "BT73g.reader-unknown-issue-empty"
+assert_rc "$_bt73g_rc" "1" "BT73g.reader-unknown-issue-rc-1"
+assert_eq "$(uberdev_goal_solver_pr_for_issue bt73g 500)" "880" "BT73g.reader-known-issue"
+# (vii) the recorder refuses a malformed pair rather than writing half of it —
+# the CSV crosses a command line, so a member that is not <issue>:<pr> is a
+# caller bug, and a partial row would answer a later lookup with a wrong PR.
+uberdev_goal_record_solver_prs bt73g-bad "500:abc,x:1,600:700" 1 2>/dev/null
+assert_eq "$(uberdev_goal_solver_pr_for_issue bt73g-bad 500)" "" "BT73g.recorder-skips-non-numeric-pr"
+assert_eq "$(uberdev_goal_solver_pr_for_issue bt73g-bad 600)" "700" "BT73g.recorder-keeps-the-good-pair"
+MOCK_PR_LIST_JSON='[]'
+UBERDEV_GOAL_ID="$_bt73g_prev_goal_id"
 
 # BT74 — agent_busy_for_issue: malformed claude JSON -> rc 1 (fail-safe "not busy").
 MOCK_CLAUDE_AGENTS_JSON='not valid json {{{'

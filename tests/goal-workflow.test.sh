@@ -815,6 +815,14 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   out.t2CollectFlag = promptFor(recT2, "goal-collect:c1").indexOf(" --partial-issues=11") >= 0;
   // The clean-path PR set is untouched by the partial ingest.
   out.t2PrsOpened = (resT2 && resT2.cycles.length) ? resT2.cycles[0].prsOpened : null;
+  // #603 — the SAME argv channel carries the corroboration pairs. The fleet is
+  // the only party that knows which PR it opened for which issue; without the
+  // pairs the shell finder picks a PR for an issue on branch NAME alone and a
+  // stranger's `fix/500-error-page` binds to issue 500. Read off the rendered
+  // command line, because no grep over either file can assert what the driver
+  // actually composed.
+  out.t2SolverFlag = promptFor(recT2, "goal-watch:c1:t1").indexOf(" --solver-prs=11:901,12:902") >= 0;
+  out.t2SolverLedger = resT2 ? (resT2.solverPrs || []).join("|") : null;
 
   // Run T3 — the negative control. Every relay command line stays
   // byte-identical to today's on a clean cycle: the flag is OMITTED, never
@@ -835,6 +843,10 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   out.t3Issues = resT3 ? resT3.partialIssues : null;
   out.t3Clean = promptFor(recT3, "goal-watch:c1:t1").indexOf("--partial-prs=") < 0
     && promptFor(recT3, "goal-collect:c1").indexOf("--partial-issues=") < 0;
+  // #603 — the corroboration flag is NOT conditional on partialness: a clean
+  // cycle is exactly the cycle whose PRs the finder must still attribute
+  // correctly, so it rides every command line that has pairs to carry.
+  out.t3SolverFlag = promptFor(recT3, "goal-watch:c1:t1").indexOf(" --solver-prs=11:901,12:902") >= 0;
 
   // Run T4 — three shapes at once, and the row cannot pass by rejecting
   // everything: the two records with NO `chainComplete` key are not counted
@@ -860,6 +872,13 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   out.t4Issues = resT4 ? resT4.partialIssues : null;
   out.t4Prs = resT4 ? resT4.partialPrs : null;
   out.t4CollectFlag = promptFor(recT4, "goal-collect:c1").indexOf(" --partial-issues=13,14") >= 0;
+  // #603 — the shapes that must NOT reach the ledger, all in one return: a
+  // FAILED record with no PR at all, and a PUSHED_NO_PR record whose prNumber
+  // is the 0 sentinel. Pairing issue 13 with PR 0 would corroborate every
+  // lookup for issue 13 with a number no PR can ever have, and the finder would
+  // then answer "no PR" for an issue whose solver may yet be found by the
+  // guess — the over-tightening that turns a wrong-PR bug into a run halt.
+  out.t4SolverFlag = promptFor(recT4, "goal-watch:c1:t1").indexOf(" --solver-prs=12:902,14:903") >= 0;
 
   // Run T5 — halt legibility. lib/goal-phase3.sh's partial-chain refusal reuses
   // the closed-set breaker reason `solver_failed` with `phase=partial_chain` as
@@ -1337,6 +1356,10 @@ else
   check t2Prs '[901]'                     "B98b the run ledger names its PR, taken from the fleet's own prsPartial subset rather than re-derived: two records claiming ONE number disagreeing about completeness is a collision prsOpened has already settled, and a second derivation here would answer it differently with nothing to compare against"
   check t2CycleIssues '[11]'              "B98c the cycle record carries the cycle's own partial set"
   check t2PrsOpened '[901,902]'           "B98d the ingested PR set is unchanged by the partial ingest — both PRs still merge (#554's non-closing trailer is what keeps the unfinished issue open, not a withheld merge)"
+  check t2SolverFlag true                 "B99a #603 the watch relay's COMMAND LINE carries --solver-prs=11:901,12:902 — the fleet's own issue->PR record, and the only thing that can tell the shell finder which PR belongs to issue N when a same-numbered stranger branch is open"
+  check t2SolverLedger '"11:901|12:902"'  "B99b #603 the pairs are a run-lifetime ledger, not a per-cycle scalar: a cycle-1 PR must still be attributable on the pass that finally merges it"
+  check t3SolverFlag true                 "B99c #603 ...and the flag is emitted on a CLEAN cycle too — corroboration is not conditional on partialness, and a row that only fired beside --partial-prs would leave every converging run guessing"
+  check t4SolverFlag true                 "B99d #603 a FAILED record with no PR, and a PUSHED_NO_PR record whose prNumber is the 0 sentinel, are both excluded — pairing an issue with PR 0 would corroborate it with a number no PR can have"
   check t2WatchFlag true                  "B98e the watch relay's COMMAND LINE carries --partial-prs=901 — argv is the only channel from the JS ledger to the shell merge gate, and this is the assertion no grep over either file can make"
   check t2CollectFlag true                "B98f the collect relay's command line carries --partial-issues=11, which is what makes the convergence gate refuse"
   check t3Issues '[]'                     "B98g a fleet return whose every chain finished leaves the ledger empty"

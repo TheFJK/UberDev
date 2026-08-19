@@ -1212,6 +1212,19 @@ function houseRules() {
 // partial arm mandates `UberDev-Partial: #N`, a whole-line trailer /merge reads
 // to release the `uberdev:active` claim without closing anything.
 //
+// #603 — "the line" was carrying the WHOLE line-anchored contract, and it is
+// prose to the free-text agent that writes this body. A writer that renders the
+// trailer as a bullet, wraps it in a code span, or lets a clause follow it on
+// the same line has satisfied "contain the line" in its own reading and emitted
+// something /merge's anchored harvest finds nothing in — and an unharvested body
+// is indistinguishable from a body that carried no trailer, so the
+// `uberdev:active` claim strands on a still-OPEN issue with no error anywhere.
+// The mandate below is therefore explicit about the SHAPE, not just the text.
+// /merge's consumer was relaxed in the same change to tolerate the two
+// decorations a writer reaches for anyway (a leading list marker, surrounding
+// backticks); this end of the contract still asks for the bare line, because the
+// producer is the end that can give it and belt-and-braces is the point.
+//
 // The prohibition is deliberately phrased WITHOUT rendering the closing form.
 // A sentence such as "must not contain `Closes #N`" would put those exact bytes
 // in the prompt, which makes an absence assertion over the rendered text
@@ -1223,11 +1236,17 @@ function prLinkLine(issue, complete) {
     + (complete ? "Closes #" + issue : "UberDev-Partial: #" + issue) + "` "
     + (complete
       ? "so the merge auto-closes the issue."
-      : "— the non-closing linkage trailer this fleet uses for an unfinished chain — and MUST NOT "
-        + "carry any GitHub closing keyword (close, closes, closed, fix, fixes, fixed, resolve, "
-        + "resolves, resolved, in any letter case) standing directly in front of a reference to "
-        + "issue " + issue + ", in any form. A pull request must not close an issue it did not "
-        + "finish: the tasks this chain never reached still need an open issue to come back to.");
+      : "— the non-closing linkage trailer this fleet uses for an unfinished chain. That trailer "
+        + "MUST STAND ALONE on its own line, with nothing before it and nothing after it on that "
+        + "line: no list marker or bullet, no backticks or other formatting around it, no leading "
+        + "or trailing prose, and no trailing punctuation. /merge harvests it with a line-anchored "
+        + "match, so a trailer buried in a sentence or decorated is harvested as nothing at all, "
+        + "and the issue's `uberdev:active` claim is then stranded on a still-open issue that no "
+        + "later run can pick up. The body MUST ALSO NOT carry any GitHub closing keyword (close, "
+        + "closes, closed, fix, fixes, fixed, resolve, resolves, resolved, in any letter case) "
+        + "standing directly in front of a reference to issue " + issue + ", in any form. A pull "
+        + "request must not close an issue it did not finish: the tasks this chain never reached "
+        + "still need an open issue to come back to.");
 }
 
 // The half a PR-body rule cannot cover, and the reason this is a separate
