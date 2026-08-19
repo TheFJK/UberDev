@@ -252,6 +252,21 @@ ck "an absent issue_body_file is audited"       "grep -q 'issue_body_missing' '$
 ck "stale-card warning names spec-reviewer"     "grep -q 'agents/spec-reviewer.md' '$SKILL'"
 ck "stale-card warning names spec-writer"       "grep -q 'agents/spec-writer.md' '$SKILL'"
 ck "research phase names the inputs it passes"  "grep -q 'Every lens gets the same three inputs' '$SKILL'"
+# #623 renamed the six research-* cards onto the wire keys the orchestrator was
+# already sending. This controller is the SECOND dispatcher of those same cards
+# and nothing else in the suite compares it against them, so the rename could --
+# and on its first draft did -- leave Phase 2 handing every lens a `summary_dir`
+# DIRECTORY that the card no longer accepts, while all 120 CI tests stayed green.
+# The cross-dispatcher comparator lives in orchestrator-plan-flatten.test.sh
+# (F2h); these rows are the turbox-side half, in the file that owns this prose.
+ck "phase 2 passes the summary_path wire key"   "grep -q 'summary_path' '$SKILL'"
+ck "phase 2 never passes a summary DIRECTORY"   "[ \$(grep -c 'summary_dir' '$SKILL') -eq 0 ]"
+ck "each issue x lens gets its own artifact"    "grep -q 'research/<lens>.md' '$SKILL'"
+# The stale-card warning is operative instruction, not commentary: a controller
+# told the research cards are wrong will override cards that are now right.
+ck "stale-card warning is scoped to two cards"  "grep -q 'Both cards are stale' '$SKILL'"
+ck "research cards are NOT called stale"        "[ \$(grep -c 'cards declare' '$SKILL') -eq 0 ]"
+ck "no deferral pointer to the closed #623"     "[ \$(grep -c '#623' '$SKILL') -eq 0 ]"
 
 echo
 echo "== Summary =="
