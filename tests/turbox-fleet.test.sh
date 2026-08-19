@@ -180,22 +180,23 @@ missing_subs="$(grep -oE 'bash "\$LIB" [a-z-]+' "$SKILL" | awk '{print $3}' | so
 done)"
 ck "skill invokes no unknown subcommand (found: '${missing_subs:-none}')" "[ -z '$missing_subs' ]"
 
-echo "== TX11b: every agent type the skill dispatches actually exists =="
-# Agents get renamed. A skill naming a dead agentType fails at dispatch time,
-# mid-run, after the claims are already written — so the roster is checked from
-# the bytes. Derived from the skill, not restated here, so a NEW agent added to
-# a phase is covered without editing this file.
-AGENT_DIR="$REPO_ROOT/plugins/uberdev/agents"
+echo "== TX11b: the skill still names a full agent roster =="
+# NARROWED by #628. The RESOLUTION half — does every named agentType exist in
+# agents/ — moved to tests/epipe-guard.test.sh L10, together with the
+# `turbox-fleet` special case (a name resolving to skills/<name>/SKILL.md is
+# skipped there for any skill, not just this one). The extractor below required
+# BACKTICK delimiters and so was blind to the operative
+# `subagent_type: uberdev:<agent>` spelling; L10 reads both shapes across the
+# whole shipped corpus and measured 21 of 21 dispatch sites that this extractor
+# cannot see.
+#
+# What stays is the half L10 cannot express: a FLOOR on how many agent types
+# THIS skill names. L10 answers "does every name resolve"; it cannot notice a
+# phase quietly losing its agent, because a shorter roster still resolves
+# perfectly. Derived from the skill, so a new agent needs no edit here.
 named_agents="$(grep -oE '`uberdev:[a-z0-9-]+`' "$SKILL" | tr -d '`' | sed 's/^uberdev://' | sort -u)"
 ck "the skill names at least 8 agent types (found: $(printf '%s' "$named_agents" | grep -c .))" \
    "[ \$(printf '%s' \"\$named_agents\" | grep -c .) -ge 8 ]"
-missing_agents=""
-for a in $named_agents; do
-  # turbox-fleet is the SKILL's own namespaced name, not an agent.
-  [ "$a" = "turbox-fleet" ] && continue
-  [ -r "$AGENT_DIR/$a.md" ] || missing_agents="$missing_agents $a"
-done
-ck "every named agent resolves in agents/ (missing:${missing_agents:- none})" "[ -z '$missing_agents' ]"
 
 echo "== TX12: the parallel-issue cap of 3 has ONE definition =="
 ck "lib defines TURBOX_ISSUE_CAP=3"     "grep -q '^TURBOX_ISSUE_CAP=3' '$LIB'"

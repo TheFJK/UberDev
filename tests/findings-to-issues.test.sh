@@ -936,30 +936,15 @@ assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
   'gh label create --force finding:false-positive' \
   'S21.9b — finding:false-positive is provisioned via gh label create --force'
 
-# S21.10 — GitHub 422s a label description over 100 characters, on update as
-# well as create, so an over-long string silently breaks label provisioning for
-# the whole run. Measure every --description in the file, not just the new ones.
-DESC_OVERLONG=''
-DESC_COUNT=0
-while IFS= read -r desc_str; do
-  [ -n "$desc_str" ] || continue
-  DESC_COUNT=$((DESC_COUNT + 1))
-  desc_len="$(printf '%s' "$desc_str" | tr -d '\r' | wc -m | tr -d '[:space:]')"
-  if [ "$desc_len" -gt 100 ]; then
-    DESC_OVERLONG="${DESC_OVERLONG}${DESC_OVERLONG:+; }${desc_len}c: ${desc_str}"
-  fi
-done <<<"$(sed -n 's/.*--description "\([^"]*\)".*/\1/p' "$AGENT_MD")"
-if [ "$DESC_COUNT" -lt 3 ]; then
-  echo "  FAIL  S21.10 — expected >=3 --description strings (review-pr-finding + 2 verdict labels), found $DESC_COUNT"
-  echo "        file: $AGENT_MD"
-  FAIL=$((FAIL + 1))
-elif [ -z "$DESC_OVERLONG" ]; then
-  echo "  PASS  S21.10 — all $DESC_COUNT gh label descriptions are <=100 chars"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL  S21.10 — gh label description exceeds GitHub's 100-char limit: $DESC_OVERLONG"
-  FAIL=$((FAIL + 1))
-fi
+# S21.10 (every --description in this file measured against GitHub's 100 limit)
+# was retired into tests/epipe-guard.test.sh L8 (#628). Two things changed with
+# the move. The scope: L8 measures the whole shipped corpus, so the three
+# descriptions here are still covered and so is every other one. And the UNIT:
+# this row used `wc -m`, which counts CHARACTERS and is locale-dependent, while
+# GitHub's limit is on BYTES — the repo's label prose is full of three-byte
+# em-dashes, so a 40-character description can be 120 bytes and pass here while
+# the API 422s. L8 uses `wc -c` and pins that exact discriminator in its
+# polarity row.
 
 assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
   'finding:true-positive' \

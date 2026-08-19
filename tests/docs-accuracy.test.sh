@@ -483,6 +483,54 @@ if [ -z "$STALE_ZSH_DOC" ]; then
 else
   echo "  FAIL  T1b.5 docs cite zsh fixture(s) test.yml does not run under zsh:${STALE_ZSH_DOC}"; FAIL=$((FAIL + 1))
 fi
+# T1b.6 (#628) — the FAILURE-PROPAGATION claim, derived in both directions.
+# testing.md described the shape-check jobs as joined into one command list
+# "so ... stops at the first red file". That sentence stopped being true the
+# moment the run: blocks were de-chained, and nothing in this suite noticed:
+# T1/T1b pin the job ids, the zsh glob, the shard rule and the bash-3.2
+# preconditions, but never the one sentence a reader uses to decide whether a
+# green tail of the CI log means anything. So it is derived from test.yml, not
+# asserted: read what the workflow actually does, then require the prose to
+# agree. If someone re-chains a block the row flips and demands the opposite
+# prose, so it cannot rot in either direction.
+#
+# The join needle is assembled at runtime. This file is inside the lint corpora
+# that grep tests/ for chained-shape literals, and a contiguous one here would
+# make this row trip guards it is not the subject of.
+# Both orders count: a join can trail the invocation (`bash tests/a.test.sh && \`)
+# or lead it (`... && bash tests/a.test.sh`). Reading only the trailing form is
+# how a classifier goes quietly blind to half its subject.
+T1B_JOIN='&'; T1B_JOIN="${T1B_JOIN}&"
+T1B_INVOKE='tests/[A-Za-z0-9._-]+\.test\.(sh|py)'
+T1B_CHAINED_N="$(grep -cE "${T1B_INVOKE}.*${T1B_JOIN}|${T1B_JOIN}.*${T1B_INVOKE}" "$TEST_YML" 2>/dev/null || true)"
+[ -n "$T1B_CHAINED_N" ] || T1B_CHAINED_N=0
+# Does the prose describe the suite as chained? Both tokens on one line.
+T1B_DOC_CHAIN="$(grep -nE "${T1B_JOIN}.{0,60}chain|chain.{0,60}${T1B_JOIN}" "$TESTING_MD" 2>/dev/null || true)"
+# Does the prose describe the accumulating harness the workflow now carries?
+T1B_DOC_ACCUM=no
+grep -qE 'run_one|accumulat' "$TESTING_MD" 2>/dev/null && T1B_DOC_ACCUM=yes
+if [ "$T1B_CHAINED_N" -eq 0 ] 2>/dev/null; then
+  if [ -z "$T1B_DOC_CHAIN" ] && [ "$T1B_DOC_ACCUM" = yes ]; then
+    echo "  PASS  T1b.6 test.yml chains no test invocation, and testing.md describes the accumulating harness"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T1b.6 test.yml chains NO test invocation, but testing.md still describes a chained suite"
+    [ -z "$T1B_DOC_CHAIN" ] || printf '        %s\n' "$T1B_DOC_CHAIN" | cut -c1-160
+    [ "$T1B_DOC_ACCUM" = yes ] || echo "        and it never names the accumulating harness (run_one / accumulate)"
+    echo "        file: $TESTING_MD — a reader concludes a red file hides the ones after it (#628)"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  # The workflow really is chained again; then the prose must say so, or it
+  # under-warns in the other direction.
+  if [ -n "$T1B_DOC_CHAIN" ]; then
+    echo "  PASS  T1b.6 test.yml chains $T1B_CHAINED_N invocation line(s) and testing.md documents the chaining"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T1b.6 test.yml chains $T1B_CHAINED_N test invocation line(s) that testing.md does not document"
+    FAIL=$((FAIL + 1))
+  fi
+fi
 
 echo
 echo "== CONTRIBUTING.md: no dead link, no false claim, test.yml is SSOT =="

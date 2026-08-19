@@ -149,13 +149,11 @@ ck "SKILL.md handles --handoff flag" "grep -q '\\-\\-handoff' '$SKILL'"
 ck "SKILL.md hands off to brainstorm via Skill(uberdev:brainstorm)" \
   "grep -q 'Skill(uberdev:brainstorm)' '$SKILL'"
 
-echo "== U8: no bashisms in SKILL.md (type -t / BASH_REMATCH) =="
-# Bashisms run through /bin/zsh in the Bash tool — silent runtime failures.
-# Mirrors the global rule from MEMORY: bit /uberscan CB7 and /finish-branch
-# Option-2 PR-extraction. Shape-only guard so a copy-pasted snippet from
-# another shell trips CI immediately.
-ck "SKILL.md contains no 'type -t' bashism" "! grep -nE 'type -t' '$SKILL'"
-ck "SKILL.md contains no 'BASH_REMATCH' bashism" "! grep -nE 'BASH_REMATCH' '$SKILL'"
+# U8 (the 'type -t' / BASH_REMATCH ban on this SKILL.md) was retired into
+# tests/epipe-guard.test.sh L7 (#628), which runs the same ban over every shipped
+# shell and markdown source — this SKILL.md included — carries the dual-shell
+# ${match[N]:-${BASH_REMATCH[N]}} carve-out, and proves both polarities on
+# seeded fixtures every run.
 
 echo "== U9: scope-gate REFUSE halt present (verdict-first safety lens) =="
 # The schema lens runs ALONE; its REFUSE verdict records a SCOPE_REFUSE halt and

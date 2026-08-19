@@ -43,6 +43,11 @@
 #         executed-row floor (see tests/ubersimplify-aggregate.test.sh) is the
 #         mechanism for that, and is required of any new file gating on an
 #         optional dependency.
+#   W12 — no job joins its test list into ONE `&&` command list, so the first
+#         non-zero exit can no longer skip every invocation after it (#628).
+#         Includes an EXECUTION proof: the harness the run: blocks actually
+#         carry is extracted from the workflow and run against a failing
+#         fixture, and must still reach the fixtures behind it.
 #   W11 — the macOS supervision job's block is comment-stripped before any
 #         wiring grep, so the required-subset floor and W7 are satisfied by the
 #         FACT that the job runs a fixture and never by a comment CLAIMING it
@@ -311,8 +316,15 @@ fi
 # and it also proves the strip does not eat genuine wiring.
 w11_probe='dispatch-wezterm.test.sh'
 w11_fx_dir="$(mktemp -d)"
+# The mutation targets any NON-COMMENT line that names the probe, rather than a
+# line that begins with `bash `. #628 de-chained the run: blocks, so the live
+# spelling is now `run_one bash tests/<name>` and a shape-anchored mutation
+# rewrote nothing — leaving the real wiring in the "forged" copy and reporting a
+# forgery that had not happened. Keying on "names the fixture and is not already
+# a comment" is what the forgery actually is, and it survives the next
+# re-spelling of the invocation.
 awk -v claim="bash tests/$w11_probe" '
-  index($0, claim) && $0 ~ /^[[:space:]]*bash / { print "        # dropped for speed: " claim; next }
+  index($0, claim) && $0 !~ /^[[:space:]]*#/ { print "        # dropped for speed: " claim; next }
   { print }
 ' "$WORKFLOW" > "$w11_fx_dir/test.yml"
 w11_forged_block="$(macos_supervision_block_of "$w11_fx_dir/test.yml")"
@@ -580,6 +592,234 @@ if [ "$w10_fx_hits" = "positive.test.sh:2" ]; then
 else
   echo "  FAIL  W10.2 the bail-out predicate is not discriminating:"
   echo "         expected exactly 'positive.test.sh:2', got: ${w10_fx_hits:-<nothing>}"
+  FAIL=$((FAIL+1))
+fi
+
+# ---------------------------------------------------------------------------
+# W12 — no job may join its test list into ONE `&&` command list (#628).
+#
+# Every job used to write its whole list as `bash tests/a.test.sh && \` … so the
+# block was a single shell command list. The first non-zero exit short-circuits
+# every invocation after it, which makes the job structurally incapable of the
+# claim its name implies: it can report "nothing failed before it stopped", and
+# it can never report "the suite is green". At the time this row was written the
+# three blocks held 197 chained invocations — 125 on ubuntu, 8 on macOS, 67 on
+# windows — so one early red hid up to 124 files.
+#
+# #551 is the recorded instance rather than a hypothetical: supervision-smoke
+# ran 630 of tests/child-dispatch.test.sh's 1338 lines, exited 0 through a bash
+# 3.2 status laundering, and the `&&` chain happily continued past it. The exit
+# floor (tests/exit-floor.test.sh) closed the laundering; this row closes the
+# hiding.
+#
+# Rows:
+#   W12.0  denominator — all three run: blocks were located and each carries a
+#          floor of invocation lines, so W12.1 is not judging an empty string
+#   W12.1  the verdict — no invocation line in any block carries `&&`
+#   W12.2  polarity, BOTH directions, through the SAME classifier W12.1 uses:
+#          a re-chained copy of the LIVE ubuntu block must be flagged on every
+#          invocation, and the same text with the join removed on none
+#   W12.3  execution proof — the harness the blocks actually carry is extracted
+#          from the workflow, run against three synthetic fixtures whose middle
+#          one fails, and must run ALL THREE and still exit non-zero
+#   W12.4  the three harnesses are byte-identical (one contract, three copies —
+#          the #370 drift class)
+# ---------------------------------------------------------------------------
+
+# run_block_of <workflow> <job-key> -> that job's `run: |` body on stdout,
+# de-indented by the ten spaces the YAML block scalar carries.
+run_block_of() {
+  awk -v JOB="$2" '
+    $0 ~ ("^  " JOB ":[[:space:]]*$") { in_job = 1; next }
+    in_job && /^  [[:alnum:]_-]+:[[:space:]]*$/ { exit }
+    in_job && /^[[:space:]]+run:[[:space:]]*[|][[:space:]]*$/ { in_run = 1; next }
+    in_run {
+      if ($0 ~ /^[[:space:]]*$/) { print ""; next }
+      if ($0 !~ /^          /) { in_run = 0; next }
+      sub(/^          /, "")
+      print
+    }
+  ' "$1"
+}
+
+# ONE classifier, four consumers. W12.0 counts with it, W12.1 judges with it,
+# W12.2 proves both of its polarities with it, and W12.3/W12.4 carve the harness
+# out with its inverse. A second transcription of "what counts as an invocation"
+# would be the uncompared-copy defect W12.4 itself exists to refuse, one level up.
+#
+# Tags, one per line of the block:
+#   C  an invocation line that IS joined into a command list  (the defect)
+#   I  an invocation line that is not                          (the fixed shape)
+#   H  everything else — the failure-accumulating harness itself
+#
+# A full-line comment is never an invocation however it is worded, so the
+# `run: |` blocks may describe the retired `&& \` shape in prose without the
+# description satisfying the predicate. A TRAILING comment is deliberately not
+# stripped: a chained line does not stop being chained because someone annotated
+# it, and guessing where a `#` stops being data is worse than the rule.
+W12_INVOCATION_RE='tests/[A-Za-z0-9._-]+\.test\.(sh|py)'
+# The join needle is assembled, never written contiguously beside an invocation
+# literal: these bytes are read by tests/epipe-guard.test.sh L0 and by
+# tests/test-harness-source-guards.test.sh, and a contiguous copy is a self-trip
+# waiting for either corpus to widen. Same discipline as GUARD_MARK above.
+W12_JOIN='&'; W12_JOIN="${W12_JOIN}&"
+W12_CLASSIFY_AWK='
+  {
+    tag = "H"
+    if ($0 !~ /^[[:space:]]*#/ && $0 ~ RE) { tag = (index($0, JOIN) > 0) ? "C" : "I" }
+    printf "%s\t%d\t%s\n", tag, FNR, $0
+  }
+'
+w12_classify() { awk -v RE="$W12_INVOCATION_RE" -v JOIN="$W12_JOIN" "$W12_CLASSIFY_AWK"; }
+
+# job-key|floor. Floors carry headroom below the live counts (125/8/67 at the
+# time of writing) — they exist to catch an extractor that COLLAPSED, not to pin
+# the inventory.
+W12_JOB_SPECS='shape-checks|100
+supervision-smoke-macos|6
+shape-checks-windows|50'
+
+w12_blocks_ok=1
+w12_denom_detail=''
+w12_hits=''
+while IFS= read -r w12_spec; do
+  [ -n "$w12_spec" ] || continue
+  w12_job=${w12_spec%%|*}
+  w12_floor=${w12_spec#*|}
+  w12_tagged="$(run_block_of "$WORKFLOW" "$w12_job" | w12_classify)"
+  w12_n="$(grep -cE '^[CI]	' <<<"$w12_tagged")"
+  w12_denom_detail="${w12_denom_detail}${w12_denom_detail:+, }$w12_job=$w12_n"
+  if [ "${w12_n:-0}" -lt "$w12_floor" ]; then
+    w12_blocks_ok=0
+  fi
+  w12_job_hits="$(sed -n "s/^C	/$w12_job:/p" <<<"$w12_tagged")"
+  if [ -n "$w12_job_hits" ]; then
+    w12_hits="$w12_hits$w12_job_hits
+"
+  fi
+done <<EOF
+$W12_JOB_SPECS
+EOF
+
+if [ "$w12_blocks_ok" -eq 1 ]; then
+  echo "  PASS  W12.0 all three run: blocks located with their invocation floors ($w12_denom_detail)"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  W12.0 a run: block is missing or below its invocation floor ($w12_denom_detail)"
+  echo "         run_block_of could not find 'run: |' under one of the three job keys,"
+  echo "         so W12.1 below would be judging an empty string."
+  FAIL=$((FAIL+1))
+fi
+
+if [ -z "$w12_hits" ]; then
+  echo "  PASS  W12.1 no test invocation in any job is joined into a command list"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  W12.1 test invocations are chained — one red file hides every file after it:"
+  sed 's/^/          /' <<<"$w12_hits"
+  echo "         Each job's run: block must call every fixture, accumulate failures, and"
+  echo "         exit non-zero at the end naming the ones that failed (#628)."
+  FAIL=$((FAIL+1))
+fi
+
+# W12.2 — polarity. W12.1's population is zero by design, so on its own it cannot
+# tell a de-chained workflow from a classifier that stopped matching. Both arms
+# run the SAME w12_classify the verdict uses. The positive arm re-chains the LIVE
+# ubuntu block, so the fixture is real bytes rather than a hand-written imitation
+# that could drift from the shape actually shipped; the negative arm strips the
+# join back off that very same text.
+w12_real="$(run_block_of "$WORKFLOW" shape-checks)"
+w12_real_n="$(grep -cE '^[CI]	' <<<"$(w12_classify <<<"$w12_real")")"
+w12_rechained="$(awk -v RE="$W12_INVOCATION_RE" -v JOIN="$W12_JOIN" '
+  $0 !~ /^[[:space:]]*#/ && $0 ~ RE { printf "%s %s \\\n", $0, JOIN; next }
+  { print }
+' <<<"$w12_real")"
+w12_unchained="$(awk -v JOIN="$W12_JOIN" '
+  { gsub(JOIN, ""); sub(/[[:space:]]+\\$/, ""); print }
+' <<<"$w12_rechained")"
+w12_pos_n="$(grep -cE '^C	' <<<"$(w12_classify <<<"$w12_rechained")")"
+w12_neg_n="$(grep -cE '^C	' <<<"$(w12_classify <<<"$w12_unchained")")"
+if [ "${w12_real_n:-0}" -gt 0 ] && [ "${w12_pos_n:-0}" -eq "${w12_real_n:-0}" ] && [ "${w12_neg_n:-1}" -eq 0 ]; then
+  echo "  PASS  W12.2 the classifier flags all $w12_pos_n re-chained invocations and none of the de-chained ones"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  W12.2 the chain classifier is not discriminating:"
+  echo "         invocations=$w12_real_n  flagged-when-chained=$w12_pos_n  flagged-when-not=$w12_neg_n"
+  echo "         W12.1 above is only as strong as this row."
+  FAIL=$((FAIL+1))
+fi
+
+# W12.3 — the execution proof the whole issue turns on. A grep can only say the
+# `&&` is gone; running the harness is the only thing that can say a red file no
+# longer hides the ones after it. The harness is carved out of the LIVE ubuntu
+# block by the inverse of the same classifier, three synthetic fixtures are
+# spliced in where the real ones were, and the middle one fails.
+W12_MARK='@@W12-INVOCATIONS@@'
+w12_fx="$(mktemp -d)"
+w12_err=''
+if [ ! -d "$w12_fx" ]; then
+  w12_err='mktemp -d failed; the execution proof could not run'
+else
+  printf '#!/usr/bin/env bash\necho w12-ran-a\nexit 0\n' > "$w12_fx/a.sh"
+  printf '#!/usr/bin/env bash\necho w12-ran-b\nexit 3\n' > "$w12_fx/b.sh"
+  printf '#!/usr/bin/env bash\necho w12-ran-c\nexit 0\n' > "$w12_fx/c.sh"
+  w12_classify <<<"$w12_real" \
+    | awk -v MARK="$W12_MARK" -v D="$w12_fx" -F'\t' '
+        $1 == "H" { sub(/^H\t[0-9]+\t/, ""); print; next }
+        !ins {
+          printf "run_one bash \"%s/a.sh\"\n", D
+          printf "run_one bash \"%s/b.sh\"\n", D
+          printf "run_one bash \"%s/c.sh\"\n", D
+          ins = 1
+        }
+      ' > "$w12_fx/runner.sh"
+  # `bash -e`, because that is the shell GitHub Actions hands a run: block. A
+  # harness that only accumulates correctly WITHOUT errexit would pass here and
+  # abort on the first failing fixture in CI — the exact difference this row is
+  # for.
+  w12_out="$(bash -e "$w12_fx/runner.sh" 2>&1)" && w12_rc=0 || w12_rc=$?
+  w12_saw=''
+  case "$w12_out" in *w12-ran-a*) ;; *) w12_saw="$w12_saw a" ;; esac
+  case "$w12_out" in *w12-ran-b*) ;; *) w12_saw="$w12_saw b" ;; esac
+  case "$w12_out" in *w12-ran-c*) ;; *) w12_saw="$w12_saw c" ;; esac
+  if [ -n "$w12_saw" ]; then
+    w12_err="the harness skipped fixture(s):$w12_saw — a failing file still hides the ones after it"
+  elif [ "${w12_rc:-0}" -eq 0 ]; then
+    w12_err="the harness ran every fixture but exited 0 with one of them at rc=3 — a red suite reports green"
+  fi
+  rm -rf "$w12_fx"
+fi
+if [ -z "$w12_err" ]; then
+  echo "  PASS  W12.3 the shipped harness runs every fixture past a failing one and still exits non-zero"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  W12.3 $w12_err"
+  FAIL=$((FAIL+1))
+fi
+
+# W12.4 — one contract, three copies. The harness is duplicated per job because
+# each run: block is its own shell, and until now nothing compared them: exactly
+# the register #370 opened. Comparing each block MINUS its invocation lines is
+# that comparison, and it costs one row.
+w12_harness_of() {  # $1 = job key
+  run_block_of "$WORKFLOW" "$1" | w12_classify \
+    | sed -n 's/^H	[0-9]*	//p'
+}
+w12_h_linux="$(w12_harness_of shape-checks)"
+w12_h_macos="$(w12_harness_of supervision-smoke-macos)"
+w12_h_windows="$(w12_harness_of shape-checks-windows)"
+if [ -n "$w12_h_linux" ] && [ "$w12_h_linux" = "$w12_h_macos" ] && [ "$w12_h_linux" = "$w12_h_windows" ]; then
+  echo "  PASS  W12.4 the three per-job failure-accumulating harnesses are byte-identical"
+  PASS=$((PASS+1))
+else
+  if [ -z "$w12_h_linux" ]; then w12_d_empty=yes; else w12_d_empty=no; fi
+  if [ "$w12_h_linux" = "$w12_h_macos" ]; then w12_d_macos=no; else w12_d_macos=yes; fi
+  if [ "$w12_h_linux" = "$w12_h_windows" ]; then w12_d_win=no; else w12_d_win=yes; fi
+  echo "  FAIL  W12.4 the three per-job harnesses have drifted, or the linux one is empty:"
+  echo "         linux harness empty:  $w12_d_empty"
+  echo "         linux/macos differ:   $w12_d_macos"
+  echo "         linux/windows differ: $w12_d_win"
+  echo "         Keep one spelling of run_one + the failure tail in all three run: blocks."
   FAIL=$((FAIL+1))
 fi
 
