@@ -4,6 +4,80 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.50.2] — 2026-08-19
+
+### Fixed - a Phase-3 halt that wrote no breaker row published an older cycle's reason
+
+`lib/goal-phase3.sh` re-derives the dispatch environment at the end of its
+`rehydrate` region. That call was a bare `uberdev_dispatch_resolve_env … ||
+exit 1`: the pass stopped with **nothing appended to the run's audit jsonl**.
+
+`skills/goal-pipeline/workflow.js`'s collect relay publishes the
+`.payload.reason` of the LAST `goal_circuit_breaker` row in that file, so it
+handed the driver whatever reason some earlier phase -- or, on a `--resume`, an
+earlier **cycle** -- had already written. `lib/goal-phase0.sh` deliberately does
+not truncate the jsonl on a resume, so the stale row is routinely present.
+Before #592 fixed the relay's payload read this failed *blank*; afterwards it
+failed with a specific, plausible and wrong cause, which is worse.
+
+- `lib/goal-phase3.sh` now takes the full halt shape on that path -- audit row,
+  reaper, `print_summary`, `exit 1` -- under a new circuit-breaker reason,
+  `backend_resolve_failed`, with payload
+  `{reason, step: "phase3_rehydrate", backend, exit_code}`. The rc is captured
+  from a bare call rather than from inside `if ! …; then`, where `$?` is the
+  negated status and always 0. `backend` is shape-gated to lowercase letters
+  before it reaches the hand-assembled JSON payload -- deliberately a shape gate
+  and not a copy of `lib/dispatch.sh`'s backend enum, which would plant an
+  unmarked mirror of a contract this file does not own.
+- The file's `EXIT CONTRACT` header now states the invariant the bug broke:
+  **every `exit 1` writes the breaker row that explains it.**
+- `GOAL_CIRCUIT_BREAKER_REASONS` goes 9 -> 10. A tenth member rather than a
+  `phase` subfield on an existing reason: both subfield reuses in the tree
+  (`solver_failed` + `phase=partial_chain`, `stuck_loop` + `phase=blocks_cycle`)
+  discriminate two shapes of the *same* failure, and a host shipping no
+  `timeout(1)` is neither a solver that fell short nor a loop that stalled.
+  The set is declared closed, so the widening carries a real RFC amendment:
+  **RFC 0005 §9 D624a**. Every count moved with it -- the enum scalar and prose
+  in `skills/goal-pipeline/SKILL.md`, the `CIRCUIT_BREAKER_HALT` rehydration
+  allowlist in `lib/goal-state.sh` (which keeps its one *declared* divergence,
+  `-solver_failed`, rather than growing a second), the breaker-family
+  arithmetic in `tests/contract_markers.py`, the count in `commands/goal.md`
+  (count only; that file is marker-policed against re-listing the enum), the
+  table row and prose in `docs/rfc/0016-contract-markers.md`, and the
+  "closed at 9 members" claim in RFC 0005 D592a.
+
+Reachability is narrow and stated as such: `uberdev_dispatch_resolve_env` has
+exactly one non-zero return (the `TIMEOUT_BIN` probe) and returns 0 early for
+`backend=workflow`, which RFC 0015 made `/goal`'s default -- so the path needs
+`--backend=background|wezterm` on a host with neither `/usr/bin/timeout` nor
+`timeout` nor `gtimeout`. A mis-attributed halt reason costs an operator the
+whole diagnosis, and the correction is one audit row.
+
+### Fixed - a comment in the goal driver misdescribed where that exit lives
+
+`skills/goal-pipeline/workflow.js` placed the failing call "above
+`lib/goal-phase3.sh`'s rehydrate region". It is the **last line inside** it --
+after `goal-state.sh` is sourced and after `uberdev_goal_read_run_state` has
+exported the two variables the audit sink reads. The wrong reading implied a
+startup rework; the fix was one emit. The comment now records the correction,
+and keeps the one residual that really is still open: that exit also precedes
+the `trap … EXIT` which prints the `{"phase":"collect",…}` decision line the
+relay is told to copy.
+
+### Added - `tests/goal.test.sh` G-624
+
+Executed, not grepped, against a **fake plugin root** (the real
+`config-read.sh` + `goal-state.sh` beside a one-line `lib/dispatch.sh` that
+refuses) -- the real resolver cannot be made to fail by emptying `PATH`, because
+its first probe is the absolute `[ -x /usr/bin/timeout ]` that ubuntu CI
+satisfies. The run-state fixture is complete so `read_run_state` succeeds, and
+the jsonl is **pre-seeded with an unrelated older breaker row**: asserting the
+reported reason is merely non-empty passes on the broken build, which is the
+vacuity the issue warns about. A negative control swaps in a resolver that
+succeeds plus a refusing fake `gh`, so the pass reaches the *other* Phase-3
+halt and proves the new row is written by the refusal rather than by entering
+the region.
+
 ## [0.50.1] — 2026-08-19
 
 ### Fixed - the six research-* agent cards declared input keys the dispatcher never sends

@@ -372,13 +372,24 @@ function watchPrompt(cycleNo, tickNo) {
 // `rec.reason || col.decision` fallback published the degraded literal "halt"
 // as the reason of every Phase-3 breaker.
 //
-// RESIDUAL, filed as #624 rather than left in prose: Phase 3 can exit 1
-// WITHOUT writing a breaker row (`uberdev_dispatch_resolve_env … || exit 1`,
-// above lib/goal-phase3.sh's rehydrate region), and the tail then finds the
-// newest row the RUN wrote — possibly an earlier cycle's. Neither fix belongs
-// here: emitting a row on that path is a change to that script's startup, and
-// bounding the read by identity needs a clock the runtime denies this script
-// (DR-7) on payloads that are not uniformly keyed by cycle.
+// The residual this comment used to describe — a Phase-3 exit 1 that wrote no
+// breaker row at all, leaving the tail to find the newest row the RUN wrote,
+// possibly an earlier CYCLE's — is CLOSED by #624, and the description of it
+// was wrong in a way worth recording. The `uberdev_dispatch_resolve_env … ||
+// exit 1` it named is not "above lib/goal-phase3.sh's rehydrate region": it is
+// the LAST line INSIDE that region, after the lib is sourced and after
+// uberdev_goal_read_run_state has exported the two variables the audit sink
+// reads. The full halt shape was available there the whole time, so the fix was
+// one emit in that script (reason `backend_resolve_failed`, RFC 0005 D624a),
+// not the startup rework the wrong reading implied.
+//
+// What is NOT closed, and is a different defect from the one #624 names: that
+// exit also precedes the `trap … EXIT` that prints the
+// {"phase":"collect",…,"decision":…} line this relay is told to copy VERBATIM,
+// so on that one path the relay has a status and an audit row but no decision
+// line. Bounding the tail read by identity remains out of reach here for the
+// original reason — it needs a clock the runtime denies this script (DR-7) on
+// payloads that are not uniformly keyed by cycle.
 function collectPrompt(cycleNo) {
   return "You are a mechanical relay. Run EXACTLY this command via Bash and report what it printed:\n\n"
     + "  " + envPrefix() + bashCmd(phase3Sh) + " --goal-id=" + goalId
