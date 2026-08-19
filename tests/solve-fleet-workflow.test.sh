@@ -899,11 +899,11 @@ fi
 # This is structural because no behavioural row can reach it: every fixture in
 # this file injects escalatedTier into a CANNED return, so the whole ratchet
 # stays green against a prompt that never mentions the field — which is exactly
-# what shipped. `deliverPrompt` is the design-tier (medium/large) rung, and it
+# what shipped. `deliverPrompt` is the design-tier (`medium`) rung, and it
 # asked for neither field while applyEscalation() ran on its return and the
 # comment beside that call said "the delivery rung speaks for the whole chain".
-# The result was a ratchet that worked on trivial/small and was inert on the two
-# tiers where a mis-triage costs the most, reported as `tierEscalations: 0` —
+# The result was a ratchet that worked on trivial/small and was inert on the
+# rung where a mis-triage costs the most, reported as `tierEscalations: 0` —
 # indistinguishable from "nobody found one".
 SOLVE_PROMPT_FN="$(sed -n '/^function solvePrompt(/,/^}/p' "$WORKFLOW")"
 DELIVER_PROMPT_FN="$(sed -n '/^function deliverPrompt(/,/^}/p' "$WORKFLOW")"
@@ -3358,7 +3358,7 @@ function probedNums(record) {
   // W3 — an unknown tier is refused WITHOUT losing the delivery. This is the
   // whole reason the wire carries no enum: the PR still has to reach /goal.
   const recTE3 = await run(buildArgs(), { agentReturns: escReturns({
-    escalatedTier: "epic", escalationReason: "bigger than large",
+    escalatedTier: "epic", escalationReason: "bigger than the top rung",
   }) });
   const resTE3 = resultOf(recTE3);
   const te3Row = escRow(resTE3, "tier_escalation_rejected");
@@ -3370,13 +3370,16 @@ function probedNums(record) {
 
   // W4 — an UNEXPLAINED escalation is not a record. "Recorded with a reason" is
   // the ask; a bare tier bump tells the next triage nothing it can act on.
+  // The attempted tier has to be a REAL upgrade over the dispatched `small`, or
+  // the unknown-tier / not-an-upgrade arms above answer first and this row stops
+  // testing the reason at all. `medium` is the ceiling since #619.
   const recTE4 = await run(buildArgs(), { agentReturns: escReturns({
-    escalatedTier: "large", escalationReason: "   ",
+    escalatedTier: "medium", escalationReason: "   ",
   }) });
   const resTE4 = resultOf(recTE4);
   const te4Row = escRow(resTE4, "tier_escalation_rejected");
   out.escNoReasonRejected = !!(te4Row && te4Row.rejection === "no-reason"
-    && te4Row.attempted === "large");
+    && te4Row.attempted === "medium");
   out.escNoReasonCount = resTE4 ? resTE4.tierEscalations : null;
 
   // W5 — THE CB1 INVARIANT, behavioural. The escalated run and the byte-identical

@@ -4,6 +4,127 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.50.0] — 2026-08-19
+
+### Changed - the `/solve` tier ladder is three rungs; `large` collapsed into `medium`
+
+Four tier names resolved to exactly two behaviours. Nothing downstream ever told
+`medium` from `large`: `lib/solve-launcher.sh` branches `trivial)` / `small)` /
+catch-all with no `large)` arm, and `skills/solve-fleet/workflow.js` gave both
+names the same design phases. The split still cost eight triage rules
+(`large:three-files`, `large:multi-component-high-risk`,
+`large:cross-cutting-refactor` and five `large-label:*`), a declared vocabulary,
+a closed `allowed_rule` alternation in `lib/agent-dispatch.sh`, a `lead_routes`
+policy row, a fixture and a CI token floor — all kept correct to produce a value
+no consumer read.
+
+**`medium` is now the ceiling.** `TIERS` is `("trivial", "small", "medium")`,
+and `TRIAGE_RULE_TOKENS` went from 26 declared tokens to 20.
+
+**Collapsing a rung moves an issue at most one rung**, and the eight rules split
+into two halves that earn that differently:
+
+- **Two were deleted**, because the arms that remain already subsume them.
+  `large:three-files` fired on `len(files) >= 3`, which fails `small`'s `<= 2`
+  and `trivial`'s `<= 1`; `large:multi-component-high-risk` needed a risk signal,
+  which fails both arms' `not risks`. Either way the issue reaches the fallback
+  rung with no rule required.
+- **Six were re-targeted, not deleted** — the five design labels (`epic`,
+  `needs-discussion`, `architectural`, `architecture`, `infrastructure`) now emit
+  `medium-label:*`, and `refactor` plus breadth emits
+  `medium:cross-cutting-refactor`. Nothing else in the classifier expresses the
+  floor they establish: a labelled issue that also carries `bug` or a
+  reproduction satisfies the `small` arm on its own, so deleting them outright
+  would drop it **two** rungs — and `needs-discussion` on a short `docs` body
+  three, all the way to `trivial`. `lib/solve_triage.py` keeps them as an
+  explicit design-floor check that pre-empts the two lighter arms.
+
+The whole change is pinned as a property rather than a sample: over 279,040
+generated snapshots (label sets x bodies x titles x floor/ceiling/override
+combinations), the new classifier's tier equals the old four-rung one's under
+the map `large -> medium` for every input, and differs for none.
+
+Measured over the 44 open issues: 17 moved `large` -> `medium`, 16 stayed
+`medium`, 11 stayed `small`, and nothing moved below `medium`. That sample
+cannot discriminate a correct collapse from a downgrade, and saying so is the
+point: **this backlog carries none of the six design labels**, so every issue in
+it reaches `medium` through the fallback arm either way. The property sweep is
+what covers the labelled inputs a consumer repository can produce — see
+`gh issue view --json labels` in `lib/solve-launcher.sh`, which reads whatever
+label set the CONSUMER repo defines, not this one's.
+
+Also in this change:
+
+- **The escalation ceiling moved with the ladder, and the retired label still
+  lifts.** `TIER_ORDER` in `skills/solve-fleet/workflow.js` is three rungs, so a
+  `small`-dispatched solver still escalates to `medium` and a `medium`-dispatched
+  one is at the ceiling. The ratchet writes a **durable** `uberdev:tier-<to>`
+  label onto a live issue, so `uberdev:tier-large` is **aliased onto `medium`**
+  rather than dropped as an unknown tier: any issue a pre-#619 solver escalated
+  carries that name and nothing else, and dropping it would silently discard the
+  recorded mis-triage and re-dispatch the issue at whatever its body computes —
+  a downgrade, which this channel is built not to express.
+- **A latent `/turbo` banner bug self-healed.** The TURBO MODE banner fires only
+  on `== "medium"`, so an all-`large` batch used to run the full orchestrator
+  pipeline and print no banner at all. With `large` gone the scan cannot miss a
+  design-tier batch.
+- **The pre-merge `pr-test-analyzer` gate was re-pointed, not dropped.**
+  `subagent-driven-dev` Step 4.5 tested `tier == "large"`; it now tests
+  `tier == "medium"`. Left alone it would have been a step that silently never
+  runs — the exact failure mode #92 fixed. `plan-reviewer`'s tier-rigor rows
+  merged onto the stricter (former `large`) semantics for the same reason.
+- **`policy/model-routing-v1.json` lost its `large` `lead_routes` row** together
+  with `lib/model_routing.py`'s `expected_tiers` set, in one commit: a mismatch
+  between them raises `invalid_policy` and fails `load_policy` outright.
+  **BREAKING for custom routing policies.** A policy supplied through
+  `UBERDEV_ROUTING_POLICY_FILE` that was valid at 0.49.1 carries four
+  `lead_routes` rows and now raises `invalid_policy` ("lead route tiers must be
+  trivial, small, and medium"), which `lib/config-read.sh`'s `policy_data()`
+  surfaces as `invalid canonical policy` — failing the whole routing config read,
+  not one classification. **Delete the `large` row** to migrate. `policy_version`
+  is bumped `2026-08-05` → `2026-08-19` so the two policy shapes are
+  distinguishable in the routing decision records `lib/agent-dispatch.sh` emits,
+  matching the precedent set when `_validate_policy` last started failing closed
+  on a previous shape (RFC 0013 §0.5).
+- **Every closed tier vocabulary shrank with it** — `lib/config-read.sh`'s
+  `uberdev_tier_rank`/`uberdev_tier_name` ladder, `lib/agent-dispatch.sh`'s
+  three validator sets, `lib/child-dispatch.sh`, `lib/run_manifest.py` and the
+  `solve_tier_floor` / `solve_tier_ceiling` enum literals. That last one is
+  load-bearing: `uberdev_clamp_tier` ignores an unrankable clamp in SILENCE, so
+  an enum still accepting `large` would let an operator set a floor that simply
+  stopped applying.
+
+### Fixed - two doc surfaces still describing the pre-#614 file rule
+
+`skills/solve-pipeline/SKILL.md` and `docs/rfc/0013-gpt-5-6-adaptive-execution.md`
+still said "≥3 named files" / "at least three distinct named files/modules".
+The shipped rule has counted **declared or change-marked scope** since #614 — a
+`path:line` citation is evidence, not scope — and no test covered the wording,
+so the drift was invisible to CI. The SKILL row is rewritten for the two-rung
+reality; the RFC gets an explicit `## 0A` amendment (both #614 and #619) rather
+than a silent in-place rewrite of a decision it recorded as of its date.
+
+### Fixed - README documented the deleted rung, and nothing in CI read it
+
+README's `/solve` triage table still carried a **medium / large** row and the
+eight rules verbatim ("Labels `epic`/`architectural`/`infrastructure`. ≥3 files
+mentioned. Cross-package."), plus `--full # force medium/large` and four more
+`/large` mentions. Every guard that moved with the collapse was keyed on code,
+and the first surface a user reads had none — so the drift was invisible to CI.
+
+It is not a cosmetic gap. A user following the table labels an issue
+`architectural` and expects a design pipeline; a user following it to
+`solve_tier_ceiling: large` gets a value `uberdev_read_enum` matches against a
+`trivial|small|medium` pipe-list, rejects as `invalid_enum` and replaces with
+the empty default — the ceiling silently never applies.
+
+`tests/docs-accuracy.test.sh` gains **T19**, which closes the class rather than
+the instance: both rows read `TIERS` out of `lib/solve_triage.py` at run time,
+so they move with the ladder instead of pinning today's three names. T19.1
+asserts README's triage-table tier column equals `TIERS` in order; T19.2 asserts
+no `x/y` pair in README puts a live tier beside a name the ladder does not have
+— which reds on `medium/large` without ever naming `large`.
+
 ## [0.49.1] — 2026-08-18
 
 ### Fixed - the post-fixer push could never land after an APPLIED Phase 1 fixer

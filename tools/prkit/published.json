@@ -192,12 +192,14 @@
     "lib/code_fixer_contract.py",
     "lib/command-workspace.py",
     "lib/config-read.sh",
+    "lib/model_routing.py",
     "lib/review-aggregate.sh",
     "lib/run_manifest.py",
     "policy/model-routing-v1.json",
     "policy/solve-run-tree-v1.json",
     "shared/code-fixer-output-v1.md",
     "skills/merge-pipeline/SKILL.md",
-    "skills/merge-pipeline/lib/discover.sh"
+    "skills/merge-pipeline/lib/discover.sh",
+    "skills/post-impl-review/SKILL.md"
   ]
 }

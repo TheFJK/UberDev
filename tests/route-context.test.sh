@@ -191,7 +191,7 @@ grep -q route_context_mismatch "$TMP/mismatch-error"
     UBERDEV_DISPATCH_ROUTE=sol-ultra UBERDEV_MODEL_ROUTING_MODE=adaptive UBERDEV_SERVICE_TIER=fast \
     UBERDEV_AGENT_WORKFLOW=turbo UBERDEV_AGENT_PHASE=plan UBERDEV_AGENT_ROLE=plan-writer \
     UBERDEV_AGENT_RISK_SIGNALS_JSON='["security"]' \
-    uberdev_dispatch_one 7 large "$TMP/run/prompt.txt"
+    uberdev_dispatch_one 7 medium "$TMP/run/prompt.txt"
 )
 python3 - "$TMP/assembled.json" <<'PY'
 import json,pathlib,sys

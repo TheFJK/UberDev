@@ -108,7 +108,7 @@ assert_no_grep "$SKILL" \
 
 echo
 echo "== Phase 1 dispatches fresh every run =="
-# With the cache gone, the medium/large fanout is unconditionally fresh.
+# With the cache gone, the medium-tier fanout is unconditionally fresh.
 assert_grep "$SKILL" \
   'always dispatched fresh' \
   'Phase 1 documents always-fresh fanout'

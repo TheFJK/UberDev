@@ -25,7 +25,7 @@ export const meta = { "name": "goal-pipeline", "description": "Workflow-native c
 // skills/solve-fleet/workflow.js for the WHOLE cycle — never one per issue. The
 // fleet script already fans out internally (waves of `concurrency`, one
 // worktree-isolated solver each, plus the research/spec/plan chain for
-// medium/large tiers). A nested call per issue would burn the single level on
+// the medium tier). A nested call per issue would burn the single level on
 // the wrong thing and the fleet's own agents could not run at all. There is no
 // solve-one.js and there must not be one.
 //

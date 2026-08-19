@@ -1,5 +1,5 @@
 ---
-description: "Unattended /solve — auto-accepts brainstorm recommendations for medium/large issues. Runs N parallel solvers in the session's Workflow runtime (one worktree-isolated agent per issue; cap: 6 default, configurable via `fanout_concurrency.solve_bg`). Watch with /workflows. Detached transports (wezterm / background) remain available via `--backend=<name>`."
+description: "Unattended /solve — auto-accepts brainstorm recommendations for medium-tier issues. Runs N parallel solvers in the session's Workflow runtime (one worktree-isolated agent per issue; cap: 6 default, configurable via `fanout_concurrency.solve_bg`). Watch with /workflows. Detached transports (wezterm / background) remain available via `--backend=<name>`."
 argument-hint: "<issue-number> [<issue-number>...] [--force] [--routing-mode=adaptive|inherit] [--route=<route>|--model=<slug> --effort=<level>] [--service-tier=default|fast|flex|--fast] [--backend=<name>]"
 allowed-tools: ["Bash", "Read", "Task", "Workflow"]
 ---
@@ -12,7 +12,7 @@ Spawn an autonomous solver per GitHub issue in **#$ARGUMENTS** — multiple issu
 
 **Behavior vs `/solve`:**
 - **trivial / small tiers:** identical to `/solve` end-to-end, with `--turbo` forwarded through `uberdev:finish-branch` into `/uberdev:review-pr` so the post-push review chain runs unattended (Phase 1 reviewer fanout runs against the pushed diff).
-- **medium / large tiers:** brainstorm runs WITHOUT the clarifying-question loop. Parallel research still runs (recommendation grounding preserved). `/uberdev:orchestrator` is dispatched with the unattended-mode flag; implementation still reaches `uberdev:finish-branch`, which opens the PR and chains `/uberdev:review-pr`; `uberdev:post-impl-review` runs post-PR-push in `/review-pr` Phase 1 against the pushed diff. Findings are summarised in the PR body under `## Reviewer findings summary`.
+- **medium tier:** brainstorm runs WITHOUT the clarifying-question loop. Parallel research still runs (recommendation grounding preserved). `/uberdev:orchestrator` is dispatched with the unattended-mode flag; implementation still reaches `uberdev:finish-branch`, which opens the PR and chains `/uberdev:review-pr`; `uberdev:post-impl-review` runs post-PR-push in `/review-pr` Phase 1 against the pushed diff. Findings are summarised in the PR body under `## Reviewer findings summary`.
 
 **Multi-issue dispatch:** `/turbo 5 6 7` validates all three issues up front (open + classifiable) and then spawns three independent sessions — each in its own `.claude/worktrees/solve-issue-N/` worktree, all running in parallel. Larger queues split into `ceil(N / cap)` sequential single-message waves (default cap 6; configurable via `fanout_concurrency.solve_bg`). If any issue is closed, missing, or fails `gh` fetch, the run aborts before spawning anything (`no agents dispatched`). Override flags apply batch-wide.
 

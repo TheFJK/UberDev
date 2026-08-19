@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "policy_version": "2026-08-05",
+  "policy_version": "2026-08-19",
   "release_default_mode": "inherit",
   "default_sandbox": "workspace-write",
   "routes": {
@@ -43,10 +43,6 @@
     "medium": {
       "default": "quality",
       "high_risk": "frontier"
-    },
-    "large": {
-      "default": "frontier",
-      "high_risk": "ultra"
     }
   },
   "high_risk_floor": "deep",

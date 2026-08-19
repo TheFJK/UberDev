@@ -20,7 +20,20 @@ MAX_LABELS = 100
 MAX_LABEL = 128
 MAX_COMPONENTS = 64
 MAX_FILES = 256
-TIERS = ("trivial", "small", "medium", "large")
+# The ceremony ladder, cheapest first. THREE rungs, not four (#619): a fourth
+# `large` name existed for a while and resolved to the same behaviour as
+# `medium` at every consumer — lib/solve-launcher.sh branches trivial / small /
+# catch-all with no `large)` arm, and skills/solve-fleet/workflow.js gave both
+# names the same design phases — so the extra name bought a split nothing acted
+# on while costing a rung's worth of rules, a closed validator alternation, a
+# policy row and a fixture corpus. `medium` is the ceiling.
+#
+# Collapsing the RUNG is not the same as deleting its RULES. Two of the eight
+# were genuinely redundant and went (see _FIXED_RULE_TOKENS); the other six
+# express a floor nothing else expresses and were re-pointed at `medium` (see
+# the design-floor block in classify()). Deleting those would have moved a
+# labelled issue two rungs, not one.
+TIERS = ("trivial", "small", "medium")
 
 FILE_RE = re.compile(
     r"(?<![\w.-])(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\."
@@ -65,6 +78,10 @@ REPRO_RE = re.compile(
     r"\b(?:repro(?:duce|duction)?|steps to reproduce|expected|actual|error|exception|fails?|failure)\b",
     re.IGNORECASE,
 )
+# Breadth stated in prose rather than counted. Pairs with `refactor` below: the
+# label alone is not scope (half the backlog's cleanups carry it), and a narrow
+# rename that says "across the codebase" is not one either, but the two together
+# are the shape that needs a design pass.
 CROSS_CUTTING_RE = re.compile(
     r"\b(?:cross[- ]cutting|repo[- ]wide|whole[- ]repo|across (?:the )?(?:codebase|repository|modules?|components?)|"
     r"multiple (?:modules?|components?|packages?|services?))\b",
@@ -84,7 +101,10 @@ RISK_PATTERNS: dict[str, re.Pattern[str]] = {
     "schema-migration": re.compile(r"\b(?:schema migration|database migration|migrate schema)\b", re.I),
     "security": re.compile(r"\b(?:security|vulnerabilit|exploit|xss|csrf|injection|owasp)\w*\b", re.I),
 }
-LARGE_LABELS = {"epic", "needs-discussion", "architectural", "architecture", "infrastructure"}
+# Labels that mean "this needs a design pass", whatever the body's other signals
+# say. Named LARGE_LABELS while a fourth rung existed; #619 collapsed the rung,
+# NOT the predicate — see the design-floor block in classify().
+DESIGN_LABELS = {"epic", "needs-discussion", "architectural", "architecture", "infrastructure"}
 TRIVIAL_LABELS = {"typo", "docs", "documentation", "chore", "good-first-issue"}
 TRIVIAL_TITLE_RE = re.compile(r"\b(?:typo|rename|bump|version|readme)\b", re.I)
 
@@ -106,10 +126,31 @@ TRIVIAL_TITLE_RE = re.compile(r"\b(?:typo|rename|bump|version|readme)\b", re.I)
 # second makes an expressible-but-lower one a no-op.
 ESCALATION_LABEL_PREFIX = "uberdev:tier-"
 ESCALATION_LABELS = {ESCALATION_LABEL_PREFIX + tier: tier for tier in TIERS[1:]}
+# MIGRATION SHIM (#619). The ratchet writes a DURABLE label onto a live issue, so
+# retiring a rung does not retire the labels already out there: any issue a
+# pre-#619 solver escalated still carries `uberdev:tier-large` and nothing else.
+# Derived straight from TIERS this name would be an unknown tier and get dropped,
+# which silently discards a recorded mis-triage and re-dispatches the issue at
+# whatever its body computes — a DOWNGRADE, and the one thing this channel is
+# built not to express. Alias it onto the new ceiling instead. The emitted token
+# is still `escalation-label:medium`, so the declared vocabulary is unchanged.
+ESCALATION_LABELS[ESCALATION_LABEL_PREFIX + "large"] = "medium"
 
-# The SIX rule tokens that are not derived from TIERS or LARGE_LABELS.
+# The FOUR rule tokens that are not derived from TIERS or DESIGN_LABELS. It was
+# six until #619 collapsed the `large` rung, and the two that went are the two
+# that were genuinely redundant: `large:three-files` fired on `len(files) >= 3`,
+# which fails `small`'s `<= 2` and `trivial`'s `<= 1` outright, and
+# `large:multi-component-high-risk` needed a risk signal, which fails both arms'
+# `not risks`. Either way the issue lands on the fallback rung with no rule
+# required, so deleting them moves nothing.
+#
+# `cross-cutting-refactor` is NOT in that class and was kept, renamed onto the
+# rung it now targets: `refactor` plus breadth is orthogonal to both lighter
+# arms' bounds, so an issue carrying it can — and does — satisfy the `small` arm
+# on its own. Deleting it would have dropped such an issue TWO rungs rather than
+# collapsing one.
 _FIXED_RULE_TOKENS = frozenset({
-    "large:three-files", "large:multi-component-high-risk", "large:cross-cutting-refactor",
+    "medium:cross-cutting-refactor",
     "trivial:bounded-explicit-signal", "small:concrete-reproduction", "medium:fallback",
 })
 # `matched_rules` is validated entry-by-entry against a CLOSED alternation
@@ -130,7 +171,7 @@ _FIXED_RULE_TOKENS = frozenset({
 # on the first one.
 TRIAGE_RULE_TOKENS = frozenset(
     {f"{kind}:{tier}" for kind in ("floor", "ceiling", "override") for tier in TIERS}
-    | {f"large-label:{label}" for label in LARGE_LABELS}
+    | {f"medium-label:{label}" for label in DESIGN_LABELS}
     | {f"escalation-label:{tier}" for tier in ESCALATION_LABELS.values()}
     | _FIXED_RULE_TOKENS
 )
@@ -239,18 +280,19 @@ FILES_TOKEN_RE = re.compile(r"[a-z0-9_.][a-z0-9_./-]{0,255}")
 #
 # This used to be `named_files()`: scrape every filename-shaped token out of the
 # issue prose and call the count the size of the work. It could not tell a file
-# cited as EVIDENCE from a file the fix will edit, and three of them is the
-# `large` threshold — which gates a 33x cost difference (1 solver vs 33).
+# cited as EVIDENCE from a file the fix will edit, and three of them crossed the
+# rung that decides between one solver agent and a full design fleet.
 #
 # That is not an edge case here, it is the house style. Every writer that files
 # issues into this repo (`/uberscan`, `findings-to-issues`, `/issue` plus the
 # codebase scout) is REQUIRED to anchor its claims with `path:line` evidence, so
 # the better-evidenced an issue was, the larger it was priced. Measured against
-# the live backlog the rule returned `large` for EVERY open issue — 40 of 40
+# the live backlog the rule pushed EVERY open issue to the top rung — 40 of 40
 # when #614 was filed, 43 of 43 when this landed: a cost gate with no
 # discriminating power, and one that taxed exactly the issues that did their
-# homework. Re-measured on the same corpus, this file returns
-# 10 small / 13 medium / 20 large.
+# homework. Re-measured on the same corpus after this landed, the file returned
+# 10 small / 13 medium / 20 large; re-measured again on 44 open issues after
+# #619 collapsed the top two rungs into one, 11 small / 33 medium.
 #
 # The replacement asks a different question — not "which files does this text
 # mention" but "which files is this issue going to CHANGE":
@@ -267,11 +309,11 @@ FILES_TOKEN_RE = re.compile(r"[a-z0-9_.][a-z0-9_./-]{0,255}")
 #      paths, because a bare verb scan reads "do not touch" as change intent.
 #
 # The heuristic under-counts by design: an issue whose prose marks nothing lands
-# on `medium` — the fallback rung — rather than on `large`. `large` is still
-# reachable four other ways (the large labels, refactor plus two components, a
-# risk signal across components, and now a declared three-file scope), so the
-# rung is sharpened rather than gutted; tests/solve-triage.test.sh S7 pins that
-# with a positive control.
+# on `medium`, which since #619 is both the fallback and the ceiling. That makes
+# the count's remaining job the DOWNWARD one — it is what keeps a two-file issue
+# eligible for `small` and holds a three-file one at the design rung — so a
+# scope extractor that always returned nothing would gut the ladder rather than
+# sharpen it. tests/solve-triage.test.sh S7 pins that with a positive control.
 # ---------------------------------------------------------------------------
 
 # Clause, not sentence: an exclusion rides in on `but` far more often than after
@@ -505,24 +547,39 @@ def classify(value: dict[str, Any], floor: str | None, ceiling: str | None, over
     cross_cutting = bool(CROSS_CUTTING_RE.search(combined))
     matched: list[str] = []
 
-    large = False
-    large_labels = sorted(set(labels) & LARGE_LABELS)
-    if large_labels:
-        large = True
-        matched.extend(f"large-label:{label}" for label in large_labels)
-    if len(files) >= 3:
-        large = True
-        matched.append("large:three-files")
-    if risks and len(components) > 1:
-        large = True
-        matched.append("large:multi-component-high-risk")
+    # THE DESIGN FLOOR. Signals that say "this needs a design pass" no matter what
+    # else the body looks like. They are checked BEFORE the two lighter arms and
+    # pre-empt them, because they are orthogonal to those arms' bounds rather than
+    # excluded by them: an `epic` can carry a `bug` label, and a cross-cutting
+    # `refactor` can ship a clean reproduction, so on the arms alone either would
+    # be priced `small`.
+    #
+    # These rules used to force a fourth `large` rung. #619 collapsed that rung
+    # into `medium`; it did NOT collapse the predicate. Dropping them here rather
+    # than re-pointing them would not merge two rungs, it would let a labelled
+    # issue fall TWO — `needs-discussion` on a short `docs` body falls THREE, all
+    # the way to `trivial` — which is the opposite of what collapsing a rung means.
+    #
+    # The two rules that WERE deleted are the ones the arms below genuinely
+    # subsume: see _FIXED_RULE_TOKENS. tests/solve-triage.test.sh L3/L4 pin those
+    # as positive controls, and L5/L8 pin the floor established here.
+    design = False
+    design_labels = sorted(set(labels) & DESIGN_LABELS)
+    if design_labels:
+        design = True
+        matched.extend(f"medium-label:{label}" for label in design_labels)
+    # The `refactor` label is not breadth on its own — it is the most common label
+    # in a cleanup backlog. It needs a second, independent breadth signal: two or
+    # more named components, or an explicit cross-cutting phrase.
     if "refactor" in labels and (len(components) >= 2 or cross_cutting):
-        large = True
-        matched.append("large:cross-cutting-refactor")
+        design = True
+        matched.append("medium:cross-cutting-refactor")
 
     stripped_length = len(markdown_text(body))
-    if large:
-        raw = "large"
+    # THREE arms, checked cheapest-first, with `medium` as both the fallback and
+    # the ceiling (#619). The design floor above pre-empts the two lighter ones.
+    if design:
+        raw = "medium"
     elif not risks and not stack and len(files) <= 1 and stripped_length < 300 and (
         bool(set(labels) & TRIVIAL_LABELS) or bool(TRIVIAL_TITLE_RE.search(title))
     ):
@@ -605,7 +662,7 @@ def finalize_decision(value: dict[str, Any], clamped: str, override: str | None)
 
 def tier_arg(value: str) -> str:
     if value not in TIERS:
-        raise argparse.ArgumentTypeError("expected trivial|small|medium|large")
+        raise argparse.ArgumentTypeError("expected trivial|small|medium")
     return value
 
 

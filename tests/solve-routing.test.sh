@@ -122,19 +122,19 @@ RUN="$TMP/run"; mkdir -p "$RUN"
   export UBERDEV_AGENT_PREPARED_REQUEST_JSON='{"routing_mode":"inherit","issue_num":999}'
   # shellcheck source=/dev/null
   . "$ROOT/plugins/uberdev/lib/dispatch.sh"
-  uberdev_dispatch_prepare_root 42 large '["security"]' turbo '{"schema_version":1,"issue":42,"raw_tier":"large","clamped_tier":"large","effective_tier":"large","tier":"large","source":"computed","matched_rules":["large-label:architectural","large:multi-component-high-risk"],"risk_signals":["security"],"file_count":2,"files":["api/b.py","auth/a.py"],"component_count":2,"components":["api","auth"]}'
+  uberdev_dispatch_prepare_root 42 medium '["security"]' turbo '{"schema_version":1,"issue":42,"raw_tier":"medium","clamped_tier":"medium","effective_tier":"medium","tier":"medium","source":"computed","matched_rules":["medium:fallback"],"risk_signals":["security"],"file_count":2,"files":["api/b.py","auth/a.py"],"component_count":2,"components":["api","auth"]}'
 ) >"$TMP/prepared.json"
 python3 - "$TMP/prepared.json" <<'PY'
 import json,pathlib,sys
 r=json.loads(pathlib.Path(sys.argv[1]).read_text())
-assert r["workflow"]=="turbo" and r["issue_num"]==42 and r["task_tier"]=="large"
+assert r["workflow"]=="turbo" and r["issue_num"]==42 and r["task_tier"]=="medium"
 assert r["risk_signals"]==["security"]
 assert pathlib.Path(r["context_file"]).is_file() and len(r["context_sha256"])==64
 assert r["root_decision"]["backend"]=="background"
 context=json.loads(pathlib.Path(r["context_file"]).read_text())
 triage=context["metadata"]["triage_decision"]
-assert triage["matched_rules"]==["large-label:architectural","large:multi-component-high-risk"]
-assert triage["raw_tier"]==triage["clamped_tier"]==triage["effective_tier"]=="large"
+assert triage["matched_rules"]==["medium:fallback"]
+assert triage["raw_tier"]==triage["clamped_tier"]==triage["effective_tier"]=="medium"
 PY
 PASS=$((PASS+1))
 
@@ -185,7 +185,7 @@ PASS=$((PASS+1))
 
 : >"$TMP/batch-mutations"
 if PATH="$BATCH_BIN:$PATH" BATCH_GH_LOG="$TMP/inverted-gh" BATCH_MUTATIONS="$TMP/batch-mutations" TMPDIR=/tmp CLAUDE_PLUGIN_ROOT="$ROOT/plugins/uberdev" \
-  SOLVE_TIER_FLOOR=large SOLVE_TIER_CEILING=small \
+  SOLVE_TIER_FLOOR=medium SOLVE_TIER_CEILING=small \
   bash "$ROOT/plugins/uberdev/lib/solve-launcher.sh" --auto-mode=0 -- 1 2 --backend=background --routing-mode=adaptive >"$TMP/inverted.out" 2>&1; then
   echo "FAIL: deliberate label failure unexpectedly succeeded" >&2; exit 1
 fi

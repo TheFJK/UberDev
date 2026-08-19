@@ -184,7 +184,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "b703109bb44930566ee92efb259cdf4437160e5e8b352893b28551804782d7a4"
+          "sha256": "9d1a49cee74cc6dbb500dfea0d147d277cbf731d158a01bc59cc8fa83fcc3bed"
         },
         {
           "path": "scripts/frame-template.html",
@@ -328,7 +328,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "a903693b245f818bf169eb2bd6c6ea8102beb8dc75a0925ee5c7516ea2b2e964"
+          "sha256": "195b2a43e9a0111d9a391ab68c3378e86b624362bdd31990293e82078a922f5b"
         }
       ]
     },
@@ -483,7 +483,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "3230d2e8ae5d370c750518cf443e1ab97253453a0f0f6832ff82374a3506807e"
+          "sha256": "c4ef9ecf5318727411bfc3c4fdaf7c715d6cef4164944628bef5249d738d2d4a"
         },
         {
           "path": "code-quality-reviewer-prompt.md",
@@ -712,7 +712,7 @@
         },
         {
           "path": "references/configuration.md",
-          "sha256": "c8acb6f883e9a110090ed9617e3a37ae7274e8541578968e6339cf6b4ec9f353"
+          "sha256": "99114d37bd43c4a055bb39ab13bfc5939521a5b7cac9e5b7bf9210ab3b9a5ffc"
         },
         {
           "path": "references/copilot-tools.md",

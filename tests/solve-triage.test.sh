@@ -21,7 +21,7 @@ import json,sys
 v=json.loads(sys.argv[1]); expected=sys.argv[2]
 assert v["schema_version"] == 1
 assert v["tier"] == expected, v
-assert v["raw_tier"] in {"trivial","small","medium","large"}
+assert v["raw_tier"] in {"trivial","small","medium"}
 assert v["risk_signals"] == sorted(set(v["risk_signals"]))
 assert json.dumps(v,sort_keys=True,separators=(",",":"),ensure_ascii=False)==sys.argv[1]
 PY
@@ -31,10 +31,10 @@ PY
 assert_case trivial.json trivial
 assert_case small.json small
 assert_case bare-refactor.json medium
-assert_case large-refactor.json large
-assert_case high-risk-cross-component.json large
+assert_case multi-component-refactor.json medium
+assert_case high-risk-cross-component.json medium
 assert_case trivial.json small --floor small
-assert_case large-refactor.json medium --ceiling medium
+assert_case multi-component-refactor.json small --ceiling small
 assert_case high-risk-cross-component.json trivial --override trivial
 
 # Explicit override is applied last but cannot erase computed risk evidence.
@@ -82,10 +82,10 @@ PASS=$((PASS+1))
 cat >"$TMP/modules.json" <<'JSON'
 {"number":8,"title":"Refactor module boundaries","state":"OPEN","body":"Refactor the auth, payments, and notifications modules.","labels":[{"name":"refactor"}]}
 JSON
-assert_case "$TMP/modules.json" large
+assert_case "$TMP/modules.json" medium
 
 # Inverted clamps are ignored as a pair, matching config-read's contract.
-INVERTED="$(python3 -I "$TRIAGE" classify --snapshot "$FIX/trivial.json" --floor large --ceiling small)"
+INVERTED="$(python3 -I "$TRIAGE" classify --snapshot "$FIX/trivial.json" --floor medium --ceiling small)"
 python3 - "$INVERTED" <<'PY'
 import json,sys
 v=json.loads(sys.argv[1]); assert v["raw_tier"]==v["clamped_tier"]==v["effective_tier"]=="trivial"; assert v["source"]=="computed"
@@ -225,18 +225,18 @@ PASS=$((PASS+1))
 
 # E2: one-way. A label BELOW the computed tier changes nothing and leaves no
 # token -- the anti-label-shopping property, asserted rather than asserted-about.
-python3 - "$FIX/large-refactor.json" "$TMP/no-downgrade.json" <<'PY'
+python3 - "$FIX/multi-component-refactor.json" "$TMP/no-downgrade.json" <<'PY'
 import json,pathlib,sys
 v=json.loads(pathlib.Path(sys.argv[1]).read_text())
 v["labels"]=list(v["labels"])+[{"name":"uberdev:tier-small"}]
 pathlib.Path(sys.argv[2]).write_text(json.dumps(v))
 PY
-assert_case "$TMP/no-downgrade.json" large
+assert_case "$TMP/no-downgrade.json" medium
 DOWN="$(python3 -I "$TRIAGE" classify --snapshot "$TMP/no-downgrade.json")"
 python3 - "$DOWN" <<'PY'
 import json,sys
 v=json.loads(sys.argv[1])
-assert v["raw_tier"]=="large", v
+assert v["raw_tier"]=="medium", v
 assert not [r for r in v["matched_rules"] if r.startswith("escalation-label:")], v
 PY
 PASS=$((PASS+1))
@@ -291,17 +291,17 @@ python3 - "$FIX/escalated-trivial.json" "$TMP/multi-tier.json" <<'PY'
 import json,pathlib,sys
 v=json.loads(pathlib.Path(sys.argv[1]).read_text())
 v["labels"]=[{"name":"docs"},{"name":"uberdev:tier-small"},
-             {"name":"uberdev:tier-large"},{"name":"uberdev:tier-trivial"}]
+             {"name":"uberdev:tier-medium"},{"name":"uberdev:tier-trivial"}]
 pathlib.Path(sys.argv[2]).write_text(json.dumps(v))
 PY
-assert_case "$TMP/multi-tier.json" large
+assert_case "$TMP/multi-tier.json" medium
 MULTI="$(python3 -I "$TRIAGE" classify --snapshot "$TMP/multi-tier.json")"
 python3 - "$MULTI" <<'PY'
 import json,sys
 v=json.loads(sys.argv[1])
-assert v["raw_tier"]=="large", v
+assert v["raw_tier"]=="medium", v
 tokens=[r for r in v["matched_rules"] if r.startswith("escalation-label:")]
-assert tokens==["escalation-label:large"], tokens
+assert tokens==["escalation-label:medium"], tokens
 PY
 PASS=$((PASS+1))
 
@@ -336,18 +336,23 @@ PASS=$((PASS+1))
 # --- S: the tier signal measures SCOPE, not citation density (#614) ----------
 # The file rule used to scrape every filename-shaped token out of issue prose,
 # so a file cited as EVIDENCE counted exactly like a file the fix will edit --
-# and three of them is the `large` threshold, which gates a 33x cost difference
-# (1 solver vs 33). This repo REQUIRES its issue writers to anchor claims with
-# `path:line` evidence, so the house style guaranteed the verdict: `large` on
-# EVERY open issue (40 of 40 when #614 was filed, 43 of 43 when this landed),
-# i.e. a cost gate with no discriminating power. Every row below is a property
-# of the replacement: a declared scope block is read as fact, and the fallback
-# counts only paths the prose marks as change targets.
+# and three of them crossed the rung between one solver agent and a full design
+# fleet. This repo REQUIRES its issue writers to anchor claims with `path:line`
+# evidence, so the house style guaranteed the verdict: the top rung on EVERY
+# open issue (40 of 40 when #614 was filed, 43 of 43 when this landed), i.e. a
+# cost gate with no discriminating power. Every row below is a property of the
+# replacement: a declared scope block is read as fact, and the fallback counts
+# only paths the prose marks as change targets.
+#
+# #619 deleted the `large:three-files` TOKEN these rows used to read, so each
+# assertion now states the same fact in the surviving vocabulary: the rule fired
+# on `len(files) >= 3`, so "no token" is `file_count < 3` and, where the count is
+# already pinned above it, the tier that count decides.
 
 # S1 -- THE BUG, in one pair. The same one-line typo fix, priced twice: the
 # bodies differ only in how many files the prose mentions, and the second one
 # explicitly says the extra two are not to be touched. Before the fix, A was
-# `trivial` (1 agent) and B was `large` (33 agents) on `large:three-files`.
+# `trivial` (1 agent) and B was the top rung (33 agents) on `large:three-files`.
 python3 - "$TMP" <<'PY'
 import json, pathlib, sys
 tmp = pathlib.Path(sys.argv[1])
@@ -369,7 +374,7 @@ assert a["tier"]==b["tier"], (a["tier"],b["tier"],
 assert a["raw_tier"]==b["raw_tier"], (a["raw_tier"],b["raw_tier"])
 assert a["file_count"]==b["file_count"], (a["file_count"],b["file_count"])
 assert a["tier"]=="trivial", a
-assert "large:three-files" not in b["matched_rules"], b
+assert b["file_count"] < 3, b
 PY
 PASS=$((PASS+1))
 
@@ -392,29 +397,34 @@ import json,sys
 v=json.loads(sys.argv[1])
 assert v["files"]==["lib/launcher.sh"], v
 assert v["file_count"]==1 and v["components"]==["lib"], v
-assert "large:three-files" not in v["matched_rules"], v
+assert v["tier"]=="small", v
 PY
 PASS=$((PASS+1))
 
 # S3 -- the declaration is not a one-way discount: a declared THREE-file scope
-# fires `large:three-files` on prose that cites nothing at all. Without this the
-# block would only ever be able to make an issue cheaper.
+# prices at the design rung on prose that cites nothing at all. Without this the
+# block would only ever be able to make an issue cheaper. Asserted as a PAIR,
+# because `medium` is also the fallback rung: the same body declaring TWO files
+# is `small`, so it is the declared count that moved the tier, not the default.
 python3 - "$TMP" <<'PY'
 import json, pathlib, sys
 tmp = pathlib.Path(sys.argv[1])
-body = ("The retry ceiling is duplicated in three places and they disagree.\n"
-        "<!-- uberdev-scope v=1 files=lib/a.sh,lib/b.sh,lib/c.sh -->")
-(tmp / "declared-three.json").write_text(json.dumps(
-    {"number": 12, "title": "Retry ceiling disagrees across copies", "state": "OPEN",
-     "body": body, "labels": [{"name": "bug"}]}))
+for name, declared in (("declared-three", "lib/a.sh,lib/b.sh,lib/c.sh"),
+                       ("declared-two", "lib/a.sh,lib/b.sh")):
+    body = ("The retry ceiling is duplicated in three places and they disagree.\n"
+            f"<!-- uberdev-scope v=1 files={declared} -->")
+    (tmp / f"{name}.json").write_text(json.dumps(
+        {"number": 12, "title": "Retry ceiling disagrees across copies", "state": "OPEN",
+         "body": body, "labels": [{"name": "bug"}]}))
 PY
-assert_case "$TMP/declared-three.json" large
+assert_case "$TMP/declared-three.json" medium
+assert_case "$TMP/declared-two.json" small
 DECLARED_THREE="$(python3 -I "$TRIAGE" classify --snapshot "$TMP/declared-three.json")"
 python3 - "$DECLARED_THREE" <<'PY'
 import json,sys
 v=json.loads(sys.argv[1])
 assert v["files"]==["lib/a.sh","lib/b.sh","lib/c.sh"], v
-assert "large:three-files" in v["matched_rules"], v
+assert v["file_count"]>=3 and v["tier"]=="medium", v
 PY
 PASS=$((PASS+1))
 
@@ -436,7 +446,7 @@ python3 - "$DECLARED_EMPTY" <<'PY'
 import json,sys
 v=json.loads(sys.argv[1])
 assert v["files"]==[] and v["file_count"]==0, v
-assert "large:three-files" not in v["matched_rules"], v
+assert v["tier"]=="small", v
 PY
 PASS=$((PASS+1))
 
@@ -458,7 +468,7 @@ python3 - "$QUOTED" <<'PY'
 import json,sys
 v=json.loads(sys.argv[1])
 assert v["files"]==["lib/writer.sh"], v
-assert "large:three-files" not in v["matched_rules"], v
+assert v["tier"]=="small", v
 PY
 PASS=$((PASS+1))
 
@@ -473,28 +483,28 @@ python3 - "$EXCLUDED" <<'PY'
 import json,sys
 v=json.loads(sys.argv[1])
 assert v["files"]==["lib/a.sh"], v
-assert "large:three-files" not in v["matched_rules"], v
+assert v["tier"]=="small", v
 PY
 PASS=$((PASS+1))
 
 # S7 -- POSITIVE CONTROL. Without this the whole section is satisfied by a
-# scope extractor that always returns nothing, which would gut `large` rather
-# than sharpen it: three MARKED change targets still classify `large`.
+# scope extractor that always returns nothing, which would gut the ladder rather
+# than sharpen it: three MARKED change targets still hold the design rung.
 cat >"$TMP/marked-three.json" <<'JSON'
 {"number":16,"title":"Retry ceiling disagrees across copies","state":"OPEN","body":"Update lib/a.sh, lib/b.sh and lib/c.sh so the three retry ceilings agree.","labels":[{"name":"bug"}]}
 JSON
-assert_case "$TMP/marked-three.json" large
+assert_case "$TMP/marked-three.json" medium
 MARKED="$(python3 -I "$TRIAGE" classify --snapshot "$TMP/marked-three.json")"
 python3 - "$MARKED" <<'PY'
 import json,sys
 v=json.loads(sys.argv[1])
 assert v["files"]==["lib/a.sh","lib/b.sh","lib/c.sh"], v
-assert "large:three-files" in v["matched_rules"], v
+assert v["file_count"]>=3 and v["tier"]=="medium", v
 PY
 PASS=$((PASS+1))
 
 # S8 -- the house style itself: a `path:line` evidence wall with no change-target
-# marking is NOT scope. This is the corpus shape behind the all-`large` verdict.
+# marking is NOT scope. This is the corpus shape behind the all-top-rung verdict.
 python3 - "$TMP" <<'PY'
 import json, pathlib, sys
 tmp = pathlib.Path(sys.argv[1])
@@ -508,8 +518,7 @@ python3 - "$WALL" <<'PY'
 import json,sys
 v=json.loads(sys.argv[1])
 assert v["files"]==[] and v["file_count"]==0, v
-assert "large:three-files" not in v["matched_rules"], v
-assert v["tier"]!="large", v
+assert v["tier"]=="small", v
 PY
 PASS=$((PASS+1))
 
@@ -539,7 +548,7 @@ python3 - "$FORGED" <<'PY'
 import json,sys
 v=json.loads(sys.argv[1])
 assert v["files"]==["lib/real.sh"], v
-assert "large:three-files" not in v["matched_rules"], v
+assert v["tier"]=="small", v
 PY
 PASS=$((PASS+1))
 
@@ -628,6 +637,275 @@ assert st.declared_scope("<!-- uberdev-scope v=1 files= -->") == [], \
 assert st.declared_scope("<!-- uberdev-scope v=1 files=lib/a.sh:1,lib/b.sh:2 -->") is None, \
     "the all-refused case must keep answering undeclared"
 PY_S12
+PASS=$((PASS+1))
+
+# --- L: the `large` rung is COLLAPSED into `medium` (#619) -------------------
+# Four tier names resolved to exactly two behaviours. No ceremony consumer ever
+# told `medium` from `large`: lib/solve-launcher.sh branches trivial / small /
+# catch-all with no `large)` arm, and solve-fleet's DESIGN_TIERS held both. So
+# EIGHT rules -- `large:three-files`, `large:multi-component-high-risk`,
+# `large:cross-cutting-refactor` and five `large-label:*` -- were computed,
+# declared in TRIAGE_RULE_TOKENS, mirrored into the closed `allowed_rule`
+# alternation lib/agent-dispatch.sh validates against, fixtured, and then
+# discarded. #619 deletes the rung; `medium` is now the ceiling.
+#
+# COLLAPSING A RUNG MUST MOVE AN ISSUE AT MOST ONE RUNG. The eight rules split
+# into two halves that earn that very differently, and only one half is safe to
+# delete:
+#   * TWO were BOUND-keyed, and the arms that remain subsume them.
+#     `large:three-files` fired on `len(files) >= 3`, and BOTH lighter arms
+#     require the opposite (`small` needs <= 2, `trivial` needs <= 1), so a
+#     three-file issue can only ever reach the fallback rung -- L3 pins it.
+#     `large:multi-component-high-risk` required a risk signal, and both lighter
+#     arms are guarded by `not risks` -- L4 pins it. These two are DELETED.
+#   * SIX were LABEL-keyed -- five design labels (`epic`, `needs-discussion`,
+#     `architectural`, `architecture`, `infrastructure`) and `refactor` plus
+#     breadth -- and NOTHING subsumes them. A labelled issue that also carries a
+#     `bug` label or a reproduction satisfies the `small` arm on its own, so
+#     deleting them outright drops it TWO rungs; `needs-discussion` on a short
+#     `docs` body drops THREE, to `trivial`. These six are RE-TARGETED at
+#     `medium` -- same predicate, new ceiling -- and emit `medium-label:*` /
+#     `medium:cross-cutting-refactor`.
+#
+# L5 and L8 therefore pin the FLOOR those six establish, on a base body built to
+# reach `small` on its own. That distinction is the whole point of the rows: an
+# earlier cut of this change asserted label INERTNESS instead (same tier with and
+# without the labels), which a correct classifier and a classifier that dropped
+# the rules satisfy EQUALLY -- and which is how the two-rung downgrade shipped
+# green. A floor assertion is red for exactly one of the two.
+
+# L1 -- the vocabulary itself. Asserted on the MODULE, not on a classification:
+# a leftover token no fixture happens to emit is still a token
+# tests/triage-rule-vocabulary.py has to keep in lockstep with the validator.
+python3 -I - "$TRIAGE" <<'PY_L1'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("solve_triage_under_test", sys.argv[1])
+st = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(st)
+assert st.TIERS == ("trivial", "small", "medium"), st.TIERS
+leftover = sorted(token for token in st.TRIAGE_RULE_TOKENS if "large" in token)
+assert not leftover, f"the deleted rung survives in the rule vocabulary: {leftover}"
+assert not hasattr(st, "LARGE_LABELS"), "LARGE_LABELS survives the collapse"
+# The five design labels did not go away with the rung -- they were re-pointed at
+# it. A classifier that dropped them passes every `large`-shaped grep above while
+# under-pricing every issue that carries one, so name the set here too.
+assert st.DESIGN_LABELS == {"epic", "needs-discussion", "architectural",
+                            "architecture", "infrastructure"}, st.DESIGN_LABELS
+# `medium` is the ceiling, so it is also the highest escalation target. Compared
+# as a SET: the retired `uberdev:tier-large` key aliases onto `medium` (L9), so
+# the values list carries it twice by design.
+assert sorted(set(st.ESCALATION_LABELS.values())) == ["medium", "small"], st.ESCALATION_LABELS
+assert st.ESCALATION_LABELS[st.ESCALATION_LABEL_PREFIX + "large"] == "medium", st.ESCALATION_LABELS
+PY_L1
+PASS=$((PASS+1))
+
+# L2 -- the CLI's tier vocabulary moved with it. `--floor large` used to be a
+# legal clamp; accepting it now would hand lib/config-read.sh a tier with no
+# rank, and uberdev_clamp_tier passes an unrankable clamp through in SILENCE --
+# an operator's explicit floor would simply stop applying.
+for L_FLAG in --floor --ceiling --override; do
+  RC=0
+  python3 -I "$TRIAGE" classify --snapshot "$FIX/trivial.json" "$L_FLAG" large \
+    >"$TMP/out" 2>"$TMP/err" || RC=$?
+  if [ "$RC" -eq 0 ]; then
+    echo "FAIL: classify $L_FLAG large was accepted — the collapsed rung is still a legal clamp" >&2
+    exit 1
+  fi
+  grep -q 'expected trivial|small|medium$' "$TMP/err"
+  PASS=$((PASS+1))
+done
+
+# L3 -- three declared change targets still price at the design rung. This is
+# the arm that used to emit `large:three-files`; with the rule gone the tier has
+# to fall out of the lighter arms' own file bounds, not out of a rule.
+cat >"$TMP/collapse-three-files.json" <<'JSON'
+{"number":20,"title":"Retry ceiling disagrees across copies","state":"OPEN","body":"Update lib/a.sh, lib/b.sh and lib/c.sh so the three retry ceilings agree.","labels":[{"name":"bug"}]}
+JSON
+assert_case "$TMP/collapse-three-files.json" medium
+COLLAPSE_FILES="$(python3 -I "$TRIAGE" classify --snapshot "$TMP/collapse-three-files.json")"
+python3 - "$COLLAPSE_FILES" <<'PY'
+import json,sys
+v=json.loads(sys.argv[1])
+assert v["file_count"]==3, v
+assert v["raw_tier"]=="medium", v
+assert v["matched_rules"]==["medium:fallback"], v
+PY
+PASS=$((PASS+1))
+
+# L4 -- a risk signal across components still prices at the design rung, for the
+# same reason: `not risks` guards both lighter arms.
+COLLAPSE_RISK="$(python3 -I "$TRIAGE" classify --snapshot "$FIX/high-risk-cross-component.json")"
+python3 - "$COLLAPSE_RISK" <<'PY'
+import json,sys
+v=json.loads(sys.argv[1])
+assert v["risk_signals"] and v["component_count"]>1, v
+assert v["raw_tier"]=="medium", v
+assert v["matched_rules"]==["medium:fallback"], v
+PY
+PASS=$((PASS+1))
+
+# L5 -- the five design labels pin a FLOOR at the new ceiling. The base body is
+# built to reach `small` ON ITS OWN (a `bug` label plus a reproduction), so the
+# label is the only thing that can hold the issue higher: this row reds if the
+# rule stops firing AND if it was deleted. A same-tier-with-and-without
+# differential cannot do that -- see the section header.
+python3 - "$TMP" <<'PY_L5'
+import json, pathlib, sys
+tmp = pathlib.Path(sys.argv[1])
+base = {"number": 21, "title": "Split the dispatcher", "state": "OPEN",
+        "body": "The dispatcher grew three responsibilities and needs splitting. "
+                "It fails today: expected one owner, actual three.",
+        "assignees": [], "comments": []}
+(tmp / "no-design-label.json").write_text(json.dumps(dict(base, labels=[{"name": "bug"}])))
+for name in ("epic", "needs-discussion", "architectural", "architecture", "infrastructure"):
+    (tmp / f"design-{name}.json").write_text(
+        json.dumps(dict(base, labels=[{"name": "bug"}, {"name": name}])))
+PY_L5
+# The control FIRST: without a design label this body genuinely computes `small`.
+# Without it the rows below would pass against a classifier that priced
+# everything at the ceiling.
+assert_case "$TMP/no-design-label.json" small
+L_CONTROL="$(python3 -I "$TRIAGE" classify --snapshot "$TMP/no-design-label.json")"
+python3 - "$L_CONTROL" <<'PY_L5C'
+import json, sys
+v = json.loads(sys.argv[1])
+assert v["matched_rules"] == ["small:concrete-reproduction"], v
+PY_L5C
+PASS=$((PASS+1))
+for L_LABEL in epic needs-discussion architectural architecture infrastructure; do
+  assert_case "$TMP/design-$L_LABEL.json" medium
+  L_DESIGN="$(python3 -I "$TRIAGE" classify --snapshot "$TMP/design-$L_LABEL.json")"
+  python3 - "$L_DESIGN" "$L_LABEL" <<'PY_L5D'
+import json, sys
+v, label = json.loads(sys.argv[1]), sys.argv[2]
+TIERS = ("trivial", "small", "medium")
+assert TIERS.index(v["raw_tier"]) >= TIERS.index("medium"), (label, v)
+assert f"medium-label:{label}" in v["matched_rules"], (label, v)
+# Re-targeted, not renamed onto a rung that no longer exists.
+assert not [r for r in v["matched_rules"] if "large" in r], (label, v)
+PY_L5D
+  PASS=$((PASS+1))
+done
+
+# L8 -- `refactor` plus real breadth pins the same floor, by either of the two
+# routes that predicate has always had: >= 2 named components, or an explicit
+# cross-cutting phrase. Same construction as L5 -- the base reaches `small` on
+# its own, so only the rule can hold it at the design rung.
+python3 - "$TMP" <<'PY_L8'
+import json, pathlib, sys
+tmp = pathlib.Path(sys.argv[1])
+base = {"number": 22, "title": "Straighten out error handling", "state": "OPEN",
+        "assignees": [], "comments": [],
+        "labels": [{"name": "refactor"}, {"name": "bug"}]}
+(tmp / "refactor-components.json").write_text(json.dumps(dict(base,
+    body="The dispatcher and scheduler modules disagree. It fails today: "
+         "expected one convention, actual two.")))
+(tmp / "refactor-cross-cutting.json").write_text(json.dumps(dict(base,
+    body="This is a cross-cutting change. It fails today: expected one "
+         "convention, actual two.")))
+(tmp / "refactor-narrow.json").write_text(json.dumps(dict(base,
+    body="The dispatcher module alone disagrees. It fails today: expected one "
+         "convention, actual two.")))
+PY_L8
+for L_CASE in refactor-components refactor-cross-cutting; do
+  assert_case "$TMP/$L_CASE.json" medium
+  L_REFACTOR="$(python3 -I "$TRIAGE" classify --snapshot "$TMP/$L_CASE.json")"
+  python3 - "$L_REFACTOR" "$L_CASE" <<'PY_L8A'
+import json, sys
+v, case = json.loads(sys.argv[1]), sys.argv[2]
+assert v["raw_tier"] == "medium", (case, v)
+assert "medium:cross-cutting-refactor" in v["matched_rules"], (case, v)
+PY_L8A
+  PASS=$((PASS+1))
+done
+# The negative control: the `refactor` LABEL is not breadth on its own. Without
+# this row the two above would pass against a rule that fired on the label alone,
+# which would over-price every narrow cleanup in the backlog.
+assert_case "$TMP/refactor-narrow.json" small
+L_NARROW="$(python3 -I "$TRIAGE" classify --snapshot "$TMP/refactor-narrow.json")"
+python3 - "$L_NARROW" <<'PY_L8B'
+import json, sys
+v = json.loads(sys.argv[1])
+assert v["component_count"] == 1, v
+assert v["matched_rules"] == ["small:concrete-reproduction"], v
+PY_L8B
+PASS=$((PASS+1))
+
+# L6 -- the one-way ratchet still works, and now tops out at `medium`. A
+# retired `uberdev:tier-large` label aliases onto the new ceiling (L9), so beside
+# a known `uberdev:tier-medium` it is redundant rather than contradictory -- and
+# either way it must not suppress the highest label that IS known.
+python3 - "$FIX/escalated-trivial.json" "$TMP/ceiling-tier.json" <<'PY'
+import json,pathlib,sys
+v=json.loads(pathlib.Path(sys.argv[1]).read_text())
+v["labels"]=[{"name":"docs"},{"name":"uberdev:tier-small"},
+             {"name":"uberdev:tier-large"},{"name":"uberdev:tier-medium"}]
+pathlib.Path(sys.argv[2]).write_text(json.dumps(v))
+PY
+assert_case "$TMP/ceiling-tier.json" medium
+CEILING_TIER="$(python3 -I "$TRIAGE" classify --snapshot "$TMP/ceiling-tier.json")"
+python3 - "$CEILING_TIER" <<'PY'
+import json,sys
+v=json.loads(sys.argv[1])
+assert v["raw_tier"]=="medium", v
+tokens=[r for r in v["matched_rules"] if r.startswith("escalation-label:")]
+assert tokens==["escalation-label:medium"], tokens
+PY
+PASS=$((PASS+1))
+
+# L7 -- and the rung below still escalates. Without this the collapse could be
+# "satisfied" by an escalation channel that stopped working altogether: `medium`
+# is the ceiling for the DISPATCHED tier, not a ban on moving up to it.
+python3 - "$FIX/escalated-trivial.json" "$TMP/small-escalation.json" <<'PY'
+import json,pathlib,sys
+v=json.loads(pathlib.Path(sys.argv[1]).read_text())
+v["labels"]=[{"name":"docs"},{"name":"uberdev:tier-small"}]
+pathlib.Path(sys.argv[2]).write_text(json.dumps(v))
+PY
+assert_case "$TMP/small-escalation.json" small
+SMALL_ESC="$(python3 -I "$TRIAGE" classify --snapshot "$TMP/small-escalation.json")"
+python3 - "$SMALL_ESC" <<'PY'
+import json,sys
+v=json.loads(sys.argv[1])
+assert v["raw_tier"]=="small" and v["source"]=="computed", v
+assert "escalation-label:small" in v["matched_rules"], v
+assert "trivial:bounded-explicit-signal" in v["matched_rules"], v
+PY
+PASS=$((PASS+1))
+
+# L9 -- a `uberdev:tier-large` label written by a PRE-#619 solver still lifts the
+# issue, ALONE. This is the migration case L6 cannot see: L6 parks the retired
+# name beside a live `uberdev:tier-medium`, so the tier is carried by the known
+# label and the retired one could be dropped entirely with the row still green.
+#
+# It matters because the ratchet is a durable, one-way record. lib/solve-launcher.sh
+# tells all four dispatch briefs to `gh label create uberdev:tier-<to> --force`
+# and states "Nothing downgrades mid-task"; RFC 0019 records the channel as
+# upgrade-only by construction. Any issue a solver escalated before this release
+# still carries the retired name and nothing else, so treating it as an unknown
+# tier would silently discard the recorded mis-triage and re-dispatch the issue at
+# whatever its body computes -- `trivial`, for this fixture. A three-rung drop,
+# with no audit row.
+python3 - "$FIX/escalated-trivial.json" "$TMP/legacy-escalation.json" <<'PY_L9'
+import json, pathlib, sys
+v = json.loads(pathlib.Path(sys.argv[1]).read_text())
+v["labels"] = [{"name": "docs"}, {"name": "uberdev:tier-large"}]
+pathlib.Path(sys.argv[2]).write_text(json.dumps(v))
+PY_L9
+assert_case "$TMP/legacy-escalation.json" medium
+LEGACY_ESC="$(python3 -I "$TRIAGE" classify --snapshot "$TMP/legacy-escalation.json")"
+python3 - "$LEGACY_ESC" <<'PY_L9A'
+import json, sys
+v = json.loads(sys.argv[1])
+assert v["raw_tier"] == "medium", v
+# The alias resolves to the CEILING, so the token stays inside the declared
+# vocabulary rather than naming a rung that no longer exists.
+assert [r for r in v["matched_rules"] if r.startswith("escalation-label:")] \
+    == ["escalation-label:medium"], v
+assert not [r for r in v["matched_rules"] if "large" in r], v
+# The computed signal survives beside it, exactly as for a live label.
+assert "trivial:bounded-explicit-signal" in v["matched_rules"], v
+PY_L9A
 PASS=$((PASS+1))
 
 echo "solve-triage: $PASS passed"

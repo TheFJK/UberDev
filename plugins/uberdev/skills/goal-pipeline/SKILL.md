@@ -26,7 +26,7 @@ So the executable body now lives in four shebang'd, independently-testable scrip
 | 3 — collect | `lib/goal-phase3.sh` | candidates → fingerprint repeat → overflow truncation → terminal gates |
 | driver | `skills/goal-pipeline/workflow.js` | the cycle loop, the projected-agent gate, and **exactly one** nested `workflow()` call per cycle into `skills/solve-fleet/workflow.js` |
 
-**There is no `solve-one.js`, and there must not be one.** `workflow()` nesting is one level deep. The solve-fleet script already fans out per issue internally (waves of `concurrency`, one worktree-isolated solver each, plus the research/spec/plan chain for medium/large tiers). A nested call *per issue* would spend the single nesting level on the wrong thing and the fleet's own agents could not run.
+**There is no `solve-one.js`, and there must not be one.** `workflow()` nesting is one level deep. The solve-fleet script already fans out per issue internally (waves of `concurrency`, one worktree-isolated solver each, plus the research/spec/plan chain for the medium tier). A nested call *per issue* would spend the single nesting level on the wrong thing and the fleet's own agents could not run.
 
 ## Constants
 

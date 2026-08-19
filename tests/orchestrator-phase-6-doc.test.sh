@@ -101,12 +101,12 @@ three=$(printf '%s\n' "$phase6_body" | grep -cE '3 .*code-simplifier.*lenses' ||
 assert_ge "AC6a 6 advisory reviewer agents mentioned"  1 "$six"
 assert_ge "AC6b 3 simplify lenses mentioned"           1 "$three"
 
-# AC7 — Phase 6 large-tier note must NOT mention "Phase 5.5" (post-#92 the
+# AC7 — the Phase 6 design-rung note must NOT mention "Phase 5.5" (post-#92 the
 # dispatch is owned by SDD Step 4.5; Phase 6 references the new location).
 n=$(printf '%s\n' "$phase6_body" | grep -ciE 'Phase 5\.5' || true)
 assert_eq "AC7 Phase 6 body no longer mentions Phase 5.5 (#92)" "0" "$n"
 
-# AC7b — Phase 6 large-tier note must mention the new SDD Step 4.5 location
+# AC7b — the Phase 6 design-rung note must mention the new SDD Step 4.5 location
 n=$(printf '%s\n' "$phase6_body" | grep -ciE 'subagent-driven-dev.*Step 4\.5|SDD.*Step 4\.5' || true)
 assert_ge "AC7b Phase 6 names SDD Step 4.5 (#92)" 1 "$n"
 

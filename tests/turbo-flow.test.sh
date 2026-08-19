@@ -83,7 +83,7 @@ assert_grep "$FINISH_BRANCH" \
 
 echo
 echo "== /turbo command entry point dispatches --turbo into the pipeline =="
-# After the orchestrator landed (PR #8), medium/large /turbo enters via
+# After the orchestrator landed (PR #8), medium-tier /turbo enters via
 # /uberdev:orchestrator --turbo; small/trivial tiers skip brainstorm entirely.
 # Either entry-point name + --turbo proves the dispatch contract.
 assert_grep "$SOLVE_PIPELINE" \
@@ -288,6 +288,46 @@ assert_grep "$SOLVE_PIPELINE" \
 assert_grep "$SOLVE_PIPELINE" \
   'TIERS\[\$n\].*medium' \
   "TURBO MODE banner checks TIERS[\$n] == medium (with break after first hit)"
+# ...and the literal it checks must COVER EVERY TIER THE ORCHESTRATOR RUNS ON.
+# The two rows above pin the banner's shape; neither can see the bug that shape
+# had. `case "$TIER"` writes the orchestrator prompt from its `*)` catch-all, so
+# the set of tiers that reach the design pipeline is `TIERS` minus the arms
+# spelled out above it — and while that set was {medium, large}, a /turbo batch
+# of nothing but `large` issues ran the full unattended orchestrator and printed
+# NO banner at all, because no tier in it was spelled `medium`. #619 collapsed
+# the rung and closed it; this row is what keeps it closed, by comparing the two
+# sets rather than asserting either one's contents.
+if python3 -I - "$SOLVE_PIPELINE" "$REPO_ROOT/plugins/uberdev/lib/solve_triage.py" <<'PY_BANNER'
+import importlib.util, pathlib, re, sys
+
+launcher = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+spec = importlib.util.spec_from_file_location("solve_triage_under_test", sys.argv[2])
+st = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(st)
+
+block = re.search(r'(?ms)^case "\$TIER" in$(.*?)^esac$', launcher)
+if not block:
+    raise SystemExit('could not find the launcher tier `case "$TIER" in` block')
+arms = set(re.findall(r"(?m)^([a-z*]+)\)$", block.group(1)))
+if "*" not in arms:
+    raise SystemExit(f"the tier case has no catch-all arm: {sorted(arms)!r}")
+catch_all = set(st.TIERS) - (arms - {"*"})
+banner = set(re.findall(r'TIERS\[\$n\]\}"\s*==\s*"([a-z]+)"', launcher))
+if not banner:
+    raise SystemExit("could not read the TURBO banner's tier literal")
+if banner != catch_all:
+    raise SystemExit(
+        f"the TURBO banner scans {sorted(banner)!r} but the orchestrator "
+        f"catch-all runs on {sorted(catch_all)!r} — a batch made only of "
+        f"{sorted(catch_all - banner)!r} runs the design pipeline unannounced")
+PY_BANNER
+then
+  echo "  PASS  TURBO MODE banner scans EVERY tier the orchestrator catch-all runs on"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  TURBO MODE banner does not cover every orchestrator-bound tier"
+  FAIL=$((FAIL + 1))
+fi
 assert_grep "$SOLVE_PIPELINE" \
   'SPAWNED\[@\]|\$\{#SPAWNED\[@\]\}' \
   "solve-pipeline emits a single summary notification (not per-spawn) using SPAWNED array"
@@ -402,7 +442,7 @@ assert_not_grep "$ORCHESTRATOR" \
   "skill description does NOT call Q&A 'optional' (mis-signals to spawned agents)"
 assert_not_grep "$ORCHESTRATOR" \
   'optional spec-reviewer' \
-  "skill description does NOT call spec-reviewer 'optional' (it is always-on for medium/large)"
+  "skill description does NOT call spec-reviewer 'optional' (it is always-on for medium)"
 
 echo
 echo "== orchestrator wires always-on reviewers =="
@@ -411,8 +451,8 @@ assert_grep "$ORCHESTRATOR" 'questions\.md' \
 assert_grep "$ORCHESTRATOR" 'spec-reviewer' \
   "spec-reviewer wired in orchestrator"
 # Old --paranoid gate REMOVED — assert the new always-on prose is present and the gate prose is absent.
-assert_grep "$ORCHESTRATOR" 'always run for medium AND large|always-on for medium and large' \
-  "spec-reviewer documented as always-on for medium+large"
+assert_grep "$ORCHESTRATOR" 'always runs for medium|always-on for medium' \
+  "spec-reviewer documented as always-on for the medium design rung"
 if grep -qE 'tier == .?medium.? AND .?--paranoid' "$ORCHESTRATOR"; then
   echo "  FAIL  old --paranoid gate prose still present"
   FAIL=$((FAIL + 1))
@@ -430,8 +470,12 @@ assert_grep "$ORCHESTRATOR" 'post-impl-review' \
 # Assert SDD owns the dispatch site.
 assert_grep "$SUBAGENT_DRIVEN" 'pr-test-analyzer' \
   "pr-test-analyzer wired in subagent-driven-dev (Step 4.5, post-#92)"
-assert_grep "$SUBAGENT_DRIVEN" 'tier == .large' \
-  "Step 4.5 gated on large tier (post-#92 AC9)"
+# #619 collapsed `large` into `medium`, and the gate moved with it rather than
+# being left pointing at a rung triage can no longer produce. A gate on a
+# deleted tier is not a skipped test here -- it is a step that silently never
+# runs, which is the exact #92 failure mode this row exists to catch.
+assert_grep "$SUBAGENT_DRIVEN" 'tier == .medium' \
+  "Step 4.5 gated on the medium design rung (post-#92 AC9, re-pointed by #619)"
 assert_grep "$SUBAGENT_DRIVEN" 'summary_dir' \
   "Step 4.5 takes summary_dir input (post-#92 AC8)"
 # Negative anchors: orchestrator must no longer carry Phase 5.5 nor own
@@ -445,8 +489,8 @@ assert_not_grep "$ORCHESTRATOR" '^### Phase 5\.5' \
 assert_grep "$ORCHESTRATOR" 'summary_dir.*RESEARCH_DIR_ABS|summary_dir: \$RESEARCH_DIR_ABS' \
   "orchestrator Phase 5 dispatch passes summary_dir to SDD (post-#92 AC8)"
 # Post-#92 AC8b: orchestrator Phase 5 dispatch must also pass tier so SDD's
-# Step 4.5 can gate the large-tier dispatch. A future refactor that dropped
-# this would silently skip Step 4.5 on large tier — same observable failure
+# Step 4.5 can gate the design-rung dispatch. A future refactor that dropped
+# this would silently skip Step 4.5 on medium tier — same observable failure
 # mode as the original #92 bug.
 assert_grep "$ORCHESTRATOR" '\btier\b' \
   "orchestrator Phase 5 dispatch passes tier to SDD (post-#92 AC8b)"
@@ -464,7 +508,7 @@ assert_not_grep "$SUBAGENT_DRIVEN" \
   'Step 4\.5 (dispatch|dispatches|routes|invokes) (via|through) (`)?uberdev:post-impl-review|(dispatch|route|invoke) Step 4\.5 (via|through) (`)?uberdev:post-impl-review' \
   "AC10: Step 4.5 is direct Task(), not routed via uberdev:post-impl-review (post-#92)"
 assert_grep "$ORCHESTRATOR" 'subagent-driven-dev.*Step 4\.5|SDD Step 4\.5' \
-  "orchestrator Phase 6 large-tier note names SDD Step 4.5 (post-#92 AC7b)"
+  "orchestrator Phase 6 design-rung note names SDD Step 4.5 (post-#92 AC7b)"
 
 echo
 echo "== subagent-driven-dev: post-impl-review hosted by /review-pr Phase 1 (#67) =="
@@ -479,9 +523,9 @@ assert_not_grep "$SUBAGENT_DRIVEN" 'WAVE.*final|WAVE: .final.' \
   "subagent-driven-dev no longer passes WAVE=final (no in-skill post-impl-review dispatch post-#67)"
 
 echo
-echo "== turbo medium/large parity: post-push post-impl-review documented in turbo.md =="
+echo "== turbo medium parity: post-push post-impl-review documented in turbo.md =="
 assert_grep "$TURBO_CMD" 'post-PR-push.*(/review-pr|review-pr).*Phase 1|(/review-pr|review-pr).*Phase 1.*post-PR-push' \
-  "turbo.md documents post-push /review-pr Phase 1 post-impl-review for medium/large"
+  "turbo.md documents post-push /review-pr Phase 1 post-impl-review for medium tier"
 assert_grep "$TURBO_CMD" 'against the pushed diff' \
   "turbo.md names the pushed-diff review target"
 assert_not_grep "$TURBO_CMD" 'post-impl-review.*once at end-of-issue|consolidated across all waves|uberdev:post-impl-review. per wave' \

@@ -191,9 +191,12 @@ def _validate_policy(policy: Mapping[str, Any]) -> None:
             raise _error("invalid_policy", f"invalid route alias {alias!r}")
 
     lead_routes = _as_mapping(policy.get("lead_routes"), "policy.lead_routes")
-    expected_tiers = {"trivial", "small", "medium", "large"}
+    # THREE rungs since #619. This set and policy.lead_routes must move
+    # together in one commit: a mismatch is `invalid_policy`, which fails
+    # load_policy outright rather than one classification.
+    expected_tiers = {"trivial", "small", "medium"}
     if set(lead_routes) != expected_tiers:
-        raise _error("invalid_policy", "lead route tiers must be trivial, small, medium, and large")
+        raise _error("invalid_policy", "lead route tiers must be trivial, small, and medium")
     for tier, raw_row in lead_routes.items():
         row = _as_mapping(raw_row, f"policy.lead_routes.{tier}")
         if set(row) != {"default", "high_risk"}:

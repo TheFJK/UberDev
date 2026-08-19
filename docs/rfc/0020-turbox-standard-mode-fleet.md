@@ -165,7 +165,7 @@ longer than the cap split into `ceil(N / 3)` sequential waves, same as `/turbo`.
 | Tier | What runs |
 | --- | --- |
 | `trivial`, `small` | ONE solver agent per issue in the controller-cut worktree. It runs its own git, its own push, its own PR — it is alone in that checkout, so there is no race for the controller to serialise. Identical in spirit to the Workflow lane's single-solver path. |
-| `medium`, `large` | The full Phase 2–6 pipeline: research fan-out → spec → plan → **wave-parallel** implementation → per-task gate → delivery. |
+| `medium` | The full Phase 2–6 pipeline: research fan-out → spec → plan → **wave-parallel** implementation → per-task gate → delivery. |
 | any tier with no usable plan | falls back to the single solver. No plan means no tasks, no waves, and no `Owns` sets to prove disjoint. |
 
 ### 3.5 The safety boundary: who may run git

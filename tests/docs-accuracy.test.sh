@@ -2167,12 +2167,12 @@ assert_in_section "$DISPATCH15_RFC" '^- \*\*R-2 — medium-tier fidelity' '^- \*
 # truncated in-place spec would be indistinguishable from a good one), which is
 # exactly the half a reader must not have to infer.
 #
-# Anchored to the medium/large TIER ROW, not to the file: each doc describes the
+# Anchored to the design-rung TIER ROW, not to the file: each doc describes the
 # chain in exactly one line, and a file-wide needle would let the claim drift
 # into a footnote while the row a reader actually consults stayed stale.
-assert_grep "$SOLVE_FLEET_SKILL" '^\| .medium., .large.*spec-r1\.md' \
+assert_grep "$SOLVE_FLEET_SKILL" '^\| .medium..*spec-r1\.md' \
   "T14.7 SKILL.md chain row names the versioned artifact the bounded revision round writes"
-assert_grep "$DISPATCH15_RFC" '^\| .medium., .large.*spec-r1\.md' \
+assert_grep "$DISPATCH15_RFC" '^\| .medium..*spec-r1\.md' \
   "T14.8 RFC 0015 chain row names the same versioned revision artifact"
 
 # #524 item 2. Naming the plan REVIEWER is not enough on its own: the rung has
@@ -2180,9 +2180,9 @@ assert_grep "$DISPATCH15_RFC" '^\| .medium., .large.*spec-r1\.md' \
 # plan reviewer runs, without saying where what it finds goes, describes a stage
 # that could be theatre. Both halves are therefore in the one anchored needle.
 # Same TIER-ROW anchor as T14.7/T14.8, for the same reason.
-assert_grep "$SOLVE_FLEET_SKILL" '^\| .medium., .large.*plan reviewer.*implementer, task reviewer and fixer' \
+assert_grep "$SOLVE_FLEET_SKILL" '^\| .medium..*plan reviewer.*implementer, task reviewer and fixer' \
   "T14.9a SKILL.md chain row names the plan reviewer AND the three rungs its findings reach"
-assert_grep "$DISPATCH15_RFC" '^\| .medium., .large.*plan reviewer.*implementer, task reviewer and fixer' \
+assert_grep "$DISPATCH15_RFC" '^\| .medium..*plan reviewer.*implementer, task reviewer and fixer' \
   "T14.9b RFC 0015 chain row names the plan reviewer AND the three rungs its findings reach"
 
 # R-2 is the RFC's own register of what the translation still LOSES. It named
@@ -2220,9 +2220,9 @@ fi
 # Same TIER-ROW anchor as T14.7-T14.9 for the chain rows, for the same reason:
 # each doc describes the chain in exactly one line, and a file-wide needle lets
 # the claim drift into a footnote while the row a reader consults stays stale.
-assert_grep "$SOLVE_FLEET_SKILL" '^\| .medium., .large.*security. lens.*risk_signals' \
+assert_grep "$SOLVE_FLEET_SKILL" '^\| .medium..*security. lens.*risk_signals' \
   "T14.11a SKILL.md chain row names the security lens AND the triage field that gates it"
-assert_grep "$DISPATCH15_RFC" '^\| .medium., .large.*security. lens.*risk_signals' \
+assert_grep "$DISPATCH15_RFC" '^\| .medium..*security. lens.*risk_signals' \
   "T14.11b RFC 0015 chain row names the same risk-gated lens"
 assert_grep "$SOLVE_FLEET_SKILL" 'one record per issue.*risk_signals' \
   "T14.11c SKILL.md records that the manifest record carries risk_signals — the one hop the value crosses"
@@ -3946,6 +3946,81 @@ else
   echo "        name the mechanism instead; T16.9 already prints the live counts on both sides"
   FAIL=$((FAIL + 1))
 fi
+
+# === BEGIN T19 README tier vocabulary ===
+# T19 — #619. README's user-facing triage table is the FIRST place a user reads
+# the tier ladder, and until this row nothing in CI read it for tier names. The
+# `large` rung was deleted from the classifier, every validator, the routing
+# policy and the fixture corpus, and README still documented it — the rung, its
+# eight rules verbatim, and `--full # force medium/large` — because every guard
+# that moved with the collapse was keyed on code, and the doc surface had none.
+# A user following it labels an issue `architectural` expecting a design
+# pipeline, or sets `solve_tier_ceiling: large`, which `uberdev_read_enum`
+# matches against a `trivial|small|medium` pipe-list, rejects as `invalid_enum`
+# and silently replaces with the empty default — the ceiling never applies.
+#
+# DERIVED, not transcribed. Both rows read `TIERS` out of `lib/solve_triage.py`
+# at run time and compare README against it, so they move with the ladder
+# instead of pinning today's three names — a retyped list is exactly the thing
+# that drifted. T19.2 is the general form: any `x/y` pair in README whose left
+# half is a live tier must have a live tier on the right too, which reds on
+# `medium/large` without ever naming `large`. Its false-positive shape (a live
+# tier beside an ordinary word, e.g. a hypothetical "medium/high risk") was
+# MEASURED rather than assumed: over all 187 historical revisions of README.md
+# the only such pair ever written is `medium/large` itself, so the broad scan
+# costs nothing and a whole-file sweep is what catches the drift on the four
+# lines that carry no `tier` keyword to scope on.
+if python3 - "$REPO_ROOT/README.md" "$REPO_ROOT/plugins/uberdev/lib/solve_triage.py" <<'PY_T19'
+import importlib.util, pathlib, re, sys
+
+readme = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").replace("\r\n", "\n")
+spec = importlib.util.spec_from_file_location("st", sys.argv[2])
+st = importlib.util.module_from_spec(spec); spec.loader.exec_module(st)
+tiers = list(st.TIERS)
+
+ok = True
+
+# T19.1 -- the triage table's tier column IS the ladder, in order.
+lines = readme.split("\n")
+head = next((i for i, l in enumerate(lines) if l.startswith("| Tier |")), None)
+if head is None:
+    print("T19.1 README has no `| Tier |` triage table header"); ok = False
+else:
+    named = []
+    for line in lines[head + 2:]:
+        if not line.startswith("|"):
+            break
+        cell = line.split("|")[1]
+        cell = re.sub(r"\*\(.*?\)\*", "", cell)     # drop the *(default …)* aside
+        named.append(cell.replace("*", "").strip())
+    if named != tiers:
+        print("T19.1 README triage table names %r; lib/solve_triage.py TIERS is %r" % (named, tiers))
+        ok = False
+
+# T19.2 -- no slash-pair that promises a rung the ladder no longer has.
+live = set(tiers)
+bad = set()
+for left, right in re.findall(r"\b([a-z]+)\s*/\s*([a-z]+)\b", readme):
+    if left in live and right not in live:
+        bad.add("%s/%s" % (left, right))
+    if right in live and left not in live:
+        bad.add("%s/%s" % (left, right))
+if bad:
+    print("T19.2 README pairs a live tier with a name the ladder does not have: %s"
+          % ", ".join(sorted(bad)))
+    ok = False
+
+sys.exit(0 if ok else 1)
+PY_T19
+then
+  echo "  PASS  T19 README's tier vocabulary is derived-equal to lib/solve_triage.py TIERS"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T19 README documents a tier ladder lib/solve_triage.py does not have"
+  echo "        file: $REPO_ROOT/README.md"
+  FAIL=$((FAIL + 1))
+fi
+# === END T19 README tier vocabulary ===
 
 echo
 echo "== Summary =="
