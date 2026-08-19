@@ -86,30 +86,6 @@
       },
       "optional_inputs": {}
     },
-    "solve.lead.orchestrator": {
-      "kind": "skill",
-      "source": "plugins/uberdev/lib/solve-launcher.sh",
-      "role": null,
-      "route": null,
-      "phase": "handoff",
-      "cardinality": "zero_or_one_medium_large"
-    },
-    "solve.lead.brainstorm": {
-      "kind": "skill",
-      "source": "plugins/uberdev/lib/solve-launcher.sh",
-      "role": null,
-      "route": null,
-      "phase": "handoff",
-      "cardinality": "zero_or_one_direct_tier_escalation"
-    },
-    "solve.lead.finish_branch": {
-      "kind": "skill",
-      "source": "plugins/uberdev/lib/solve-launcher.sh",
-      "role": null,
-      "route": null,
-      "phase": "handoff",
-      "cardinality": "zero_or_one_direct_tier_completion"
-    },
     "brainstorm.research.codebase": {
       "kind": "provider",
       "source": "plugins/uberdev/skills/brainstorm/SKILL.md",
