@@ -3885,14 +3885,18 @@ uberdev_goal_read_run_state() {
         case "$v" in
           # DECLARED DIVERGENCE, not intent (found while wiring #370's Half A
           # guard, NOT in its register): goal-pipeline/SKILL.md's
-          # GOAL_CIRCUIT_BREAKER_REASONS has NINE reasons; this rehydration
-          # allowlist has eight — `solver_failed` (goal-phase3.sh; goal-watch.sh's three
+          # GOAL_CIRCUIT_BREAKER_REASONS has TEN reasons; this rehydration
+          # allowlist has nine — `solver_failed` (goal-phase3.sh; goal-watch.sh's three
           # sites went with the codex solver-status branch #381 deleted)
           # is missing. Latent today: only `agent_stuck_on_dialog` is ever
           # assigned to CIRCUIT_BREAKER_HALT, so nothing is dropped yet. The
           # arm has no else branch, so if that changes the value vanishes on the
           # next fresh-shell fence exactly as it did for UBERDEV_RESOLVED_BACKEND.
-          max_cycles|nonconvergence|stuck_loop|merge_failed|gh_api_failed|unknown_merge_result|queue_empty_not_converged|agent_stuck_on_dialog)
+          # `backend_resolve_failed` (#624) joins the allowlist with the rest of
+          # the closed set: the divergence this comment declares is the ONE
+          # member above, and letting a second one accumulate silently is how a
+          # declared gap turns back into an undeclared one.
+          max_cycles|nonconvergence|stuck_loop|merge_failed|gh_api_failed|unknown_merge_result|queue_empty_not_converged|agent_stuck_on_dialog|backend_resolve_failed)
             CIRCUIT_BREAKER_HALT="$v" ;;
         esac ;;
       PRIOR_LAST_ACTIVITY_*|FIRST_DIALOG_TS_*)

@@ -330,8 +330,8 @@ CONTRACTS: dict[str, list[str]] = {
         "skills/goal-pipeline/workflow.js",
     ],
     # NOT in #370's register — found by applying this convention.
-    # GOAL_CIRCUIT_BREAKER_REASONS (9) vs the CIRCUIT_BREAKER_HALT run-state
-    # allowlist in uberdev_goal_read_run_state (8, missing `solver_failed`).
+    # GOAL_CIRCUIT_BREAKER_REASONS (10) vs the CIRCUIT_BREAKER_HALT run-state
+    # allowlist in uberdev_goal_read_run_state (9, missing `solver_failed`).
     # Latent, not live: today only `agent_stuck_on_dialog` is ever assigned to
     # that scalar. The divergence is DECLARED at the site, not laundered.
     "goal-circuit-breaker-reason": [

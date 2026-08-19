@@ -16,12 +16,20 @@
 #   42 — loop back: goal_cycle_completed emitted, candidates merged into the
 #        rollover queue, `cycle` bumped, merge barrier re-seeded.
 #   1  — halt: a circuit breaker fired (max_cycles, nonconvergence,
-#        solver_failed, queue_empty_not_converged, gh_api_failed). `solver_failed`
-#        covers TWO distinct halts, told apart by the `phase` subfield on the
-#        breaker payload rather than by a second reason (RFC 0005 §9 keeps
-#        GOAL_CIRCUIT_BREAKER_REASONS a CLOSED set): the failed-issue count, and
-#        `phase=partial_chain` — a run whose PRs are all terminal but whose
-#        solver task chain stopped short on at least one of them (#592).
+#        solver_failed, queue_empty_not_converged, gh_api_failed,
+#        backend_resolve_failed). EVERY exit-1 path in this file writes its own
+#        goal_circuit_breaker row BEFORE it goes, and that is part of the
+#        contract rather than a courtesy: skills/goal-pipeline/workflow.js's
+#        collect relay publishes the reason of the LAST such row in the run's
+#        jsonl, so a halt that writes none is published under some earlier
+#        halt's — or some earlier CYCLE's — reason (#624).
+#        `solver_failed` covers TWO distinct halts, told apart by the `phase`
+#        subfield on the breaker payload rather than by a second reason (RFC
+#        0005 §9 keeps GOAL_CIRCUIT_BREAKER_REASONS a CLOSED set, so widening
+#        it takes an amendment — `backend_resolve_failed` has one, D624a): the
+#        failed-issue count, and `phase=partial_chain` — a run whose PRs are all
+#        terminal but whose solver task chain stopped short on at least one of
+#        them (#592).
 #   3  — run-state could not be rehydrated or persisted.
 #   2  — a STARTUP refusal, raised before any state is read: an unrecognised
 #        flag, or a `--partial-issues` value that is not digits-and-commas.
@@ -93,7 +101,64 @@ esac
 [ -r "${UBERDEV_PLUGIN_ROOT}/lib/goal-state.sh" ]  && . "${UBERDEV_PLUGIN_ROOT}/lib/goal-state.sh"
 GOAL_ID="${UBERDEV_GOAL_ID:-${GOAL_ID:-}}"
 uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase 3" >&2; exit 3; }
-uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # re-derive backend/env (idempotent, D8); not persisted
+# Backend/env re-derivation (idempotent, D8; not persisted). It is a HOST-
+# CAPABILITY preflight — lib/dispatch.sh's resolver has exactly ONE non-zero
+# return, the TIMEOUT_BIN probe, and it returns 0 early for `workflow`, so this
+# can only refuse under `--backend=background|wezterm` on a host that ships
+# neither /usr/bin/timeout nor timeout(1) nor gtimeout(1). Narrow, not
+# unreachable.
+#
+# #624 — this used to be a bare `|| exit 1` that appended NOTHING to the audit
+# jsonl. skills/goal-pipeline/workflow.js's collect relay publishes the
+# `.payload.reason` of the LAST goal_circuit_breaker row in that file, so it
+# handed the driver whatever reason an earlier phase — or, on a `--resume`, an
+# EARLIER CYCLE — had already written (lib/goal-phase0.sh deliberately does not
+# truncate the jsonl on a resume, so a prior pass's halting row is routinely
+# still there). The halt was real; the cause published for it belonged to a
+# different halt, which is worse than the blank reason that preceded #592
+# because it is specific and plausible.
+#
+# A TENTH GOAL_CIRCUIT_BREAKER_REASONS member rather than a `phase` subfield on
+# an existing one: both subfield reuses in this tree (`solver_failed` +
+# phase=partial_chain here, `stuck_loop` + phase=blocks_cycle in
+# lib/goal-watch.sh) discriminate two shapes of the SAME failure, and a host
+# with no timeout(1) is not a solver that fell short. RFC 0005 §9 D624a carries
+# the amendment the closed set requires.
+#
+# The full halt shape (audit + reap + summary) is available HERE, at the last
+# line of the rehydrate region, because goal-state.sh is sourced above and
+# uberdev_goal_read_run_state has already exported UBERDEV_GOAL_ID and
+# UBERDEV_TMPDIR — the only two inputs the audit sink reads. This is NOT a
+# startup path: without goal-state.sh the read_run_state call above would be a
+# command-not-found and its `||` arm would have exited 3 before this line ran.
+#
+# rc is captured from a BARE call, never from inside `if ! …; then`, where `$?`
+# is the negated status and always 0 — same idiom as the `gh_rc=$?` reads below.
+uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}"
+_backend_resolve_rc=$?
+if [ "$_backend_resolve_rc" -ne 0 ]; then
+  # The payload is hand-assembled JSON (uberdev_goal_audit escapes nothing), and
+  # this value arrives from run-state, so it is gated before interpolation. A
+  # SHAPE gate, deliberately, not a copy of lib/dispatch.sh's backend
+  # vocabulary: re-listing that enum here would plant an unmarked mirror of a
+  # contract this file does not own (docs/rfc/0016), and the only property the
+  # sink needs is that the value cannot carry a quote or a brace.
+  _backend_resolve_name="${UBERDEV_RESOLVED_BACKEND:-}"
+  case "$_backend_resolve_name" in
+    ""|*[!a-z]*) _backend_resolve_name="unknown" ;;
+  esac
+  uberdev_goal_audit goal_circuit_breaker \
+    "{\"reason\":\"backend_resolve_failed\",\"step\":\"phase3_rehydrate\",\"backend\":\"$_backend_resolve_name\",\"exit_code\":$_backend_resolve_rc}"
+  # The resolver prints its own diagnostic (which binary it looked for, how to
+  # install one); this line says which decision that diagnostic just caused, so
+  # an unattended run's operator does not have to infer the halt from an exit
+  # status alone.
+  printf 'goal-phase3: could not resolve the dispatch environment for backend %s (rc=%s) — halting; see the resolver diagnostic above.\n' \
+    "$_backend_resolve_name" "$_backend_resolve_rc" >&2
+  _uberdev_goal_reap_zombies || true
+  print_summary "$cycle"
+  exit 1
+fi
 # <<< region: rehydrate
 
 # >>> region: partial-union
