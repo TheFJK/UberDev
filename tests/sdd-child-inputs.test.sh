@@ -1521,6 +1521,122 @@ rulings_first_line_after="$(sed -n '1p' "$RULINGS")"
   exit 1
 }
 
+# ── AC-16g: a ruling is ONE line, so a field carrying a break is refused ──────
+# The write is `Ruling: %s — %s — %s\n`. A newline inside any field splits one
+# call into two on-disk lines, and step 5's roll-up ("read the run's rulings.md
+# and emit every line it holds") then carries the fragment into the PR body as a
+# ruling of its own — no decision, no why, no cost, and nothing marking it as
+# half of one. A carriage return does the same to any reader that splits on
+# CRLF. Neither is a value a ruling can need, so both are refused with the same
+# rc 2 an empty field draws. NOT stripped: stripping would rewrite the decision
+# rather than reject it, and a rewritten ruling is worse than a missing one.
+assert_ruling_rejected 'newline in decision' "$RULINGS" 'kept the plan step
+Ruling: forged: a second line' 'why' 'cost'
+assert_ruling_rejected 'newline in why' "$RULINGS" 'decision' 'the wider read
+was unowned' 'cost'
+assert_ruling_rejected 'newline in cost' "$RULINGS" 'decision' 'why' 'a reviewer
+re-derives it'
+# Assembled at run time so no literal CR byte ever enters this file (a CR in
+# tracked source is invisible to grep — see the Git-Bash CR class).
+RULING_CR="$(printf 'before\rafter')"
+assert_ruling_rejected 'carriage return in decision' "$RULINGS" "$RULING_CR" 'why' 'cost'
+assert_ruling_rejected 'carriage return in why' "$RULINGS" 'decision' "$RULING_CR" 'cost'
+assert_ruling_rejected 'carriage return in cost' "$RULINGS" 'decision' 'why' "$RULING_CR"
+
+# ── AC-16h: the ruling contract has a PRODUCER, and an absolute path to write ─
+# `## Rulings` promises "every ruling gets one line on disk at the moment it is
+# made" and step 5 reads that file back into the PR body. Until #606 the helper
+# had exactly two mentions in the whole skill — the `- **How.**` bullet and its
+# own definition — so no numbered step ever called it: a contract with a reader,
+# a validator and no writer. Its `case "$rulings_path" in /*)` guard also
+# refuses a relative path, and nothing established an absolute one.
+#
+# Every row below is DERIVED from the file rather than pinned to a line: the
+# cap-exhaustion row walks whatever rungs call `sdd_note_cap_exhausted`, so a
+# sixth rung added later must record its ruling too or this reds on that commit.
+python3 -I -B - "$SKILL" <<'PY_AC16H'
+import re
+import sys
+from pathlib import Path
+
+lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+
+# Prose only: a fence body is the helper's own implementation, not a call site.
+fenced, in_fence = [], False
+for line in lines:
+    if line.startswith("```"):
+        in_fence = not in_fence
+        fenced.append(True)
+        continue
+    fenced.append(in_fence)
+
+def index_of(needle):
+    hits = [i for i, line in enumerate(lines) if needle in line]
+    assert len(hits) == 1, "AC-16h: %r occurs %d time(s)" % (needle, len(hits))
+    return hits[0]
+
+def heading_of(text):
+    # Exact-line match: `## Rulings` also appears inside the step-5 roll-up's
+    # `## Rulings I made` heading name, and `## The Process` is quoted in the
+    # `## Rulings` prose. A substring anchor for either is ambiguous by design.
+    hits = [i for i, line in enumerate(lines) if line.strip() == text]
+    assert len(hits) == 1, "AC-16h: heading %r occurs %d time(s)" % (text, len(hits))
+    return hits[0]
+
+process_at = heading_of("## The Process")
+
+# AC-16h.1 — anti-vacuity. Every row below is a loop over prose lines; a renamed
+# helper makes all of them vacuously true.
+steps = [i for i in range(process_at, len(lines)) if not fenced[i]]
+assert len(steps) > 100, "AC-16h.1: only %d prose line(s) after '## The Process'" % len(steps)
+cap_rungs = [i for i in steps if "sdd_note_cap_exhausted" in lines[i]]
+assert len(cap_rungs) >= 4, \
+    "AC-16h.1: only %d cap-exhaustion rung(s) found in the numbered steps" % len(cap_rungs)
+
+# AC-16h.2 — cap exhaustion is a ruling by this skill's own list ("parking a
+# finding once a cap fires"), so every rung that fires one records it.
+missing = [i + 1 for i in cap_rungs if "sdd_append_ruling" not in lines[i]]
+assert not missing, \
+    "AC-16h.2: cap-exhaustion rung(s) at line(s) %r call sdd_note_cap_exhausted but record no ruling" % missing
+
+# AC-16h.3 — the other three rungs the `## Rulings` section names as stops that
+# route rather than wait. Each is anchored on its own prose, never on a number.
+for label, anchor in (
+        ("BLOCKED ladder", "**BLOCKED:** The implementer cannot complete the task."),
+        ("REFUSED rung", "**REFUSED:** The implementer judged the handoff itself unexecutable"),
+        ("wave resequencing", "An overlap is a **plan** defect"),
+):
+    at = index_of(anchor)
+    window = " ".join(lines[at:at + 8])
+    assert "sdd_append_ruling" in window, \
+        "AC-16h.3: the %s makes a ruling and never writes one (anchor %r)" % (label, anchor)
+
+# AC-16h.4 — the absolute path the helper's `/*` guard requires is ESTABLISHED,
+# once, in the routed-adapter fence, and every call site names that one variable.
+assignments = [i for i in range(len(lines)) if re.match(r"^SDD_RULINGS=", lines[i])]
+assert len(assignments) == 1, \
+    "AC-16h.4: SDD_RULINGS is assigned %d time(s); the run has exactly one rulings file" % len(assignments)
+assert assignments[0] < process_at, \
+    "AC-16h.4: SDD_RULINGS is established after '## The Process' — the steps above it have no path to write"
+call_sites = [i for i in steps if "sdd_append_ruling" in lines[i]]
+assert len(call_sites) >= 4, "AC-16h.4: only %d step-level sdd_append_ruling call site(s)" % len(call_sites)
+bare = [i + 1 for i in call_sites if "SDD_RULINGS" not in lines[i]]
+assert not bare, \
+    "AC-16h.4: sdd_append_ruling call site(s) at line(s) %r pass a path other than $SDD_RULINGS" % bare
+
+# AC-16h.5 — the reader reads the file the writers write, by the same name.
+rollup = index_of("**Rulings roll-up.**")
+assert "SDD_RULINGS" in " ".join(lines[rollup:rollup + 4]), \
+    "AC-16h.5: the step-5 roll-up names no file — it must read the same $SDD_RULINGS the steps append to"
+
+# AC-16h.6 — and the `## Rulings` contract itself says where that path comes
+# from, so a reader of the section alone is not left to invent one.
+rulings_at = heading_of("## Rulings")
+section = " ".join(lines[rulings_at:process_at])
+assert "SDD_RULINGS" in section, \
+    "AC-16h.6: the '## Rulings' section never names the variable that carries the run's rulings path"
+PY_AC16H
+
 # ── AC-9b: the accepted stage set is closed, and matches the prose ───────────
 SKILL_STAGE_TOKENS="$(python3 -I -B - "$SKILL" <<'PY'
 import re

@@ -1131,6 +1131,67 @@ else
   fail "G42b SKILL.md lost load-bearing claim-verification wording:$CV_ASYM_MISSING (see B217, B301b and B302/B302b)"
 fi
 
+# G47/G47b/G48 (#606) — the audit-event enumeration is COMPLETE and DERIVED, and
+# the one signature claim built on top of it is qualified.
+#
+# G41 asks that five NAMED events appear; nothing asked whether the list was all
+# of them. It was not: `main()`'s outer catch wraps its own recovery and audits
+# `pr_proof_not_run_recovery_failed` when the classification or the marking
+# throws, and that name appeared on no doc surface at all. This section's whole
+# premise is that the counts cannot carry the fact and the audit trail is the
+# only discriminator — so an emitter missing from the trail's own contract is
+# the discriminator going quiet on exactly the path where every count is zero.
+#
+# G48 is the claim that event refutes. The section said `probed: 0` beside a
+# NON-ZERO `unverified` is the shape of a thrown run. It is not, when the
+# recovery itself threw: nothing is ever marked, so `unverified` stays at zero
+# beside `probed: 0` — byte-identical to a batch with no claim to prove, which
+# is the very confusion the row exists to resolve.
+#
+# The names are HARVESTED from the emitters rather than transcribed, so a tenth
+# event reds this row on the commit that adds it instead of on the next audit.
+PR_PROOF_EMITTED="$(grep -o 'event: "pr_proof_[a-z_]*"' "$WORKFLOW" \
+  | sed 's/.*"\(pr_proof_[a-z_]*\)"/\1/' | sort -u | tr -d '\r')"
+PR_PROOF_EMITTED_COUNT="$(grep -c '' <<<"$PR_PROOF_EMITTED" || true)"
+
+# G47 — anti-vacuity, and it MUST run before G47b. A renamed emitter key yields
+# an EMPTY harvest, and an empty loop reports every name as present.
+if [ -z "$PR_PROOF_EMITTED" ]; then
+  fail "G47 no pr_proof_* emitter names were harvested from workflow.js — G47b would be vacuous"
+elif [ "$PR_PROOF_EMITTED_COUNT" -lt 8 ]; then
+  fail "G47 only $PR_PROOF_EMITTED_COUNT pr_proof_* emitter name(s) harvested from workflow.js — too few to be the real set"
+else
+  pass "G47 the pr_proof_* emitter names were harvested from workflow.js ($PR_PROOF_EMITTED_COUNT of them; G47b has something to compare)"
+fi
+
+# G47b — every emitted name is named by the contract surface a reader holds.
+PR_PROOF_UNDOCUMENTED=""
+while IFS= read -r pp_ev; do
+  [ -n "$pp_ev" ] || continue
+  grep -qF -- "$pp_ev" <<<"$CV_SECTION" || PR_PROOF_UNDOCUMENTED="$PR_PROOF_UNDOCUMENTED $pp_ev"
+done <<<"$PR_PROOF_EMITTED"
+if [ -z "$PR_PROOF_UNDOCUMENTED" ]; then
+  pass "G47b every pr_proof_* event workflow.js emits is named in SKILL.md's claim-verification section"
+else
+  fail "G47b workflow.js emits pr_proof_* events SKILL.md never names:$PR_PROOF_UNDOCUMENTED — an audit row nobody documents is a discriminator nobody reads"
+fi
+
+# G48 — the signature claim, read wrap-independently. The needles are chosen so
+# the NEGATION of each fact cannot satisfy them, and both positives were
+# measured absent from the pre-fix section.
+CV_FLAT="$(tr '\n' ' ' <<<"$CV_SECTION" | tr -s ' ')"
+CV_SHAPE_MISSING=""
+for cv_shape in 'the one case where the shape above' 'never evidence the claims were checked'; do
+  grep -qF -- "$cv_shape" <<<"$CV_FLAT" || CV_SHAPE_MISSING="$CV_SHAPE_MISSING [$cv_shape]"
+done
+if grep -qF -- 'is the shape, and that audit row' <<<"$CV_FLAT"; then
+  fail "G48 SKILL.md still claims a non-zero unverified is THE shape of a thrown run — it is not when the recovery itself threw (pr_proof_not_run_recovery_failed)"
+elif [ -n "$CV_SHAPE_MISSING" ]; then
+  fail "G48 SKILL.md does not state the recovery-threw exit:$CV_SHAPE_MISSING"
+else
+  pass "G48 SKILL.md qualifies the thrown-run signature and states the recovery-threw exit that all-zero counts hide"
+fi
+
 # --- the script surface ----------------------------------------------------
 # The comment shipped beside the declaration is a shipped statement too, and it
 # is the surface this defect was BORN on: an earlier fix added a comment that

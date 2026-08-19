@@ -142,12 +142,20 @@ assert {edge_id for edge_id,row in edges.items()
 # ROOT edge: it has no role card, so _uberdev_child_prepare never composes a
 # prompt for it and it reads no terminal directive at all. It belongs to the set
 # above because it is an unbound provider edge, not because it is a child whose
-# return vocabulary is at stake -- 31 of the 32 are composable, this one is not.
+# return vocabulary is at stake -- every OTHER member is composable, and the row
+# below ASSERTS that rather than stating it. This comment used to hand-write
+# "31 of the 32 are composable", derived by nothing: a fourth copy of the pair
+# SRT-606.3 derives, sitting five lines above a census that enumerated three
+# files and did not count the one it was written in. The split is never typed
+# here again -- membership is pinned, and the figures live only where they are
+# computed.
 assert edges['solve.issue.lead'].get('role') is None
 assert tree['root_edge_id']=='solve.issue.lead'
+assert {edge_id for edge_id in unbound_provider_edges
+        if edges[edge_id].get('role') is None}=={'solve.issue.lead'}
 # --- SRT-606.x (#606) -- the prose copies of this set's cardinalities, derived.
 #
-# Three files state, in prose, facts about the set pinned above: RFC 0016's
+# Three OTHER files state, in prose, facts about the set pinned above: RFC 0016's
 # `sdd-implementer-status` register row, tests/contract_markers.py's mirror
 # comment on the same register entry, and the composer comment in
 # lib/child-dispatch.sh that explains why the contract-less arm may only POINT.
@@ -155,6 +163,12 @@ assert tree['root_edge_id']=='solve.issue.lead'
 # drifted: two named a third role whose card does carry a fenced block, and the
 # third said "the other 31" beside RFC 0016's "all 32" -- two figures that read
 # as a contradiction while each was describing a different subset.
+#
+# A FOURTH copy sat in THIS file, five lines above, and the first edition of this
+# census did not count it: SRT-546.2's own comment hand-wrote "31 of the 32 are
+# composable". It is gone -- that sentence pins the roleless membership instead
+# of typing the split -- which is why the enumeration is three files and not
+# four. A census blind to a copy in its own file is the defect it audits.
 #
 # These rows recompute every figure from `unbound_provider_edges` above and from
 # the role cards on disk, then require the prose to match. The only membership
@@ -266,9 +280,11 @@ for sdd_phrase,sdd_number in (('%d members' % sdd_unbound_total,sdd_unbound_tota
             sdd_number,sdd_bare,sdd_phrase,sdd_composer.count(sdd_phrase))
 assert 'solve.issue.lead' in sdd_composer, \
     'SRT-606.3: the composer comment does not name the roleless member of the set'
-# The RFC row is the third copy of the same pair and is the one the composer
-# comment was made consistent with, so it is derived here too -- otherwise the
-# pair is free to drift apart in the other direction.
+# The RFC row states the same pair as the composer comment, and is the copy the
+# composer was made consistent with, so it is derived here too -- otherwise the
+# pair is free to drift apart in the other direction. Named rather than
+# numbered: an ordinal here would be one more figure to keep in step with the
+# census above, which is the class this section exists to close.
 assert 'all %d unbound provider edges (%d of them ever composed' % (
     sdd_unbound_total,sdd_unbound_composable) in sdd_rfc_row, \
     'SRT-606.3: the RFC register row no longer states the derived %d/%d split' % (

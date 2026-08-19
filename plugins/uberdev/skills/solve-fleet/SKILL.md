@@ -411,9 +411,19 @@ ran leaves every verification count at zero, which is byte-identical to a batch
 that had no PR claim to prove. So the catch runs the same two steps the pass's
 own catch runs — the coherence classification, then marking every retained claim
 `UNVERIFIED` — and audits **`pr_proof_not_run`**. `probed: 0` beside a non-zero
-`unverified` is the shape, and that audit row is the only thing telling a thrown
-run apart from one with nothing to prove: another two facts separated only by
-the audit trail. Nothing is downgraded — unproven is reported as unproven.
+`unverified` is the shape **once that recovery completes**, and that audit row
+is the only thing telling a thrown run apart from one with nothing to prove:
+another two facts separated only by the audit trail. Nothing is downgraded —
+unproven is reported as unproven.
+
+The recovery is itself wrapped, and that is the one case where the shape above
+does not hold. If the classification or the marking throws, no claim is ever
+marked, so `unverified` stays at zero beside `probed: 0` — the exact signature a
+batch with nothing to prove publishes, which is the confusion the row exists to
+resolve. The run's results are still finalized rather than lost, and
+**`pr_proof_not_run_recovery_failed`** is audited beside `pr_proof_not_run`,
+carrying the recovery's own failure reason. So a zero `unverified` is never
+evidence the claims were checked: read both rows, never the counts.
 
 `relayRc` carries the relay's rc **only** when the relay both ran and answered
 with an integer `rc`. Every other exit publishes `null`: no PR was claimed, so

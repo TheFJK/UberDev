@@ -264,7 +264,7 @@ review_fleet_require_engine() {
 # review_fleet_contract_path PLUGIN_ROOT CONTRACT_ID -> absolute path on stdout.
 #
 # THE BINDING IS DATA, NOT PROSE. policy/solve-run-tree-v1.json declares
-# output_contracts[<id>] and attaches it to the six review_pr.review.* edges;
+# output_contracts[<id>] and attaches it to the seven review_pr.review.* edges;
 # lib/child-dispatch.sh resolves that same declaration for the ROUTED path and
 # appends the file's bytes to the child prompt. The Workflow composer has no
 # filesystem, so the controller resolves it HERE and the path travels across the
@@ -273,8 +273,8 @@ review_fleet_require_engine() {
 # which is exactly the drift #403 filed.
 #
 # Refuses rather than defaults: an unresolvable contract must stop the wave at
-# the controller, not produce six children improvising a serialization the
-# validator's re.fullmatch can never accept.
+# the controller, not produce a whole wave of children improvising a
+# serialization the validator's re.fullmatch can never accept.
 #
 # `contract_rel` / `contract_abs`, NEVER `path` or `status`: zsh ties both, and
 # tests/crossplatform-shell-wrappers.test.sh scans this file for exactly that.
@@ -322,7 +322,7 @@ review_fleet_contract_path() {
   contract_abs="$plugin_root/$contract_rel"
   # The value the caller emits is gated downstream by isSafeAbsPath(); refusing
   # here means a bad PLUGIN_ROOT names itself instead of aborting a whole wave
-  # under `bad_contract_path` six dispatches later.
+  # under `bad_contract_path` a whole wave of dispatches later.
   case "$contract_abs" in
     *..* | *'"'*)
       echo "error: review_fleet_contract_path: resolved path '$contract_abs' is not envelope-safe" >&2
@@ -347,14 +347,15 @@ review_fleet_contract_path() {
   esac
   # THE SAME ACCEPTANCE TEST AS THE ROUTED TRANSPORT, not a looser one.
   #
-  # lib/child-dispatch.sh resolves THIS contract id for THE SAME six edges, and
-  # its `invalid_output_contract` arm refuses more than `-f`/`-r`/`! -L`: a file
-  # not owned by the running euid, one with st_nlink != 1, and one whose size
-  # falls outside 1..65536 bytes. Two transports reading one declaration must
-  # also agree on what the declaration resolves TO. Without these three, a file
-  # the routed path calls `invalid_output_contract` was ACCEPTED here and its
-  # path handed to six reviewer subagents told to obey it -- the drift #403
-  # filed, one layer down from the path itself.
+  # lib/child-dispatch.sh resolves THIS contract id for THE SAME
+  # `review_pr.review.*` edges, and its `invalid_output_contract` arm refuses
+  # more than `-f`/`-r`/`! -L`: a file not owned by the running euid, one with
+  # st_nlink != 1, and one whose size falls outside 1..65536 bytes. Two
+  # transports reading one declaration must also agree on what the declaration
+  # resolves TO. Without these three, a file the routed path calls
+  # `invalid_output_contract` was ACCEPTED here and its path handed to seven
+  # reviewer subagents told to obey it -- the drift #403 filed, one layer down
+  # from the path itself.
   #
   # python3, not `stat`: st_uid / st_nlink / st_size have no portable shell
   # spelling (`stat -c` is GNU, `stat -f` is BSD and means --file-system on

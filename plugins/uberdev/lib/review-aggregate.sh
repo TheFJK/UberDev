@@ -125,9 +125,10 @@ try:
      or (uid is not None and trusted_dir_entry.st_uid!=uid)): fail('unsafe-artifact')
  seen_provider_paths=set(); seen_paths=set(); seen_evidence=set(); trusted_rows=[]
  # One dispatcher per wave. A ledger that mixes receipt-shaped and
- # binding-shaped launch rows describes six children that did not come from one
- # fanout, and the whole point of this builder is that the aggregate covers ONE
- # complete roster. Recorded on the first row and enforced on every later one.
+ # binding-shaped launch rows describes a roster of children that did not come
+ # from one fanout, and the whole point of this builder is that the aggregate
+ # covers ONE complete roster. Recorded on the first row and enforced on every
+ # later one.
  launch_shape=None
  for row in rows:
   if set(row)!={'edge','index','instance','result','sha256'} or type(row['index']) is not int:

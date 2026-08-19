@@ -46,8 +46,8 @@ source "$REPO_ROOT/tests/_lib_assert_structural.sh" || { echo "FATAL: _lib_asser
 # Both lines below are read by bump-version.sh as literal anchors. The echo text
 # and the assert_version_bump argument must carry the CURRENT version, and both
 # must be bumped together every release.
-echo "== Version bump 0.50.2 -> 0.50.3 propagated =="
-assert_version_bump "$REPO_ROOT" "0.50.3"
+echo "== Version bump 0.50.3 -> 0.51.2 propagated =="
+assert_version_bump "$REPO_ROOT" "0.51.2"
 
 # --- #123 B1: closing-keyword regex left-anchor -------------------------------
 # Kept because it EXECUTES the regex rather than only asserting its presence,

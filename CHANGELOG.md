@@ -4,6 +4,133 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.51.2] — 2026-08-19
+
+### Fixed - `subagent-driven-dev`'s ruling contract had no producer
+
+`## Rulings` promised "every ruling gets one line on disk at the moment it is
+made", and step 5 read that file back into the PR body — but `sdd_append_ruling`
+had exactly two mentions in the whole skill: the `- **How.**` bullet and its own
+definition. **No numbered step ever called it.** A contract with a validator, a
+reader and no writer: `rulings.md` was never created, so the roll-up read a file
+nothing wrote and every judgement the controller made instead of stalling on it
+went unrecorded.
+
+Three halves, because any one alone leaves the contract inert:
+
+- **Producer.** Every rung the section names as a stop that routes rather than
+  waits now records its ruling where it takes it — the BLOCKED ladder, the
+  REFUSED rung, wave re-cutting in step 4a, and all five `sdd_note_cap_exhausted`
+  arms (steps 4e/4g/4h, NEEDS_CONTEXT, and the Red-Flags reviewer loop).
+- **Path.** `sdd_append_ruling` refuses a relative path (`case "$rulings_path" in
+  /*)`) and nothing established an absolute one. The routed-adapter fence now
+  derives `SDD_RULINGS` from the run carrier's `context_file` via
+  `_uberdev_child_context_run_dir` — the same helper `lib/child-dispatch.sh` uses
+  for its own confinement checks, so the skill cannot come to disagree with the
+  library about where a run lives. That is the private run directory the fix
+  ledgers and every `task_path` already sit in, never the feature worktree.
+- **One line per call.** The helper wrote `Ruling: %s — %s — %s\n` verbatim after
+  checking only that each field was non-empty, so an embedded newline split one
+  ruling into two on-disk rows — the second with no decision, no why and no cost
+  — and step 5 pushed the fragment into the PR body as a ruling of its own. A
+  newline or carriage return in any field is now refused with the same rc `2` an
+  empty field draws, never stripped: stripping rewrites the decision instead of
+  rejecting it.
+
+### Fixed - three stale counts and one refuted justification
+
+- **`lib/solve_triage.py`** justified emitting one escalation token by claiming a
+  second "would be a dispatch failure rather than merely noisy". Executed: both
+  emitters collapse `matched` with `dict.fromkeys(...)` on the statement *before*
+  `assert_rule_tokens`, and the routing-context validator's duplicate check and
+  `len(rules)>32` cap read that already-deduped list — so no duplicate reaches
+  either. After #619 the label map spans two distinct tiers, so per-label
+  emission would add at most two tokens against a cap of 32. The comment now
+  states the real cost: two rungs recorded for one decision, in the trail.
+- **`skills/solve-fleet/SKILL.md`** enumerated eight `pr_proof_*` audit events.
+  `workflow.js` emits a **ninth**, `pr_proof_not_run_recovery_failed`, named on no
+  doc surface at all — and it refutes the section's own signature claim: when the
+  never-ran recovery itself throws, no claim is marked, so `unverified` stays at
+  zero beside `probed: 0`, byte-identical to a batch with nothing to prove. Both
+  are now documented, and the claim is qualified.
+- **`docs/rfc/0003-dev-command.md`** argued from "four tiers (`trivial` →
+  `large`)" (three since #619) and "an unskippable 6-agent fanout" (seven since
+  the `convention-compliance` lens joined), citing a line range that now lands on
+  an `## Emphasis` example fence. Corrected the RFC 0013 §0A way — a dated
+  `§2.1a — SUPERSEDED IN PART (2026-08-19)` note plus inline markers — because an
+  RFC is a record of what was true when it was written. The rotted `SKILL.md:N`
+  pointer is replaced by the symbol `### Step 2: Dispatch 7 required routed
+  reviewers`.
+- **Seventeen sites across eight live files** still sized the Phase 1 fanout at
+  six, against a `REVIEW_ROSTER` — and a `review_pr.review.*` edge set in the
+  policy, the args library and the wire contract alike — of **seven**:
+  `commands/review-pr.md` (twice), `skills/dev-pipeline/SKILL.md`, both SDD flow
+  diagrams, `finish-branch/SKILL.md`, and — worst — the review-fleet engine
+  describing itself, in `SKILL.md`'s guard table, four comments in `workflow.js`
+  (skill metadata included) and five in `lib/review-fleet-args.sh`, plus the
+  ledger check in `lib/review-aggregate.sh`. A maintainer sizing the nonce pool
+  or the agent ceiling from the engine's own guard table read six against a
+  roster of seven.
+
+  `workflow.js` also **misquoted its own cited source**: it rendered
+  post-impl-review/SKILL.md's failure boundary as "all six reviewer slots", where
+  that file says *seven*. A retyped quotation rots exactly like a retyped count,
+  but invisibly — the number sits inside quotation marks claiming someone else
+  wrote it.
+
+  Where the numeral was pure illustration in roster-generic code it is gone
+  rather than corrected: `lib/review-aggregate.sh`'s ledger check is
+  parameterised by `expected`, and `review_fleet_contract_path` aborts a whole
+  wave whatever its width, so neither should have been restating a cardinality it
+  does not own.
+
+### Fixed - a cardinality census that missed a copy in its own file
+
+`tests/solve-run-tree.test.sh`'s SRT-606.x block said "Three files state, in
+prose, facts about the set pinned above" — while SRT-546.2, five lines above in
+the same file, hand-wrote "31 of the 32 are composable", derived by nothing. Four
+copies, census of three. That sentence now pins the role-less membership instead
+of typing the split, so the figures live only where they are computed. Verified
+by mutation: with the composable count moved to 30 and both derived prose copies
+updated to match, the pre-fix suite passes green with the fourth copy left false;
+the fixed suite reds.
+
+### Added - the guards that make each of the above re-detectable
+
+All five are DERIVED from the shipped tree rather than transcribed from it:
+
+- `tests/solve-triage.test.sh` **L10** — reads the cap out of
+  `lib/agent-dispatch.sh` and the tier span out of the classifier, asserts the
+  dedupe precedes every validator call, and requires the comment to state that
+  reason and not the refuted one.
+- `tests/solve-fleet-workflow.test.sh` **G47/G47b/G48** — harvests every
+  `pr_proof_*` emitter name from `workflow.js` and requires the claim-verification
+  section to name each; a tenth event reds on the commit that adds it.
+- `tests/sdd-child-inputs.test.sh` **AC-16g/AC-16h** — the one-line refusals, plus
+  a producer census that walks whatever rungs call `sdd_note_cap_exhausted`, so a
+  sixth rung must record its ruling too.
+- `tests/docs-accuracy.test.sh` **T20** — counts the `review_pr.review.*` edges in
+  `post-impl-review/SKILL.md`'s wire-contract block and compares every live prose
+  claim, the roster heading and the RFC note against that count. The claim
+  harvest reads **two tiers**, because proximity alone is blind in exactly the
+  files that get this wrong — a file whose whole subject is the fanout stops
+  re-naming it, which is how `workflow.js` could say "closed six-edge roster" and
+  no name-proximity scan would ever reach it. The *proximity* tier reads every
+  `*.md` under the plugin; the *owner* tier reads every file, any extension, that
+  names a `review_pr.review.*` edge — a set derived by grep, never listed, so a
+  new engine file opts itself in. Number-**words** count as much as digits — ten
+  of the seventeen stale sites spelled it out, and the row's first shape,
+  `(\d+)[- ]agents?`, could see four of them; a digit-only detector reading one
+  noun *is* the hand-picked census this row exists to stop being. `Phase 2`
+  ordinals and `5 → 6` historical transitions are not counts and are skipped.
+  Measured over the shipped tree: 37 claims harvested, 0 false positives. **T20.6** re-derives quotations: every span the
+  engine quotes and credits to `post-impl-review/SKILL.md` must still be found
+  there, comment wrapping normalised away first — the quotation that was wrong
+  spanned two comment lines, so no line-oriented grep could have matched it
+  whole.
+- `tests/solve-run-tree.test.sh` **SRT-546.2** — asserts the role-less member set
+  rather than stating its size.
+
 ## [0.50.3] — 2026-08-19
 
 ### Fixed - L10's label vocabulary was blind to the tier-escalation labels
