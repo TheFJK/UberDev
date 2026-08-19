@@ -3148,9 +3148,9 @@ async function main() {
     // RUN-level term, not a per-issue one — that is the whole point of hoisting
     // it — so it sits beside the leading 2 rather than inside the design term,
     // and it is charged for the same reason the #515 proof relay is: a ceiling
-    // that under-projects is not a ceiling. (RFC 0015's copy of this formula
-    // predates the term and is one agent short; SKILL.md's CB1 row carries the
-    // current reading.)
+    // that under-projects is not a ceiling. (SKILL.md's CB1 row and RFC 0015
+    // §4.2 both carry this reading; skills/goal-pipeline/workflow.js charges the
+    // same term as fleetRunCost() on its own side of the nesting since #590.)
     const repoProfileAgents = designCount > 0 ? 1 : 0;
     const projected = 2 + intakeIssues.length + repoProfileAgents
       + (designCount * (9 + IMPLEMENT_AGENT_BUDGET - 1));

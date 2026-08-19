@@ -132,6 +132,7 @@ review_grace_cli=""
 watch_passes_cli=""
 watch_budget_cli=""
 max_watch_ticks_cli=""
+implement_budget_cli=""
 only_mine=0
 dry_run=0
 resume=0
@@ -145,6 +146,7 @@ for tok in $ARGUMENTS; do
     --watch-passes=*)       watch_passes_cli="${tok#--watch-passes=}" ;;
     --watch-budget=*)       watch_budget_cli="${tok#--watch-budget=}" ;;
     --max-watch-ticks=*)    max_watch_ticks_cli="${tok#--max-watch-ticks=}" ;;
+    --implement-budget=*)   implement_budget_cli="${tok#--implement-budget=}" ;;
     --only-mine)            only_mine=1 ;;
     --dry-run)              dry_run=1 ;;
     --resume)               resume=1 ;;
@@ -174,7 +176,7 @@ fi
 # <<< region: validate
 
 if [ "${#queue[@]}" -eq 0 ] && [ "$resume" = "0" ]; then
-  echo "usage: /uberdev:goal <issue> [<issue> ...] [--max-cycles=N] [--max-parallel=N] [--barrier-timeout=N] [--review-grace-secs=N] [--watch-passes=N] [--watch-budget=SECS] [--max-watch-ticks=N] [--only-mine] [--dry-run] [--resume] [--backend=<name>]" >&2
+  echo "usage: /uberdev:goal <issue> [<issue> ...] [--max-cycles=N] [--max-parallel=N] [--barrier-timeout=N] [--review-grace-secs=N] [--watch-passes=N] [--watch-budget=SECS] [--max-watch-ticks=N] [--implement-budget=N] [--only-mine] [--dry-run] [--resume] [--backend=<name>]" >&2
   exit 2
 fi
 
@@ -216,6 +218,55 @@ WATCH_BUDGET="$(UBERDEV_GOAL_WATCH_BUDGET="${watch_budget_cli:-${UBERDEV_GOAL_WA
 # goal tunable uses. Range matches the driver's clampInt(…, 1, 500, 40).
 MAX_WATCH_TICKS="$(UBERDEV_GOAL_MAX_WATCH_TICKS="${max_watch_ticks_cli:-${UBERDEV_GOAL_MAX_WATCH_TICKS:-}}" \
   uberdev_read_int_in_range goal.max_watch_ticks UBERDEV_GOAL_MAX_WATCH_TICKS 1 500 40)"
+
+# IMPLEMENT_BUDGET is the nested solver fleet's CB3 per-issue implement-phase
+# agent cap, resolved HERE so /goal's own CB1 projection can be priced against
+# it (issue #590). Before this the driver froze the per-issue cost at the fleet
+# DEFAULT: raise the budget and CB1 under-projected by up to 72 agents per
+# issue, stopped being the breaker that bound, and the run died against the
+# runtime's own lifetime cap with no named halt event.
+#
+# UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET is a tier of its OWN, sitting BELOW the
+# config key (RFC 0005 D590a). It is in the chain because it is the channel that
+# ALREADY reaches the fleet: lib/solve-launcher.sh reads it when it composes the
+# solve-fleet envelope, and the Phase-1 claim relay runs that launcher, so
+# reading the same variable is what makes the projection track the budget the
+# fleet actually runs with rather than a second, unrelated knob. But it is the
+# AMBIENT, fleet-wide setting — an operator exports it once for /turbo — whereas
+# goal.implement_budget is an explicit, /goal-scoped decision, so the config key
+# must outrank it.
+#
+# It therefore CANNOT be folded into the env argument of the read below: tier 1
+# of uberdev_read_int_in_range IS that env var and tier 2 is the config file, so
+# folding it in puts the ambient value ABOVE the explicit one and makes a config
+# key set to CAP /goal silently unreachable — projected AND, via the claim-relay
+# pin, armed at the wrong number.
+#
+# Hence two reads. The first resolves the fallback FLOOR and runs only when the
+# fleet variable is actually set — exactly the case where tier 1 answers and the
+# config file is never consulted, so it can neither pre-empt the config key
+# below nor read it twice. Routing it through the same range read, rather than
+# passing it straight in as the default, is deliberate: uberdev_read_int_in_range
+# returns its DEFAULT argument verbatim WITHOUT validating it, so an unvalidated
+# UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET=500 handed in as the default would be
+# projected as typed, outside the fleet's own clamp.
+#
+# The reverse direction is closed in skills/goal-pipeline/workflow.js, which
+# pins the value resolved here back onto that launcher command line — so an
+# --implement-budget flag is not merely projected, it is armed.
+# Range matches the fleet's own clampInt(CFG.implementBudget, 4, 96, 24).
+# Precedence: --implement-budget=N > UBERDEV_GOAL_IMPLEMENT_BUDGET >
+#             goal.implement_budget > UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET > 24.
+_implement_budget_floor="$_UBERDEV_GOAL_DEFAULT_IMPLEMENT_BUDGET"
+if [ -n "${UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET:-}" ]; then
+  _implement_budget_floor="$(uberdev_read_int_in_range goal.implement_budget \
+    UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET 4 96 "$_UBERDEV_GOAL_DEFAULT_IMPLEMENT_BUDGET")"
+fi
+IMPLEMENT_BUDGET="$(UBERDEV_GOAL_IMPLEMENT_BUDGET="${implement_budget_cli:-${UBERDEV_GOAL_IMPLEMENT_BUDGET:-}}" \
+  uberdev_read_int_in_range goal.implement_budget UBERDEV_GOAL_IMPLEMENT_BUDGET 4 96 \
+  "$_implement_budget_floor")"
+unset _implement_budget_floor
+
 if [ "${GOAL_SINGLE_TICK:-0}" = "1" ] && [ "${WATCH_PASSES:-0}" -eq 0 ] && [ "${WATCH_BUDGET:-0}" -eq 0 ]; then
   WATCH_PASSES=1
 fi
@@ -436,6 +487,7 @@ uberdev_emit_workflow_args goal \
   watchPasses="${WATCH_PASSES:-0}" \
   watchBudgetS="${WATCH_BUDGET:-0}" \
   maxWatchTicks="$MAX_WATCH_TICKS" \
+  implementBudget="$IMPLEMENT_BUDGET" \
   bashBin="$GOAL_BASH_BIN" \
   onlyMine="$([ "$only_mine" = "1" ] && echo true || echo false)" \
   resumed="$([ "$resume" = "1" ] && echo true || echo false)" \

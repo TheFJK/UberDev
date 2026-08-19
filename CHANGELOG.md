@@ -4,6 +4,65 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.51.0] — 2026-08-19
+
+### Fixed - `/goal`'s CB1 ceiling hardcoded the per-issue fleet cost, so a raised implement budget under-projected it out of existence
+
+`projectedAgentsForCycle()` in `skills/goal-pipeline/workflow.js` priced every
+claimed issue at a literal `33` agents. That number is only correct at the solve
+fleet's DEFAULT implement budget: the fleet declares
+`IMPLEMENT_AGENT_BUDGET = clampInt(CFG.implementBudget, 4, 96, 24)` and honours a
+raised value inside a `/goal` run (it inherits
+`UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET` through the Phase-1 launcher call), so at
+the clamp ceiling one design-tier issue really costs 105 — an under-count of 72
+per issue, 216 per cycle at `--max-parallel=3`. The SPEND accumulator beside it
+already derived the same cost from the relayed envelope: **one contract, two
+copies, only one of them derived.**
+
+Because CB1 is the only NAMED halt in the pipeline, an under-projection is not a
+mis-report. The breaker simply stops binding, and the run dies against the
+runtime's own agent lifetime cap with no halt reason, no audit row and no cycle
+record saying why it stopped.
+
+- The two copies collapse into ONE derivation, `perIssueCostAtBudget(budget)`,
+  read by both the pre-claim projection and the spend accumulator.
+- `lib/goal-phase0.sh` gains an `--implement-budget=N` knob (range `4..96`,
+  precedence: CLI flag > `UBERDEV_GOAL_IMPLEMENT_BUDGET` > `goal.implement_budget`
+  > `UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET` > `24`) and publishes the resolved
+  value as the envelope's `implementBudget` key. The tier below the config key is
+  deliberately the variable the launcher ALREADY reads, so the projection tracks
+  the budget the fleet actually runs with. It sits BELOW `goal.implement_budget`
+  and not above it: that variable is the ambient, fleet-wide setting an operator
+  exports once for `/turbo`, whereas the config key is an explicit, `/goal`-scoped
+  decision — so a project config that caps `/goal` stays reachable, and is what
+  the launcher is armed with.
+- The claim relay pins that same resolved value onto the STEP 2 launcher command
+  line, closing the loop the other way: a `--implement-budget` flag is not merely
+  projected against, it is what the fleet is armed with.
+
+### Fixed - `/goal` under-counted the fleet's run-shared repo-profile agent by exactly 1 every cycle
+
+`skills/solve-fleet/workflow.js` charges `repoProfileAgents = designCount > 0 ? 1 : 0`
+beside its leading 2 and really dispatches that agent (#615 Part A), but
+`grep -n repoProfile` over the goal driver returned nothing at all. Both goal-side
+cost sites — the projection and the `fleetCost` accumulator — charged a flat 2, so
+every cycle with work in it was projected and charged one agent short,
+independently of the budget gap above. Both now take their run-level term from a
+shared `fleetRunCost(issueCount)` helper.
+
+### Tests
+
+`tests/goal-workflow.test.sh` gains runs Z/Z2/Z3 (B99-B99f) — the first rows in
+the repo that exercise the PROJECTION at a non-default budget. Every pre-existing
+CB1 row (M/M2/S) runs at the fleet default, where a literal and a derivation are
+the same number, so none of them could see this. B99b is the discriminator: with a
+raised budget relayed, a ceiling set to the DEFAULT-budget projection must already
+have been blown, which a frozen literal cannot satisfy. `tests/goal.test.sh` gains
+G55, including a live probe that runs the extracted Phase-0 tunables region and
+reads the resolved budget back out. `tests/solve-fleet-workflow.test.sh` G16 is
+re-pointed from "a literal in the projection, a derivation in the accumulator" to
+the single shared derivation plus the shared run-level term.
+
 ## [0.50.3] — 2026-08-19
 
 ### Fixed - L10's label vocabulary was blind to the tier-escalation labels

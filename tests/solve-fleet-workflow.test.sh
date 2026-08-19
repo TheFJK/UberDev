@@ -493,19 +493,40 @@ else
     EXPECTED_COST=$(( FLEET_DESIGN_BASE + FLEET_BUDGET ))
     GOAL_MARKERS="$(grep -c 'SHARED COST: solve-fleet-per-issue-agent-cost' "$GOAL_WF" || true)"
     G16_OK=1
-    # Copy 1 — the PRE-dispatch projection. No envelope exists yet, so the
-    # default is the only honest number and the literal must equal it.
-    grep -q "issueCount \* $EXPECTED_COST" "$GOAL_WF" || G16_OK=0
-    # Copy 2 — the SPEND accumulator. By then the relayed envelope carries the
-    # operator's effective budget, so this copy must DERIVE the term instead of
-    # repeating the literal: a hardcoded 30 understates a maxed-out budget more
-    # than threefold and CB1, the only named halt, then never fires. The clamp
-    # bounds and default are read back out of the fleet's own constant, so the
-    # two files still cannot drift apart.
-    grep -q "$FLEET_DESIGN_BASE + clampInt(cfg.implementBudget, 4, 96, $FLEET_BUDGET)" "$GOAL_WF" || G16_OK=0
+    # ONE DERIVATION, TWO CALLERS (#590). /goal used to carry two copies of this
+    # cost — a frozen literal in the PRE-CLAIM projection and an
+    # envelope-derived term in the SPEND accumulator — and this row required
+    # exactly that split, on the reasoning that no envelope exists at projection
+    # time so the default was the only honest number. It was not: the budget
+    # reaches the fleet through UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET, which
+    # lib/goal-phase0.sh can read at preflight and publish as /goal's own
+    # `implementBudget` key. So the projection derives too, and both callers now
+    # read ONE helper — which is why the marker count is 1 and not 2. Two copies
+    # of one contract is the #370 shape this repo keeps paying for; the vacuity
+    # guard against collapsing them into nothing is the pair of call-site greps
+    # below plus the runtime oracles (B91-B99 in goal-workflow.test.sh).
+    grep -q "$FLEET_DESIGN_BASE + clampInt(budget, 4, 96, $FLEET_BUDGET)" "$GOAL_WF" || G16_OK=0
+    # Caller 1 — the PRE-CLAIM projection, priced off /goal's own relayed config.
+    grep -q "issueCount \* perIssueCostAtBudget(implementBudget)" "$GOAL_WF" || G16_OK=0
+    # Caller 2 — the SPEND accumulator, priced off the fleet envelope the claim
+    # relay handed back.
     grep -q "claimed.length \* perIssueFleetCost(" "$GOAL_WF" || G16_OK=0
+    # NEITHER caller may re-freeze the default as a literal. Both directions are
+    # checked because the projection is the one that shipped frozen.
+    grep -q "issueCount \* $EXPECTED_COST" "$GOAL_WF" && G16_OK=0
     grep -q "claimed.length \* $EXPECTED_COST" "$GOAL_WF" && G16_OK=0
-    [ "${GOAL_MARKERS:-0}" = "2" ] || G16_OK=0
+    [ "${GOAL_MARKERS:-0}" = "1" ] || G16_OK=0
+    # The fleet's RUN-level term is shared the same way, and /goal missed a
+    # piece of it: skills/solve-fleet/workflow.js charges
+    # `repoProfileAgents = designCount > 0 ? 1 : 0` beside its leading 2 and
+    # really dispatches that agent, while `grep -n repoProfile` over the goal
+    # driver returned nothing at all. A flat 2 on either goal-side cost site is
+    # one agent short on every cycle that claims anything.
+    grep -q 'function fleetRunCost(' "$GOAL_WF" || G16_OK=0
+    grep -qE '^ *return 2 \+ \(issueCount > 0 \? 1 : 0\);$' "$GOAL_WF" || G16_OK=0
+    grep -q 'fleetRunCost(rec.claimed.length)' "$GOAL_WF" || G16_OK=0
+    grep -q 'fleetRunCost(issueCount)' "$GOAL_WF" || G16_OK=0
+    grep -qE 'const fleetCost = 2 \+' "$GOAL_WF" && G16_OK=0
     # Deriving the term is only half of it — the cost still has to be CHARGED,
     # on BOTH exit arms of the nested fleet call. The clean arm and the catch
     # arm each carry their own copy, and the catch arm is the one that rots
@@ -525,8 +546,8 @@ else
     # which assert the accumulator as a number; these greps only stop the two
     # charge sites and the named event from being deleted outright.
     [ "$G16_OK" = "1" ] \
-      && pass "G16 /goal's two per-issue cost copies both track the fleet's $FLEET_DESIGN_BASE + IMPLEMENT_AGENT_BUDGET ($EXPECTED_COST at the default) — the projection as a literal, the accumulator derived from the relayed envelope — and both carry the contract marker" \
-      || fail "G16 /goal's cost copies drifted from the fleet constant (want the literal $EXPECTED_COST in the projection, a $FLEET_DESIGN_BASE + clampInt(cfg.implementBudget, 4, 96, $FLEET_BUDGET) derivation in the accumulator, 2 markers, found ${GOAL_MARKERS:-0} markers; want the cost CHARGED on both the clean and the catch arm, found ${GOAL_CHARGE_SITES:-0} of 2 'agentsSpent += fleetCost' sites; want the unmeasured-spend cycle still named by a fleet_spend_unmeasured event)"
+      && pass "G16 /goal prices the fleet from ONE derivation of $FLEET_DESIGN_BASE + IMPLEMENT_AGENT_BUDGET ($EXPECTED_COST at the default), read by both the pre-claim projection and the spend accumulator, plus one shared run-level term that counts the fleet's repo-profile agent — one contract, one copy, one marker" \
+      || fail "G16 /goal's fleet cost drifted from the fleet constants (want a $FLEET_DESIGN_BASE + clampInt(budget, 4, 96, $FLEET_BUDGET) helper read by BOTH 'issueCount * perIssueCostAtBudget(implementBudget)' and 'claimed.length * perIssueFleetCost(', neither re-freezing the literal $EXPECTED_COST, and exactly 1 marker, found ${GOAL_MARKERS:-0}; want a fleetRunCost(issueCount) helper returning '2 + (issueCount > 0 ? 1 : 0)' used at BOTH sites instead of a flat 2; want the cost CHARGED on both the clean and the catch arm, found ${GOAL_CHARGE_SITES:-0} of 2 'agentsSpent += fleetCost' sites; want the unmeasured-spend cycle still named by a fleet_spend_unmeasured event)"
   fi
 fi
 

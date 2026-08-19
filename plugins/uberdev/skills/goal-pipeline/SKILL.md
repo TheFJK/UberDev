@@ -49,6 +49,7 @@ TRUST_SIGNAL_ENUM='green|yellow|red|stale|missing'
 GOAL_MERGE_RESULT_ENUM='success|conflict|hook_failed|missing'
 _UBERDEV_GOAL_DEFAULT_MAX_CYCLES=5
 _UBERDEV_GOAL_DEFAULT_MAX_PARALLEL=3
+_UBERDEV_GOAL_DEFAULT_IMPLEMENT_BUDGET=24      # the nested fleet's CB3 per-issue implement cap; CB1 projects against it (issue #590)
 _UBERDEV_GOAL_DEFAULT_BARRIER_TIMEOUT_S=14400
 _UBERDEV_GOAL_POLL_SECS=60
 _UBERDEV_GOAL_STUCK_SECS=14400         # 4h
@@ -72,6 +73,19 @@ Notes on the enums:
 - **`GOAL_MERGE_RESULT_ENUM`** — the 4 values `uberdev_goal_read_merge_result` returns. Maps the merge-pipeline's audit-row events (`merge_executed` for `success`, `pr_parked` with `data.reason ∈ {refused, ambiguous, push-non-ff}` for `conflict`, `pr_parked` with `data.reason == test-fail-exhausted` for `hook_failed`) plus a sentinel `missing` for "no audit row appended yet". Phase 2d's case statement handles each value explicitly; the `*)` default arm emits `goal_circuit_breaker reason=unknown_merge_result` (B7 — defensive guard against future enum drift).
 - **`BLOCKS_LINE_REGEX`** is the anchored ReDoS-safe shape (D9 + T1) used by `_uberdev_goal_parse_blocks_line` in `lib/goal-state.sh`. The Phase 3 prose and the Unblock rule both reference this constant by name; the literal `^Blocks: #([0-9]+)$` appears here once.
 - **`FINDING_FINGERPRINT_REGEX`** is the marker shape `agents/findings-to-issues.md` injects into every BLOCKER/CRITICAL `review-pr-finding` issue body; Phase 3 extracts it via `_uberdev_goal_extract_fingerprint` to drive the repeat-cycle detector.
+- **`_UBERDEV_GOAL_DEFAULT_IMPLEMENT_BUDGET`** (issue #590) is the nested solver fleet's CB3 per-issue implement-phase agent cap as `/goal` resolves it, and it exists here because **CB1's per-issue projection is derived from it**. Phase 0 resolves it through the usual chain — `--implement-budget=N` > `UBERDEV_GOAL_IMPLEMENT_BUDGET` > `goal.implement_budget` > `UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET` (the variable `lib/solve-launcher.sh` already reads when it composes the fleet envelope) > this default — clamps it to the fleet's own `4..96`, and publishes it as the envelope's `implementBudget` key. `skills/goal-pipeline/workflow.js` then does two things with it: it prices the pre-claim projection against it, and it pins it back onto the STEP 2 launcher command line so the fleet is **armed** with the number `/goal` projected against rather than merely measured by it.
+
+### CB1 — the per-cycle agent projection
+
+`projectedAgentsForCycle(issueCount)` is computed BEFORE the claim pass and compared against `agentsSpent + projection > maxAgents`. It has three terms, and every one of them is a term the nested fleet really spends:
+
+| Term | Value | Why |
+|---|---|---|
+| driver relays | `3 + maxWatchTicks` | the claim, verdict and collect relays, plus up to `maxWatchTicks` watch relays |
+| fleet run-level | `2 + (issueCount > 0 ? 1 : 0)` | the fleet's batched intake relay and batched PR-claim verification relay (#515), plus its run-shared repo profile (#615 A), which it dispatches once per run that has any design-tier issue |
+| fleet per-issue | `issueCount × (9 + implementBudget)` | the issue's own solver, the nine research/design agents a medium-tier issue costs, and the #508 per-task implementer → reviewer → fix chain bounded by `implementBudget` |
+
+`/goal` has no manifest at projection time and so no tier breakdown; it prices **every** claimed issue as design-tier, which is why the repo-profile gate reduces to "the cycle claimed something". The same two helpers price the SPEND accumulator after the fleet returns, so the ceiling and the ledger cannot answer differently. **A ceiling that under-projects is not a ceiling**: CB1 is the only NAMED halt, so a projection reading low does not merely mis-report — it stops firing, and the run dies against the runtime's own lifetime cap with no halt reason, no audit row and no cycle record saying why it stopped. That is exactly what a frozen per-issue literal did at any raised budget (#590), and what an uncounted repo-profile agent did on every cycle.
 
 ## Preflight
 
