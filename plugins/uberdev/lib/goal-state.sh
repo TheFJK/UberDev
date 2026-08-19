@@ -1621,8 +1621,12 @@ _uberdev_goal_batch_issue_for_pr() {
 # by uberdev_goal_cleanup_run_state.
 #
 # FAIL-SOFT BY DESIGN. Every helper here is called from inside the watch loop,
-# where a fail-loud write stalls the whole goal (uniform with the writes at
-# goal-watch.sh:628-643 and :673-674). A bad input is skipped with a stderr
+# where a fail-loud write stalls the whole goal (uniform with the fail-soft
+# `_uberdev_goal_set_batch_terminal_state … MERGING` writes in lib/goal-watch.sh,
+# each of which carries its own `barrier may not serialize` breadcrumb — grep
+# that message for the call sites; a line number here goes stale the moment
+# either file grows, which is exactly what happened to the range this replaces).
+# A bad input is skipped with a stderr
 # breadcrumb; a missing file reads as "nothing recorded", never as an error.
 # ---------------------------------------------------------------------------
 
@@ -4128,8 +4132,11 @@ uberdev_goal_cleanup_run_state() {
   local sc="$tmpdir/goal-$GOAL_ID-runstate"
   # The #592 partial-chain ledger is reaped here beside the batch registry.
   # Read-before-reap is safe by inspection: the only call site that runs on a
-  # converged goal is lib/goal-phase3.sh:305, which is AFTER print_summary at
-  # :304. Leaving it behind would strand one file per goal in $UBERDEV_TMPDIR.
+  # converged goal is the `uberdev_goal_cleanup_run_state` call on the
+  # `goal_converged` exit path in lib/goal-phase3.sh, which sits AFTER that
+  # path's `print_summary "$cycle"` — grep those two symbols rather than a line
+  # number, which goes stale whenever either file grows.
+  # Leaving it behind would strand one file per goal in $UBERDEV_TMPDIR.
   rm -f "$sc" "${sc}.queue" "${sc}.active" "${sc}.candidates" \
         "$tmpdir/goal-$GOAL_ID-batch-prs.tsv" \
         "$tmpdir/goal-$GOAL_ID-partial-prs.tsv" 2>/dev/null

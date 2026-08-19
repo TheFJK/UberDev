@@ -1209,8 +1209,19 @@ review_fleet_read_reviewed_head() {
     echo "error: review-fleet reviewed head missing: ${1:-}" >&2
     return 2
   }
-  local recorded
-  IFS= read -r recorded <"$1" || return 2
+  local recorded=""
+  # NOT `|| return 2`. `read` reports failure for BOTH a zero-byte file and a
+  # final line with no trailing newline, and returning on its status made those
+  # two -- the exact corruption modes the published-head refusal branch names --
+  # the only ones that failed in COMPLETE SILENCE, while a full line that merely
+  # failed the 40-hex check got a diagnostic. Judge the CONTENT instead: an
+  # unterminated "abc" still lands in `recorded` and falls through to the
+  # shape check below, which names it.
+  IFS= read -r recorded <"$1" || :
+  [ -n "$recorded" ] || {
+    echo "error: review-fleet reviewed head is empty or holds no readable line: $1" >&2
+    return 2
+  }
   [ "${#recorded}" -eq 40 ] || {
     echo "error: review-fleet reviewed head is not a 40-hex SHA: ${recorded:-<empty>}" >&2
     return 2
@@ -2165,6 +2176,11 @@ _review_fleet_bind_reviewed_head() {
     # redirected away, because a carrier that cannot be read has to say so.
     if ! REVIEWED_HEAD_SHA="$(review_fleet_read_published_head \
         "$research_dir/published-head.txt")"; then
+      # The reader names WHAT is wrong with the bytes; this names what the run
+      # loses because of it, which is the half an operator needs: the publish
+      # gate is about to refuse on an empty expected-remote head, and the reason
+      # is this record rather than anything about the PR.
+      echo "error: review-fleet could not read the published head from $research_dir/published-head.txt; leaving REVIEWED_HEAD_SHA empty so the publication gate refuses rather than falling back to the fixer-advanced local head" >&2
       REVIEWED_HEAD_SHA=
       return 0
     fi
