@@ -263,11 +263,12 @@ assert_in "$STATUS_LIB" '_uberdev_status_config_int' \
 assert_in "$STATUS_LIB" '\-I \-B' \
   "S1.11 python runs with -B so no __pycache__ is emitted"
 
-# Cross-shell traps this repo has been bitten by before.
-assert_not_in "$CODE_ONLY" 'type -t' \
-  "S1.12 no 'type -t' bashism (misreports under the zsh-backed Bash tool)"
-assert_not_in "$CODE_ONLY" 'BASH_REMATCH' \
-  "S1.13 no BASH_REMATCH (unset under zsh)"
+# S1.12 / S1.13 (the 'type -t' and BASH_REMATCH bans over $CODE_ONLY) were
+# retired into tests/epipe-guard.test.sh L7 (#628). They read this one file
+# through a `sed 's/#.*//'` projection; L7 runs the same ban over the whole
+# shipped shell + markdown corpus, carries the ${match[N]:-${BASH_REMATCH[N]}}
+# dual-shell carve-out lib/goal-state.sh depends on, and proves both polarities
+# every run. lib/status.sh is inside that corpus, so this file lost nothing.
 STAT_C_LINE="$(grep -n 'stat -c %Y' "$STATUS_LIB" | head -n1 | cut -d: -f1)"
 STAT_F_LINE="$(grep -n 'stat -f %m' "$STATUS_LIB" | head -n1 | cut -d: -f1)"
 if [ -n "$STAT_C_LINE" ] && [ -n "$STAT_F_LINE" ] && [ "$STAT_C_LINE" -lt "$STAT_F_LINE" ]; then

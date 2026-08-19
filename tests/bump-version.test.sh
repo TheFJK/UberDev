@@ -248,9 +248,12 @@ assert_grep "$BUMP_SH" 'assert_version_bump' "B1.9 targets the assert_version_bu
 # helper, never sed's in-place flag (GNU and BSD/macOS sed disagree on its
 # argument shape — the divergence this script exists to sidestep).
 assert_grep_not "$BUMP_SH" 'sed[[:space:]]+-i' "B1.10 no non-portable in-place sed flag"
-# Renderer-hazard hygiene is N/A here (lib/ is never rendered), but the script
-# must stay bash-3.2-safe: no mapfile/readarray/declare -A.
-assert_grep_not "$BUMP_SH" 'mapfile|readarray|declare -A' "B1.11 bash-3.2-safe (no mapfile/readarray/declare -A)"
+# Renderer-hazard hygiene is N/A here (lib/ is never rendered). B1.11, the
+# bash-3.2 builtin ban, was retired into tests/epipe-guard.test.sh L9 (#628): it
+# guarded this ONE script while every shipped lib declares the same floor in its
+# own header, and L9 now enforces it across the whole shipped corpus with an
+# exemption for the comment and backticked-prose mentions that make the floor
+# describable. lib/bump-version.sh is inside that corpus.
 
 echo
 echo "== B2: happy bump 1.2.3 -> 1.3.0 updates all 8 anchors =="

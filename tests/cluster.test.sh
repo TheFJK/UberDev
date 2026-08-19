@@ -9,12 +9,12 @@
 #   C1    — commands/cluster.md frontmatter (description, argument-hint, allowed-tools)
 #   C1.b  — commands/cluster.md allowed-tools omits "Edit" / "MultiEdit" (Write is OK)
 #   C2    — skills/cluster-pipeline/SKILL.md name + Phase 0..5 markers + agent ref
-#   C2.b  — SKILL.md bashism-free: no "type -t", no "BASH_REMATCH", no awk $N col refs
+#   C2.b  — SKILL.md renderer-hazard-free: no awk $N column refs (the bashism
+#           arms moved to tests/epipe-guard.test.sh L7 — #628)
 #   C2.c  — SKILL.md uses --body-file form, never --body "$VAR" (security.md §Q2)
 #   C3    — agents/issue-similarity-analyzer.md frontmatter (name, description, model, tools)
 #   C3.b  — agent tools whitelist omits Edit / MultiEdit / Write (read-only invariant)
 #   C3.c  — agent return YAML schema cites clusters / lead / members / rationale / confidence
-#   C4    — gh label create description literal <=100 chars (memory project_uberdev_label_desc_100char_limit)
 #   C5    — HTML-comment fingerprint marker present (<!-- uberdev:cluster-fold lead= ... fingerprint= ...)
 #   C5.b  — fingerprint computed via sha256sum + cut -c1-16, NOT awk substr $1 (renderer collision)
 #   C6    — alias-sync SSOT row present + byte-match against cluster.md allowed-tools
@@ -119,9 +119,13 @@ assert_grep "$SKILL" 'Phase 4'                                   "C2.phase-4"
 assert_grep "$SKILL" 'Phase 5'                                   "C2.phase-5"
 assert_grep "$SKILL" 'issue-similarity-analyzer'                 "C2.agent-ref"
 
-echo "== C2.b: SKILL.md bashism-free (zsh-compat) =="
-assert_no_grep "$SKILL" 'type -t'      "C2.b.no-type-t"
-assert_no_grep "$SKILL" 'BASH_REMATCH' "C2.b.no-bash-rematch"
+echo "== C2.b: SKILL.md renderer-hazard-free =="
+# The 'type -t' and BASH_REMATCH arms were retired into tests/epipe-guard.test.sh
+# L7 (#628), which runs the same ban over the whole shipped corpus — this SKILL.md
+# included — with the dual-shell carve-out and both polarities proven every run.
+# The awk column-ref guard below stays here: it is about the SKILL RENDERER
+# substituting $ARGUMENTS into a single-quoted awk body, which is a markdown
+# concern, not a shell-portability one.
 # awk $N column-ref guard. Skill-renderer substitutes positional $ARGUMENTS
 # into the entire SKILL.md body, including inside single-quoted awk one-liners
 # (memory project_uberdev_skill_renderer_dollar_arg_collision). The forbidden
@@ -166,16 +170,13 @@ assert_grep "$AGENT" 'members:'    "C3.c.members"
 assert_grep "$AGENT" 'rationale:'  "C3.c.rationale"
 assert_grep "$AGENT" 'confidence:' "C3.c.confidence"
 
-echo "== C4: gh label create description <=100 chars (memory project_uberdev_label_desc_100char_limit) =="
-# Extract the quoted "Closed as semantic duplicate by /uberdev:cluster..."
-# string from SKILL.md and assert its byte-length is in (0, 100].
-LABEL_DESC="$(grep -oE '"Closed as semantic duplicate by /uberdev:cluster[^"]*"' "$SKILL" | head -1 | sed -e 's/^"//' -e 's/"$//')"
-LEN="$(printf '%s' "$LABEL_DESC" | wc -c | tr -d '[:space:]')"
-if [ "${LEN:-0}" -le 100 ] && [ "${LEN:-0}" -gt 0 ]; then
-  echo "  PASS  C4.label-desc-len (len=$LEN)"; PASS=$((PASS+1))
-else
-  echo "  FAIL  C4.label-desc-len (len=$LEN)"; FAIL=$((FAIL+1))
-fi
+# C4 (gh label description <= 100 chars) was retired into
+# tests/epipe-guard.test.sh L8 (#628). It found its subject by grepping for the
+# literal's own opening words, so it guarded exactly one string and rotted the
+# day that string was reworded; L8 measures every description literal in the
+# shipped corpus by ROLE — --description arguments, *LABEL_DESC* assignments
+# (this SKILL.md's shape), and *_trust_label() record producers — in BYTES,
+# which is the unit GitHub 422s on.
 
 echo "== C5: HTML-comment fingerprint marker =="
 assert_grep "$SKILL" '<!-- uberdev:cluster-fold lead=' "C5.marker-lead"

@@ -1517,6 +1517,745 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# ---------------------------------------------------------------------------
+# The shared code/prose projection L7, L9 and L11 run their bans against.
+#
+# All three ports are BANS on a token, and the corpus is shipped shell PLUS
+# shipped markdown. Every one of them therefore has the same problem: the token
+# is legitimately NAMED far more often than it is used. `mapfile` appears
+# thirteen times in shipped code and every one is a comment or a prose line
+# explaining why it must not be used; a naive repo-wide ban on the word reds on
+# its own documentation, and the only way to keep it green is to stop writing
+# the documentation. That is the wrong trade, so the exemption is mechanical:
+#
+#   * a FULL-LINE shell comment is dropped whole. This is the same rule L1
+#     already applies and for the same reason — a retirement has to stay
+#     describable in prose.
+#   * every BACKTICK-DELIMITED span is blanked. A backticked token is a NAME
+#     being discussed, not a statement being executed, and it is how this repo
+#     writes markdown prose (`BASH_REMATCH` in docs/testing.md), in-fence
+#     comments, and the assertion-string mentions the donors carved out by hand.
+#
+# DECLARED BOUNDARY: the backtick rule also blanks a legacy `cmd` command
+# substitution, so a banned token inside one would be missed. Measured on the
+# corpus at the time of writing: the shipped shell surface contains no backtick
+# substitution at all — every backtick in it opens a comment's prose span — and
+# the repo's own convention is $(...). The rule is stated rather than hedged.
+#
+# ONE program, three bans. Each ban supplies its needle and, where a sanctioned
+# spelling of the same token exists, the exempt form to subtract BEFORE the
+# needle is applied — subtracted rather than merely tested, so a line carrying
+# both the sanctioned form and a real violation is still reported.
+_LINT_BAN_AWK='
+function project(s,   t) {
+  t = s
+  gsub(/`[^`]*`/, " ", t)
+  return t
+}
+/^[[:space:]]*#/ { next }
+{
+  line = project($0)
+  if (EXEMPT != "") gsub(EXEMPT, " ", line)
+  if (line ~ RE) printf "%s:%d: %s\n", REL, FNR, $0
+}
+'
+# _lint_ban REL RE EXEMPT FILE -> `rel:line: text` per violation, empty when clean.
+# A detector that cannot run must never look like a clean file, so a non-zero awk
+# is turned into a DETECTOR-ERROR row the caller reports as a failure — the
+# three-way rc discipline L2 states.
+_lint_ban() {
+  if ! awk -v REL="$1" -v RE="$2" -v EXEMPT="$3" "$_LINT_BAN_AWK" "$4" 2>/dev/null; then
+    printf '%s:0: DETECTOR-ERROR awk exited non-zero while scanning this file\n' "$1"
+  fi
+}
+
+# _lint_ban_corpus RE EXEMPT -> every violation across shell + markdown.
+_lint_ban_corpus() {
+  local _re="$1" _ex="$2" _rel _out
+  while IFS= read -r _rel; do
+    [ -n "$_rel" ] || continue
+    [ -f "$REPO_ROOT/$_rel" ] || continue
+    _out="$(_lint_ban "$_rel" "$_re" "$_ex" "$REPO_ROOT/$_rel")"
+    [ -z "$_out" ] || printf '%s\n' "$_out"
+  done <<<"$LINT_SH_LIST
+$LINT_MD_LIST"
+}
+
+# _lint_mentions RE -> how many corpus lines name the token in ANY context.
+# This is the denominator every ban below reports: an ABSENCE assertion over a
+# regex that has never fired cannot tell "clean corpus" from "regex that stopped
+# matching", and for these three bans the population is not merely small — it is
+# zero by construction, because the projection is what makes them green.
+_lint_mentions() {
+  local _re="$1" _rel _n _total=0
+  while IFS= read -r _rel; do
+    [ -n "$_rel" ] || continue
+    [ -f "$REPO_ROOT/$_rel" ] || continue
+    _n="$(grep -cE -e "$_re" "$REPO_ROOT/$_rel" 2>/dev/null)" || _n=0
+    _total=$((_total + _n))
+  done <<<"$LINT_SH_LIST
+$LINT_MD_LIST"
+  printf '%s' "$_total"
+}
+
+# _lint_ban_case NAME EXPECT RE EXEMPT BODY — one polarity fixture. EXPECT is
+# `flag` or `clean`. The fixture body is written to $TMPD and run through the
+# SAME _lint_ban the verdict rows use, never through a re-implementation of it.
+_lint_ban_case() {
+  local _name="$1" _expect="$2" _re="$3" _ex="$4" _body="$5" _f _hits
+  _f="$TMPD/lintban-case.sh"
+  printf '%s\n' "$_body" > "$_f"
+  if [ ! -s "$_f" ]; then
+    echo "  FAIL  $_name — fixture is missing or empty; the case proves nothing"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  _hits="$(_lint_ban "fixture" "$_re" "$_ex" "$_f")"
+  case "$_expect" in
+    flag)
+      if [ -n "$_hits" ]; then
+        echo "  PASS  $_name — flagged"
+        PASS=$((PASS + 1))
+      else
+        echo "  FAIL  $_name — NOT flagged; the ban is blind to this shape"
+        FAIL=$((FAIL + 1))
+      fi ;;
+    clean)
+      if [ -z "$_hits" ]; then
+        echo "  PASS  $_name — not flagged"
+        PASS=$((PASS + 1))
+      else
+        echo "  FAIL  $_name — false positive: $_hits"
+        FAIL=$((FAIL + 1))
+      fi ;;
+  esac
+}
+
+echo
+echo "== L7: cross-shell bashisms in shipped code =="
+# Ported from tests/status.test.sh S1.12/S1.13 (one file, via a `sed 's/#.*//'`
+# CODE_ONLY projection), tests/cluster.test.sh C2.b (one SKILL.md) and
+# tests/uberthink.test.sh U8 (one SKILL.md). Three files were covered; the
+# corpus is 158.
+#
+# Every shipped SKILL.md `bash` fence and every lib/ file re-sourced from one
+# runs under /bin/zsh on macOS, where `type -t` does not exist and BASH_REMATCH
+# is never populated (zsh fills $match instead). Both fail SILENTLY — `type -t`
+# misreports, BASH_REMATCH reads as empty — so there is no crash to notice.
+#
+# THE MANDATORY CARVE-OUT. `${match[N]:-${BASH_REMATCH[N]}}` is the CORRECT
+# dual-shell fix, not a violation: it reads whichever array the live shell
+# populated. lib/goal-state.sh uses it for the only `Blocks: #N` parser in the
+# repo, and a naive repo-wide BASH_REMATCH ban reds on exactly the line that
+# fixed the bug. The exempt form is subtracted from the line before the ban is
+# applied, and L7.4 asserts the form is still LIVE in shipped code — without
+# that partner the carve-out would go on standing after the line it protects was
+# deleted, which is how an exemption becomes a hole.
+#
+# DECLARED BOUNDARY — `for x in $SCALAR` is NOT in this ban. zsh does not
+# word-split an unquoted scalar, so the loop runs once over the whole string;
+# it is the same class and it is in this repo's memory as a recurring one. It is
+# left out because the shipped corpus carries ~15 live instances (commands/
+# cluster.md, lib/goal-phase1.sh, lib/live-semaphore.sh, several SKILL.md
+# fences), several of them deliberate, and re-classifying them is a change to
+# shipped behaviour rather than a test consolidation. The runtime bash-vs-zsh
+# differential at tests/review-pr-consolidate.test.sh RCXZa-d covers the one lib
+# where the split is load-bearing. Stated here so the gap is a decision on the
+# record and not an oversight.
+#
+# Needles assembled, never contiguous: these bytes sit in several corpora that
+# grep tests/ for exactly these tokens.
+L7_REMATCH='BASH_'; L7_REMATCH="${L7_REMATCH}REMATCH"
+L7_TYPET='type[[:space:]]+'; L7_TYPET="${L7_TYPET}-t([[:space:]]|$)"
+L7_RE="${L7_TYPET}|${L7_REMATCH}"
+# Bracket classes throughout instead of backslash escapes: the value crosses an
+# `awk -v` boundary, where backslash handling differs between the BSD, GNU and
+# MSYS awks this suite runs under.
+L7_EXEMPT="[$][{]match[[][0-9]+[]][:][-][$][{]${L7_REMATCH}[[][0-9]+[]][}][}]"
+L7_HITS="$(_lint_ban_corpus "$L7_RE" "$L7_EXEMPT")"
+if [ -z "$L7_HITS" ]; then
+  echo "  PASS  L7.1 no zsh-hostile bashism in executable shipped code"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L7.1 zsh-hostile bashism in shipped code:"
+  sed 's/^/        /' <<<"$L7_HITS"
+  echo "        fix:    'command -v' for type -t; \${match[N]:-\${BASH_REMATCH[N]}} for the capture"
+  FAIL=$((FAIL + 1))
+fi
+# The floor carries deliberate headroom, per the L0 convention above: it exists
+# to catch a matcher that COLLAPSED to zero, not to pin the inventory. Live
+# count is 12 and all twelve are prose — six comment lines in lib/goal-state.sh,
+# one in each of lib/review-fleet-args.sh, lib/turbox-fleet.sh and
+# docs/testing.md, and the rest documentation of why the token must not be used.
+# A floor of 12 would red on the first legitimate comment tidy and report it as
+# "corpus or matcher regressed", which is a false accusation and trains the next
+# reader to raise the number without looking. 6 is half the live count: a
+# collapsed matcher reads 0 and still reds.
+#
+# The lower floor costs nothing, because a COUNT was never what proves the two
+# alternatives are live. Measured: all 12 lines come from the BASH_REMATCH arm
+# and ZERO from the `type -t` arm — the corpus writes that token backticked, and
+# the arm requires whitespace or end-of-line after `-t`. So the `type -t` half
+# has a denominator of 0 at ANY floor, and what actually proves it fires is
+# L7.3b, which runs a seeded `type -t` through the same _lint_ban the verdict
+# uses, on every run. Do not raise this floor back to the inventory: the
+# per-arm proof is the polarity fixtures, and this row only catches a TOTAL
+# collapse.
+L7_DENOM="$(_lint_mentions "$L7_RE")"
+if [ "$L7_DENOM" -ge 6 ]; then
+  echo "  PASS  L7.2 the bashism scan inspected $L7_DENOM corpus lines naming these tokens (floor 6)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L7.2 only $L7_DENOM corpus lines name these tokens (floor 6) — corpus or matcher regressed"
+  FAIL=$((FAIL + 1))
+fi
+_lint_ban_case "L7.3a live capture-array read" flag "$L7_RE" "$L7_EXEMPT" \
+  "$(printf 'if [[ "$x" =~ ^a([0-9]+)$ ]]; then\n  n="${%s[1]}"\nfi\n' "$L7_REMATCH")"
+L7_TYPET_LIT='type '; L7_TYPET_LIT="${L7_TYPET_LIT}-t"
+_lint_ban_case "L7.3b live shell-builtin type probe" flag "$L7_RE" "$L7_EXEMPT" \
+  "$(printf 'if [ "$(%s helper)" = function ]; then :; fi\n' "$L7_TYPET_LIT")"
+_lint_ban_case "L7.3c the sanctioned dual-shell capture" clean "$L7_RE" "$L7_EXEMPT" \
+  "$(printf 'local pr_num="${match[1]:-${%s[1]}}"\n' "$L7_REMATCH")"
+_lint_ban_case "L7.3d a comment naming the token" clean "$L7_RE" "$L7_EXEMPT" \
+  "$(printf '# never %s here: zsh populates $match instead\n' "$L7_REMATCH")"
+_lint_ban_case "L7.3e backticked prose naming the token" clean "$L7_RE" "$L7_EXEMPT" \
+  "$(printf 'Bashisms such as `%s` and `%s` misfire under zsh.\n' "$L7_REMATCH" "$L7_TYPET_LIT")"
+# L7.4 — the carve-out's partner. An exemption whose subject has been deleted is
+# a permanent hole nobody can see; this is L5.2's discipline applied to L7.
+if grep -rqE -e "$L7_EXEMPT" "$REPO_ROOT/plugins/uberdev" 2>/dev/null; then
+  echo "  PASS  L7.4 the sanctioned dual-shell capture form is still live in shipped code"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L7.4 nothing in shipped code uses \${match[N]:-\${BASH_REMATCH[N]}} any more —"
+  echo "        the L7 carve-out is now exempting a form that does not exist"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== L8: gh label descriptions inside GitHub's 100-BYTE limit =="
+# Ported from tests/cluster.test.sh C4 (one literal in one SKILL.md, found by
+# grepping for its own opening words) and tests/findings-to-issues.test.sh
+# S21.10 (every --description in one agent .md).
+#
+# THE UNIT. The two donors disagree: C4 measures with `wc -c` (bytes), S21.10
+# with `wc -m` (characters, and locale-dependent at that). GitHub's limit is on
+# BYTES, so the port resolves in favour of `wc -c`. The difference is not
+# academic here — this repo's label prose is full of em-dashes and typographic
+# punctuation at three bytes each, so a 40-character description can be 120
+# bytes. `wc -m` calls it 40 and passes; the API returns 422 and label
+# provisioning fails for the whole run. L8.3c is that exact fixture.
+#
+# THE VACUITY TRAP. A resolver that walks the corpus for `<VAR>=` and takes the
+# first hit binds a variable to some OTHER file's value: a seeded 113-byte
+# violation once measured as 5 bytes and passed. So nothing is resolved from a
+# call site. Every literal is measured WHERE IT IS WRITTEN, through three
+# mechanically-derivable shapes, and a `--description "$VAR"` call site is not a
+# measurement subject at all:
+#   direct    --description "<literal>"           (S21.10's shape)
+#   assign    <NAME>LABEL_DESC[RIPTION]=<literal> (C4's subject, by role)
+#   record    a prose literal inside a *_trust_label() record producer, which is
+#             how commands/review-pr.md's descriptions reach gh — through a
+#             tab-separated triple, so they have no assignment to find and both
+#             donors were blind to them
+L8_TAB="$(printf '\t')"
+# ONE awk over each corpus file. It does the comment skip, the three shapes and
+# the tab framing in a single pass, so the extraction has no sed-quoting seam and
+# emits real tabs on every platform's sed. `_trust_label()` is matched by ROLE —
+# any function whose name ends that way — rather than by a file:line anchor that
+# would rot the next time review-fleet-args.sh is edited.
+_L8_EXTRACT_AWK='
+  /^[A-Za-z_][A-Za-z0-9_]*_trust_label\(\)[[:space:]]*\{/ { infn = 1 }
+  infn && /^\}/ { infn = 0 }
+  /^[[:space:]]*#/ { next }
+  {
+    if (match($0, /--description[[:space:]]+"[^"$]*"/)) {
+      s = substr($0, RSTART, RLENGTH)
+      sub(/^--description[[:space:]]+"/, "", s); sub(/"$/, "", s)
+      if (s != "") printf "direct\t%s\n", s
+    }
+    if (match($0, /LABEL_DESC(RIPTION)?="[^"$]*"/)) {
+      s = substr($0, RSTART, RLENGTH); sub(/^[^"]*"/, "", s); sub(/"$/, "", s)
+      if (s != "") printf "assign\t%s\n", s
+    }
+    if (match($0, "LABEL_DESC(RIPTION)?=" Q "[^" Q "]*" Q)) {
+      s = substr($0, RSTART, RLENGTH); sub("^[^" Q "]*" Q, "", s); sub(Q "$", "", s)
+      if (s != "") printf "assign\t%s\n", s
+    }
+    if (infn) {
+      s = $0
+      while (match(s, Q "[^" Q "]*" Q)) {
+        lit = substr(s, RSTART + 1, RLENGTH - 2)
+        if (lit ~ / /) printf "record\t%s\n", lit
+        s = substr(s, RSTART + RLENGTH)
+      }
+    }
+  }
+'
+L8_LITERALS=""
+L8_FILE_COUNT=0
+while IFS= read -r l8_rel; do
+  [ -n "$l8_rel" ] || continue
+  [ -f "$REPO_ROOT/$l8_rel" ] || continue
+  l8_found="$(awk -v Q="'" "$_L8_EXTRACT_AWK" "$REPO_ROOT/$l8_rel" 2>/dev/null)" || l8_found=""
+  [ -n "$l8_found" ] || continue
+  L8_FILE_COUNT=$((L8_FILE_COUNT + 1))
+  while IFS= read -r l8_row; do
+    [ -n "$l8_row" ] || continue
+    L8_LITERALS="$L8_LITERALS$l8_rel$L8_TAB$l8_row
+"
+  done <<<"$l8_found"
+done <<<"$LINT_SH_LIST
+$LINT_MD_LIST
+$LINT_JS_LIST"
+
+# _l8_overlong LITERAL-BLOCK -> `rel<TAB>shape<TAB>bytes<TAB>text` per breach.
+# `wc -c` over the exact bytes, with printf '%s' so no trailing newline is counted.
+_l8_overlong() {
+  local _rel _shape _text _len
+  while IFS="$L8_TAB" read -r _rel _shape _text; do
+    [ -n "$_shape" ] || continue
+    _len="$(printf '%s' "$_text" | wc -c | tr -d '[:space:]')"
+    [ "${_len:-0}" -le 100 ] || printf '%s\t%s\t%s\t%s\n' "$_rel" "$_shape" "$_len" "$_text"
+  done <<<"$1"
+}
+L8_COUNT="$(grep -c . <<<"$L8_LITERALS")"
+L8_BREACH="$(_l8_overlong "$L8_LITERALS")"
+if [ -z "$L8_BREACH" ]; then
+  echo "  PASS  L8.1 all $L8_COUNT gh label description literals are <= 100 bytes"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L8.1 gh label description over GitHub's 100-BYTE limit (422s on create AND update):"
+  sed 's/^/        /' <<<"$L8_BREACH"
+  FAIL=$((FAIL + 1))
+fi
+# L8.2 — the denominator, in two independent directions. A count alone would stay
+# green if one extractor shape silently stopped matching while another grew, so
+# the file spread is asserted too.
+if [ "$L8_COUNT" -ge 6 ] && [ "$L8_FILE_COUNT" -ge 4 ]; then
+  echo "  PASS  L8.2 measured $L8_COUNT description literals across $L8_FILE_COUNT files (floors 6 / 4)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L8.2 measured $L8_COUNT literals across $L8_FILE_COUNT files (floors 6 / 4) — an extractor shape stopped matching"
+  FAIL=$((FAIL + 1))
+fi
+# L8.2b — all three shapes must be live. This is the row that keeps the port
+# honest about subsuming BOTH donors plus the record producer neither saw.
+L8_SHAPES_MISSING=""
+while IFS= read -r l8_shape; do
+  [ -n "$l8_shape" ] || continue
+  grep -q "$L8_TAB$l8_shape$L8_TAB" <<<"$L8_LITERALS" \
+    || L8_SHAPES_MISSING="$L8_SHAPES_MISSING $l8_shape"
+done <<EOF
+direct
+assign
+record
+EOF
+if [ -z "$L8_SHAPES_MISSING" ]; then
+  echo "  PASS  L8.2b all three extraction shapes (direct / assign / record) found live literals"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L8.2b extraction shape(s) found nothing:$L8_SHAPES_MISSING"
+  echo "        each one covers a donor this row replaced; a dead shape is silent lost coverage"
+  FAIL=$((FAIL + 1))
+fi
+# L8.3 — polarity, through the SAME _l8_overlong the verdict uses. Three cases:
+# over the limit, exactly at it, and the unit discriminator. Built with a counted
+# loop rather than `seq`, which is not guaranteed on Git Bash.
+L8_FX_OVER=""; while [ "${#L8_FX_OVER}" -lt 113 ]; do L8_FX_OVER="${L8_FX_OVER}x"; done
+L8_FX_EDGE=""; while [ "${#L8_FX_EDGE}" -lt 100 ]; do L8_FX_EDGE="${L8_FX_EDGE}x"; done
+L8_FX_EM="$(printf '\342\200\224')"
+L8_FX_WIDE=""; l8_i=0
+while [ "$l8_i" -lt 40 ]; do L8_FX_WIDE="$L8_FX_WIDE$L8_FX_EM"; l8_i=$((l8_i + 1)); done
+L8_FX_IN="fx${L8_TAB}direct${L8_TAB}$L8_FX_OVER
+fx${L8_TAB}direct${L8_TAB}$L8_FX_EDGE
+fx${L8_TAB}record${L8_TAB}$L8_FX_WIDE"
+L8_FX_OUT="$(_l8_overlong "$L8_FX_IN")"
+L8_FX_N="$(grep -c . <<<"$L8_FX_OUT")"
+L8_FX_LENS="$(awk -F'\t' 'NF >= 4 { print $3 }' <<<"$L8_FX_OUT" | sort -n | tr '\n' ' ')"
+if [ "$L8_FX_N" -eq 2 ] && [ "$L8_FX_LENS" = "113 120 " ]; then
+  echo "  PASS  L8.3 the measurement flags 113 bytes and the 40-char/120-byte string, and spares 100 bytes"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L8.3 the measurement is not discriminating: flagged $L8_FX_N with lengths [$L8_FX_LENS]"
+  echo "        expected exactly 2 breaches at 113 and 120 bytes; 120 from 40 em-dashes is the"
+  echo "        wc -m / wc -c discriminator — a character count reads it as 40 and passes"
+  FAIL=$((FAIL + 1))
+fi
+echo
+echo "== L9: the macOS bash-3.2 floor =="
+# Ported from tests/bump-version.test.sh B1.11, which banned the three builtins
+# on ONE file (lib/bump-version.sh). Every shipped lib states the same floor in
+# its own header — lib/solve-launcher.sh:28, lib/turbox-fleet.sh:17,
+# lib/rl-curl:26 — and none of them was checked.
+#
+# macOS ships /bin/bash 3.2. mapfile and readarray arrive in bash 4, `declare -A`
+# in bash 4 as well, and zsh has none of them. All three fail the same way: the
+# builtin is missing, the array it should have filled stays EMPTY, and the next
+# statement reads that as "nothing to do". #398 is the recorded instance.
+#
+# CARVE-OUT: probe and comment contexts. The token is named far more often than
+# it is used — thirteen shipped lines name it and every one is documentation of
+# why not to. The shared projection above handles both: a full-line comment is
+# dropped, a backticked mention is blanked. That is the same exemption the issue
+# asks for in tests/crossplatform-shell-wrappers.test.sh (a live `mapfile` inside
+# a zsh negative-control probe) and tests/goal.test.sh:534 (the token inside an
+# assertion string); those two are outside this corpus by construction — L0 is
+# scoped to plugins/uberdev — because the bash-3.2 floor is a SHIPPED-code
+# contract. The CI harness runs on bash 5 and Git Bash 4.4, so banning the
+# builtins there would be a rule with no defect behind it.
+L9_MAPFILE='map'; L9_MAPFILE="${L9_MAPFILE}file"
+L9_READARRAY='read'; L9_READARRAY="${L9_READARRAY}array"
+L9_DECLARE_A='declare[[:space:]]+'; L9_DECLARE_A="${L9_DECLARE_A}-A([[:space:]]|$)"
+L9_RE="${L9_MAPFILE}|${L9_READARRAY}|${L9_DECLARE_A}"
+L9_HITS="$(_lint_ban_corpus "$L9_RE" "")"
+if [ -z "$L9_HITS" ]; then
+  echo "  PASS  L9.1 no bash-4 builtin executed in shipped code (macOS /bin/bash is 3.2)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L9.1 bash-4-only builtin in shipped code:"
+  sed 's/^/        /' <<<"$L9_HITS"
+  echo "        fix:    while IFS= read -r over a herestring; parallel indexed arrays, never declare -A"
+  FAIL=$((FAIL + 1))
+fi
+# Floored with headroom for the same reason as L7.2, and the reason bites harder
+# here: every one of the 8 live lines is documentation of why NOT to use the
+# builtin (lib/goal-phase3.sh:218 describes a mapfile that no longer exists —
+# precisely the stale prose a later cleanup deletes). A floor of 8 would make
+# writing that documentation mandatory, inverting L9's own carve-out, whose
+# whole purpose is to let the ban stay describable in prose. 4 is half the live
+# count and still reds on a matcher that stopped matching.
+#
+# Per-arm, measured: mapfile 6, declare -A 2, readarray 0. The readarray arm has
+# no corpus line at any floor, and at 4 a lone declare -A arm going dark would
+# leave 6 and pass. Neither is a hole, because the arms are proven by EXECUTION,
+# not by counting: L9.3a/b/c push a seeded mapfile, readarray and declare -A
+# through the same _lint_ban the verdict uses and each must flag. This row's job
+# is the total collapse the fixtures cannot see — a corpus that stopped being
+# enumerated at all.
+L9_DENOM="$(_lint_mentions "$L9_RE")"
+if [ "$L9_DENOM" -ge 4 ]; then
+  echo "  PASS  L9.2 the bash-3.2 scan inspected $L9_DENOM corpus lines naming these builtins (floor 4)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L9.2 only $L9_DENOM corpus lines name these builtins (floor 4) — corpus or matcher regressed"
+  FAIL=$((FAIL + 1))
+fi
+_lint_ban_case "L9.3a live array slurp" flag "$L9_RE" "" \
+  "$(printf '%s -t rows < <(printf "a\\nb\\n")\n' "$L9_MAPFILE")"
+_lint_ban_case "L9.3b live readarray" flag "$L9_RE" "" \
+  "$(printf '%s -t rows <<<"$payload"\n' "$L9_READARRAY")"
+L9_DECL_LIT='declare '; L9_DECL_LIT="${L9_DECL_LIT}-A"
+_lint_ban_case "L9.3c live associative array" flag "$L9_RE" "" \
+  "$(printf '%s WANT=()\nWANT[a]=1\n' "$L9_DECL_LIT")"
+_lint_ban_case "L9.3d a comment naming the builtin" clean "$L9_RE" "" \
+  "$(printf '# portable while-read loop — NOT %s, which is bash-4-only\n' "$L9_MAPFILE")"
+_lint_ban_case "L9.3e a backticked probe mention in prose" clean "$L9_RE" "" \
+  "$(printf 'The Z2 negative control runs `%s -t probe` under zsh -f and expects rc=127.\n' "$L9_MAPFILE")"
+
+echo
+echo "== L10: every plugin-namespaced name the corpus dispatches or cites resolves =="
+# Ported from tests/turbox-fleet.test.sh TX11b, which read ONE SKILL.md through
+# an extractor requiring BACKTICK delimiters:  `uberdev:<name>`  . That spelling
+# is documentation. The OPERATIVE spelling — the one a dispatch actually fails
+# on — is `subagent_type: uberdev:<agent>`, and the donor's extractor cannot see
+# a single one of them. Both shapes are read here, and they are judged
+# differently because they mean different things:
+#
+#   L10.1  a DISPATCH position (subagent_type) must name a real agent. A dead
+#          agentType fails at dispatch time, mid-run, after the claims are
+#          already written.
+#   L10.2  a CITATION (backticked) must name a real shipped artifact of some
+#          kind. This is TX11b's own predicate, widened from one file to the
+#          whole markdown corpus.
+#
+# CARVE-OUTS, all mechanically derived — no hand-maintained allow-list:
+#   * template placeholders. `subagent_type: uberdev:testers-<persona>` is a
+#     substitution site, not a name; anything carrying < or > is skipped.
+#   * skill names — in a CITATION, and ONLY there. TX11b hardcoded `continue`
+#     on `turbox-fleet` because that is the skill's own namespaced name being
+#     NAMED in prose, and the donor read backticked citations exclusively, so a
+#     citation is the only position its carve-out ever covered. Widening it to
+#     the dispatch position would admit all ~30 shipped skill names there, and
+#     every one of them is a dead dispatch: `subagent_type:` resolves against
+#     agents/ alone, so `subagent_type: uberdev:solve-fleet` fails at dispatch
+#     time even though skills/solve-fleet/SKILL.md exists — which is exactly the
+#     mid-run failure L10.1 exists to prevent, waved through by its own
+#     exemption. L10.1 therefore admits `agent` and nothing else; L10.2 admits
+#     all four kinds. L10.4 proves both directions on the same name.
+#   * plugin-namespaced non-agents. Commands (uberdev:review-pr) and gh label
+#     literals (uberdev:active, defined as *LABEL*='uberdev:…' in shipped shell)
+#     are real artifacts that are not agents; L10.2 resolves against all four
+#     kinds, and the label set is DERIVED from the corpus rather than listed.
+#   * other namespaces. prkit rewrites uberdev: to prkit: wholesale, and
+#     tests/prkit-verify.test.sh deliberately seeds `subagent_type:
+#     prkit:ghost-agent` as a fixture. Only the uberdev: namespace is resolved,
+#     because only this plugin's agents/ directory can answer for it — L10.4c
+#     pins that a foreign namespace stays untouched.
+L10_AGENT_DIR="$REPO_ROOT/plugins/uberdev/agents"
+L10_SKILL_DIR="$REPO_ROOT/plugins/uberdev/skills"
+L10_CMD_DIR="$REPO_ROOT/plugins/uberdev/commands"
+# Label literals, derived: `<ANYTHING>LABEL<ANYTHING>='uberdev:name'`.
+#
+# The shell scrape alone is NOT the whole label vocabulary. `lib/solve_triage.py`
+# BUILDS the tier-escalation label names by concatenation
+# (`ESCALATION_LABEL_PREFIX + tier`), so no `uberdev:tier-…` literal exists in any
+# shipped file for a `sed` to find, and every one of them resolved to `none`. That
+# is not hypothetical: #619 collapsed the `large` rung but deliberately KEPT
+# `uberdev:tier-large` as a migration alias so a pre-#619 ratchet write still
+# lifts instead of being dropped as an unknown tier, and the retained alias is
+# named in `skills/solve-pipeline/SKILL.md` and `docs/rfc/0019`. A scrape-only
+# label set flags that prose as a dangling citation.
+#
+# So the escalation half is DERIVED from the shipped module at run time rather
+# than transcribed here — the same discipline L10.4's kind lists follow. Reading
+# `ESCALATION_LABELS` keys means a rung added, removed or aliased moves this set
+# with it, and a transcribed copy cannot drift out of step with the classifier.
+# Fails CLOSED: if the module cannot be loaded the extraction is empty and the
+# citations red, which is the honest outcome for a corpus whose classifier is
+# unreadable.
+L10_LABELS="$( { while IFS= read -r l10_rel; do
+  [ -n "$l10_rel" ] || continue
+  [ -f "$REPO_ROOT/$l10_rel" ] || continue
+  sed -n "s/.*LABEL[A-Za-z0-9_]*=[\"']uberdev:\([a-z0-9-]*\)[\"'].*/\1/p" "$REPO_ROOT/$l10_rel"
+done <<<"$LINT_SH_LIST"
+  python3 - "$REPO_ROOT/plugins/uberdev/lib/solve_triage.py" <<'L10_PY' 2>/dev/null
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("_l10_st", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+prefix = getattr(mod, "ESCALATION_LABEL_PREFIX", "uberdev:")
+for name in getattr(mod, "ESCALATION_LABELS", {}):
+    if name.startswith("uberdev:"):
+        print(name[len("uberdev:"):])
+L10_PY
+} | sort -u)"
+
+# _l10_kind NAME -> agent | skill | command | label | none
+_l10_kind() {
+  [ -r "$L10_AGENT_DIR/$1.md" ] && { printf 'agent'; return; }
+  [ -r "$L10_SKILL_DIR/$1/SKILL.md" ] && { printf 'skill'; return; }
+  [ -r "$L10_CMD_DIR/$1.md" ] && { printf 'command'; return; }
+  grep -qxF "$1" <<<"$L10_LABELS" && { printf 'label'; return; }
+  printf 'none'
+}
+
+# The two extractors. `subagent_type` is matched with either `:` or `=` after it
+# because the corpus uses both spellings (Task(subagent_type=…) in agent
+# frontmatter prose, `subagent_type: …` in skill steps).
+L10_DISPATCH_RE='subagent_type[[:space:]]*[:=][[:space:]]*["'"'"']?uberdev:[a-z0-9<>_-]+'
+L10_CITE_RE='`uberdev:[a-z0-9<>_-]+`'
+_l10_names() {  # $1 = extractor regex
+  local _rel
+  while IFS= read -r _rel; do
+    [ -n "$_rel" ] || continue
+    [ -f "$REPO_ROOT/$_rel" ] || continue
+    grep -oE -e "$1" "$REPO_ROOT/$_rel" 2>/dev/null
+  done <<<"$LINT_SH_LIST
+$LINT_MD_LIST
+$LINT_JS_LIST" | sed -e 's/.*uberdev://' -e 's/`$//' | sort -u
+}
+L10_DISPATCHED="$(_l10_names "$L10_DISPATCH_RE")"
+L10_CITED="$(_l10_names "$L10_CITE_RE")"
+
+# _l10_unresolved NAMES ALLOWED-KINDS -> the names that resolve to none of them.
+_l10_unresolved() {
+  local _names="$1" _allowed="$2" _n _k _bad=""
+  while IFS= read -r _n; do
+    [ -n "$_n" ] || continue
+    case "$_n" in *"<"*|*">"*) continue ;; esac
+    _k="$(_l10_kind "$_n")"
+    case "$_allowed" in
+      *"$_k"*) ;;
+      *) _bad="$_bad $_n($_k)" ;;
+    esac
+  done <<<"$_names"
+  printf '%s' "$_bad"
+}
+# The TWO policies, named once and consumed by BOTH the verdicts below and the
+# L10.4 polarity fixtures. Restating a policy at its fixture site is what makes
+# a polarity row a COPY of the rule instead of a test of it — it then stays
+# green no matter what the verdict actually allows, which is the uncompared-copy
+# defect this suite refuses elsewhere. One definition, four readers.
+L10_DISPATCH_KINDS="agent"
+L10_CITE_KINDS="agent skill command label"
+L10_D_BAD="$(_l10_unresolved "$L10_DISPATCHED" "$L10_DISPATCH_KINDS")"
+if [ -z "$L10_D_BAD" ]; then
+  echo "  PASS  L10.1 every uberdev: agent type in a subagent_type position resolves in agents/"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L10.1 dangling agent type(s) in a dispatch position:$L10_D_BAD"
+  echo "        a dead agentType fails at dispatch time, mid-run, after the claims are written"
+  FAIL=$((FAIL + 1))
+fi
+L10_C_BAD="$(_l10_unresolved "$L10_CITED" "$L10_CITE_KINDS")"
+if [ -z "$L10_C_BAD" ]; then
+  echo "  PASS  L10.2 every cited \`uberdev:<name>\` resolves to an agent, skill, command or label"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L10.2 cited uberdev: name(s) that resolve to nothing shipped:$L10_C_BAD"
+  FAIL=$((FAIL + 1))
+fi
+L10_D_N="$(grep -c . <<<"$L10_DISPATCHED")"
+L10_C_N="$(grep -c . <<<"$L10_CITED")"
+L10_A_N="$(ls "$L10_AGENT_DIR"/*.md 2>/dev/null | grep -c .)"
+L10_L_N="$(grep -c . <<<"$L10_LABELS")"
+if [ "$L10_D_N" -ge 6 ] && [ "$L10_C_N" -ge 30 ] && [ "$L10_A_N" -ge 30 ] && [ "$L10_L_N" -ge 1 ]; then
+  echo "  PASS  L10.3 scanned $L10_D_N dispatched + $L10_C_N cited names against $L10_A_N agents and $L10_L_N label literal(s)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L10.3 an extractor collapsed: dispatched=$L10_D_N (floor 6) cited=$L10_C_N (floor 30) agents=$L10_A_N (floor 30) labels=$L10_L_N (floor 1)"
+  FAIL=$((FAIL + 1))
+fi
+# L10.3b — the whole point of the port, MEASURED rather than asserted in prose.
+# TX11b's extractor needs a BARE backticked span, `uberdev:<name>`, with the
+# backtick immediately before the namespace. Not one dispatch site in the corpus
+# is written that way: they are `subagent_type: uberdev:<name>` inside a WIDER
+# backticked span, or a bold heading, or an agent frontmatter description, or an
+# in-fence comment — in every case the character before `uberdev:` is a space or
+# a colon, never a backtick. So the donor's extractor reaches zero of them, and
+# this row measures how many sites and how many FILES the subagent_type
+# extractor adds. The donor read one file.
+_L10_SITE_AWK='
+  $0 ~ DRE { sites++; if ($0 !~ BT) blind++ }
+  END { printf "%d %d\n", sites + 0, blind + 0 }
+'
+L10_SITES=0
+L10_BLIND=0
+L10_SITE_FILES=0
+while IFS= read -r l10_rel; do
+  [ -n "$l10_rel" ] || continue
+  [ -f "$REPO_ROOT/$l10_rel" ] || continue
+  l10_pair="$(awk -v DRE="$L10_DISPATCH_RE" -v BT='`uberdev:' "$_L10_SITE_AWK" "$REPO_ROOT/$l10_rel" 2>/dev/null)" || l10_pair="0 0"
+  l10_s="${l10_pair%% *}"
+  l10_b="${l10_pair##* }"
+  [ "${l10_s:-0}" -gt 0 ] || continue
+  L10_SITE_FILES=$((L10_SITE_FILES + 1))
+  L10_SITES=$((L10_SITES + l10_s))
+  L10_BLIND=$((L10_BLIND + l10_b))
+done <<<"$LINT_SH_LIST
+$LINT_MD_LIST
+$LINT_JS_LIST"
+if [ "$L10_SITES" -ge 15 ] && [ "$L10_BLIND" -ge 10 ] && [ "$L10_SITE_FILES" -ge 4 ]; then
+  echo "  PASS  L10.3b $L10_BLIND of $L10_SITES dispatch sites across $L10_SITE_FILES files are invisible to a bare-backtick extractor"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L10.3b sites=$L10_SITES (floor 15) backtick-invisible=$L10_BLIND (floor 10) files=$L10_SITE_FILES (floor 4)"
+  echo "        the subagent_type extractor is adding nothing over the donor's backtick-only one,"
+  echo "        so the blindness this port exists to fix has not actually been fixed"
+  FAIL=$((FAIL + 1))
+fi
+# L10.4 — polarity, through the SAME _l10_unresolved / _l10_kind AND the same
+# two policy variables the verdicts read. Every case is stated in the position
+# it belongs to, because the two positions do not agree: a skill name is a
+# legitimate CITATION and a dead DISPATCH, and a row that only ever tries it in
+# one position cannot tell the two policies apart.
+L10_FX_BAD="$(_l10_unresolved "$(printf 'ghost-agent\n')" "$L10_DISPATCH_KINDS")"
+L10_FX_TMPL="$(_l10_unresolved "$(printf 'testers-<persona>\n')" "$L10_DISPATCH_KINDS")"
+L10_FX_SKILL_CITE="$(_l10_unresolved "$(printf 'turbox-fleet\n')" "$L10_CITE_KINDS")"
+L10_FX_SKILL_DISPATCH="$(_l10_unresolved "$(printf 'turbox-fleet\n')" "$L10_DISPATCH_KINDS")"
+L10_FX_LABEL="$(_l10_unresolved "$(printf 'active\n')" "$L10_CITE_KINDS")"
+L10_FX_LABEL_STRICT="$(_l10_unresolved "$(printf 'active\n')" "$L10_DISPATCH_KINDS")"
+L10_FX_ERR=""
+[ -n "$L10_FX_BAD" ]            || L10_FX_ERR="$L10_FX_ERR a-nonexistent-agent-was-not-flagged"
+[ -z "$L10_FX_TMPL" ]           || L10_FX_ERR="$L10_FX_ERR a-template-placeholder-was-flagged"
+[ -z "$L10_FX_SKILL_CITE" ]     || L10_FX_ERR="$L10_FX_ERR a-skill-name-was-flagged-as-a-citation"
+[ -n "$L10_FX_SKILL_DISPATCH" ] || L10_FX_ERR="$L10_FX_ERR a-skill-name-passed-the-dispatch-rule"
+[ -z "$L10_FX_LABEL" ]          || L10_FX_ERR="$L10_FX_ERR a-label-citation-was-flagged"
+[ -n "$L10_FX_LABEL_STRICT" ]   || L10_FX_ERR="$L10_FX_ERR a-label-passed-the-dispatch-rule"
+if [ -z "$L10_FX_ERR" ]; then
+  echo "  PASS  L10.4 the resolver flags a ghost agent, a skill and a label in a dispatch position, and spares template / skill / label citations"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L10.4 the resolver is not discriminating:$L10_FX_ERR"
+  FAIL=$((FAIL + 1))
+fi
+# L10.4b — the foreign-namespace carve-out, on the SAME extractor. prkit rewrites
+# uberdev: to prkit: wholesale and tests/prkit-verify.test.sh seeds exactly this
+# line as a fixture; if the extractor stripped the namespace instead of matching
+# it, that fixture would resolve here as a ghost agent.
+L10_FX_FOREIGN="$(printf 'subagent_type: prkit:ghost-agent\nsubagent_type: uberdev:code-fixer\n' \
+  | grep -oE -e "$L10_DISPATCH_RE" | sed 's/.*uberdev://' | sort -u)"
+if [ "$L10_FX_FOREIGN" = "code-fixer" ]; then
+  echo "  PASS  L10.4b the dispatch extractor takes the uberdev: namespace only and ignores prkit:"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L10.4b the dispatch extractor mis-read a foreign namespace: got '$L10_FX_FOREIGN', expected 'code-fixer'"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== L11: the /goal surface uses no shell-evaluation primitive =="
+# Ported from tests/goal.test.sh G19.no-eval / G19.no-bash-c, which banned both
+# on ONE hardcoded path ($GOAL_LIB = lib/goal-state.sh). The T3 hard rule is
+# about the /goal surface, not about one file of it: lib/goal-state.sh is
+# re-sourced from the goal-pipeline SKILL.md fences, and lib/goal-phase0.sh,
+# goal-phase1.sh, goal-phase3.sh, goal-watch.sh, goal-abort.sh and
+# skills/goal-pipeline/workflow.js all read the same attacker-influenced
+# run-state records. tests/goal-state-sidecar.test.sh writes `GOAL_ID=x; touch
+# …/PWNED` into one and asserts the marker never appears — that proof holds only
+# while NOTHING on the surface evaluates the value it read.
+#
+# The surface is DERIVED from the corpus by path, so a new lib/goal-*.sh joins
+# it the day it is added, with no edit here — the failure mode of the donor's
+# single hardcoded path.
+#
+# CARVE-OUT: the shared projection's comment and backtick rules. lib/goal-state.sh
+# names this very assertion in a comment at its dual-shell indirect reader, and
+# commands/goal.md discusses evaluation in prose. The issue's other two
+# carve-outs — the live `eval` harness in tests/goal-state-zsh.test.sh and the
+# prose mention in tests/goal-state-sidecar.test.sh — are outside this corpus by
+# construction: L0 is scoped to plugins/uberdev, and a test harness evaluating
+# its own probe specs is not the shipped surface the T3 rule is about.
+L11_EVAL='ev'; L11_EVAL="${L11_EVAL}al"
+L11_RE="(^|[^A-Za-z0-9_])${L11_EVAL}[[:space:]]|(^|[^A-Za-z0-9_])bash[[:space:]]+-c([[:space:]]|$)"
+L11_SURFACE="$(while IFS= read -r l11_rel; do
+  [ -n "$l11_rel" ] || continue
+  case "$l11_rel" in
+    *goal-*|*/goal.md) printf '%s\n' "$l11_rel" ;;
+  esac
+done <<<"$LINT_SH_LIST
+$LINT_MD_LIST
+$LINT_JS_LIST")"
+L11_HITS=""
+while IFS= read -r l11_rel; do
+  [ -n "$l11_rel" ] || continue
+  [ -f "$REPO_ROOT/$l11_rel" ] || continue
+  l11_out="$(_lint_ban "$l11_rel" "$L11_RE" "" "$REPO_ROOT/$l11_rel")"
+  [ -z "$l11_out" ] || L11_HITS="$L11_HITS$l11_out
+"
+done <<<"$L11_SURFACE"
+L11_N="$(grep -c . <<<"$L11_SURFACE")"
+if [ -z "$L11_HITS" ]; then
+  echo "  PASS  L11.1 no shell-evaluation primitive on the $L11_N-file /goal surface (T3 hard rule)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L11.1 shell-evaluation primitive on the /goal surface:"
+  sed 's/^/        /' <<<"$L11_HITS"
+  echo "        cause:  run-state records are attacker-influenced; evaluating one executes it"
+  FAIL=$((FAIL + 1))
+fi
+# L11.2 — the denominator. Two directions again: the surface must be big enough
+# to be the surface, and it must contain the file the donor named, or a path
+# rule that stopped matching would leave this row asserting nothing.
+L11_HAS_LIB=no
+grep -qxF 'plugins/uberdev/lib/goal-state.sh' <<<"$L11_SURFACE" && L11_HAS_LIB=yes
+if [ "$L11_N" -ge 5 ] && [ "$L11_HAS_LIB" = yes ]; then
+  echo "  PASS  L11.2 the derived /goal surface holds $L11_N files including lib/goal-state.sh (floor 5)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  L11.2 the derived /goal surface holds $L11_N files (floor 5), lib/goal-state.sh present: $L11_HAS_LIB"
+  FAIL=$((FAIL + 1))
+fi
+_lint_ban_case "L11.3a live eval of a read value" flag "$L11_RE" "" \
+  "$(printf '%s "$(printf "%%s" "$record")"\n' "$L11_EVAL")"
+L11_BASHC='bash '; L11_BASHC="${L11_BASHC}-c"
+_lint_ban_case "L11.3b live child-shell evaluation" flag "$L11_RE" "" \
+  "$(printf '%s ". $lib; uberdev_goal_read_run_state"\n' "$L11_BASHC")"
+_lint_ban_case "L11.3c a comment naming the assertion" clean "$L11_RE" "" \
+  "$(printf '# never a shell-evaluation primitive, which the T3 rule (G19.no-%s) forbids\n' "$L11_EVAL")"
+_lint_ban_case "L11.3d backticked prose naming the primitive" clean "$L11_RE" "" \
+  "$(printf 'The validating reader must NOT `%s` or source the value it read.\n' "$L11_EVAL")"
+
 echo
 echo "==================================================================="
 echo "  PASS=$PASS  FAIL=$FAIL"

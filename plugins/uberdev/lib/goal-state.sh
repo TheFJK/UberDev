@@ -458,8 +458,9 @@ _uberdev_goal_append() {
 # goal-pipeline SKILL.md bash fences which run under /bin/zsh on macOS. zsh reads
 # an indirect via `${(P)name}`; bash via `${!name}`. Branch on the live shell so
 # the SAME source works in both, using only native parameter expansion — never a
-# shell-evaluation primitive, which the T3 hard rule (goal.test.sh assertion
-# G19.no-eval) forbids in this file. bash never parse-errors on the un-taken zsh
+# shell-evaluation primitive, which the T3 hard rule forbids here (enforced by
+# tests/epipe-guard.test.sh L11, across the whole /goal shipped surface rather
+# than this one file). bash never parse-errors on the un-taken zsh
 # `${(P)...}` arm (the expansion is resolved lazily, only when run), so leaving
 # both arms in one file is safe. Prints the value (empty if unset).
 _uberdev_goal_indirect_get() {

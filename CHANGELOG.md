@@ -4,6 +4,146 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.50.3] — 2026-08-19
+
+### Fixed - L10's label vocabulary was blind to the tier-escalation labels
+
+`L10_LABELS` was scraped exclusively from shipped shell (`sed` for
+`*LABEL*='uberdev:<name>'`), but `lib/solve_triage.py` BUILDS the tier-escalation
+label names by concatenation (`ESCALATION_LABEL_PREFIX + tier`), so no
+`uberdev:tier-*` literal exists anywhere for that scrape to find and every one of
+them resolved to `none`.
+
+Surfaced by v0.50.0 (#619): collapsing the `large` rung deliberately RETAINED
+`uberdev:tier-large` as a migration alias, so a pre-#619 ratchet write still lifts
+instead of being dropped as an unknown tier. The retained alias is named in
+`skills/solve-pipeline/SKILL.md` and `docs/rfc/0019`, and L10.2 flagged that prose
+as a dangling citation.
+
+The escalation half of the set is now DERIVED from the shipped module at run time
+(`ESCALATION_LABELS` keys) rather than transcribed, matching the discipline L10.4's
+kind lists already follow: a rung added, removed or aliased moves this set with it.
+Fails closed - an unloadable classifier yields an empty extraction and the citations
+red. Proven both directions: greens on the real retained `tier-large`, reds on
+`tier-enormous` and `ghost-thing`.
+
+
+### Fixed - CI could report "nothing failed before it stopped", never "the suite is green"
+
+All three jobs in `.github/workflows/test.yml` joined their whole test list with
+`&& \`, so each `run:` block was ONE shell command list and the first non-zero
+exit short-circuited every invocation after it. There were three chained blocks,
+not one: `shape-checks` (125 invocations), `shape-checks-windows` (67) and
+`supervision-smoke-macos` (8) — 197 chained joins in total, so a single early red
+could hide up to 124 files. #551 is the recorded instance rather than a
+hypothetical: `supervision-smoke-macos` ran 630 of `tests/child-dispatch.test.sh`'s
+1338 lines, exited 0 through a bash 3.2 status laundering, and the chain happily
+continued past it. The exit floor closed the laundering; nothing had closed the
+hiding.
+
+Each block now carries an identical failure-accumulating harness: `run_one` calls
+every fixture, records the ones that fail, and the tail exits non-zero naming
+them. Measured on a four-fixture probe with the second one failing: the old chain
+ran 2 of 4 and exited 3; the new harness runs 4 of 4, exits 1, and prints which
+file failed.
+
+`tests/ci-wiring.test.sh` gains **W12** to keep it that way — a denominator row,
+the verdict, a both-directions polarity proof driven through the same classifier
+the verdict uses, a row asserting the three per-job harnesses stay byte-identical,
+and an **execution** proof that extracts the harness the workflow actually carries
+and runs it against a failing fixture. A grep can only say the `&&` is gone; only
+running it can say a red file no longer hides the ones behind it.
+
+W11's forgery probe was re-keyed at the same time. It mutated any line *beginning*
+with `bash `, which after the de-chaining rewrote nothing — leaving the real wiring
+in the "forged" copy and reporting a forgery that had not happened. It now keys on
+"names the fixture and is not already a comment", which is what the forgery is.
+
+### Fixed - the shipped testing doc still described the retired chained shape
+
+`plugins/uberdev/docs/testing.md` is the harness SSOT CONTRIBUTING.md points at,
+and it asserted that each test "exits non-zero if any assertion failed — so
+`&&`-chaining them (as `test.yml` does) stops at the first red file". After the
+de-chaining above, `test.yml` chains nothing. A contributor reading it would stop
+scanning the job log at the first `--- FAIL`, or re-chain a new block "to match
+the documented shape" and then be unable to explain why W12 reds. A second
+sentence carried the same stale premise: the `supervision-smoke-macos` note ended
+"the job's `&&` chain carries on green", when the hazard it describes — a fixture
+laundering its own exit status on bash 3.2 — survives de-chaining untouched,
+because accumulating failures still means accumulating the statuses fixtures
+report.
+
+`tests/docs-accuracy.test.sh` gains **T1b.6**, which pins neither sentence. It
+reads `test.yml`, counts the test invocations actually joined into a command
+list, and requires the prose to agree with the answer in whichever direction it
+comes back: no chained invocations means the doc must not describe a chained
+suite and must name the accumulating harness; a re-chained block means the doc
+must document the chaining. It found the second stale sentence on its first run.
+
+### Changed - five repo-wide guards consolidated into the shared lint corpus
+
+`tests/epipe-guard.test.sh` L0 declares one shipped-code corpus (shell by shebang,
+markdown, and the `skills/*/workflow.js` surface a shell-plus-markdown scan misses).
+Five guards that each read a single hardcoded file were ported onto it as **L7–L11**,
+each with a denominator row, an explicit exemption clause, and a both-directions
+proof that runs on seeded fixtures every time:
+
+- **L7 zsh-hostile bashisms** (`type -t`, bare `BASH_REMATCH`) — from three donors
+  that covered three files, now 158. Carries the mandatory carve-out for
+  `${match[N]:-${BASH_REMATCH[N]}}`, the *correct* dual-shell capture that
+  `lib/goal-state.sh`'s only `Blocks: #N` parser depends on, plus L7.4 asserting
+  that form is still live so the exemption cannot outlive its subject.
+- **L8 gh label descriptions** — the two donors disagreed on the unit: one used
+  `wc -c` (bytes), one `wc -m` (characters, locale-dependent). **GitHub's limit is
+  on BYTES**, so the port resolves in favour of `wc -c` and pins the discriminator:
+  40 em-dashes is 40 characters and 120 bytes; a character count passes it and the
+  API returns 422. Literals are measured where they are written, through three
+  shapes derived by role — `--description` arguments, `*LABEL_DESC*` assignments,
+  and `*_trust_label()` record producers, the last of which neither donor saw.
+  Nothing is resolved from a call site, which is what made a seeded 113-byte
+  violation once measure as 5.
+- **L9 the macOS bash-3.2 floor** (`mapfile` / `readarray` / `declare -A`) — the
+  donor guarded one script while every shipped lib declares the same floor in its
+  own header. Comment and backticked-prose mentions are exempt, so the floor stays
+  describable in the thirteen shipped lines that explain it.
+- **L10 dangling agent dispatch** — the donor's extractor required BACKTICK
+  delimiters and was therefore blind to the operative `subagent_type: uberdev:<agent>`
+  spelling: **21 of 21 dispatch sites in the corpus** are invisible to it. L10 reads
+  both shapes and judges them differently (a dispatch position must name a real
+  agent; a citation must name a real shipped artifact), with mechanically derived
+  carve-outs for template placeholders, gh label literals, and foreign
+  namespaces such as prkit's rewritten `prkit:`. **Skill names are exempt in a
+  citation and nothing else.** The donor's `continue` on `turbox-fleet` was
+  reached from a backtick-only extractor, so a citation was the only position it
+  ever covered; carrying it into the dispatch position would admit all ~30 shipped
+  skill names there, and every one is a dead dispatch — `subagent_type:` resolves
+  against `agents/` alone, so `subagent_type: uberdev:solve-fleet` fails mid-run
+  even though `skills/solve-fleet/SKILL.md` exists. Both policies are now single
+  variables read by the verdicts *and* by L10.4, so the polarity rows exercise the
+  rule instead of restating it.
+- **L11 the /goal shell-evaluation ban** — the T3 hard rule, widened from one
+  hardcoded path to the whole `/goal` shipped surface, derived by path so a new
+  `lib/goal-*.sh` joins the ban the day it is added.
+
+The donors were then removed, each replaced by a comment naming the row that took
+it over: `status.test.sh` S1.12/S1.13, `cluster.test.sh` C2.b bashism arms and C4,
+`uberthink.test.sh` U8, `findings-to-issues.test.sh` S21.10, `bump-version.test.sh`
+B1.11, and `goal.test.sh` G19.no-eval/G19.no-bash-c. `turbox-fleet.test.sh` TX11b
+was **narrowed** rather than deleted: L10 took the resolution half, but it cannot
+express a floor on how many agent types one skill names — a shorter roster still
+resolves perfectly — so that half stays where its subject is.
+
+Every denominator floor carries deliberate headroom under its live count, which
+is the convention L0 states and the reason it states it: these floors exist to
+catch an extractor that COLLAPSED to zero, not to pin the current inventory. L7.2
+(live 12) and L9.2 (live 8) were first written at exactly their live counts, which
+made every contributing line load-bearing — and all twenty are prose, the class of
+line that gets reworded. Deleting `lib/goal-phase3.sh`'s comment describing a
+`mapfile` that no longer exists would have reddened both shape-check jobs with
+"corpus or matcher regressed", an accusation about a regression that did not
+happen. They are floored at 6 and 4; a collapsed matcher still reads 0 and still
+reds.
+
 ## [0.50.2] — 2026-08-19
 
 ### Fixed - a Phase-3 halt that wrote no breaker row published an older cycle's reason

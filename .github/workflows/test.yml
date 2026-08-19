@@ -96,131 +96,154 @@ jobs:
         # `ci-wiring windows-skip-list` marker block in the windows job
         # below. Ran first in both jobs so a wiring drift reds CI fast.
         run: |
-          bash tests/ci-wiring.test.sh && \
-          bash tests/turbo-flow.test.sh && \
-          bash tests/issue-causal-fanout.test.sh && \
-          bash tests/post-impl-review.test.sh && \
-          bash tests/testers-pipeline.test.sh && \
-          bash tests/spec-reviewer-plan-aware.test.sh && \
-          bash tests/leaf-worker-contract.test.sh && \
-          bash tests/sdd-routed-lifecycle.test.sh && \
-          bash tests/audit-fixups.test.sh && \
-          bash tests/review-pr.test.sh && \
-          bash tests/review-pr-entry.test.sh && \
-          bash tests/review-pr-phase3-ci.test.sh && \
-          bash tests/review-pr-consolidate.test.sh && \
-          bash tests/prkit-manifest.test.sh && \
-          bash tests/prkit-rewrite.test.sh && \
-          bash tests/prkit-verify.test.sh && \
-          bash tests/prkit-generate.test.sh && \
-          bash tests/prkit-publish.test.sh && \
-          bash tests/review-precision.test.sh && \
-          bash tests/status.test.sh && \
-          bash tests/cluster.test.sh && \
-          bash tests/cluster-pipeline.test.sh && \
-          bash tests/code-fixer-contract.test.sh && \
-          bash tests/convention-citation.test.sh && \
-          bash tests/code-fixer-dispatch.test.sh && \
-          bash tests/review-child-handoff.test.sh && \
-          bash tests/find-polluter.test.sh && \
-          bash tests/findings-to-issues.test.sh && \
-          bash tests/trust-trail-evaluator.test.sh && \
-          bash tests/trust-trail-base-identity.test.sh && \
-          bash tests/finish-branch-auto-chain.test.sh && \
-          bash tests/finish-branch.test.sh && \
-          bash tests/secret-scan.test.sh && \
-          bash tests/aliases.test.sh && \
-          bash tests/install.test.sh && \
-          bash tests/merge.test.sh && \
-          bash tests/ghostty-dispatch-no-instance-leak.test.sh && \
-          bash tests/solve-effort-flag.test.sh && \
-          zsh tests/solve-pipeline-zsh.test.sh && \
-          zsh tests/goal-state-zsh.test.sh && \
-          zsh tests/goal-pipeline-zsh.test.sh && \
-          zsh tests/finish-branch-zsh.test.sh && \
-          zsh tests/merge-pipeline-zsh.test.sh && \
-          bash tests/lib-assert-count.test.sh && \
-          bash tests/crossplatform-shell-wrappers.test.sh && \
-          bash tests/docs-accuracy.test.sh && \
-          bash tests/orchestrator-phase1-shortcircuit.test.sh && \
-          bash tests/config-override.test.sh && \
-          bash tests/model-routing.test.sh && \
-          bash tests/model-routing-config.test.sh && \
-          bash tests/plan-writer-routing.test.sh && \
-          bash tests/run-manifest.test.sh && \
-          bash tests/live-semaphore.test.sh && \
-          bash tests/agent-dispatch.test.sh && \
-          bash tests/child-dispatch.test.sh && \
-          bash tests/child-dispatch-receipts.test.sh && \
-          bash tests/atomic-move.test.sh && \
-          bash tests/child-inputs.test.sh && \
-          bash tests/child-wait.test.sh && \
-          bash tests/solve-run-tree.test.sh && \
-          bash tests/solve-run-tree-scope.test.sh && \
-          bash tests/child-contract-v2.test.sh && \
-          bash tests/command-workspace.test.sh && \
-          bash tests/production-run-tree-builder.test.sh && \
-          bash tests/brainstorm-child-inputs.test.sh && \
-          bash tests/orchestrator-child-inputs.test.sh && \
-          bash tests/sdd-child-inputs.test.sh && \
-          bash tests/review-child-inputs.test.sh && \
-          bash tests/routed-provider-bypass.test.sh && \
-          bash tests/run-tree-callsite-contract.test.sh && \
-          bash tests/route-context.test.sh && \
-          bash tests/solve-triage.test.sh && \
-          bash tests/solve-routing.test.sh && \
-          bash tests/route-unsupported.test.sh && \
-          bash tests/dispatch-routing-parity.test.sh && \
-          bash tests/orchestrator-plan-flatten.test.sh && \
-          bash tests/orchestrator-phase-6-doc.test.sh && \
-          bash tests/orchestrator-phase-0-bg-detection.test.sh && \
-          bash tests/dev.test.sh && \
-          bash tests/dev-pipeline.test.sh && \
-          bash tests/solve-claim.test.sh && \
-          bash tests/dispatch-fallback.test.sh && \
-          bash tests/dispatch-background.test.sh && \
-          bash tests/dispatch-wezterm.test.sh && \
-          bash tests/dispatch-child-worktree-teardown.test.sh && \
-          bash tests/ubersimplify.test.sh && \
-          bash tests/ubersimplify-aggregate.test.sh && \
-          bash tests/simplify.test.sh && \
-          bash tests/simplify-standalone-flow.test.sh && \
-          bash tests/uberscan.test.sh && \
-          bash tests/uberscan-report.test.sh && \
-          bash tests/uberscan-chunk.test.sh && \
-          bash tests/merge-discovery-resilience.test.sh && \
-          bash tests/testers-agent-contract.test.sh && \
-          bash tests/testers-rate-limit-audit.test.sh && \
-          bash tests/testers-rate-limit-wrapper.test.sh && \
-          bash tests/uberthink.test.sh && \
-          bash tests/uberthink-report.test.sh && \
-          bash tests/goal-state-sidecar.test.sh && \
-          bash tests/goal-dispatch-helpers.test.sh && \
-          bash tests/using-git-worktrees.test.sh && \
-          bash tests/goal.test.sh && \
-          bash tests/goal-verdict-receipt.test.sh && \
-          bash tests/goal-batch-barrier.test.sh && \
-          bash tests/goal-version-bump.test.sh && \
-          bash tests/skill-renderer-awk-collision.test.sh && \
-          bash tests/dispatch-prompt-no-bare-slash.test.sh && \
-          bash tests/bump-version.test.sh && \
-          bash tests/test-harness-source-guards.test.sh && \
-          bash tests/exit-floor.test.sh && \
-          bash tests/workflow-scripts.test.sh && \
-          bash tests/workflow-args.test.sh && \
-          bash tests/testers-workflow.test.sh && \
-          bash tests/scan-fleet-workflow.test.sh && \
-          bash tests/solve-fleet-workflow.test.sh && \
-          bash tests/turbox-fleet.test.sh && \
-          bash tests/turbox-fleet-runtime.test.sh && \
-          bash tests/review-pr-workflow.test.sh && \
-          bash tests/goal-workflow.test.sh && \
-          bash tests/uberthink-workflow.test.sh && \
-          bash tests/epipe-guard.test.sh && \
-          bash tests/contract-markers.test.sh && \
-          bash tests/schema-property-reads.test.sh && \
-          bash tests/vendor-provenance.test.sh && \
-          bash tests/vendor-drift.test.sh
+          # De-chained (#628). This block used to be ONE shell command list joined by
+          # `&& \`, so the first non-zero exit skipped every invocation after it and the
+          # job could only ever report "nothing failed before it stopped". run_one calls
+          # every fixture, accumulates the failures, and the tail exits non-zero naming
+          # them. tests/ci-wiring.test.sh W12 locks the shape AND runs this harness.
+          fail=0
+          failed=""
+          run_one() {
+            echo "--- RUN  $*"
+            if "$@"; then
+              echo "--- PASS $*"
+            else
+              rc=$?
+              echo "--- FAIL $* (rc=$rc)"
+              fail=$((fail + 1))
+              failed="${failed}${failed:+ | }$*"
+            fi
+          }
+          run_one bash tests/ci-wiring.test.sh
+          run_one bash tests/turbo-flow.test.sh
+          run_one bash tests/issue-causal-fanout.test.sh
+          run_one bash tests/post-impl-review.test.sh
+          run_one bash tests/testers-pipeline.test.sh
+          run_one bash tests/spec-reviewer-plan-aware.test.sh
+          run_one bash tests/leaf-worker-contract.test.sh
+          run_one bash tests/sdd-routed-lifecycle.test.sh
+          run_one bash tests/audit-fixups.test.sh
+          run_one bash tests/review-pr.test.sh
+          run_one bash tests/review-pr-entry.test.sh
+          run_one bash tests/review-pr-phase3-ci.test.sh
+          run_one bash tests/review-pr-consolidate.test.sh
+          run_one bash tests/prkit-manifest.test.sh
+          run_one bash tests/prkit-rewrite.test.sh
+          run_one bash tests/prkit-verify.test.sh
+          run_one bash tests/prkit-generate.test.sh
+          run_one bash tests/prkit-publish.test.sh
+          run_one bash tests/review-precision.test.sh
+          run_one bash tests/status.test.sh
+          run_one bash tests/cluster.test.sh
+          run_one bash tests/cluster-pipeline.test.sh
+          run_one bash tests/code-fixer-contract.test.sh
+          run_one bash tests/convention-citation.test.sh
+          run_one bash tests/code-fixer-dispatch.test.sh
+          run_one bash tests/review-child-handoff.test.sh
+          run_one bash tests/find-polluter.test.sh
+          run_one bash tests/findings-to-issues.test.sh
+          run_one bash tests/trust-trail-evaluator.test.sh
+          run_one bash tests/trust-trail-base-identity.test.sh
+          run_one bash tests/finish-branch-auto-chain.test.sh
+          run_one bash tests/finish-branch.test.sh
+          run_one bash tests/secret-scan.test.sh
+          run_one bash tests/aliases.test.sh
+          run_one bash tests/install.test.sh
+          run_one bash tests/merge.test.sh
+          run_one bash tests/ghostty-dispatch-no-instance-leak.test.sh
+          run_one bash tests/solve-effort-flag.test.sh
+          run_one zsh tests/solve-pipeline-zsh.test.sh
+          run_one zsh tests/goal-state-zsh.test.sh
+          run_one zsh tests/goal-pipeline-zsh.test.sh
+          run_one zsh tests/finish-branch-zsh.test.sh
+          run_one zsh tests/merge-pipeline-zsh.test.sh
+          run_one bash tests/lib-assert-count.test.sh
+          run_one bash tests/crossplatform-shell-wrappers.test.sh
+          run_one bash tests/docs-accuracy.test.sh
+          run_one bash tests/orchestrator-phase1-shortcircuit.test.sh
+          run_one bash tests/config-override.test.sh
+          run_one bash tests/model-routing.test.sh
+          run_one bash tests/model-routing-config.test.sh
+          run_one bash tests/plan-writer-routing.test.sh
+          run_one bash tests/run-manifest.test.sh
+          run_one bash tests/live-semaphore.test.sh
+          run_one bash tests/agent-dispatch.test.sh
+          run_one bash tests/child-dispatch.test.sh
+          run_one bash tests/child-dispatch-receipts.test.sh
+          run_one bash tests/atomic-move.test.sh
+          run_one bash tests/child-inputs.test.sh
+          run_one bash tests/child-wait.test.sh
+          run_one bash tests/solve-run-tree.test.sh
+          run_one bash tests/solve-run-tree-scope.test.sh
+          run_one bash tests/child-contract-v2.test.sh
+          run_one bash tests/command-workspace.test.sh
+          run_one bash tests/production-run-tree-builder.test.sh
+          run_one bash tests/brainstorm-child-inputs.test.sh
+          run_one bash tests/orchestrator-child-inputs.test.sh
+          run_one bash tests/sdd-child-inputs.test.sh
+          run_one bash tests/review-child-inputs.test.sh
+          run_one bash tests/routed-provider-bypass.test.sh
+          run_one bash tests/run-tree-callsite-contract.test.sh
+          run_one bash tests/route-context.test.sh
+          run_one bash tests/solve-triage.test.sh
+          run_one bash tests/solve-routing.test.sh
+          run_one bash tests/route-unsupported.test.sh
+          run_one bash tests/dispatch-routing-parity.test.sh
+          run_one bash tests/orchestrator-plan-flatten.test.sh
+          run_one bash tests/orchestrator-phase-6-doc.test.sh
+          run_one bash tests/orchestrator-phase-0-bg-detection.test.sh
+          run_one bash tests/dev.test.sh
+          run_one bash tests/dev-pipeline.test.sh
+          run_one bash tests/solve-claim.test.sh
+          run_one bash tests/dispatch-fallback.test.sh
+          run_one bash tests/dispatch-background.test.sh
+          run_one bash tests/dispatch-wezterm.test.sh
+          run_one bash tests/dispatch-child-worktree-teardown.test.sh
+          run_one bash tests/ubersimplify.test.sh
+          run_one bash tests/ubersimplify-aggregate.test.sh
+          run_one bash tests/simplify.test.sh
+          run_one bash tests/simplify-standalone-flow.test.sh
+          run_one bash tests/uberscan.test.sh
+          run_one bash tests/uberscan-report.test.sh
+          run_one bash tests/uberscan-chunk.test.sh
+          run_one bash tests/merge-discovery-resilience.test.sh
+          run_one bash tests/testers-agent-contract.test.sh
+          run_one bash tests/testers-rate-limit-audit.test.sh
+          run_one bash tests/testers-rate-limit-wrapper.test.sh
+          run_one bash tests/uberthink.test.sh
+          run_one bash tests/uberthink-report.test.sh
+          run_one bash tests/goal-state-sidecar.test.sh
+          run_one bash tests/goal-dispatch-helpers.test.sh
+          run_one bash tests/using-git-worktrees.test.sh
+          run_one bash tests/goal.test.sh
+          run_one bash tests/goal-verdict-receipt.test.sh
+          run_one bash tests/goal-batch-barrier.test.sh
+          run_one bash tests/goal-version-bump.test.sh
+          run_one bash tests/skill-renderer-awk-collision.test.sh
+          run_one bash tests/dispatch-prompt-no-bare-slash.test.sh
+          run_one bash tests/bump-version.test.sh
+          run_one bash tests/test-harness-source-guards.test.sh
+          run_one bash tests/exit-floor.test.sh
+          run_one bash tests/workflow-scripts.test.sh
+          run_one bash tests/workflow-args.test.sh
+          run_one bash tests/testers-workflow.test.sh
+          run_one bash tests/scan-fleet-workflow.test.sh
+          run_one bash tests/solve-fleet-workflow.test.sh
+          run_one bash tests/turbox-fleet.test.sh
+          run_one bash tests/turbox-fleet-runtime.test.sh
+          run_one bash tests/review-pr-workflow.test.sh
+          run_one bash tests/goal-workflow.test.sh
+          run_one bash tests/uberthink-workflow.test.sh
+          run_one bash tests/epipe-guard.test.sh
+          run_one bash tests/contract-markers.test.sh
+          run_one bash tests/schema-property-reads.test.sh
+          run_one bash tests/vendor-provenance.test.sh
+          run_one bash tests/vendor-drift.test.sh
+          if [ "$fail" -ne 0 ]; then
+            echo "=== $fail test file(s) FAILED: $failed"
+            exit 1
+          fi
+          echo "=== every test file in this block ran and passed"
 
   supervision-smoke-macos:
     name: supervision-smoke-macos
@@ -241,14 +264,37 @@ jobs:
         # UNBOUNDED arm and reds the row (#548). tests/ci-wiring.test.sh pins
         # both names into the macOS required-subset floor.
         run: |
-          bash tests/review-pr-entry.test.sh && \
-          bash tests/agent-dispatch.test.sh && \
-          bash tests/child-dispatch.test.sh && \
-          bash tests/dispatch-child-worktree-teardown.test.sh && \
-          bash tests/dispatch-background.test.sh && \
-          bash tests/dispatch-wezterm.test.sh && \
-          bash tests/review-pr-workflow.test.sh && \
-          bash tests/atomic-move.test.sh
+          # De-chained (#628). This block used to be ONE shell command list joined by
+          # `&& \`, so the first non-zero exit skipped every invocation after it and the
+          # job could only ever report "nothing failed before it stopped". run_one calls
+          # every fixture, accumulates the failures, and the tail exits non-zero naming
+          # them. tests/ci-wiring.test.sh W12 locks the shape AND runs this harness.
+          fail=0
+          failed=""
+          run_one() {
+            echo "--- RUN  $*"
+            if "$@"; then
+              echo "--- PASS $*"
+            else
+              rc=$?
+              echo "--- FAIL $* (rc=$rc)"
+              fail=$((fail + 1))
+              failed="${failed}${failed:+ | }$*"
+            fi
+          }
+          run_one bash tests/review-pr-entry.test.sh
+          run_one bash tests/agent-dispatch.test.sh
+          run_one bash tests/child-dispatch.test.sh
+          run_one bash tests/dispatch-child-worktree-teardown.test.sh
+          run_one bash tests/dispatch-background.test.sh
+          run_one bash tests/dispatch-wezterm.test.sh
+          run_one bash tests/review-pr-workflow.test.sh
+          run_one bash tests/atomic-move.test.sh
+          if [ "$fail" -ne 0 ]; then
+            echo "=== $fail test file(s) FAILED: $failed"
+            exit 1
+          fi
+          echo "=== every test file in this block ran and passed"
 
   shape-checks-windows:
     name: shape-checks-windows
@@ -448,70 +494,93 @@ jobs:
         # installs in every genuinely declared fixture makes the next such
         # mismatch red instead of silent.
         run: |
-          bash tests/ci-wiring.test.sh && \
-          bash tests/run-manifest.test.sh --artifact-publication-only && \
-          bash tests/turbo-flow.test.sh && \
-          bash tests/issue-causal-fanout.test.sh && \
-          bash tests/post-impl-review.test.sh && \
-          bash tests/crossplatform-shell-wrappers.test.sh && \
-          bash tests/docs-accuracy.test.sh && \
-          bash tests/spec-reviewer-plan-aware.test.sh && \
-          bash tests/leaf-worker-contract.test.sh && \
-          bash tests/audit-fixups.test.sh && \
-          bash tests/review-pr.test.sh && \
-          bash tests/prkit-manifest.test.sh && \
-          bash tests/cluster.test.sh && \
-          bash tests/code-fixer-dispatch.test.sh && \
-          python -I -B tests/code-fixer-contract-windows.test.py && \
-          bash tests/find-polluter.test.sh && \
-          bash tests/findings-to-issues.test.sh && \
-          bash tests/trust-trail-evaluator.test.sh && \
-          bash tests/finish-branch-auto-chain.test.sh && \
-          bash tests/finish-branch.test.sh && \
-          bash tests/secret-scan.test.sh && \
-          bash tests/aliases.test.sh && \
-          bash tests/install.test.sh && \
-          bash tests/merge.test.sh && \
-          bash tests/ghostty-dispatch-no-instance-leak.test.sh && \
-          bash tests/solve-effort-flag.test.sh && \
-          bash tests/orchestrator-phase1-shortcircuit.test.sh && \
-          bash tests/config-override.test.sh && \
-          bash tests/solve-run-tree.test.sh && \
-          bash tests/solve-run-tree-scope.test.sh && \
-          bash tests/orchestrator-phase-6-doc.test.sh && \
-          bash tests/orchestrator-phase-0-bg-detection.test.sh && \
-          bash tests/dev.test.sh && \
-          bash tests/dev-pipeline.test.sh && \
-          bash tests/solve-claim.test.sh && \
-          bash tests/dispatch-fallback.test.sh && \
-          bash tests/dispatch-background.test.sh && \
-          bash tests/child-dispatch-receipts.test.sh && \
-          bash tests/atomic-move.test.sh && \
-          bash tests/review-child-handoff.test.sh --windows-path-only && \
-          bash tests/dispatch-wezterm.test.sh && \
-          bash tests/ubersimplify.test.sh && \
-          bash tests/simplify.test.sh && \
-          MSYSTEM=MSYS bash tests/simplify-standalone-flow.test.sh && \
-          bash tests/goal-state-sidecar.test.sh && \
-          bash tests/goal-dispatch-helpers.test.sh && \
-          bash tests/using-git-worktrees.test.sh && \
-          bash tests/goal.test.sh && \
-          bash tests/goal-verdict-receipt.test.sh && \
-          bash tests/goal-batch-barrier.test.sh && \
-          bash tests/goal-version-bump.test.sh && \
-          bash tests/skill-renderer-awk-collision.test.sh && \
-          bash tests/dispatch-prompt-no-bare-slash.test.sh && \
-          bash tests/bump-version.test.sh && \
-          bash tests/test-harness-source-guards.test.sh && \
-          bash tests/exit-floor.test.sh && \
-          bash tests/workflow-scripts.test.sh && \
-          bash tests/workflow-args.test.sh && \
-          bash tests/testers-workflow.test.sh && \
-          bash tests/scan-fleet-workflow.test.sh && \
-          bash tests/solve-fleet-workflow.test.sh && \
-          bash tests/turbox-fleet.test.sh && \
-          bash tests/goal-workflow.test.sh && \
-          bash tests/uberthink-workflow.test.sh && \
-          bash tests/epipe-guard.test.sh && \
-          bash tests/contract-markers.test.sh && \
-          bash tests/schema-property-reads.test.sh
+          # De-chained (#628). This block used to be ONE shell command list joined by
+          # `&& \`, so the first non-zero exit skipped every invocation after it and the
+          # job could only ever report "nothing failed before it stopped". run_one calls
+          # every fixture, accumulates the failures, and the tail exits non-zero naming
+          # them. tests/ci-wiring.test.sh W12 locks the shape AND runs this harness.
+          fail=0
+          failed=""
+          run_one() {
+            echo "--- RUN  $*"
+            if "$@"; then
+              echo "--- PASS $*"
+            else
+              rc=$?
+              echo "--- FAIL $* (rc=$rc)"
+              fail=$((fail + 1))
+              failed="${failed}${failed:+ | }$*"
+            fi
+          }
+          run_one bash tests/ci-wiring.test.sh
+          run_one bash tests/run-manifest.test.sh --artifact-publication-only
+          run_one bash tests/turbo-flow.test.sh
+          run_one bash tests/issue-causal-fanout.test.sh
+          run_one bash tests/post-impl-review.test.sh
+          run_one bash tests/crossplatform-shell-wrappers.test.sh
+          run_one bash tests/docs-accuracy.test.sh
+          run_one bash tests/spec-reviewer-plan-aware.test.sh
+          run_one bash tests/leaf-worker-contract.test.sh
+          run_one bash tests/audit-fixups.test.sh
+          run_one bash tests/review-pr.test.sh
+          run_one bash tests/prkit-manifest.test.sh
+          run_one bash tests/cluster.test.sh
+          run_one bash tests/code-fixer-dispatch.test.sh
+          run_one python -I -B tests/code-fixer-contract-windows.test.py
+          run_one bash tests/find-polluter.test.sh
+          run_one bash tests/findings-to-issues.test.sh
+          run_one bash tests/trust-trail-evaluator.test.sh
+          run_one bash tests/finish-branch-auto-chain.test.sh
+          run_one bash tests/finish-branch.test.sh
+          run_one bash tests/secret-scan.test.sh
+          run_one bash tests/aliases.test.sh
+          run_one bash tests/install.test.sh
+          run_one bash tests/merge.test.sh
+          run_one bash tests/ghostty-dispatch-no-instance-leak.test.sh
+          run_one bash tests/solve-effort-flag.test.sh
+          run_one bash tests/orchestrator-phase1-shortcircuit.test.sh
+          run_one bash tests/config-override.test.sh
+          run_one bash tests/solve-run-tree.test.sh
+          run_one bash tests/solve-run-tree-scope.test.sh
+          run_one bash tests/orchestrator-phase-6-doc.test.sh
+          run_one bash tests/orchestrator-phase-0-bg-detection.test.sh
+          run_one bash tests/dev.test.sh
+          run_one bash tests/dev-pipeline.test.sh
+          run_one bash tests/solve-claim.test.sh
+          run_one bash tests/dispatch-fallback.test.sh
+          run_one bash tests/dispatch-background.test.sh
+          run_one bash tests/child-dispatch-receipts.test.sh
+          run_one bash tests/atomic-move.test.sh
+          run_one bash tests/review-child-handoff.test.sh --windows-path-only
+          run_one bash tests/dispatch-wezterm.test.sh
+          run_one bash tests/ubersimplify.test.sh
+          run_one bash tests/simplify.test.sh
+          run_one env MSYSTEM=MSYS bash tests/simplify-standalone-flow.test.sh
+          run_one bash tests/goal-state-sidecar.test.sh
+          run_one bash tests/goal-dispatch-helpers.test.sh
+          run_one bash tests/using-git-worktrees.test.sh
+          run_one bash tests/goal.test.sh
+          run_one bash tests/goal-verdict-receipt.test.sh
+          run_one bash tests/goal-batch-barrier.test.sh
+          run_one bash tests/goal-version-bump.test.sh
+          run_one bash tests/skill-renderer-awk-collision.test.sh
+          run_one bash tests/dispatch-prompt-no-bare-slash.test.sh
+          run_one bash tests/bump-version.test.sh
+          run_one bash tests/test-harness-source-guards.test.sh
+          run_one bash tests/exit-floor.test.sh
+          run_one bash tests/workflow-scripts.test.sh
+          run_one bash tests/workflow-args.test.sh
+          run_one bash tests/testers-workflow.test.sh
+          run_one bash tests/scan-fleet-workflow.test.sh
+          run_one bash tests/solve-fleet-workflow.test.sh
+          run_one bash tests/turbox-fleet.test.sh
+          run_one bash tests/goal-workflow.test.sh
+          run_one bash tests/uberthink-workflow.test.sh
+          run_one bash tests/epipe-guard.test.sh
+          run_one bash tests/contract-markers.test.sh
+          run_one bash tests/schema-property-reads.test.sh
+          if [ "$fail" -ne 0 ]; then
+            echo "=== $fail test file(s) FAILED: $failed"
+            exit 1
+          fi
+          echo "=== every test file in this block ran and passed"
