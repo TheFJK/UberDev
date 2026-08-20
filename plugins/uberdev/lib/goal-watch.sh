@@ -123,13 +123,18 @@ case "$PARTIAL_PRS" in
     exit 2 ;;
 esac
 # #603 — the same injection boundary for the pair list, one level deeper because
-# the members are PAIRS. The whole-scalar arm cannot express "every member is
-# <digits>:<digits>": `500:880,881` passes a character-class check and would then
-# record issue 881 with no PR at all, so each member is re-checked after the
-# split. The colon is load-bearing and its absence is refused rather than
-# tolerated — a bare number would be read as an issue with an empty PR half and
-# hand that issue the wrong answer silently, which is the failure #603 exists to
-# remove pointed the other way.
+# the members are PAIRS. The whole-scalar CLASS check cannot express the
+# per-member grammar "every member is <digits>:<digits>" — `500:880,881` passes
+# it — so each member is re-checked after the split.
+#
+# This is an argv-EDGE guard, not the last line of defence, and the difference
+# is the point: uberdev_goal_record_solver_prs already splits each member on the
+# first colon, refuses any member whose issue half equals the whole token, and
+# skips it with a breadcrumb (a colon-less token expands to itself on both
+# halves, so it can never record an empty PR). Refusing here instead names the
+# DRIVER bug loudly, at the boundary that built the argument, rather than
+# leaving the recorder to drop members one layer down where the loss reads as
+# nothing worse than one malformed pair.
 #
 # `while IFS= read -r` over a herestring, never `for p in $SOLVER_PRS`: zsh does
 # not word-split an unquoted scalar and would run the body ONCE over the whole

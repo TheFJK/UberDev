@@ -321,8 +321,9 @@ review_fleet_contract_path() {
   esac
   contract_abs="$plugin_root/$contract_rel"
   # The value the caller emits is gated downstream by isSafeAbsPath(); refusing
-  # here means a bad PLUGIN_ROOT names itself instead of aborting a whole wave
-  # under `bad_contract_path` a whole wave of dispatches later.
+  # here means a bad PLUGIN_ROOT names itself instead of aborting under
+  # `bad_contract_path` only once the full reviewer roster has already been
+  # dispatched.
   case "$contract_abs" in
     *..* | *'"'*)
       echo "error: review_fleet_contract_path: resolved path '$contract_abs' is not envelope-safe" >&2

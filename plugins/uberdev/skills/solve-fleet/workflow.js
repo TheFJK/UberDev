@@ -1220,10 +1220,14 @@ function houseRules() {
 // is indistinguishable from a body that carried no trailer, so the
 // `uberdev:active` claim strands on a still-OPEN issue with no error anywhere.
 // The mandate below is therefore explicit about the SHAPE, not just the text.
-// /merge's consumer was relaxed in the same change to tolerate the two
-// decorations a writer reaches for anyway (a leading list marker, surrounding
-// backticks); this end of the contract still asks for the bare line, because the
-// producer is the end that can give it and belt-and-braces is the point.
+// /merge's consumer was relaxed in the same change to tolerate the decorations
+// a writer reaches for anyway. The tolerated set is OWNED by
+// skills/merge-pipeline/SKILL.md Step 3.4, next to the expression that defines
+// it, and is deliberately NOT enumerated or counted here — a restated count is
+// how one contract acquires several uncompared copies that drift the moment the
+// expression moves. This end of the contract still asks for the bare line,
+// because the producer is the end that can give it and belt-and-braces is the
+// point.
 //
 // The prohibition is deliberately phrased WITHOUT rendering the closing form.
 // A sentence such as "must not contain `Closes #N`" would put those exact bytes

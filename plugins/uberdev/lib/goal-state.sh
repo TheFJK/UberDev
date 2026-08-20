@@ -1760,11 +1760,16 @@ uberdev_goal_count_partial_prs() {
 # ---------------------------------------------------------------------------
 
 # uberdev_goal_record_solver_prs GOAL_ID CSV [CYCLE]
-# CSV is `<issue>:<pr>[,<issue>:<pr>…]`. Append one row per pair whose mapping
-# is not already on file, creating the ledger if it is absent. Idempotent across
-# ticks and across a resume (the watch lane re-records the same set every pass);
-# a pair that names a DIFFERENT PR for an already-recorded issue is appended, so
-# the reader's last-row-wins rule can promote it.
+# CSV is `<issue>:<pr>[,<issue>:<pr>…]`. Append one row per pair that is not
+# already the issue's CURRENT answer, creating the ledger if it is absent. One
+# rule, stated once: the skip test asks uberdev_goal_solver_pr_for_issue, which
+# returns the LAST matching row, so "already recorded" means "already what the
+# reader would answer" — not "present somewhere in the file". That is what makes
+# this idempotent across ticks and across a resume (the watch lane re-records
+# the same set every pass), and by the same rule a pair naming a DIFFERENT PR
+# for an already-recorded issue is appended so the last-row-wins reader can
+# promote it — including a mapping that was recorded, superseded, and is now
+# being offered again.
 #
 # A malformed member is SKIPPED with a stderr breadcrumb rather than failing the
 # batch — this runs inside the watch loop, where a fail-loud write stalls the

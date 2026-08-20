@@ -1317,8 +1317,14 @@ CLOSED_ISSUES=($(printf '%s' "$PR_BODY_FOR_CLEANUP" \
 # one of those was harvested as NOTHING by the bare `^UberDev-Partial: #N$`
 # form, and the miss is silent by construction: an unmatched body produces an
 # empty array, the loop runs zero times, rc stays 0, and the stranded claim is
-# indistinguishable from a PR that carried no trailer. So the anchors STAY and
-# only the three decorations are tolerated between them.
+# indistinguishable from a PR that carried no trailer. So the anchors STAY, and
+# what is tolerated between them is only what leaves the line carrying NOTHING
+# BUT THE TRAILER: a leading whitespace run (an indented trailer matches too),
+# an optional list marker, a backtick on either side — the two positions are
+# independently optional, so a single unpaired backtick also matches — and
+# trailing whitespace. The two extra tolerances beyond the three shapes the
+# producer prose names fail safe, but they are enumerated here because this
+# comment is the surface a maintainer audits the boundary against.
 #
 # The list-marker class is `[-*+]` and deliberately NOT `[0-9]+\.` — an ordered
 # marker would put a stray digit in front of the issue number and the `[0-9]+`

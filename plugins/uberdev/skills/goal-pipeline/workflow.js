@@ -116,9 +116,16 @@ const maxAgents = clampInt(CFG.maxAgents, 1, 2000, 250);
 // UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET already says, and the claim relay pins
 // the resolved value back onto the launcher's own command line — so the number
 // projected here and the number the fleet spends are one number, not two.
-// Clamped with the FLEET's triple: a relayed value the fleet would refuse must
-// be projected as the fleet would run it, or reading the key trades an
-// under-projection for an over-projection.
+// Clamped with the FLEET's triple, but as a BACKSTOP only — and the asymmetry
+// is worth naming rather than papering over. The declared 4..96 range is
+// refined two DIFFERENT ways along this seam: lib/goal-phase0.sh resolves the
+// key through a reader that SUBSTITUTES the default for an out-of-range value,
+// while this line and the fleet CLAMP to the nearest bound. Phase 0 has already
+// normalised whatever reaches CFG, so this clamp can only ever fire on a relay
+// that skipped that normalisation; it is defence in depth, never the thing that
+// makes the projection and the arming agree. Enforcement of the declared range
+// belongs to phase 0's reader, and that is the one to change if the two ends
+// should ever refine alike.
 const implementBudget = clampInt(CFG.implementBudget, 4, 96, 24);
 // The watch stage is bounded by a COUNTER, never by a clock (DR-7). Each tick
 // is one lib/goal-watch.sh invocation, which itself honours the

@@ -312,10 +312,16 @@ same token:
   body, and GitHub closes the issue when that PR merges.
 - `chainComplete: false` → it mandates the non-closing trailer
   `UberDev-Partial: #N` instead — which must **stand alone on its own line**,
-  with nothing before or after it (#603): `/merge` harvests it with a
-  line-anchored match, so a trailer the writer bulleted, backticked or buried in
-  a sentence is harvested as nothing and strands the claim on a still-open issue
-  — and forbids any GitHub closing keyword standing
+  with nothing before or after it (#603). That mandate is deliberate
+  producer-side strictness, not the only thing holding the claim up: `/merge`
+  harvests the trailer with a line-anchored match that was relaxed in the same
+  change to tolerate the decorations a free-text writer reaches for, so a
+  bulleted or backticked trailer IS harvested. What that anchor still misses is
+  a trailer buried in a sentence — harvested as nothing, stranding the claim on
+  a still-open issue. The tolerated set is owned by
+  `skills/merge-pipeline/SKILL.md` Step 3.4 and is a consumer-end safety net;
+  this end asks for the bare line because the producer is the end that can give
+  it. The brief also forbids any GitHub closing keyword standing
   in front of this issue's number in the body **or** in any commit message on
   the branch (GitHub honours them in both). The issue therefore stays **OPEN**
   when the PR merges — the tasks the chain never reached still need an issue to
