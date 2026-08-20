@@ -1301,8 +1301,13 @@ CLOSED_ISSUES=($(printf '%s' "$PR_BODY_FOR_CLEANUP" \
 # work but does NOT finish the issue, so GitHub never auto-closes it and the
 # keyword harvest above finds nothing — leaving `uberdev:active` set on a still
 # OPEN issue, which then blocks every later /solve, /turbo and /goal Phase 1.
-# Whole-line, case-sensitive and namespaced, exactly like the `Blocks: #N`
-# trailer lib/goal-state.sh already parses (BLOCKS_LINE_REGEX). A bare `Refs #N`
+# Standalone-line, case-sensitive and namespaced — the same namespaced-trailer
+# convention as the `Blocks: #N` line lib/goal-state.sh parses
+# (BLOCKS_LINE_REGEX), though NOT the same regex: that one is whole-line and
+# admits no decoration, while this one tolerates the bounded set the STANDALONE
+# block below enumerates. The exact shape is that block's to state; do not
+# re-describe it here, or this fence carries two descriptions of one regex and a
+# reader meets the stale copy first. A bare `Refs #N`
 # was rejected deliberately: /merge runs on EVERY PR, so a drive-by reference
 # would release a claim a LIVE solver still holds. The trailer has exactly one
 # producer (skills/solve-fleet/workflow.js), which is what makes it safe.
