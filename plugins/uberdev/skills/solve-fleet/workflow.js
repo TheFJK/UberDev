@@ -1212,6 +1212,23 @@ function houseRules() {
 // partial arm mandates `UberDev-Partial: #N`, a whole-line trailer /merge reads
 // to release the `uberdev:active` claim without closing anything.
 //
+// #603 — "the line" was carrying the WHOLE line-anchored contract, and it is
+// prose to the free-text agent that writes this body. A writer that renders the
+// trailer as a bullet, wraps it in a code span, or lets a clause follow it on
+// the same line has satisfied "contain the line" in its own reading and emitted
+// something /merge's anchored harvest finds nothing in — and an unharvested body
+// is indistinguishable from a body that carried no trailer, so the
+// `uberdev:active` claim strands on a still-OPEN issue with no error anywhere.
+// The mandate below is therefore explicit about the SHAPE, not just the text.
+// /merge's consumer was relaxed in the same change to tolerate the decorations
+// a writer reaches for anyway. The tolerated set is OWNED by
+// skills/merge-pipeline/SKILL.md Step 3.4, next to the expression that defines
+// it, and is deliberately NOT enumerated or counted here — a restated count is
+// how one contract acquires several uncompared copies that drift the moment the
+// expression moves. This end of the contract still asks for the bare line,
+// because the producer is the end that can give it and belt-and-braces is the
+// point.
+//
 // The prohibition is deliberately phrased WITHOUT rendering the closing form.
 // A sentence such as "must not contain `Closes #N`" would put those exact bytes
 // in the prompt, which makes an absence assertion over the rendered text
@@ -1223,11 +1240,17 @@ function prLinkLine(issue, complete) {
     + (complete ? "Closes #" + issue : "UberDev-Partial: #" + issue) + "` "
     + (complete
       ? "so the merge auto-closes the issue."
-      : "— the non-closing linkage trailer this fleet uses for an unfinished chain — and MUST NOT "
-        + "carry any GitHub closing keyword (close, closes, closed, fix, fixes, fixed, resolve, "
-        + "resolves, resolved, in any letter case) standing directly in front of a reference to "
-        + "issue " + issue + ", in any form. A pull request must not close an issue it did not "
-        + "finish: the tasks this chain never reached still need an open issue to come back to.");
+      : "— the non-closing linkage trailer this fleet uses for an unfinished chain. That trailer "
+        + "MUST STAND ALONE on its own line, with nothing before it and nothing after it on that "
+        + "line: no list marker or bullet, no backticks or other formatting around it, no leading "
+        + "or trailing prose, and no trailing punctuation. /merge harvests it with a line-anchored "
+        + "match, so a trailer buried in a sentence or decorated is harvested as nothing at all, "
+        + "and the issue's `uberdev:active` claim is then stranded on a still-open issue that no "
+        + "later run can pick up. The body MUST ALSO NOT carry any GitHub closing keyword (close, "
+        + "closes, closed, fix, fixes, fixed, resolve, resolves, resolved, in any letter case) "
+        + "standing directly in front of a reference to issue " + issue + ", in any form. A pull "
+        + "request must not close an issue it did not finish: the tasks this chain never reached "
+        + "still need an open issue to come back to.");
 }
 
 // The half a PR-body rule cannot cover, and the reason this is a separate
@@ -3148,9 +3171,9 @@ async function main() {
     // RUN-level term, not a per-issue one — that is the whole point of hoisting
     // it — so it sits beside the leading 2 rather than inside the design term,
     // and it is charged for the same reason the #515 proof relay is: a ceiling
-    // that under-projects is not a ceiling. (RFC 0015's copy of this formula
-    // predates the term and is one agent short; SKILL.md's CB1 row carries the
-    // current reading.)
+    // that under-projects is not a ceiling. (SKILL.md's CB1 row and RFC 0015
+    // §4.2 both carry this reading; skills/goal-pipeline/workflow.js charges the
+    // same term as fleetRunCost() on its own side of the nesting since #590.)
     const repoProfileAgents = designCount > 0 ? 1 : 0;
     const projected = 2 + intakeIssues.length + repoProfileAgents
       + (designCount * (9 + IMPLEMENT_AGENT_BUDGET - 1));

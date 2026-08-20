@@ -328,7 +328,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "195b2a43e9a0111d9a391ab68c3378e86b624362bdd31990293e82078a922f5b"
+          "sha256": "5558bf49c3e6d69001892a9b0eb9e018bb40930ab9521e682e47a0921cf1cec7"
         }
       ]
     },
@@ -483,7 +483,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "c4ef9ecf5318727411bfc3c4fdaf7c715d6cef4164944628bef5249d738d2d4a"
+          "sha256": "f81952cb4ac9a0e642b083ae28490d750c9400f1f15a54aeb63b945760dee745"
         },
         {
           "path": "code-quality-reviewer-prompt.md",

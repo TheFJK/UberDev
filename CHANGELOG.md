@@ -4,6 +4,402 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.51.4] — 2026-08-19
+
+### Fixed - the head-ref fallback bound an issue to any PR that happened to share its number
+
+`lib/goal-state.sh`'s issue->PR resolver falls back to matching a PR's HEAD
+BRANCH against `<type>/<issue>-` when no `closingIssuesReferences` link exists,
+and that arm selected purely on NAME. Executed against the shipped function, a
+fixture carrying one PR — `{"number":901,"headRefName":"fix/500-error-page"}` —
+resolved issue **500** to PR **901**: a PR about an HTTP 500 error page, by a
+stranger, with no relationship to the issue at all. Adding the real solver PR
+(`feat/500-real-solver`, #880) beside it did not help; `| max` still handed the
+issue to 901. Neither `--json` projection carries an author, so no arm *could*
+have filtered on one, and the claim comment is not a corroboration source either
+(`lib/solve-launcher.sh` records the worktree directory name, not the PR head
+ref). Downstream, `lib/goal-watch.sh` registers that PR into the batch registry
+and drives `/review-pr` and `/merge` against it.
+
+The fix plumbs EVIDENCE from the only party that has it. `skills/solve-fleet/`
+returns per-issue `results[]` records; `skills/goal-pipeline/workflow.js` now
+derives `<issue>:<pr>` pairs from them (`solverPairsFromResults`), accumulates
+them for the whole run, and carries them to `lib/goal-watch.sh` on
+`--solver-prs=` — the same argv channel `--partial-prs` uses, because RFC 0012
+§2.2 constraint 6 forbids that script the filesystem. The watch lane lands them
+in a new run-lifetime ledger `goal-<id>-solver-prs.tsv` before step 2a resolves
+anything, and `_uberdev_goal_pr_for_issue_jq` gains a third ranked arm that
+selects on the recorded NUMBER: `$byclose // $bycorr // $byhead`.
+
+**It ranks, it never replaces — the resolver can only ever degrade to the old
+guess, never to "no PR".** The head-ref arm stays in the program
+unconditionally, and that is the safety argument rather than a wiring detail. A
+recorded number is only useful while the PR it names is still OPEN, and it can
+stop being open for reasons that say nothing about the issue: a human or the
+solver closes it, or the `#515` proof pass could not verify the claim at all
+(`markUnverifiable` KEEPS the number on http 0/401/429/5xx, so a stale or
+mis-parsed one is never zeroed). Under `/goal` a resolution miss is TERMINAL on
+the first watch tick — the settled arm fails the issue and
+`lib/goal-phase3.sh`'s `solver_failed` breaker then halts the WHOLE run — so had
+the corroborated arm *replaced* the guess, every one of those cases would have
+turned a wrong-PR bug into a run-halting one, and the presence of evidence would
+have resolved to strictly less than its absence. Ranked, a record that names
+nothing open simply falls through to the guess the run always had. Pairs whose
+PR number is the `0` no-PR sentinel, and pairs in a claim collision, are dropped
+rather than guessed at, which leaves those issues on the guess too. A
+`closingIssuesReferences` link still outranks everything: it is a deliberate
+statement about the issue, not a name collision.
+
+Residual, stated plainly: an issue for which the fleet opened no PR at all
+(`PUSHED_NO_PR`, `FAILED`) gets no ledger row, so a same-numbered stranger
+branch can still win the guess for it. Narrowing that case would remove the only
+link such an issue has, and the terminal-miss cost above makes that the wrong
+trade.
+
+### Fixed - a partial-delivery trailer the producer actually emits was harvested as nothing
+
+`/merge` Step 3.4 harvested the non-closing `UberDev-Partial: #N` claim-release
+trailer with `grep -oE '^UberDev-Partial: #[0-9]+$'`. Run against the shipped
+fence's own pipeline, only the completely bare line matched. The same trailer
+wrapped in backticks, the same trailer rendered as a `-` list item, and a line
+with one trailing space all harvested **nothing** — and the miss is silent by
+construction: an unmatched body produces an empty array, the loop runs zero
+times, rc stays 0, and the stranded
+`uberdev:active` claim is indistinguishable from a PR that carried no trailer.
+The claim then blocks every later `/solve`, `/turbo` and `/goal` Phase 1 on a
+still-OPEN issue. The sole producer, `prLinkLine()` in
+`skills/solve-fleet/workflow.js`, renders the trailer INSIDE BACKTICKS and
+imposed no standalone-line rule — the word "line" was the only thing holding the
+anchored consumer up, and it is prose to a free-text agent.
+
+Fixed at BOTH ends, because either alone leaves the class open:
+
+- **Consumer** (`skills/merge-pipeline/SKILL.md`, fence bumped to
+  `merge-issue-cleanup-fence-v3`): the harvest now tolerates a leading list
+  marker (`-`/`*`/`+`), surrounding backticks and trailing whitespace — and
+  nothing else. It is still line-anchored. The list-marker class deliberately
+  excludes ordered markers, which would put a stray digit in front of the issue
+  number for the `[0-9]+` extraction to harvest.
+- **Producer** (`prLinkLine()`): the partial arm now mandates the trailer STAND
+  ALONE on its own line, with nothing before or after it.
+
+The boundary is pinned in both directions: `MZ3.h` (prose *before* the trailer)
+passes unchanged, and a new `MZ3.n` refuses prose *after* it. `/merge` runs on
+every PR, so a sentence that merely discusses a claim must never release it.
+
+## [0.51.3] — 2026-08-19
+
+### Added - the four remaining published solve-fleet contracts are compared against the script
+
+`tests/docs-accuracy.test.sh` T16 already joined the per-task record, the
+`reviewVerdict` union, `partialDelivery` and the enclosing per-issue record
+between `skills/solve-fleet/SKILL.md` and `skills/solve-fleet/workflow.js`. Four
+more shapes the same two files publish had **no comparator at all**, so a drift
+in any of them was invisible to every fixture in the repo (#588):
+
+- the per-task `claimedStatus` roster - documented sentence against
+  `TASK_CLAIMABLE`, resolved through `TASK_STATUS` because the roster is spelled
+  as references rather than literals, unioned with the empty-string fallback the
+  assignment writes. Read from `TASK_CLAIMABLE` and never from `TASK_STATUS`,
+  and a row asserts that outcome: the two differ by `SKIPPED`, which no
+  implementer can claim.
+- the per-issue `status` union, in **all three** of its copies - the documented
+  union, the solve schema's `enum`, and the solver prompt that tells an agent
+  which words it may answer with. The prompt copies are compared to each other
+  as well as to the schema, because a merged set hides a member lost from
+  exactly one of them. Each copy is anchored on the return line it rides on and
+  never on a member of the union: an anchor taken from the vocabulary under
+  comparison is dissolved by the drift it exists to catch, so the copy leaves
+  the set silently instead of failing. The extracted copies are then required to
+  equal the per-issue return lines in the script, which catches the one shape
+  re-anchoring cannot - a return line that drops its union outright.
+- the `prProof` union - the documented table cell against the classification
+  assignment sites, anchored strictly on assignment rather than on the symbol,
+  which this script also uses as a relay-schema property name.
+- the **top-level return object**, plus nested `counts` and `verification` as
+  their own pairs.
+
+Every pair runs in both directions behind its own anti-vacuity floor, and each
+floor sits well under the live member count so it stays a vacuity guard instead
+of becoming a size ratchet.
+
+Measured before these rows existed, one realistic drift per contract - a member
+dropped from the `claimedStatus` sentence, a member added to the solve `enum`
+and documented nowhere, a member dropped from one solver-prompt copy, a member
+dropped from the `prProof` cell, a key dropped from the Return value fence, a
+`counts` bucket renamed there, and a `verification` member invented there. Every
+one of them left both this suite and `tests/solve-fleet-workflow.test.sh` at
+their clean totals, rc 0. Each now reds the row that owns it.
+
+Three further drifts were measured against one solver-prompt copy, each leaving
+the other copy untouched: renaming its leading member, reordering the union so a
+different member leads, and deleting its union clause. All three passed both
+suites at their clean totals before the copies were re-anchored, the rename
+being a live defect - the agent is told to answer a word the schema `enum`
+rejects, so its structured return is discarded and the run reports a null result
+that names nothing. All three now red.
+
+Two helpers carry the new reads: `sf_js_object_keys` (depth-tracking script-side
+key extraction, because `finalize()`'s return nests objects that `sf_js_keys`'
+brace-free window cannot span) and an optional opener argument on
+`sf_doc_record_members`, for a fence that opens on a line below its anchor. The
+new helper joins the existing fail-open roster, so a rename aborts with rc 2
+rather than reporting a fabricated pass.
+
+### Changed - the hand-picked return-key grep in the solve-fleet suite is retired
+
+`tests/solve-fleet-workflow.test.sh` G30 checked one chosen key of the return
+object (`tasksApproved`) with a whole-file grep, which certified that key and
+nothing else. The key set is now joined in both directions, so the grep is
+deleted rather than left standing beside the stronger predicate, and G30's
+pass/fail text no longer claims to cover the return keys. Verified: dropping
+`tasksApproved` from the fence reds the new reverse row by name.
+
+## [0.51.2] — 2026-08-19
+
+### Fixed - `subagent-driven-dev`'s ruling contract had no producer
+
+`## Rulings` promised "every ruling gets one line on disk at the moment it is
+made", and step 5 read that file back into the PR body — but `sdd_append_ruling`
+had exactly two mentions in the whole skill: the `- **How.**` bullet and its own
+definition. **No numbered step ever called it.** A contract with a validator, a
+reader and no writer: `rulings.md` was never created, so the roll-up read a file
+nothing wrote and every judgement the controller made instead of stalling on it
+went unrecorded.
+
+Three halves, because any one alone leaves the contract inert:
+
+- **Producer.** Every rung the section names as a stop that routes rather than
+  waits now records its ruling where it takes it — the BLOCKED ladder, the
+  REFUSED rung, wave re-cutting in step 4a, and all five `sdd_note_cap_exhausted`
+  arms (steps 4e/4g/4h, NEEDS_CONTEXT, and the Red-Flags reviewer loop).
+- **Path.** `sdd_append_ruling` refuses a relative path (`case "$rulings_path" in
+  /*)`) and nothing established an absolute one. The routed-adapter fence now
+  derives `SDD_RULINGS` from the run carrier's `context_file` via
+  `_uberdev_child_context_run_dir` — the same helper `lib/child-dispatch.sh` uses
+  for its own confinement checks, so the skill cannot come to disagree with the
+  library about where a run lives. That is the private run directory the fix
+  ledgers and every `task_path` already sit in, never the feature worktree.
+- **One line per call.** The helper wrote `Ruling: %s — %s — %s\n` verbatim after
+  checking only that each field was non-empty, so an embedded newline split one
+  ruling into two on-disk rows — the second with no decision, no why and no cost
+  — and step 5 pushed the fragment into the PR body as a ruling of its own. A
+  newline or carriage return in any field is now refused with the same rc `2` an
+  empty field draws, never stripped: stripping rewrites the decision instead of
+  rejecting it.
+
+### Fixed - three stale counts and one refuted justification
+
+- **`lib/solve_triage.py`** justified emitting one escalation token by claiming a
+  second "would be a dispatch failure rather than merely noisy". Executed: both
+  emitters collapse `matched` with `dict.fromkeys(...)` on the statement *before*
+  `assert_rule_tokens`, and the routing-context validator's duplicate check and
+  `len(rules)>32` cap read that already-deduped list — so no duplicate reaches
+  either. After #619 the label map spans two distinct tiers, so per-label
+  emission would add at most two tokens against a cap of 32. The comment now
+  states the real cost: two rungs recorded for one decision, in the trail.
+- **`skills/solve-fleet/SKILL.md`** enumerated eight `pr_proof_*` audit events.
+  `workflow.js` emits a **ninth**, `pr_proof_not_run_recovery_failed`, named on no
+  doc surface at all — and it refutes the section's own signature claim: when the
+  never-ran recovery itself throws, no claim is marked, so `unverified` stays at
+  zero beside `probed: 0`, byte-identical to a batch with nothing to prove. Both
+  are now documented, and the claim is qualified.
+- **`docs/rfc/0003-dev-command.md`** argued from "four tiers (`trivial` →
+  `large`)" (three since #619) and "an unskippable 6-agent fanout" (seven since
+  the `convention-compliance` lens joined), citing a line range that now lands on
+  an `## Emphasis` example fence. Corrected the RFC 0013 §0A way — a dated
+  `§2.1a — SUPERSEDED IN PART (2026-08-19)` note plus inline markers — because an
+  RFC is a record of what was true when it was written. The rotted `SKILL.md:N`
+  pointer is replaced by the symbol `### Step 2: Dispatch 7 required routed
+  reviewers`.
+- **Seventeen sites across eight live files** still sized the Phase 1 fanout at
+  six, against a `REVIEW_ROSTER` — and a `review_pr.review.*` edge set in the
+  policy, the args library and the wire contract alike — of **seven**:
+  `commands/review-pr.md` (twice), `skills/dev-pipeline/SKILL.md`, both SDD flow
+  diagrams, `finish-branch/SKILL.md`, and — worst — the review-fleet engine
+  describing itself, in `SKILL.md`'s guard table, four comments in `workflow.js`
+  (skill metadata included) and five in `lib/review-fleet-args.sh`, plus the
+  ledger check in `lib/review-aggregate.sh`. A maintainer sizing the nonce pool
+  or the agent ceiling from the engine's own guard table read six against a
+  roster of seven.
+
+  `workflow.js` also **misquoted its own cited source**: it rendered
+  post-impl-review/SKILL.md's failure boundary as "all six reviewer slots", where
+  that file says *seven*. A retyped quotation rots exactly like a retyped count,
+  but invisibly — the number sits inside quotation marks claiming someone else
+  wrote it.
+
+  Where the numeral was pure illustration in roster-generic code it is gone
+  rather than corrected: `lib/review-aggregate.sh`'s ledger check is
+  parameterised by `expected`, and `review_fleet_contract_path` aborts a whole
+  wave whatever its width, so neither should have been restating a cardinality it
+  does not own.
+
+### Fixed - a cardinality census that missed a copy in its own file
+
+`tests/solve-run-tree.test.sh`'s SRT-606.x block said "Three files state, in
+prose, facts about the set pinned above" — while SRT-546.2, five lines above in
+the same file, hand-wrote "31 of the 32 are composable", derived by nothing. Four
+copies, census of three. That sentence now pins the role-less membership instead
+of typing the split, so the figures live only where they are computed. Verified
+by mutation: with the composable count moved to 30 and both derived prose copies
+updated to match, the pre-fix suite passes green with the fourth copy left false;
+the fixed suite reds.
+
+### Added - the guards that make each of the above re-detectable
+
+All five are DERIVED from the shipped tree rather than transcribed from it:
+
+- `tests/solve-triage.test.sh` **L10** — reads the cap out of
+  `lib/agent-dispatch.sh` and the tier span out of the classifier, asserts the
+  dedupe precedes every validator call, and requires the comment to state that
+  reason and not the refuted one.
+- `tests/solve-fleet-workflow.test.sh` **G47/G47b/G48** — harvests every
+  `pr_proof_*` emitter name from `workflow.js` and requires the claim-verification
+  section to name each; a tenth event reds on the commit that adds it.
+- `tests/sdd-child-inputs.test.sh` **AC-16g/AC-16h** — the one-line refusals, plus
+  a producer census that walks whatever rungs call `sdd_note_cap_exhausted`, so a
+  sixth rung must record its ruling too.
+- `tests/docs-accuracy.test.sh` **T20** — counts the `review_pr.review.*` edges in
+  `post-impl-review/SKILL.md`'s wire-contract block and compares every live prose
+  claim, the roster heading and the RFC note against that count. The claim
+  harvest reads **two tiers**, because proximity alone is blind in exactly the
+  files that get this wrong — a file whose whole subject is the fanout stops
+  re-naming it, which is how `workflow.js` could say "closed six-edge roster" and
+  no name-proximity scan would ever reach it. The *proximity* tier reads every
+  `*.md` under the plugin; the *owner* tier reads every file, any extension, that
+  names a `review_pr.review.*` edge — a set derived by grep, never listed, so a
+  new engine file opts itself in. Number-**words** count as much as digits — ten
+  of the seventeen stale sites spelled it out, and the row's first shape,
+  `(\d+)[- ]agents?`, could see four of them; a digit-only detector reading one
+  noun *is* the hand-picked census this row exists to stop being. `Phase 2`
+  ordinals and `5 → 6` historical transitions are not counts and are skipped.
+  Measured over the shipped tree: 37 claims harvested, 0 false positives. **T20.6** re-derives quotations: every span the
+  engine quotes and credits to `post-impl-review/SKILL.md` must still be found
+  there, comment wrapping normalised away first — the quotation that was wrong
+  spanned two comment lines, so no line-oriented grep could have matched it
+  whole.
+- `tests/solve-run-tree.test.sh` **SRT-546.2** — asserts the role-less member set
+  rather than stating its size.
+
+## [0.51.1] — 2026-08-19
+
+### Changed - the three orphan `solve.lead.*` run-tree edges are retired behind a declared prefix
+
+`policy/solve-run-tree-v1.json` carried `solve.lead.orchestrator`,
+`solve.lead.brainstorm` and `solve.lead.finish_branch` — all `kind: "skill"`, all
+`role: null` / `route: null`, all sourced from `lib/solve-launcher.sh`, and all
+dispatched by nothing. Running the resolution predicate over the whole manifest:
+51 of 54 edges resolved and exactly those three did not. They are deleted (54 → 51).
+
+Deleting them is not free, and that is the substance of this release.
+`tests/launcher_edge_ids.py` DERIVES L1's guarded prefixes from the tree — every
+`edges` key with three or more dot-segments whose first segment is `solve`
+contributes `<seg0>.<seg1>.` — and those three orphans were the **sole** source of
+the `solve.lead.` prefix. With them gone and nothing put in their place, the
+`solve.lead.` namespace leaves the guard's vocabulary entirely and #536's own
+defect ships green again through #536's own guard: measured, `tests/solve-run-tree.test.sh`
+row E4 (a fictional `solve.lead.$TIER` in the carrier-failure string) went
+`rc 1 -> rc 0`. E5 (the same id in comment prose) is the same class.
+
+So the prefix is now **declared** rather than derived. `RETIRED_PREFIXES` in
+`tests/launcher_edge_ids.py` lists namespaces that stay GUARDED after their last
+edge is gone and are permanently UNRESOLVABLE — `edges` may hold no key under one,
+so every token under it is a finding by construction. An accidental coupling
+became a stated one.
+
+The two halves may never silently disagree: an `edges` key under a retired prefix
+is now a PRECONDITION ERROR (exit 2), not a verdict about the launcher, because at
+that point the namespace is both retired and live. A retired token is also reported
+as retired (`retired edge id '…' -- the 'solve.lead.' namespace is declared retired
+in RETIRED_PREFIXES …`) rather than as a plain unresolvable one: different cause,
+different fix.
+
+New pins in `tests/solve-run-tree.test.sh` (69 → 71 rows): **E71** asserts the
+declaration exists, asserts the manifest really is empty under it (without which
+E4/E5 could be passing by derivation again and would be measuring nothing), and
+re-adds `solve.lead.orchestrator` to the tree to prove the refusal is exit 2.
+**E72** is the want-0 floor from the other side — adding an ordinary new
+`solve.<area>.<name>` edge must stay a normal clean run, so the refusal cannot
+degrade into "any unfamiliar area is fatal". E4 and E5 now name the expected
+diagnostic, so they pin the retired attribution rather than a bare exit code.
+
+Verified against the issue's own blast-radius claims rather than trusting them:
+`tests/run_tree_edge_sources.py` does not exist and no `EXPECTED_EDGES = 54` ratchet
+exists anywhere in `tests/` or `tools/`; `tools/prkit/generate.sh` filters the
+projection to the `review_pr.` / `simplify.` prefixes, so the projected policy and
+its `published.json` sha256 pin are untouched (all five prkit suites green, no
+regenerate); and `tests/solve-run-tree-scope.test.sh:5`'s "54 edges" is a comment,
+refreshed to 51.
+
+Out of scope and deliberately not folded in: the 15 `cardinality` strings in this
+same manifest that still name the `large` rung #619 retired. No edge id names a
+tier, so there is no routing drift — filed as #634 and sequenced after this change.
+
+Closes #607. Closes #536 — already fixed on its own terms (`UBERDEV_ROOT_EDGE_ID`
+has zero hits under `plugins/`, and the assertion it asked for exists and executes
+at `tests/solve-run-tree.test.sh` row E1), and inseparable from #607 because the
+retire path edits the very guard #536 shipped.
+
+## [0.51.0] — 2026-08-19
+
+### Fixed - `/goal`'s CB1 ceiling hardcoded the per-issue fleet cost, so a raised implement budget under-projected it out of existence
+
+`projectedAgentsForCycle()` in `skills/goal-pipeline/workflow.js` priced every
+claimed issue at a literal `33` agents. That number is only correct at the solve
+fleet's DEFAULT implement budget: the fleet declares
+`IMPLEMENT_AGENT_BUDGET = clampInt(CFG.implementBudget, 4, 96, 24)` and honours a
+raised value inside a `/goal` run (it inherits
+`UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET` through the Phase-1 launcher call), so at
+the clamp ceiling one design-tier issue really costs 105 — an under-count of 72
+per issue, 216 per cycle at `--max-parallel=3`. The SPEND accumulator beside it
+already derived the same cost from the relayed envelope: **one contract, two
+copies, only one of them derived.**
+
+Because CB1 is the only NAMED halt in the pipeline, an under-projection is not a
+mis-report. The breaker simply stops binding, and the run dies against the
+runtime's own agent lifetime cap with no halt reason, no audit row and no cycle
+record saying why it stopped.
+
+- The two copies collapse into ONE derivation, `perIssueCostAtBudget(budget)`,
+  read by both the pre-claim projection and the spend accumulator.
+- `lib/goal-phase0.sh` gains an `--implement-budget=N` knob (range `4..96`,
+  precedence: CLI flag > `UBERDEV_GOAL_IMPLEMENT_BUDGET` > `goal.implement_budget`
+  > `UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET` > `24`) and publishes the resolved
+  value as the envelope's `implementBudget` key. The tier below the config key is
+  deliberately the variable the launcher ALREADY reads, so the projection tracks
+  the budget the fleet actually runs with. It sits BELOW `goal.implement_budget`
+  and not above it: that variable is the ambient, fleet-wide setting an operator
+  exports once for `/turbo`, whereas the config key is an explicit, `/goal`-scoped
+  decision — so a project config that caps `/goal` stays reachable, and is what
+  the launcher is armed with.
+- The claim relay pins that same resolved value onto the STEP 2 launcher command
+  line, closing the loop the other way: a `--implement-budget` flag is not merely
+  projected against, it is what the fleet is armed with.
+
+### Fixed - `/goal` under-counted the fleet's run-shared repo-profile agent by exactly 1 every cycle
+
+`skills/solve-fleet/workflow.js` charges `repoProfileAgents = designCount > 0 ? 1 : 0`
+beside its leading 2 and really dispatches that agent (#615 Part A), but
+`grep -n repoProfile` over the goal driver returned nothing at all. Both goal-side
+cost sites — the projection and the `fleetCost` accumulator — charged a flat 2, so
+every cycle with work in it was projected and charged one agent short,
+independently of the budget gap above. Both now take their run-level term from a
+shared `fleetRunCost(issueCount)` helper.
+
+### Tests
+
+`tests/goal-workflow.test.sh` gains runs Z/Z2/Z3 (B99-B99f) — the first rows in
+the repo that exercise the PROJECTION at a non-default budget. Every pre-existing
+CB1 row (M/M2/S) runs at the fleet default, where a literal and a derivation are
+the same number, so none of them could see this. B99b is the discriminator: with a
+raised budget relayed, a ceiling set to the DEFAULT-budget projection must already
+have been blown, which a frozen literal cannot satisfy. `tests/goal.test.sh` gains
+G55, including a live probe that runs the extracted Phase-0 tunables region and
+reads the resolved budget back out. `tests/solve-fleet-workflow.test.sh` G16 is
+re-pointed from "a literal in the projection, a derivation in the accumulator" to
+the single shared derivation plus the shared run-level term.
+
 ## [0.50.3] — 2026-08-19
 
 ### Fixed - L10's label vocabulary was blind to the tier-escalation labels

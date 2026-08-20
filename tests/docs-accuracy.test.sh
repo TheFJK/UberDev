@@ -2474,22 +2474,82 @@ sf_doc_members() {   # <file> <anchor> <closer> [<opener>]
     }
   ' | sort -u
 }
-# Script side. `//` comments are stripped BEFORE the newlines collapse — the
-# taskRec literal carries four comment lines, and prose ending in a colon
-# ("… as the PR-claim pass below:") otherwise reads as a key. Collapsing to one
-# line is what lets one ERE span an authored wrap; `[^{}]*` keeps each match
-# inside a single brace-free literal, and these records nest nothing. Braces are
-# spelled `[{]`/`[}]` and never `\{`/`\}`: an escaped brace in an ERE is
-# undefined by POSIX and GNU grep 3.8+ warns on stray escapes, so the bracket
-# expression is the form that means the same thing to every grep CI resolves.
+# Script side, normalised ONCE. Every extraction below reads one of these three
+# forms instead of respawning the same four-command prefix over a ~3200-line
+# file at each site:
+#
+#   SF_JS_SRC    `//` comments and CRs stripped, LINES PRESERVED — what the
+#                depth-tracking reader below needs, since it is line-oriented.
+#   SF_JS_FLAT   the same text collapsed onto one line, which is what lets a
+#                single ERE span an authored wrap.
+#   SF_JS_GLUED  SF_JS_FLAT with the JS string-concatenation glue removed, for
+#                the prompt copies that are split across a wrap by `" + "`.
+#
+# `//` comments go BEFORE the newlines collapse — the taskRec literal carries
+# four comment lines, and prose ending in a colon ("… as the PR-claim pass
+# below:") otherwise reads as a key.
+#
+# Fed to the greps by HERESTRING, never by pipe: this file sets `-o pipefail`
+# and is inside epipe-guard.test.sh's scan set, which is the same reason
+# sf_member_count further down reads a herestring.
+SF_JS_SRC="$(sed 's|//.*||' "$SOLVE_FLEET_JS" | tr -d '\r')"
+SF_JS_FLAT="$(tr '\n' ' ' <<<"$SF_JS_SRC")"
+SF_JS_GLUED="$(sed 's/"[[:space:]]*+[[:space:]]*"//g' <<<"$SF_JS_FLAT")"
+
+# `[^{}]*` keeps each match inside a single brace-free literal, and these
+# records nest nothing. Braces are spelled `[{]`/`[}]` and never `\{`/`\}`: an
+# escaped brace in an ERE is undefined by POSIX and GNU grep 3.8+ warns on stray
+# escapes, so the bracket expression is the form that means the same thing to
+# every grep CI resolves.
 sf_js_keys() {       # <ERE matching the whole object literal>
-  sed 's|//.*||' "$SOLVE_FLEET_JS" | tr -d '\r' | tr '\n' ' ' \
-    | grep -oE "$1" | grep -oE '[A-Za-z_][A-Za-z0-9_]*:' | tr -d ':' | sort -u
+  grep -oE "$1" <<<"$SF_JS_FLAT" \
+    | grep -oE '[A-Za-z_][A-Za-z0-9_]*:' | tr -d ':' | sort -u
 }
-# Count and set-difference, factored: six of each below, and six copies of the
-# same loop is the very class this section exists to police. Herestrings, not
-# pipes — this file sets `-o pipefail` and is inside epipe-guard.test.sh's scan
-# set, where a `printf | grep -q` writer takes EPIPE and poisons the rc.
+# Script side, DEPTH-TRACKING. sf_js_keys' `[^{}]*` window is a brace-free
+# literal by construction, and the objects joined below break it: finalize()'s
+# return nests `counts` and `verification`, and `counts` nests a per-bucket
+# `function (r) { … }` predicate of its own. `verification` carries no brace
+# today and sf_js_keys could still read it — it is read here anyway, so that
+# every object of one pass is extracted by ONE rule instead of by whichever
+# helper each object's current contents happen to permit. Same depth-0 rule as
+# sf_doc_record_members further down: a nested object appears by KEY NAME and
+# never by its members.
+#
+# TWO anchors, each matched as an ERE against a whole line: the first ARMS the
+# scan at the enclosing function definition, the second OPENS the object. One
+# anchor cannot do it — `return [{]` is spelled at several sites in this script,
+# and a file-wide first-match reader would slice whichever of them comes first.
+# `counts: [{]` and `verification: [{]` do resolve uniquely today and are given
+# the same two-anchor treatment regardless: a nested key name is not a scarce
+# string, and the arming anchor is what makes a row say WHICH object it read
+# rather than whichever copy happened to come first. Neither anchor may carry a
+# backslash escape: awk resolves escapes in a `-v` assignment before the regex
+# ever sees them (warning about it on some builds), so a literal brace is
+# spelled `[{]` and a literal parenthesis is left out of the pattern altogether.
+sf_js_object_keys() {   # <arming ERE> <opening ERE>
+  awk -v arm="$1" -v opener="$2" '
+    { if (fin) next
+      if (!armed) { if ($0 ~ arm) armed = 1; next }
+      if (!cap) { if ($0 !~ opener) next
+                  p = index($0, "{"); if (p == 0) next
+                  cap = 1; line = substr($0, p + 1) }
+      else { line = $0 }
+      n = length(line)
+      for (i = 1; i <= n; i++) {
+        c = substr(line, i, 1)
+        if (c == "{" || c == "[") { depth++; continue }
+        if (c == "}" || c == "]") { if (depth == 0) { fin = 1; break } depth--; continue }
+        if (depth == 0) buf = buf c
+      }
+      if (fin) print buf
+    }
+  ' <<<"$SF_JS_SRC" | grep -oE '[A-Za-z_][A-Za-z0-9_]*:' | tr -d ':' | sort -u
+}
+# Count and set-difference, factored: every comparison below reads them, and one
+# copy of this loop per comparison is the very class this section exists to
+# police. Herestrings, not pipes — this file sets `-o pipefail` and is inside
+# epipe-guard.test.sh's scan set, where a `printf | grep -q` writer takes EPIPE
+# and poisons the rc.
 sf_member_count() {  # <newline-separated list>
   local _n=0 _line
   while IFS= read -r _line; do [ -n "$_line" ] && _n=$((_n + 1)); done <<<"$1"
@@ -2516,7 +2576,7 @@ sf_members_absent() {  # <needles> <haystack> -> space-prefixed missing members
 #
 # The guard sits HERE rather than beside the other one because these helpers are
 # defined further down the file than that loop runs.
-for _sf_fn in sf_doc_members sf_js_keys sf_member_count sf_members_absent; do
+for _sf_fn in sf_doc_members sf_js_keys sf_js_object_keys sf_member_count sf_members_absent; do
   command -v "$_sf_fn" >/dev/null 2>&1 || {
     echo "FATAL: solve-fleet doc-join helper $_sf_fn is not defined (renamed, or a typo'd call site) — every row that calls it would report PASS having asserted nothing" >&2
     exit 2
@@ -2662,12 +2722,22 @@ fi
 # that BREAKS fails loudly on T16.10, the forward row: the over-collected
 # members (tasksTotal, blocked, skipped, unreviewed) land on the DOC side, and
 # the script writes none of them.
-sf_doc_record_members() {   # <file> <anchor>
-  tr -d '\r' < "$1" | awk -v anchor="$2" '
+#
+# The OPTIONAL third argument mirrors the one sf_doc_members takes, and for the
+# same reason: an anchor whose own text already contains the opening brace can
+# be given alone, but the `## Return value` fence opens on its own line BELOW
+# the sentence that introduces it, so there the anchor and the brace cannot be
+# one string. Given an opener, everything up to and including the first one
+# after the anchor is skipped and the depth-0 read starts there; omitted, the
+# behaviour is exactly what the two-argument callers above already get.
+sf_doc_record_members() {   # <file> <anchor> [<opener>]
+  tr -d '\r' < "$1" | awk -v anchor="$2" -v opener="${3:-}" '
     { if (fin) next
       if (!cap) { p = index($0, anchor); if (p == 0) next
                   cap = 1; line = substr($0, p + length(anchor)) }
       else { line = $0 }
+      if (opener != "" && !armed) { o = index(line, opener); if (o == 0) next
+                                    armed = 1; line = substr(line, o + length(opener)) }
       n = length(line)
       for (i = 1; i <= n; i++) {
         c = substr(line, i, 1)
@@ -2789,6 +2859,379 @@ if [ -z "$T16_ISSUE_EXTRA" ]; then
 else
   echo "  FAIL  T16.11 workflow.js publishes per-issue field(s) SKILL.md never declares"
   echo "        undocumented:$T16_ISSUE_EXTRA"
+  FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------------------
+# THE FOUR REMAINING PUBLISHED CONTRACTS (#588). The rows above join the
+# per-task record, the reviewVerdict union, partialDelivery and the enclosing
+# per-issue record. Four more shapes are published by the same two files and had
+# no comparator at all: the per-task `claimedStatus` union, the per-issue
+# `status` union, the `prProof` union, and the top-level return object together
+# with its nested `counts` and `verification` objects.
+#
+# MEASURED before these rows existed, one realistic drift per contract — a
+# member dropped from the claimedStatus sentence, a member added to the solve
+# enum and documented nowhere, a member dropped from ONE solver-prompt copy of
+# that same union, a member dropped from the prProof table cell, a key dropped
+# from the Return value fence, a counts bucket renamed there, and a verification
+# member invented there. Every one of them left BOTH this suite and
+# tests/solve-fleet-workflow.test.sh at their clean totals, rc 0.
+#
+# All four are joined HERE rather than declared with a marker for
+# tests/contract_markers.py (#370/#371). Two of them would qualify — `status`
+# and `prProof` are closed vocabularies — but the other two are not, and
+# workflow.js states the rule where it declines the marker for a one-boolean
+# predicate: the marker is reserved for a closed VOCABULARY whose members that
+# extractor reads and compares. The top-level return object is a KEY SET, not a
+# vocabulary; the claimedStatus roster is spelled on the script side as
+# REFERENCES into another frozen map plus a bare empty string, which is not a
+# member list an extractor can read off the declaration. Splitting one section
+# across two mechanisms on that boundary would put half the fleet's contracts
+# where the other half's reader never looks, so all four take the join the rest
+# of this section already uses.
+
+# --- 1 of 4: the per-task `claimedStatus` union ----------------------------
+# The implementer's own terminal word, kept beside the status the script DERIVES
+# from commitCount. The doc side is the sentence under the Return value fence,
+# harvested for its backtick-quoted tokens — the empty-string member included,
+# because here `""` is a real member. That is the opposite of the reviewVerdict
+# union, where T16.5 exists precisely because `""` is NOT one; the two fields sit
+# in the same record and mean the empty string differently, which is why each
+# gets its own pair of rows rather than a shared one.
+SF_DOC_CLAIMED="$(sf_doc_members "$SOLVE_FLEET_SKILL" 'terminal word' 'when it answered' \
+  | grep -E '^`.+`$' | tr -d '`' | sort -u)"
+# Script side: TASK_CLAIMABLE, and it MUST be TASK_CLAIMABLE rather than
+# TASK_STATUS. The two differ by SKIPPED — the chain's own account of a rung it
+# never dispatched, which no implementer can claim and which the doc therefore
+# does not list. Reading the roster the task schema's enum is built from is what
+# keeps SKIPPED out of the comparison, and T16.16 asserts that outcome rather
+# than trusting the anchor.
+#
+# Members are spelled there as REFERENCES (`TASK_STATUS.DONE`), never as string
+# literals, so each reference is RESOLVED through the TASK_STATUS map instead of
+# being read as a value. Harvesting the array alone would compare PROPERTY NAMES
+# — which happen to equal the values today and would stop the moment a member is
+# spelled differently from its key, silently comparing the wrong strings. The
+# bare `""` fallback on the `taskRec.claimedStatus =` assignment is a member in
+# its own right and is unioned in from that one site.
+SF_JS_TASK_STATUS_MAP="$(grep -oE 'TASK_STATUS = Object\.freeze\([{][^{}]*[}]' <<<"$SF_JS_FLAT")"
+SF_JS_CLAIMABLE_REFS="$(grep -oE 'TASK_CLAIMABLE = Object\.freeze\(\[[^][]*\]' <<<"$SF_JS_FLAT" \
+  | grep -oE 'TASK_STATUS\.[A-Za-z_][A-Za-z0-9_]*' | sed 's/^TASK_STATUS\.//' | sort -u)"
+SF_JS_CLAIMED="$({
+  while IFS= read -r _sf_ref; do
+    [ -n "$_sf_ref" ] || continue
+    grep -oE "[[:space:]]$_sf_ref: \"[A-Za-z_][A-Za-z0-9_]*\"" <<<"$SF_JS_TASK_STATUS_MAP" \
+      | grep -oE '"[A-Za-z_][A-Za-z0-9_]*"' | tr -d '"'
+  done <<<"$SF_JS_CLAIMABLE_REFS"
+  grep -oE 'taskRec\.claimedStatus = [^;]*: "";' "$SOLVE_FLEET_JS" \
+    | grep -oE ': "";' | sed 's/^: //; s/;$//'; } | sort -u)"
+SF_DOC_CLAIMED_N="$(sf_member_count "$SF_DOC_CLAIMED")"
+SF_JS_CLAIMED_N="$(sf_member_count "$SF_JS_CLAIMED")"
+
+# T16.16 — anti-vacuity, plus the SOURCE check that makes this pair discriminate.
+# A moved anchor on either side extracts zero names and would make T16.17 pass
+# while comparing nothing; the floor is well under the live size for the same
+# reason the per-issue floor is, and both live sizes are printed rather than
+# restated. The second clause is not decoration: reading TASK_STATUS instead of
+# TASK_CLAIMABLE is the one substitution that still extracts a plausible roster,
+# and it is caught by the member it drags in.
+if [ "$SF_DOC_CLAIMED_N" -ge 2 ] && [ "$SF_JS_CLAIMED_N" -ge 2 ] \
+  && ! grep -qxF -- 'SKIPPED' <<<"$SF_JS_CLAIMED"; then
+  echo "  PASS  T16.16 both per-task claimedStatus rosters extracted from the claimable list (SKILL.md: $SF_DOC_CLAIMED_N, workflow.js: $SF_JS_CLAIMED_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.16 setup error: the per-task claimedStatus roster did not extract from both sides, or came from the wrong constant"
+  echo "        SKILL.md members:    $SF_DOC_CLAIMED_N (expected >= 2) — $SOLVE_FLEET_SKILL"
+  echo "        workflow.js members: $SF_JS_CLAIMED_N (expected >= 2) — $SOLVE_FLEET_JS"
+  grep -qxF -- 'SKIPPED' <<<"$SF_JS_CLAIMED" \
+    && echo "        SKIPPED is in the script-side roster — that is TASK_STATUS, not TASK_CLAIMABLE; no implementer can claim it"
+  FAIL=$((FAIL + 1))
+fi
+
+# T16.17 — both directions in one row, the T16.8 shape. A documented word the
+# script can never record is one a consumer's switch waits for forever; a word
+# the script records and the doc omits is one it has no arm for.
+T16_CLAIMED_MISSING="$(sf_members_absent "$SF_DOC_CLAIMED" "$SF_JS_CLAIMED")"
+T16_CLAIMED_EXTRA="$(sf_members_absent "$SF_JS_CLAIMED" "$SF_DOC_CLAIMED")"
+if [ -z "$T16_CLAIMED_MISSING" ] && [ -z "$T16_CLAIMED_EXTRA" ]; then
+  echo "  PASS  T16.17 SKILL.md and workflow.js agree on the per-task claimedStatus roster, both directions"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.17 the documented claimedStatus roster and TASK_CLAIMABLE have drifted"
+  [ -n "$T16_CLAIMED_MISSING" ] && echo "        documented but never recorded:$T16_CLAIMED_MISSING"
+  [ -n "$T16_CLAIMED_EXTRA" ] && echo "        recorded but never documented:$T16_CLAIMED_EXTRA"
+  FAIL=$((FAIL + 1))
+fi
+
+# --- 2 of 4: the per-issue `status` union, in every copy of it -------------
+# This vocabulary drives every count in the run, the PR set /goal ingests, and
+# the downgrade the proof pass applies — and it is spelled in more than one
+# place: the doc union, the `enum` array on the solve schema, and every solver
+# prompt that tells an agent which words it may answer with. The prompt copies
+# are the ones that cannot be skipped: an agent told a short union answers with
+# a word the schema rejects, the structured return is discarded, and the failure
+# surfaces as a null result that never names the word that caused it.
+SF_DOC_STATUS="$(sf_doc_members "$SOLVE_FLEET_SKILL" '`status` ∈' '`' '`')"
+SF_JS_STATUS_ENUM="$(grep -oE 'status: [{] *type: "string", *enum: \[[^][]*\]' <<<"$SF_JS_FLAT" \
+  | grep -oE '"[A-Z][A-Z0-9_]*"' | tr -d '"' | sort -u)"
+# The prompt copies are JS string CONCATENATION split across an authored wrap,
+# so the glue is removed before the union is looked for — otherwise the union
+# reads as two fragments and neither one matches. Each copy is kept WHOLE rather
+# than merged into a set, and whole means the SPELLING, not the membership.
+# Merging is blind in both of the directions that matter: a member dropped from
+# one copy is handed back by the other, and a reordered union has the very same
+# members — either way the merged set still equals the enum, and every row below
+# passes on a script whose copies no longer agree.
+#
+# The anchor is the RETURN LINE the union rides on, never a member of the union
+# itself. Anchoring on a member is self-defeating and silently so: a copy whose
+# union is reordered, or whose anchor member is renamed, stops matching and
+# drops OUT of the set — and the rows below then compare only the copies that
+# did NOT drift, which is the drift a second copy was included to catch,
+# passing. The `issue (` field of that line is what holds the per-task
+# `taskId (` return line out; its own status vocabulary is a different contract
+# and a looser anchor drags it in, poisoning the comparison with words the solve
+# schema was never meant to accept.
+SF_JS_STATUS_PROMPTS="$(grep -oE 'StructuredOutput: issue \([^)]*\), status \([^)]*\)' <<<"$SF_JS_GLUED" \
+  | sed 's/^.*, status (/status (/')"
+# Every per-issue return line, carrying a union or not. This is the DENOMINATOR
+# the copy count is measured against: re-anchoring keeps a DRIFTED union in the
+# set, but a copy that drops its union clause outright has no anchor left to
+# match and would still leave without a sound.
+SF_JS_STATUS_RETURNS="$(grep -oE 'Return via StructuredOutput: issue \(' <<<"$SF_JS_GLUED")"
+SF_JS_STATUS_PROMPT_SPELLINGS="$(sort -u <<<"$SF_JS_STATUS_PROMPTS")"
+SF_JS_STATUS_PROMPT_MEMBERS="$(grep -oE '[A-Z][A-Z0-9_]+' <<<"$SF_JS_STATUS_PROMPT_SPELLINGS" | sort -u)"
+SF_DOC_STATUS_N="$(sf_member_count "$SF_DOC_STATUS")"
+SF_JS_STATUS_N="$(sf_member_count "$SF_JS_STATUS_ENUM")"
+SF_JS_STATUS_PROMPT_N="$(sf_member_count "$SF_JS_STATUS_PROMPTS")"
+SF_JS_STATUS_RETURN_N="$(sf_member_count "$SF_JS_STATUS_RETURNS")"
+SF_JS_STATUS_SPELLING_N="$(sf_member_count "$SF_JS_STATUS_PROMPT_SPELLINGS")"
+
+# T16.18 — anti-vacuity across every copy. Every floor sits well UNDER
+# the live size, on the T16.9 rule: a floor set just beneath it is not an
+# anti-vacuity guard but a SIZE RATCHET that reds when a member is legitimately
+# retired on both sides, and a lost anchor extracts ZERO rather than merely
+# fewer. The live sizes are printed by the row instead of restated here.
+#
+# The prompt floor counts COPIES, not members, and it is an ARMING floor: one
+# copy is enough to make T16.21 a real comparison, and collapsing the prompts
+# into a single shared builder is a refactor this row must not veto.
+#
+# Which is exactly why the floor cannot be the whole guard, and the second
+# clause is not decoration. A floor is satisfied by whatever SURVIVED: it reads
+# the same whether the script publishes one union or lost one of several, so a
+# copy that walks out of the set takes its own drift with it and every row below
+# reads green on the copies that stayed. Requiring the copies to equal the
+# per-issue return lines closes that: the denominator moves with the script, so
+# folding the prompts into one shared builder still passes — both sides fall
+# together — while a return line that stops carrying its union reds here by
+# name, instead of quietly shrinking what T16.20 and T16.21 compare.
+if [ "$SF_DOC_STATUS_N" -ge 3 ] && [ "$SF_JS_STATUS_N" -ge 3 ] && [ "$SF_JS_STATUS_PROMPT_N" -ge 1 ] \
+  && [ "$SF_JS_STATUS_PROMPT_N" = "$SF_JS_STATUS_RETURN_N" ]; then
+  echo "  PASS  T16.18 every status-union copy extracted (SKILL.md: $SF_DOC_STATUS_N, schema enum: $SF_JS_STATUS_N, solver prompts: $SF_JS_STATUS_PROMPT_N of $SF_JS_STATUS_RETURN_N per-issue return lines)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.18 setup error: a copy of the per-issue status union did not extract"
+  echo "        SKILL.md members:     $SF_DOC_STATUS_N (expected >= 3) — $SOLVE_FLEET_SKILL"
+  echo "        schema enum members:  $SF_JS_STATUS_N (expected >= 3) — $SOLVE_FLEET_JS"
+  echo "        solver-prompt copies: $SF_JS_STATUS_PROMPT_N (expected >= 1) — $SOLVE_FLEET_JS"
+  [ "$SF_JS_STATUS_PROMPT_N" != "$SF_JS_STATUS_RETURN_N" ] \
+    && echo "        per-issue return lines: $SF_JS_STATUS_RETURN_N — a return line carries no status union, so it left the comparison"
+  FAIL=$((FAIL + 1))
+fi
+
+# T16.19 — the doc and the schema enum, both directions.
+T16_STATUS_MISSING="$(sf_members_absent "$SF_DOC_STATUS" "$SF_JS_STATUS_ENUM")"
+T16_STATUS_EXTRA="$(sf_members_absent "$SF_JS_STATUS_ENUM" "$SF_DOC_STATUS")"
+if [ -z "$T16_STATUS_MISSING" ] && [ -z "$T16_STATUS_EXTRA" ]; then
+  echo "  PASS  T16.19 SKILL.md and the solve schema agree on the per-issue status union, both directions"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.19 the documented status union and the schema enum have drifted"
+  [ -n "$T16_STATUS_MISSING" ] && echo "        documented but not in the enum:$T16_STATUS_MISSING"
+  [ -n "$T16_STATUS_EXTRA" ] && echo "        in the enum but never documented:$T16_STATUS_EXTRA"
+  FAIL=$((FAIL + 1))
+fi
+
+# T16.20 — the solver prompts spell ONE union, not several. Comparing the copies
+# to each other rather than only to the enum is what makes a member lost from a
+# single prompt visible: the merged set would still equal the enum.
+if [ "$SF_JS_STATUS_SPELLING_N" = "1" ]; then
+  echo "  PASS  T16.20 every solver prompt spells the status union identically ($SF_JS_STATUS_PROMPT_N copies, one spelling)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.20 the solver prompts disagree about the status union a solver may answer with"
+  echo "        file: $SOLVE_FLEET_JS"
+  sed 's/^/        /' <<<"$SF_JS_STATUS_PROMPT_SPELLINGS"
+  FAIL=$((FAIL + 1))
+fi
+
+# T16.21 — that one spelling against the enum, both directions. A prompt word
+# the schema rejects and a schema word no prompt offers are the same defect seen
+# from its two ends.
+T16_PROMPT_MISSING="$(sf_members_absent "$SF_JS_STATUS_PROMPT_MEMBERS" "$SF_JS_STATUS_ENUM")"
+T16_PROMPT_EXTRA="$(sf_members_absent "$SF_JS_STATUS_ENUM" "$SF_JS_STATUS_PROMPT_MEMBERS")"
+if [ -z "$T16_PROMPT_MISSING" ] && [ -z "$T16_PROMPT_EXTRA" ]; then
+  echo "  PASS  T16.21 the solver prompt offers exactly the status words the solve schema accepts, both directions"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.21 the solver prompt and the solve schema disagree about the answerable status words"
+  [ -n "$T16_PROMPT_MISSING" ] && echo "        offered by the prompt, rejected by the schema:$T16_PROMPT_MISSING"
+  [ -n "$T16_PROMPT_EXTRA" ] && echo "        accepted by the schema, never offered:$T16_PROMPT_EXTRA"
+  FAIL=$((FAIL + 1))
+fi
+
+# --- 3 of 4: the `prProof` union -------------------------------------------
+# The classification the proof pass writes onto a record, and the only field
+# that says whether a claimed PR was observed. The doc side is the table cell in
+# the proof section, read between the cell's own delimiters and filtered to its
+# backtick-quoted tokens so the separator glyphs are not members.
+SF_DOC_PRPROOF="$(sf_doc_members "$SOLVE_FLEET_SKILL" '| `prProof` | ' '|' \
+  | grep -E '^`.+`$' | tr -d '`' | sort -u)"
+# Script side, anchored STRICTLY on the assignment sites. A bare `prProof` key
+# sweep is wrong here and quietly so: this script spells the symbol in two roles
+# — the published classification written by `r.prProof =`, and the `prProof:`
+# property of the proof-relay schema — and sweeping the key drags the relay's
+# observation properties in as if they were members of this union.
+SF_JS_PRPROOF="$(grep -oE 'r\.prProof = "[A-Z][A-Z0-9_]*"' "$SOLVE_FLEET_JS" \
+  | grep -oE '"[A-Z][A-Z0-9_]*"' | tr -d '"\r' | sort -u)"
+SF_DOC_PRPROOF_N="$(sf_member_count "$SF_DOC_PRPROOF")"
+SF_JS_PRPROOF_N="$(sf_member_count "$SF_JS_PRPROOF")"
+
+# T16.22 — anti-vacuity. A renamed table header or a classification moved behind
+# a helper extracts zero on that side, and zero-vs-zero is the vacuous green.
+if [ "$SF_DOC_PRPROOF_N" -ge 2 ] && [ "$SF_JS_PRPROOF_N" -ge 2 ]; then
+  echo "  PASS  T16.22 both prProof unions extracted (SKILL.md: $SF_DOC_PRPROOF_N, workflow.js: $SF_JS_PRPROOF_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.22 setup error: the prProof union did not extract from both sides"
+  echo "        SKILL.md members:    $SF_DOC_PRPROOF_N (expected >= 2) — $SOLVE_FLEET_SKILL"
+  echo "        workflow.js members: $SF_JS_PRPROOF_N (expected >= 2) — $SOLVE_FLEET_JS"
+  FAIL=$((FAIL + 1))
+fi
+
+# T16.23 — both directions. This is the field an operator reads to decide
+# whether to believe a run, so an unlisted classification is one nobody can look
+# up and a documented one the script never writes is a filter that matches
+# nothing.
+T16_PRPROOF_MISSING="$(sf_members_absent "$SF_DOC_PRPROOF" "$SF_JS_PRPROOF")"
+T16_PRPROOF_EXTRA="$(sf_members_absent "$SF_JS_PRPROOF" "$SF_DOC_PRPROOF")"
+if [ -z "$T16_PRPROOF_MISSING" ] && [ -z "$T16_PRPROOF_EXTRA" ]; then
+  echo "  PASS  T16.23 SKILL.md and workflow.js agree on the prProof union, both directions"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.23 the documented prProof union and the classifications the script writes have drifted"
+  [ -n "$T16_PRPROOF_MISSING" ] && echo "        documented but never written:$T16_PRPROOF_MISSING"
+  [ -n "$T16_PRPROOF_EXTRA" ] && echo "        written but never documented:$T16_PRPROOF_EXTRA"
+  FAIL=$((FAIL + 1))
+fi
+
+# --- 4 of 4: the TOP-LEVEL return object, and its two nested objects --------
+# The outermost shape the fleet publishes — what /goal and every operator read
+# first — joined the way the per-issue record above is joined, because it is a
+# KEY SET rather than a vocabulary. Doc side is the `## Return value` fence,
+# read at depth 0 so the nested records appear by KEY NAME and never by their
+# members; the fence opens on its own line below the sentence that introduces
+# it, which is why the anchor and the opening brace are given separately.
+SF_DOC_RETURN="$(sf_doc_record_members "$SOLVE_FLEET_SKILL" '## Return value' '{')"
+# Script side, scoped to finalize() — the one function that builds this object.
+# A file-wide reader would collect every literal in the script; the arming
+# anchor is what makes `return [{]` mean THIS return.
+SF_JS_RETURN="$(sf_js_object_keys '^function finalize' '^  return [{]')"
+SF_DOC_RETURN_N="$(sf_member_count "$SF_DOC_RETURN")"
+SF_JS_RETURN_N="$(sf_member_count "$SF_JS_RETURN")"
+
+# T16.24 — anti-vacuity, same floor rule as the per-issue row: well under the
+# live size, because a floor set just beneath it is a size ratchet that reds on
+# a key legitimately removed from both sides. Both live sizes are printed here
+# on every run, which is the only copy of them that cannot go stale.
+if [ "$SF_DOC_RETURN_N" -ge 12 ] && [ "$SF_JS_RETURN_N" -ge 12 ]; then
+  echo "  PASS  T16.24 both top-level return key sets extracted (SKILL.md: $SF_DOC_RETURN_N, workflow.js: $SF_JS_RETURN_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.24 setup error: the top-level return object did not extract from both sides"
+  echo "        SKILL.md '## Return value' fence keys: $SF_DOC_RETURN_N (expected >= 12) — $SOLVE_FLEET_SKILL"
+  echo "        finalize() return keys:               $SF_JS_RETURN_N (expected >= 12) — $SOLVE_FLEET_JS"
+  FAIL=$((FAIL + 1))
+fi
+
+# T16.25 — forward. A documented top-level key finalize() never publishes is one
+# every consumer reads as undefined on every run.
+T16_RETURN_MISSING="$(sf_members_absent "$SF_DOC_RETURN" "$SF_JS_RETURN")"
+if [ -z "$T16_RETURN_MISSING" ]; then
+  echo "  PASS  T16.25 every top-level key SKILL.md documents is one finalize() returns ($SF_DOC_RETURN_N/$SF_DOC_RETURN_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.25 SKILL.md documents top-level return key(s) finalize() never publishes"
+  echo "        absent from workflow.js:$T16_RETURN_MISSING"
+  FAIL=$((FAIL + 1))
+fi
+
+# T16.26 — reverse. This is the half that retires the hand-picked key greps: a
+# key added to the return and to no doc reds here, where a grep for one chosen
+# name stayed green for every other name.
+T16_RETURN_EXTRA="$(sf_members_absent "$SF_JS_RETURN" "$SF_DOC_RETURN")"
+if [ -z "$T16_RETURN_EXTRA" ]; then
+  echo "  PASS  T16.26 every top-level key finalize() returns is documented in SKILL.md ($SF_JS_RETURN_N/$SF_JS_RETURN_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.26 finalize() publishes top-level key(s) SKILL.md never declares"
+  echo "        undocumented:$T16_RETURN_EXTRA"
+  FAIL=$((FAIL + 1))
+fi
+
+# The two nested objects get their own pair each, on the partialDelivery
+# precedent: the depth-0 read above proves only that the KEY exists, and a
+# histogram whose buckets have drifted is exactly as unreadable as a missing
+# one.
+SF_DOC_COUNTS="$(sf_doc_members "$SOLVE_FLEET_SKILL" 'counts: {' '}')"
+SF_JS_COUNTS="$(sf_js_object_keys '^function finalize' '^    counts: [{]')"
+SF_DOC_COUNTS_N="$(sf_member_count "$SF_DOC_COUNTS")"
+SF_JS_COUNTS_N="$(sf_member_count "$SF_JS_COUNTS")"
+if [ "$SF_DOC_COUNTS_N" -ge 3 ] && [ "$SF_JS_COUNTS_N" -ge 3 ]; then
+  echo "  PASS  T16.27 both counts bucket lists extracted (SKILL.md: $SF_DOC_COUNTS_N, workflow.js: $SF_JS_COUNTS_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.27 setup error: the counts object did not extract from both sides"
+  echo "        SKILL.md members:    $SF_DOC_COUNTS_N (expected >= 3) — $SOLVE_FLEET_SKILL"
+  echo "        workflow.js members: $SF_JS_COUNTS_N (expected >= 3) — $SOLVE_FLEET_JS"
+  FAIL=$((FAIL + 1))
+fi
+T16_COUNTS_MISSING="$(sf_members_absent "$SF_DOC_COUNTS" "$SF_JS_COUNTS")"
+T16_COUNTS_EXTRA="$(sf_members_absent "$SF_JS_COUNTS" "$SF_DOC_COUNTS")"
+if [ -z "$T16_COUNTS_MISSING" ] && [ -z "$T16_COUNTS_EXTRA" ]; then
+  echo "  PASS  T16.28 SKILL.md and finalize() agree on the counts buckets, both directions"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.28 the documented counts histogram and the one finalize() builds have drifted"
+  [ -n "$T16_COUNTS_MISSING" ] && echo "        documented but never counted:$T16_COUNTS_MISSING"
+  [ -n "$T16_COUNTS_EXTRA" ] && echo "        counted but never documented:$T16_COUNTS_EXTRA"
+  FAIL=$((FAIL + 1))
+fi
+
+SF_DOC_VERIF="$(sf_doc_members "$SOLVE_FLEET_SKILL" 'verification: {' '}')"
+SF_JS_VERIF="$(sf_js_object_keys '^function finalize' '^    verification: [{]')"
+SF_DOC_VERIF_N="$(sf_member_count "$SF_DOC_VERIF")"
+SF_JS_VERIF_N="$(sf_member_count "$SF_JS_VERIF")"
+if [ "$SF_DOC_VERIF_N" -ge 3 ] && [ "$SF_JS_VERIF_N" -ge 3 ]; then
+  echo "  PASS  T16.29 both verification member lists extracted (SKILL.md: $SF_DOC_VERIF_N, workflow.js: $SF_JS_VERIF_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.29 setup error: the verification object did not extract from both sides"
+  echo "        SKILL.md members:    $SF_DOC_VERIF_N (expected >= 3) — $SOLVE_FLEET_SKILL"
+  echo "        workflow.js members: $SF_JS_VERIF_N (expected >= 3) — $SOLVE_FLEET_JS"
+  FAIL=$((FAIL + 1))
+fi
+T16_VERIF_MISSING="$(sf_members_absent "$SF_DOC_VERIF" "$SF_JS_VERIF")"
+T16_VERIF_EXTRA="$(sf_members_absent "$SF_JS_VERIF" "$SF_DOC_VERIF")"
+if [ -z "$T16_VERIF_MISSING" ] && [ -z "$T16_VERIF_EXTRA" ]; then
+  echo "  PASS  T16.30 SKILL.md and finalize() agree on the verification totals, both directions"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.30 the documented verification object and the one finalize() builds have drifted"
+  [ -n "$T16_VERIF_MISSING" ] && echo "        documented but never computed:$T16_VERIF_MISSING"
+  [ -n "$T16_VERIF_EXTRA" ] && echo "        computed but never documented:$T16_VERIF_EXTRA"
   FAIL=$((FAIL + 1))
 fi
 
@@ -4069,6 +4512,233 @@ else
   FAIL=$((FAIL + 1))
 fi
 # === END T19 README tier vocabulary ===
+
+# === BEGIN T20 review-fanout cardinality and the /dev RFC's archived counts ===
+# T20 — #606. Two counts drifted the moment the surfaces that state them moved
+# and the prose that quotes them did not:
+#
+#   * The Phase 1 reviewer roster grew to SEVEN (the `convention` lens joined),
+#     and SEVENTEEN sites across EIGHT live files still promised six —
+#     `commands/review-pr.md` twice, `skills/dev-pipeline/SKILL.md`, both SDD
+#     flow diagrams, `finish-branch/SKILL.md`, and — worst — the review-fleet
+#     engine describing itself: its SKILL.md guard table, four comments in
+#     `workflow.js` and five in `lib/review-fleet-args.sh`, plus the ledger check
+#     in `lib/review-aggregate.sh`. Every one of them is what a reader sizes the
+#     review budget, the nonce pool or the agent ceiling from.
+#   * v0.50.0 collapsed the tier ladder to three rungs, and `docs/rfc/0003`'s
+#     motivation section still argued from "four tiers (`trivial` → `large`)"
+#     and "an unskippable 6-agent fanout", citing a line RANGE that now lands on
+#     an `## Emphasis` example fence rather than on the roster.
+#
+# DERIVED on both halves. The roster size is COUNTED out of the
+# `child-callsite-contracts-v1` block in `post-impl-review/SKILL.md` — the wire
+# contract, the one surface that cannot be wrong about how many children are
+# dispatched — and the ladder is read out of `lib/solve_triage.py` exactly as
+# T19 reads it. Nothing below retypes either figure.
+#
+# The two halves are treated DIFFERENTLY on purpose. Live prose is corrected in
+# place; an RFC is an archival record of what was true when it was written, so
+# T20.4/T20.5 require a DATED superseded-in-part note (the form RFC 0013 §0A
+# already uses) instead of a rewritten §2.1 — and require the note to carry the
+# symbol anchor that replaced the rotted `SKILL.md:89-101` offset, because a
+# re-anchor is the only half of the correction that stops the citation rotting
+# again on the next edit above it.
+if python3 - "$PLUGIN_DIR" "$RFC_DIR/0003-dev-command.md" "$PLUGIN_DIR/lib/solve_triage.py" <<'PY_T20'
+import importlib.util, json, pathlib, re, sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+rfc = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").replace("\r\n", "\n")
+spec = importlib.util.spec_from_file_location("st_t20", sys.argv[3])
+st = importlib.util.module_from_spec(spec); spec.loader.exec_module(st)
+tiers = list(st.TIERS)
+
+roster_md = plugin_dir / "skills" / "post-impl-review" / "SKILL.md"
+roster_text = roster_md.read_text(encoding="utf-8").replace("\r\n", "\n")
+ok = True
+
+# T20.1 — anti-vacuity for the roster. A renamed marker or a reshaped block
+# yields zero reviewer edges, and every comparison below would then be measured
+# against a number nothing produced.
+block = re.search(r"<!-- BEGIN child-callsite-contracts-v1 -->\n```json\n(.*?)\n```",
+                  roster_text, re.DOTALL)
+roster = 0
+if block is None:
+    print("T20.1 post-impl-review/SKILL.md has no child-callsite-contracts-v1 json block"); ok = False
+else:
+    try:
+        edges = json.loads(block.group(1))
+    except ValueError as error:
+        print("T20.1 the post-impl-review callsite block is not valid JSON: %s" % error); ok = False
+        edges = {}
+    roster = len([e for e in edges if e.startswith("review_pr.review.")])
+    if roster < 5:
+        print("T20.1 only %d review_pr.review.* edge(s) in the callsite block — too few to be the roster" % roster)
+        ok = False
+
+# T20.2 — anti-vacuity for the scan. TWO tiers, because a detector keyed on
+# proximity alone is blind in exactly the files that get this wrong: a file whose
+# whole subject is the fanout stops re-naming it, so `review-fleet/workflow.js`
+# could say "closed six-edge roster" three lines under a REVIEW_ROSTER of seven
+# and no paragraph-proximity scan would ever reach it.
+#
+#   PROXIMITY tier — every `*.md` under the plugin. A cardinality token must sit
+#   within a bounded window of a fanout NAME in the same paragraph, so a reflow
+#   cannot hide a claim and a distant unrelated count cannot invent one. This
+#   tier alone may read the GENERIC noun `agents`, which means nothing on its own.
+#
+#   OWNER tier — every file, any extension, that names a `review_pr.review.*`
+#   edge. The set is DERIVED by grep, never listed: a file that names the edges
+#   is a file describing this roster, and adding a new one opts it in for free.
+#   No proximity is required there, so the nouns are narrowed to the ones that
+#   are self-anchoring (`reviewer*`, `edge roster`) — never bare `agents`, which
+#   is why "The one agent-returned string" is not read as a roster claim.
+#
+# Number-WORDS count as much as digits. TEN of the seventeen stale sites spelled
+# it out — "six children", "six-edge roster", "Six reviewers" — and the row's
+# first shape, `(\d+)[- ]agents?`, could see FOUR of them: a digit-only detector
+# reading one noun IS the hand-picked census this row exists to stop being. A
+# numeral is skipped when a preceding `Phase`/`Step`/`Wave`/`#` makes it an
+# ordinal rather than a count, or when an arrow makes it the left side of an
+# `N -> M` historical transition (the `5 → 6 reviewers` record of #73 is TRUE
+# about #73 and must stay).
+#
+# A zero harvest means the detector stopped detecting, not that the docs are
+# clean, so the floor below is set well under the live count.
+NAME = r"(?:post-impl-review|/review-pr|review-pr|review-fleet|REVIEW_ROSTER)"
+WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+         "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+NUM = r"(?:\d+|" + "|".join(sorted(WORDS)) + r")"
+ROSTER_NOUN = r"(?:reviewers?|reviewer[- ](?:subagents?|agents?|slots?|lenses)|(?:edge|reviewer) roster)"
+ANY_NOUN = r"(?:" + ROSTER_NOUN + r"|agents?)"
+def count_re(noun):
+    return r"(?<![\w-])(" + NUM + r")[- ]" + noun + r"\b"
+NOT_A_COUNT = re.compile(r"(?:[Pp]hase|[Ss]tage|[Ss]tep|[Ww]ave|[Oo]ption|[Ii]teration|#|->|→)\s*$")
+WINDOW = 240
+forward = re.compile(NAME + r".{0,%d}?" % WINDOW + count_re(ANY_NOUN), re.DOTALL | re.IGNORECASE)
+backward = re.compile(count_re(ANY_NOUN) + r".{0,%d}?" % WINDOW + NAME, re.DOTALL | re.IGNORECASE)
+owner_only = re.compile(count_re(ROSTER_NOUN), re.IGNORECASE)
+scanned = sorted(p for p in plugin_dir.rglob("*")
+                 if p.is_file() and p.suffix in (".md", ".js", ".sh"))
+# ONE read per file, reused by all three passes below (the owner derivation
+# here, the paragraph scan, and T20.6). Nothing between them mutates the tree, so
+# re-reading and re-decoding 161 files two to three times per CI run bought
+# nothing; every read used these exact arguments, so the cache is the same text.
+texts = {p: p.read_text(encoding="utf-8", errors="replace") for p in scanned}
+owners = set(p for p in scanned if "review_pr.review." in texts[p])
+claims = []
+for path in scanned:
+    patterns = ([forward, backward] if path.suffix == ".md" else [])
+    if path in owners:
+        patterns = patterns + [owner_only]
+    if not patterns:
+        continue
+    lines = texts[path].replace("\r\n", "\n").splitlines()
+    start = 0
+    for idx in range(len(lines) + 1):
+        if idx == len(lines) or not lines[idx].strip():
+            para = " ".join(lines[start:idx])
+            offsets = set()
+            for pattern in patterns:
+                for hit in pattern.finditer(para):
+                    if hit.start(1) in offsets or NOT_A_COUNT.search(para[:hit.start(1)]):
+                        continue
+                    offsets.add(hit.start(1))
+                    token = hit.group(1).lower()
+                    stated = WORDS[token] if token in WORDS else int(token)
+                    claims.append((path.relative_to(plugin_dir).as_posix(), start + 1, stated))
+            start = idx + 1
+if len(claims) < 20:
+    print("T20.2 the fanout-cardinality detector found %d claim(s) in %s — it has stopped detecting"
+          % (len(claims), plugin_dir))
+    ok = False
+if not any(path.endswith(".js") or path.endswith(".sh") for path, _, _ in claims):
+    print("T20.2 the owner tier harvested nothing outside *.md — the derived owner set has gone empty")
+    ok = False
+
+# T20.3 — forward. Every live prose surface that sizes the fanout sizes it the
+# way the wire contract does.
+wrong = ["%s:%d says %d" % row for row in claims if roster and row[2] != roster]
+if wrong:
+    print("T20.3 live prose sizes the Phase 1 reviewer fanout wrongly (the callsite block dispatches %d): %s"
+          % (roster, "; ".join(wrong)))
+    ok = False
+
+# T20.4 — the RFC keeps its record AND carries a dated correction. `Draft` in
+# the Status field is part of the record; the amendment marker is what tells a
+# reader the motivation below it argues from figures that have since moved.
+if not re.search(r"SUPERSEDED IN PART \(2026-08-19\)", rfc):
+    print("T20.4 docs/rfc/0003-dev-command.md carries no dated superseded-in-part note for its §2.1 counts")
+    ok = False
+
+# T20.5 — and the note states BOTH corrected figures, derived, plus the symbol
+# that replaced the rotted line-range citation. The heading is read out of the
+# roster file, so growing the roster reds this row rather than silently
+# re-rotting the anchor.
+heading = re.search(r"^### Step 2: Dispatch (\d+) required routed reviewers$",
+                    roster_text, re.MULTILINE)
+if heading is None:
+    print("T20.5 post-impl-review/SKILL.md has no '### Step 2: Dispatch N required routed reviewers' heading to anchor on")
+    ok = False
+elif roster and int(heading.group(1)) != roster:
+    print("T20.5 the roster heading says %s reviewers; the callsite block dispatches %d"
+          % (heading.group(1), roster))
+    ok = False
+else:
+    needles = [
+        heading.group(0).lstrip("# "),
+        "`%s` → `%s`" % (tiers[0], tiers[-1]),
+        "%d" % roster,
+    ]
+    absent = [n for n in needles if n not in rfc]
+    if absent:
+        print("T20.5 the RFC 0003 correction note omits: %s" % "; ".join(repr(n) for n in absent))
+        ok = False
+    if re.search(r"post-impl-review/SKILL\.md:\d", rfc):
+        print("T20.5 docs/rfc/0003-dev-command.md still cites post-impl-review/SKILL.md by line offset")
+        ok = False
+
+# T20.6 — a RETYPED quotation rots the same way a retyped count does, and it
+# rots invisibly: `review-fleet/workflow.js` quoted "all six reviewer slots" and
+# attributed it to `post-impl-review/SKILL.md`, which says seven. The shipped
+# tree misquoted its own cited source, and a cardinality scan cannot catch that
+# because the number is inside quotation marks that claim someone else wrote it.
+# So every span this engine quotes AND attributes to that file must still be in
+# it. Comment wrapping is normalised away first (`//` and `#` continuations),
+# because the quotation that was wrong spanned two comment lines and no
+# line-oriented grep could have matched it whole. Case is folded: these are
+# mid-sentence quotations, so a leading capital is the quoter's, not a
+# divergence. Only the DERIVED owner set is read, and only its source files —
+# markdown carries `#` as syntax, which this normalisation would eat.
+attributed = 0
+for path in sorted(p for p in owners if p.suffix in (".js", ".sh")):
+    flat = re.sub(r"\s+", " ",
+                  re.sub(r"\n\s*(?://+|#+)\s*", " ",
+                         texts[path].replace("\r\n", "\n")))
+    for quoted in re.finditer(r"[\"“]([^\"“”]{20,300})[\"”]", flat):
+        if "post-impl-review/SKILL.md" not in flat[quoted.end():quoted.end() + 160]:
+            continue
+        attributed += 1
+        needle = re.sub(r"\s+", " ", quoted.group(1)).strip().casefold()
+        if needle not in re.sub(r"\s+", " ", roster_text).casefold():
+            print("T20.6 %s quotes %r and credits post-impl-review/SKILL.md, which does not contain it"
+                  % (path.relative_to(plugin_dir).as_posix(), quoted.group(1)))
+            ok = False
+if attributed < 2:
+    print("T20.6 found %d attributed quotation(s) in the review-fleet sources — it has stopped detecting"
+          % attributed)
+    ok = False
+
+sys.exit(0 if ok else 1)
+PY_T20
+then
+  echo "  PASS  T20 the Phase 1 fanout size is derived-equal across live prose, and RFC 0003's archived counts carry a dated correction"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T20 a review-fanout cardinality or the /dev RFC's archived counts disagree with the shipped tree"
+  echo "        files: $PLUGIN_DIR/**/*.md, $RFC_DIR/0003-dev-command.md"
+  FAIL=$((FAIL + 1))
+fi
+# === END T20 review-fanout cardinality and the /dev RFC's archived counts ===
 
 echo
 echo "== Summary =="

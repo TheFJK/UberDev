@@ -452,7 +452,9 @@ echo "== G19: lib/goal-state.sh shape =="
 # uberdev_goal_review_pr_in_flight (in-flight gate for Phase 2b + 2c) and
 # uberdev_goal_agent_stuck_on_dialog (60s activity-window detector via
 # audit-log row-count proxy); issue #329 adds the gh-failure counter reader so
-# Phase 2 can distinguish "no PR" from "PR lookup unavailable".
+# Phase 2 can distinguish "no PR" from "PR lookup unavailable"; issue #603 adds
+# the solver-PR corroboration ledger's writer and reader, which is what stops the
+# head-ref fallback binding an issue to a same-numbered stranger branch.
 for fn in uberdev_goal_state_init uberdev_goal_pr_state_transition uberdev_goal_issue_state_transition \
           uberdev_goal_read_trust_signal uberdev_goal_check_fingerprint_repeat uberdev_goal_should_automerge \
           uberdev_goal_audit uberdev_goal_locate_review_pr_audit \
@@ -466,6 +468,8 @@ for fn in uberdev_goal_state_init uberdev_goal_pr_state_transition uberdev_goal_
           uberdev_goal_register_batch_pr \
           uberdev_goal_batch_all_terminal \
           uberdev_goal_batch_unblock_wait_clear \
+          uberdev_goal_record_solver_prs \
+          uberdev_goal_solver_pr_for_issue \
           uberdev_goal_gh_failure_count; do
   assert_grep "$GOAL_LIB" "^${fn}\\(\\)" "G19.public.${fn}"
 done
@@ -501,8 +505,8 @@ assert_no_grep "$GOAL_LIB" '\bbash -c'                                   "G19.no
 assert_grep "$GOAL_CMD" '--i-know-what-im-doing'                         "G19.r12-mentioned-once"
 
 echo
-echo "== G20: version bump locked (0.50.3) =="
-assert_version_bump "$REPO_ROOT" "0.50.3"
+echo "== G20: version bump locked (0.51.4) =="
+assert_version_bump "$REPO_ROOT" "0.51.4"
 assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.30\.0'               "G20.solve-claim-no-old-version"
 
 assert_grep "$GOAL_P0" 'uberdev_dispatch_resolve_env'     "G20b.phase0-wires-resolve-env (#175 SSOT anchor)"
@@ -2754,7 +2758,7 @@ assert_eq "$(uberdev_goal_find_pr_for_issue 300)" "" "BT73d.find-pr-head-prefix-
 assert_eq "$(uberdev_goal_find_pr_for_issue 30)" "4343" "BT73d.find-pr-head-prefix-isolation-fix-30-matches"
 MOCK_PR_LIST_JSON='[]'
 
-# BT73e — the `$byclose // $byhead` ranking survives the widening: a LOWER-
+# BT73e — the `$byclose // $bycorr // $byhead` ranking survives the widening: a LOWER-
 # numbered PR that genuinely closes N still outranks a HIGHER-numbered PR that
 # merely carries a `fix/N-` head, because a re-used branch must never beat a
 # real closes-link (#290.4(b), now that far more branch names can match).
@@ -2786,6 +2790,81 @@ for _bt73f_sym in solver_failed uberdev_goal_count_failed_issues FINDING_LABEL; 
     "named" "BT73f.header-names-${_bt73f_sym}"
   assert_grep "$GOAL_P3" "$_bt73f_sym" "BT73f.${_bt73f_sym}-resolves-in-goal-phase3"
 done
+
+# BT73g — the head-ref fallback is a GUESS, and #603 is what the guess costs when
+# something else in the repository happens to be named for the same number. The
+# arm selects purely on NAME, so a PR about an HTTP 500 error page on branch
+# `fix/500-error-page` binds to issue 500 — and `| max` hands the issue to it
+# even when the real solver PR is sitting right beside it on a lower number.
+#
+# The corroboration is the fleet's OWN record of which PR it opened for which
+# issue, carried into the watch lane on argv and landed in a per-goal ledger.
+# It is a third RANK between the closes-link and the guess, never a replacement
+# for the guess: `$byclose // $bycorr // $byhead`. Both directions are pinned
+# below — the record wins whenever it resolves (ii), and the guess still answers
+# whenever it does not (iii, iii-b) — because a head-ref miss under /goal is
+# TERMINAL on the first tick (BT73f), so an arm that could resolve to nothing
+# where the guess resolved to something would convert a wrong-PR bug into a
+# whole-run halt.
+_bt73g_prev_goal_id="${UBERDEV_GOAL_ID:-}"
+MOCK_PR_LIST_JSON='[{"number":901,"closingIssuesReferences":[],"headRefName":"fix/500-error-page"},{"number":880,"closingIssuesReferences":[],"headRefName":"feat/500-real-solver"}]'
+# (i) the unchanged half — no ledger row, so the guess runs exactly as before and
+# `| max` still picks the stranger. This is the row that proves the fix is the
+# LEDGER and not a silent narrowing of the fallback.
+UBERDEV_GOAL_ID=bt73g-none
+assert_eq "$(uberdev_goal_find_pr_for_issue 500)" "901" \
+  "BT73g.no-record-guess-unchanged"
+# (ii) with the fleet's record, the authoritative PR OUTRANKS the name match —
+# and it does so from BELOW on number, so `| max` alone cannot produce 880.
+UBERDEV_GOAL_ID=bt73g
+uberdev_goal_record_solver_prs bt73g "500:880" 1
+assert_eq "$(uberdev_goal_find_pr_for_issue 500)" "880" \
+  "BT73g.record-beats-head-ref-namesake"
+# (iii) an EXPIRED record — one naming a PR that is no longer in the open list
+# — DEGRADES to the guess; it must never refuse. Evidence RANKS above the
+# guess, it does not REPLACE it. Under /goal a resolution miss is terminal on
+# the first tick (BT73f), so a ledger row that resolves to nothing would let the
+# presence of evidence manufacture a whole-run halt the guess alone would never
+# have had — strictly worse than the wrong-PR bug this issue is about. The
+# stranger binding here is the unchanged pre-#603 behaviour.
+MOCK_PR_LIST_JSON='[{"number":901,"closingIssuesReferences":[],"headRefName":"fix/500-error-page"}]'
+assert_eq "$(uberdev_goal_find_pr_for_issue 500)" "901" \
+  "BT73g.expired-record-degrades-to-the-guess"
+# (iii-b) the JOIN that makes "the ledger can never manufacture a resolution
+# miss" a comparison rather than a claim: the SAME snapshot resolved with no
+# record at all must answer identically. A `$bycorr`-replaces-`$byhead`
+# regression reds here ("" vs 901), and row (iii) above keeps the pair from
+# passing vacuously on a double-empty.
+UBERDEV_GOAL_ID=bt73g-none
+_bt73g_noledger="$(uberdev_goal_find_pr_for_issue 500)"
+UBERDEV_GOAL_ID=bt73g
+assert_eq "$(uberdev_goal_find_pr_for_issue 500)" "$_bt73g_noledger" \
+  "BT73g.ledger-never-manufactures-a-resolution-miss"
+# (iv) an explicit GitHub closes-link still outranks the ledger: that link is a
+# deliberate human/producer statement about this issue, not a name collision,
+# and #290.4(b)'s ranking must survive the corroboration.
+MOCK_PR_LIST_JSON='[{"number":12,"closingIssuesReferences":[{"number":500}],"headRefName":"chore/unrelated"},{"number":880,"closingIssuesReferences":[],"headRefName":"feat/500-real-solver"}]'
+assert_eq "$(uberdev_goal_find_pr_for_issue 500)" "12" \
+  "BT73g.closes-link-still-outranks-the-record"
+# (v) the ledger is per-ISSUE: a record for 500 must not silence the guess for a
+# different issue in the same goal.
+MOCK_PR_LIST_JSON='[{"number":777,"closingIssuesReferences":[],"headRefName":"fix/501-other"}]'
+assert_eq "$(uberdev_goal_find_pr_for_issue 501)" "777" \
+  "BT73g.record-scoped-to-its-own-issue"
+# (vi) ledger reader shape: an unrecorded issue is empty + rc 1, never a stale
+# neighbour's number.
+_bt73g_out="$(uberdev_goal_solver_pr_for_issue bt73g 999)"; _bt73g_rc=$?
+assert_eq "$_bt73g_out" "" "BT73g.reader-unknown-issue-empty"
+assert_rc "$_bt73g_rc" "1" "BT73g.reader-unknown-issue-rc-1"
+assert_eq "$(uberdev_goal_solver_pr_for_issue bt73g 500)" "880" "BT73g.reader-known-issue"
+# (vii) the recorder refuses a malformed pair rather than writing half of it —
+# the CSV crosses a command line, so a member that is not <issue>:<pr> is a
+# caller bug, and a partial row would answer a later lookup with a wrong PR.
+uberdev_goal_record_solver_prs bt73g-bad "500:abc,x:1,600:700" 1 2>/dev/null
+assert_eq "$(uberdev_goal_solver_pr_for_issue bt73g-bad 500)" "" "BT73g.recorder-skips-non-numeric-pr"
+assert_eq "$(uberdev_goal_solver_pr_for_issue bt73g-bad 600)" "700" "BT73g.recorder-keeps-the-good-pair"
+MOCK_PR_LIST_JSON='[]'
+UBERDEV_GOAL_ID="$_bt73g_prev_goal_id"
 
 # BT74 — agent_busy_for_issue: malformed claude JSON -> rc 1 (fail-safe "not busy").
 MOCK_CLAUDE_AGENTS_JSON='not valid json {{{'
@@ -4021,6 +4100,120 @@ assert_grep "$GOAL_P0" '--max-watch-ticks='                                     
 assert_grep "$GOAL_P0" 'goal\.max_watch_ticks UBERDEV_GOAL_MAX_WATCH_TICKS 1 500 40' "G53.phase0-resolves-via-the-standard-precedence-chain"
 assert_grep "$GOAL_P0" 'maxWatchTicks="\$MAX_WATCH_TICKS"'                           "G53.phase0-emits-it-in-the-envelope"
 assert_grep "$GOAL_CMD" '--max-watch-ticks=N'                                     "G53.cmd-documents-the-flag"
+
+echo
+echo "== G55: --implement-budget is a real knob, and CB1's per-issue projection is derived from it (issue #590) =="
+# The nested solver fleet's CB3 implement-phase cap is operator-set through
+# UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET, which lib/solve-launcher.sh reads when it
+# composes the fleet envelope. /goal's OWN CB1 ceiling used to price every
+# claimed issue at a literal frozen at that variable's DEFAULT, so a raised
+# budget under-projected by up to 72 agents per issue — and since CB1 is the only
+# NAMED halt, it did not merely mis-report: it stopped firing, and the run died
+# against the runtime's own lifetime cap with no halt reason and no audit row.
+# Phase 0 resolves the budget and publishes it; the driver projects against it
+# AND pins it back onto the launcher command line so the fleet is armed with the
+# same number. Shape first, then a live resolution probe.
+assert_grep "$GOAL_SKILL" '_UBERDEV_GOAL_DEFAULT_IMPLEMENT_BUDGET=24'                                  "G55.default-constant-in-the-fence"
+assert_grep "$GOAL_LIB"   '_UBERDEV_GOAL_DEFAULT_IMPLEMENT_BUDGET:=24'                                 "G55.runtime-ssot-mirror-in-goal-state"
+assert_grep "$GOAL_P0" 'uberdev_read_int_in_range goal\.implement_budget UBERDEV_GOAL_IMPLEMENT_BUDGET 4 96' "G55.range-helper-uses-the-fleet-clamp"
+assert_grep "$GOAL_P0" 'implement_budget_cli'                                                          "G55.cli-arg-var"
+assert_grep "$GOAL_P0" '--implement-budget=\*\)'                                                       "G55.cli-arg-case-arm"
+assert_grep "$GOAL_P0" 'UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET:-'                                        "G55.fleet-env-is-in-the-chain-as-a-tier-of-its-own"
+# The fold that put the AMBIENT fleet variable above the EXPLICIT config key:
+# tier 1 of uberdev_read_int_in_range is the env var it is handed, so nesting the
+# fleet variable inside that argument silently outranks goal.implement_budget.
+# The live rows below catch the behaviour; this catches the shape that causes it.
+assert_no_grep "$GOAL_P0" 'UBERDEV_GOAL_IMPLEMENT_BUDGET:-\$\{UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET'   "G55.fleet-env-is-not-folded-into-the-goal-env-tier"
+assert_grep "$GOAL_P0" 'implementBudget="\$IMPLEMENT_BUDGET"'                                          "G55.phase0-emits-it-in-the-envelope"
+assert_grep "$GOAL_WF" 'clampInt\(CFG\.implementBudget, 4, 96, 24\)'                                   "G55.driver-reads-and-clamps-the-relayed-key"
+assert_grep "$GOAL_WF" 'issueCount \* perIssueCostAtBudget\(implementBudget\)'                         "G55.projection-is-derived-not-literal"
+assert_no_grep "$GOAL_WF" 'issueCount \* 33'                                                           "G55.the-frozen-literal-is-gone"
+assert_grep "$GOAL_WF" 'UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET=" \+ implementBudget'                     "G55.claim-relay-arms-the-launcher-with-the-projected-budget"
+assert_grep "$GOAL_CMD" '\-\-implement-budget=N'                                                       "G55.cmd-documents-the-flag"
+
+# LIVE resolution probe. Every row above is a grep, and a grep cannot observe a
+# VALUE: the read call can be present with the wrong precedence, the wrong
+# clamp, or a default that never reaches it. This runs the EXTRACTED Phase-0
+# tunables region for real, once per entrance, and reads IMPLEMENT_BUDGET back
+# out of it.
+#
+# The probe runs from the scratch dir with UBERDEV_CONFIG_FILE cleared, because
+# tier 2 of the read is a project-config lookup: either channel would otherwise
+# let a real `goal.implement_budget` key answer instead of the fixture.
+_g55_tmp="$(mktemp -d 2>/dev/null || printf '/tmp/goal-g55-%s' "$$")"
+if extract_region tunables "$GOAL_P0" > "$_g55_tmp/tunables.sh" && [ -s "$_g55_tmp/tunables.sh" ]; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "G55.extract: located the Phase-0 tunables region"
+  {
+    echo 'set -u'
+    printf 'export UBERDEV_PLUGIN_ROOT=%s\n' "'$REPO_ROOT/plugins/uberdev'"
+    echo 'export CLAUDE_PLUGIN_ROOT="$UBERDEV_PLUGIN_ROOT"'
+    printf 'export UBERDEV_TMPDIR=%s\n' "'$_g55_tmp/tmp'"
+    echo 'mkdir -p "$UBERDEV_TMPDIR"'
+    echo '. "$UBERDEV_PLUGIN_ROOT/lib/goal-state.sh"'
+    echo 'max_cycles_cli=""; max_parallel_cli=""; barrier_timeout_cli=""; review_grace_cli=""'
+    echo 'watch_passes_cli=""; watch_budget_cli=""; max_watch_ticks_cli=""'
+    echo 'implement_budget_cli="${G55_CLI:-}"'
+    printf '. %s\n' "'$_g55_tmp/tunables.sh'"
+    echo 'printf "IB=%s\\n" "$IMPLEMENT_BUDGET"'
+  } > "$_g55_tmp/drv.sh"
+  # Every entrance is cleared first; the caller re-adds only the one under test,
+  # so a row can never pass on a variable it did not set.
+  _g55_read() {  # args: zero or more NAME=VALUE env assignments
+    ( cd "$_g55_tmp" && env -u UBERDEV_CONFIG_FILE -u G55_CLI \
+        -u UBERDEV_GOAL_IMPLEMENT_BUDGET -u UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET \
+        "$@" bash "$_g55_tmp/drv.sh" 2>/dev/null ) | sed -n 's/^IB=//p'
+  }
+  assert_eq "$(_g55_read)" "24" \
+    "G55.live-default: nothing set anywhere resolves the shipped default"
+  assert_eq "$(_g55_read G55_CLI=48)" "48" \
+    "G55.live-cli: the --implement-budget flag wins"
+  assert_eq "$(_g55_read UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET=96)" "96" \
+    "G55.live-fleet-env: the variable the LAUNCHER already reads is what /goal projects against — the whole point of the fix"
+  assert_eq "$(_g55_read G55_CLI=500)" "24" \
+    "G55.live-clamp: a value the fleet would refuse falls back to the default rather than being projected as typed"
+  assert_eq "$(_g55_read G55_CLI=7 UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET=96)" "7" \
+    "G55.live-precedence: the flag outranks the fleet env var, so the two entrances cannot disagree silently"
+
+  # Tier 1 vs tier 2 — the CONFIG KEY's rank against the fleet env var.
+  #
+  # Every row above runs with UBERDEV_CONFIG_FILE cleared, precisely so a real
+  # goal.implement_budget in the checkout cannot answer for the fixture. That
+  # also means none of them exercises tier 2 at all, so the rank the docs state
+  # — `goal.implement_budget` ABOVE `UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET` —
+  # had ZERO coverage, and the two drifted: the fleet variable was folded into
+  # the env argument of a reader whose tier 1 IS the env var, which put it above
+  # the config key rather than below it. An operator who capped /goal in project
+  # config while exporting the fleet-wide budget for /turbo got the fleet number
+  # silently, both projected AND armed onto the launcher command line.
+  #
+  # Four surfaces state the intended order and one of them is a decision record:
+  # commands/goal.md's flag docs, the SKILL.md Constants note, CHANGELOG 0.51.0,
+  # and RFC 0005 D590a — "one extra tier BELOW the config key". These rows are
+  # the only executable thing holding the code to it.
+  mkdir -p "$_g55_tmp/cfg"
+  printf 'goal:\n  implement_budget: 48\n' > "$_g55_tmp/cfg/uberdev.local.md"
+  _g55_cfg="$_g55_tmp/cfg/uberdev.local.md"
+  # Vacuity guard: without this row the discriminator below could pass on a
+  # fixture the reader never actually reached (wrong path, wrong key shape).
+  assert_eq "$(_g55_read UBERDEV_CONFIG_FILE="$_g55_cfg")" "48" \
+    "G55.live-config-key: goal.implement_budget resolves on its own, so the fixture is genuinely reachable"
+  assert_eq "$(_g55_read UBERDEV_CONFIG_FILE="$_g55_cfg" UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET=96)" "48" \
+    "G55.live-config-outranks-fleet-env: the config key sits ABOVE UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET (RFC 0005 D590a)"
+  assert_eq "$(_g55_read UBERDEV_CONFIG_FILE="$_g55_cfg" UBERDEV_GOAL_IMPLEMENT_BUDGET=12 UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET=96)" "12" \
+    "G55.live-goal-env-outranks-config: the goal-scoped env var still tops the config key"
+  # The fleet variable keeps its own tier: below the config key, above the
+  # default. With no config key present it must still answer, or the fix for
+  # #590 (project against the budget the fleet really runs with) is undone.
+  assert_eq "$(_g55_read UBERDEV_CONFIG_FILE="$_g55_tmp/cfg/absent.md" UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET=96)" "96" \
+    "G55.live-fleet-env-below-config: with no config key set the fleet variable still outranks the default"
+  # An out-of-range fleet value must be clamped by the SAME range as every other
+  # entrance, not passed through as an unvalidated default.
+  assert_eq "$(_g55_read UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET=500)" "24" \
+    "G55.live-fleet-env-clamp: a fleet value outside 4..96 falls back to the default rather than being projected as typed"
+else
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "G55.extract: could not extract the Phase-0 tunables region (marker moved?)" >&2
+fi
+rm -rf "$_g55_tmp"
 
 echo
 echo "== G54: partial-chain carrier (#592) =="

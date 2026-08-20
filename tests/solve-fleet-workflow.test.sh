@@ -493,19 +493,40 @@ else
     EXPECTED_COST=$(( FLEET_DESIGN_BASE + FLEET_BUDGET ))
     GOAL_MARKERS="$(grep -c 'SHARED COST: solve-fleet-per-issue-agent-cost' "$GOAL_WF" || true)"
     G16_OK=1
-    # Copy 1 — the PRE-dispatch projection. No envelope exists yet, so the
-    # default is the only honest number and the literal must equal it.
-    grep -q "issueCount \* $EXPECTED_COST" "$GOAL_WF" || G16_OK=0
-    # Copy 2 — the SPEND accumulator. By then the relayed envelope carries the
-    # operator's effective budget, so this copy must DERIVE the term instead of
-    # repeating the literal: a hardcoded 30 understates a maxed-out budget more
-    # than threefold and CB1, the only named halt, then never fires. The clamp
-    # bounds and default are read back out of the fleet's own constant, so the
-    # two files still cannot drift apart.
-    grep -q "$FLEET_DESIGN_BASE + clampInt(cfg.implementBudget, 4, 96, $FLEET_BUDGET)" "$GOAL_WF" || G16_OK=0
+    # ONE DERIVATION, TWO CALLERS (#590). /goal used to carry two copies of this
+    # cost — a frozen literal in the PRE-CLAIM projection and an
+    # envelope-derived term in the SPEND accumulator — and this row required
+    # exactly that split, on the reasoning that no envelope exists at projection
+    # time so the default was the only honest number. It was not: the budget
+    # reaches the fleet through UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET, which
+    # lib/goal-phase0.sh can read at preflight and publish as /goal's own
+    # `implementBudget` key. So the projection derives too, and both callers now
+    # read ONE helper — which is why the marker count is 1 and not 2. Two copies
+    # of one contract is the #370 shape this repo keeps paying for; the vacuity
+    # guard against collapsing them into nothing is the pair of call-site greps
+    # below plus the runtime oracles (B91-B99 in goal-workflow.test.sh).
+    grep -q "$FLEET_DESIGN_BASE + clampInt(budget, 4, 96, $FLEET_BUDGET)" "$GOAL_WF" || G16_OK=0
+    # Caller 1 — the PRE-CLAIM projection, priced off /goal's own relayed config.
+    grep -q "issueCount \* perIssueCostAtBudget(implementBudget)" "$GOAL_WF" || G16_OK=0
+    # Caller 2 — the SPEND accumulator, priced off the fleet envelope the claim
+    # relay handed back.
     grep -q "claimed.length \* perIssueFleetCost(" "$GOAL_WF" || G16_OK=0
+    # NEITHER caller may re-freeze the default as a literal. Both directions are
+    # checked because the projection is the one that shipped frozen.
+    grep -q "issueCount \* $EXPECTED_COST" "$GOAL_WF" && G16_OK=0
     grep -q "claimed.length \* $EXPECTED_COST" "$GOAL_WF" && G16_OK=0
-    [ "${GOAL_MARKERS:-0}" = "2" ] || G16_OK=0
+    [ "${GOAL_MARKERS:-0}" = "1" ] || G16_OK=0
+    # The fleet's RUN-level term is shared the same way, and /goal missed a
+    # piece of it: skills/solve-fleet/workflow.js charges
+    # `repoProfileAgents = designCount > 0 ? 1 : 0` beside its leading 2 and
+    # really dispatches that agent, while `grep -n repoProfile` over the goal
+    # driver returned nothing at all. A flat 2 on either goal-side cost site is
+    # one agent short on every cycle that claims anything.
+    grep -q 'function fleetRunCost(' "$GOAL_WF" || G16_OK=0
+    grep -qE '^ *return 2 \+ \(issueCount > 0 \? 1 : 0\);$' "$GOAL_WF" || G16_OK=0
+    grep -q 'fleetRunCost(rec.claimed.length)' "$GOAL_WF" || G16_OK=0
+    grep -q 'fleetRunCost(issueCount)' "$GOAL_WF" || G16_OK=0
+    grep -qE 'const fleetCost = 2 \+' "$GOAL_WF" && G16_OK=0
     # Deriving the term is only half of it — the cost still has to be CHARGED,
     # on BOTH exit arms of the nested fleet call. The clean arm and the catch
     # arm each carry their own copy, and the catch arm is the one that rots
@@ -525,8 +546,8 @@ else
     # which assert the accumulator as a number; these greps only stop the two
     # charge sites and the named event from being deleted outright.
     [ "$G16_OK" = "1" ] \
-      && pass "G16 /goal's two per-issue cost copies both track the fleet's $FLEET_DESIGN_BASE + IMPLEMENT_AGENT_BUDGET ($EXPECTED_COST at the default) — the projection as a literal, the accumulator derived from the relayed envelope — and both carry the contract marker" \
-      || fail "G16 /goal's cost copies drifted from the fleet constant (want the literal $EXPECTED_COST in the projection, a $FLEET_DESIGN_BASE + clampInt(cfg.implementBudget, 4, 96, $FLEET_BUDGET) derivation in the accumulator, 2 markers, found ${GOAL_MARKERS:-0} markers; want the cost CHARGED on both the clean and the catch arm, found ${GOAL_CHARGE_SITES:-0} of 2 'agentsSpent += fleetCost' sites; want the unmeasured-spend cycle still named by a fleet_spend_unmeasured event)"
+      && pass "G16 /goal prices the fleet from ONE derivation of $FLEET_DESIGN_BASE + IMPLEMENT_AGENT_BUDGET ($EXPECTED_COST at the default), read by both the pre-claim projection and the spend accumulator, plus one shared run-level term that counts the fleet's repo-profile agent — one contract, one copy, one marker" \
+      || fail "G16 /goal's fleet cost drifted from the fleet constants (want a $FLEET_DESIGN_BASE + clampInt(budget, 4, 96, $FLEET_BUDGET) helper read by BOTH 'issueCount * perIssueCostAtBudget(implementBudget)' and 'claimed.length * perIssueFleetCost(', neither re-freezing the literal $EXPECTED_COST, and exactly 1 marker, found ${GOAL_MARKERS:-0}; want a fleetRunCost(issueCount) helper returning '2 + (issueCount > 0 ? 1 : 0)' used at BOTH sites instead of a flat 2; want the cost CHARGED on both the clean and the catch arm, found ${GOAL_CHARGE_SITES:-0} of 2 'agentsSpent += fleetCost' sites; want the unmeasured-spend cycle still named by a fleet_spend_unmeasured event)"
   fi
 fi
 
@@ -825,14 +846,21 @@ grep -Fq 'no // === SHARED:<name> === block here' "$WORKFLOW" \
 # the return-value block are the three places an operator reads to predict what
 # a run costs and returns; a per-task review gate that none of them mention is
 # an undocumented change of both.
+#
+# The `tasksApproved` grep that used to ride in this block is GONE (#588). A
+# grep for one hand-picked key of the return object certifies that key and
+# nothing else — every other key could leave the fence with this row still
+# green — and the whole object is now joined against finalize() in BOTH
+# directions by docs-accuracy T16.24-T16.26. Leaving the weaker predicate
+# standing beside the stronger one is how a reader learns the wrong thing about
+# what is covered, so it is deleted rather than parked here.
 G30_OK=1
 grep -q 'review gate' "$SKILL" || G30_OK=0
 grep -q 'FIX_ROUNDS' "$SKILL" || G30_OK=0
-grep -q 'tasksApproved' "$SKILL" || G30_OK=0
 grep -q 'implementBudget' "$SKILL" || G30_OK=0
 [ "$G30_OK" = "1" ] \
-  && pass "G30 SKILL.md documents the per-task review gate, its FIX_ROUNDS cap, the implementBudget key and the tasks* return keys" \
-  || fail "G30 SKILL.md does not document the per-task review gate / cap / envelope key / return keys"
+  && pass "G30 SKILL.md documents the per-task review gate, its FIX_ROUNDS cap and the implementBudget envelope key" \
+  || fail "G30 SKILL.md does not document the per-task review gate / cap / envelope key"
 
 # G19 — the return contract has to be DOCUMENTED and RENDERED, or it is the
 # dead-contract class this repo has been filing issues about: a key nothing
@@ -979,10 +1007,15 @@ fi
 
 # G40.4 — the two per-record fields and the counter have to be declared where an
 # operator actually reads the record shape: the Return value fence. MEASURED as a
-# real hole before this row existed — deleting `escalatedTier, escalationReason`
-# from that fence reds nothing else in this file, in docs-accuracy, or in the
-# schema guard, because T16's joins cover the per-task record, the reviewVerdict
-# union and partialDelivery, and none of them reach the results member list.
+# real hole WHEN THIS ROW WAS WRITTEN — deleting `escalatedTier,
+# escalationReason` from that fence then reds nothing else in this file, in
+# docs-accuracy, or in the schema guard, because T16's joins at that point
+# reached the per-task record, the reviewVerdict union and partialDelivery and
+# stopped there. They no longer stop there: T16 now joins the results member
+# list (#558) and the top-level fence (#588), so those two deletions and the
+# `tierEscalations` one red over there as well. This row is kept because it
+# names the three symbols an escalation is READ by in one place and reds with a
+# diagnostic about escalation rather than about a set difference.
 # Anti-vacuity first: an empty extraction would make the greps below meaningless.
 SF_RETURN_FENCE="$(awk '/^## Return value/{seen=1; next} seen && /^```/{n++; next} seen && n==1' "$SKILL")"
 if [ -z "$SF_RETURN_FENCE" ]; then
@@ -1129,6 +1162,67 @@ if [ -z "$CV_ASYM_MISSING" ]; then
   pass "G42b SKILL.md carries both asymmetries AND both firing arms of pr_proof_relay_failed (load-bearing wordings, each absent from the pre-fix section)"
 else
   fail "G42b SKILL.md lost load-bearing claim-verification wording:$CV_ASYM_MISSING (see B217, B301b and B302/B302b)"
+fi
+
+# G47/G47b/G48 (#606) — the audit-event enumeration is COMPLETE and DERIVED, and
+# the one signature claim built on top of it is qualified.
+#
+# G41 asks that five NAMED events appear; nothing asked whether the list was all
+# of them. It was not: `main()`'s outer catch wraps its own recovery and audits
+# `pr_proof_not_run_recovery_failed` when the classification or the marking
+# throws, and that name appeared on no doc surface at all. This section's whole
+# premise is that the counts cannot carry the fact and the audit trail is the
+# only discriminator — so an emitter missing from the trail's own contract is
+# the discriminator going quiet on exactly the path where every count is zero.
+#
+# G48 is the claim that event refutes. The section said `probed: 0` beside a
+# NON-ZERO `unverified` is the shape of a thrown run. It is not, when the
+# recovery itself threw: nothing is ever marked, so `unverified` stays at zero
+# beside `probed: 0` — byte-identical to a batch with no claim to prove, which
+# is the very confusion the row exists to resolve.
+#
+# The names are HARVESTED from the emitters rather than transcribed, so a tenth
+# event reds this row on the commit that adds it instead of on the next audit.
+PR_PROOF_EMITTED="$(grep -o 'event: "pr_proof_[a-z_]*"' "$WORKFLOW" \
+  | sed 's/.*"\(pr_proof_[a-z_]*\)"/\1/' | sort -u | tr -d '\r')"
+PR_PROOF_EMITTED_COUNT="$(grep -c '' <<<"$PR_PROOF_EMITTED" || true)"
+
+# G47 — anti-vacuity, and it MUST run before G47b. A renamed emitter key yields
+# an EMPTY harvest, and an empty loop reports every name as present.
+if [ -z "$PR_PROOF_EMITTED" ]; then
+  fail "G47 no pr_proof_* emitter names were harvested from workflow.js — G47b would be vacuous"
+elif [ "$PR_PROOF_EMITTED_COUNT" -lt 8 ]; then
+  fail "G47 only $PR_PROOF_EMITTED_COUNT pr_proof_* emitter name(s) harvested from workflow.js — too few to be the real set"
+else
+  pass "G47 the pr_proof_* emitter names were harvested from workflow.js ($PR_PROOF_EMITTED_COUNT of them; G47b has something to compare)"
+fi
+
+# G47b — every emitted name is named by the contract surface a reader holds.
+PR_PROOF_UNDOCUMENTED=""
+while IFS= read -r pp_ev; do
+  [ -n "$pp_ev" ] || continue
+  grep -qF -- "$pp_ev" <<<"$CV_SECTION" || PR_PROOF_UNDOCUMENTED="$PR_PROOF_UNDOCUMENTED $pp_ev"
+done <<<"$PR_PROOF_EMITTED"
+if [ -z "$PR_PROOF_UNDOCUMENTED" ]; then
+  pass "G47b every pr_proof_* event workflow.js emits is named in SKILL.md's claim-verification section"
+else
+  fail "G47b workflow.js emits pr_proof_* events SKILL.md never names:$PR_PROOF_UNDOCUMENTED — an audit row nobody documents is a discriminator nobody reads"
+fi
+
+# G48 — the signature claim, read wrap-independently. The needles are chosen so
+# the NEGATION of each fact cannot satisfy them, and both positives were
+# measured absent from the pre-fix section.
+CV_FLAT="$(tr '\n' ' ' <<<"$CV_SECTION" | tr -s ' ')"
+CV_SHAPE_MISSING=""
+for cv_shape in 'the one case where the shape above' 'never evidence the claims were checked'; do
+  grep -qF -- "$cv_shape" <<<"$CV_FLAT" || CV_SHAPE_MISSING="$CV_SHAPE_MISSING [$cv_shape]"
+done
+if grep -qF -- 'is the shape, and that audit row' <<<"$CV_FLAT"; then
+  fail "G48 SKILL.md still claims a non-zero unverified is THE shape of a thrown run — it is not when the recovery itself threw (pr_proof_not_run_recovery_failed)"
+elif [ -n "$CV_SHAPE_MISSING" ]; then
+  fail "G48 SKILL.md does not state the recovery-threw exit:$CV_SHAPE_MISSING"
+else
+  pass "G48 SKILL.md qualifies the thrown-run signature and states the recovery-threw exit that all-zero counts hide"
 fi
 
 # --- the script surface ----------------------------------------------------
@@ -1427,6 +1521,14 @@ function probedNums(record) {
   const partialLinkOk = function (t) {
     return t.indexOf("Closes #11") < 0             // the closing token is absent outright
       && t.indexOf("UberDev-Partial: #11") >= 0    // the non-closing linkage is mandated
+      // #603 — and it must be mandated as a STANDALONE LINE. /merge harvests the
+      // trailer with a line-anchored match, so a trailer the writer wrapped in a
+      // sentence, a bullet or a code span is harvested as NOTHING and the
+      // `uberdev:active` claim strands on a still-OPEN issue — silently, because
+      // an unharvested body is indistinguishable from a body that carried no
+      // trailer. "the line" alone was the only thing holding that contract up,
+      // and it is prose to the free-text agent this prompt is written for.
+      && t.indexOf("MUST STAND ALONE on its own line") >= 0
       && t.indexOf("STOPPED EARLY") >= 0;          // anti-vacuity: this really IS the partial arm
   };
 

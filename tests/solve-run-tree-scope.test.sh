@@ -2,7 +2,7 @@
 # tests/solve-run-tree-scope.test.sh — issue #510.
 #
 # THE DEFECT. policy/solve-run-tree-v1.json calls itself the solve run tree, but
-# every one of its 54 edges is sourced from skills/orchestrator/SKILL.md,
+# every one of its 51 edges is sourced from skills/orchestrator/SKILL.md,
 # skills/subagent-driven-dev/SKILL.md, commands/review-pr.md and friends — the
 # ROUTED-CHILD substrate. Since RFC 0015 the DEFAULT /solve + /turbo route is the
 # Workflow-native fleet in skills/solve-fleet/workflow.js, and zero edges are

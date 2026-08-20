@@ -108,6 +108,25 @@ const goalId = /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(goalIdRaw) ? goalIdRaw : "";
 const maxCycles = clampInt(CFG.maxCycles, 1, 20, 5);
 const maxParallel = clampInt(CFG.maxParallel, 1, 10, 3);
 const maxAgents = clampInt(CFG.maxAgents, 1, 2000, 250);
+// The nested fleet's CB3 per-issue implement-phase budget, relayed here by
+// lib/goal-phase0.sh so the PRE-CLAIM projection can be priced against the
+// budget the fleet will actually run with (#590). Phase 0 resolves it through
+// the ordinary --implement-budget / UBERDEV_GOAL_IMPLEMENT_BUDGET /
+// goal.implement_budget chain, defaulting to whatever
+// UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET already says, and the claim relay pins
+// the resolved value back onto the launcher's own command line — so the number
+// projected here and the number the fleet spends are one number, not two.
+// Clamped with the FLEET's triple, but as a BACKSTOP only — and the asymmetry
+// is worth naming rather than papering over. The declared 4..96 range is
+// refined two DIFFERENT ways along this seam: lib/goal-phase0.sh resolves the
+// key through a reader that SUBSTITUTES the default for an out-of-range value,
+// while this line and the fleet CLAMP to the nearest bound. Phase 0 has already
+// normalised whatever reaches CFG, so this clamp can only ever fire on a relay
+// that skipped that normalisation; it is defence in depth, never the thing that
+// makes the projection and the arming agree. Enforcement of the declared range
+// belongs to phase 0's reader, and that is the one to change if the two ends
+// should ever refine alike.
+const implementBudget = clampInt(CFG.implementBudget, 4, 96, 24);
 // The watch stage is bounded by a COUNTER, never by a clock (DR-7). Each tick
 // is one lib/goal-watch.sh invocation, which itself honours the
 // watchPasses/watchBudgetS bound lib/goal-phase0.sh resolved.
@@ -179,6 +198,71 @@ function partialIssuesFromResults(results) {
   return (Array.isArray(results) ? results : [])
     .filter(function (r) { return r && r.chainComplete === false; })
     .map(function (r) { return r.issue; });
+}
+
+// #603 — the fleet's issue->PR record, rendered as `<issue>:<pr>` pairs.
+//
+// WHY IT IS NEEDED AT ALL. lib/goal-state.sh's PR finder falls back to matching
+// a PR's HEAD BRANCH NAME against `<type>/<issue>-`, and that arm has nothing
+// behind it: a PR about an HTTP 500 error page on `fix/500-error-page` satisfies
+// it exactly for issue 500, and `| max` then hands the issue to that PR even
+// with the solver's own lower-numbered PR open beside it. Neither `--json`
+// projection carries an author, and the claim comment records the WORKTREE
+// directory name rather than the head ref, so nothing in the shell lane could
+// corroborate the guess. These pairs are the evidence, and they exist in
+// exactly one place: the fleet's return value, here.
+//
+// DERIVED FROM `results[]`, NOT FILTERED THROUGH `prsOpened`. The two answer
+// different questions — `prsOpened` is "which PRs did this cycle open", this is
+// "which PR belongs to which issue" — and only `results[]` carries the second.
+// Riding `prsOpened` would also make a fleet return that omits it (a shape the
+// #592 ingest below deliberately tolerates) lose corroboration for every issue
+// in the cycle, and losing corroboration means falling back to the guess this
+// exists to replace.
+//
+// COLLISIONS ARE DROPPED, never resolved by picking one. Two records naming the
+// SAME PR number disagree about who owns it, and one issue named twice with
+// different numbers disagrees with itself; corroborating either from a coin
+// flip would bind an issue to a PR nobody opened for it, which is the very
+// defect. Dropping leaves those issues on the head-ref guess — the pre-#603
+// behaviour, and the only degradation direction that is safe here, because a
+// finder that answered "no PR" would fail the issue on the first watch tick.
+//
+// prNumber 0 is the fleet's no-PR sentinel (PUSHED_NO_PR, FAILED, a claim the
+// #515 proof pass DISPROVED and zeroed) and is excluded by the digit test plus
+// the positive check: `0` is digits, so the string filter alone would let it
+// through and corroborate an issue with a number no PR can have.
+function solverPairsFromResults(results) {
+  // Pass 1 — resolve each ISSUE to at most one PR. "" is the conflict marker: an
+  // issue named twice with two different numbers disagrees with itself and gets
+  // no pair at all.
+  const byIssue = {};
+  (Array.isArray(results) ? results : []).forEach(function (r) {
+    if (!r) return;
+    // digitsOnly() is this file's ONE definition of "digit string" — the helper
+    // every other ingest here routes through. It trims each member and drops the
+    // non-digit ones while preserving order, so a two-member result says exactly
+    // what the inline pair of tests said: both halves are digit strings. Only the
+    // positive check stays local, and it is what excludes the `0` no-PR sentinel.
+    const pair = digitsOnly([r.issue, r.prNumber]);
+    if (pair.length !== 2) return;
+    const issue = pair[0];
+    const pr = pair[1];
+    if (Number(issue) <= 0 || Number(pr) <= 0) return;
+    byIssue[issue] = (byIssue[issue] === undefined || byIssue[issue] === pr) ? pr : "";
+  });
+  // Pass 2 — count DISTINCT issues per PR, over the RESOLVED map rather than the
+  // raw records. Counting raw occurrences would let a record repeated verbatim
+  // (same issue, same PR) read as a two-issue collision and drop a pair that is
+  // not in conflict with anything.
+  const issuesPerPr = {};
+  Object.keys(byIssue).forEach(function (i) {
+    if (byIssue[i] === "") return;
+    issuesPerPr[byIssue[i]] = (issuesPerPr[byIssue[i]] || 0) + 1;
+  });
+  return Object.keys(byIssue)
+    .filter(function (i) { return byIssue[i] !== "" && issuesPerPr[byIssue[i]] === 1; })
+    .map(function (i) { return i + ":" + byIssue[i]; });
 }
 
 // The relays return comma-joined scalars (the shell prints one compact JSON
@@ -281,12 +365,15 @@ function claimPrompt(cycleNo) {
     + "launcherRc 0, fleetArgsJson \"\", armed \"\", markRc 0.\n\n"
     + "STEP 2 — arm the solver fleet for exactly the claimed set (substitute <ISSUES> with the SPACE-separated "
     + "issue numbers from `dispatch`):\n\n"
-    + "  " + envPrefix() + "AUTO_MODE=1 " + bashCmd(launcherSh)
+    + "  " + envPrefix() + "AUTO_MODE=1 "
+    + "UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET=" + implementBudget + " " + bashCmd(launcherSh)
     + " --auto-mode=1 --turbo -- <ISSUES> --backend=workflow --force\n\n"
     + "`--backend=workflow` makes the launcher write its manifest and print an args envelope INSTEAD of "
     + "dispatching anything itself. `--force` is required and is not a shortcut: STEP 1 already took the "
     + "`uberdev:active` claim for these issues on this run's behalf, so the launcher's own claim pass would "
-    + "otherwise refuse them as a collision with us.\n\n"
+    + "otherwise refuse them as a collision with us. The UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET pin is the "
+    + "budget lib/goal-phase0.sh resolved for this run: /goal projected its agent ceiling against that number "
+    + "before claiming anything, so the fleet has to be armed with the same one (#590).\n\n"
     + "Record the launcher's exit status as launcherRc. Copy the JSON between the WORKFLOW_ARGS_BEGIN and "
     + "WORKFLOW_ARGS_END markers into fleetArgsJson VERBATIM — one line, byte for byte, no re-indentation, "
     + "no key reordering, nothing added or removed. If the markers are absent, set fleetArgsJson to \"\".\n\n"
@@ -313,12 +400,19 @@ function claimPrompt(cycleNo) {
 // script the filesystem, so it can neither write a file that gate would read
 // nor reach into a running shell. argv is the whole channel.
 //
-// OMITTED, never emitted empty. `--partial-prs=` with no value is a
-// malformed-shape refusal (exit 2) in lib/goal-watch.sh, and both scripts take
-// a startup refusal as a bug in the caller that composed the command line
-// rather than as something to poll through — so an always-on flag would halt
-// every converging run at the first tick. On a clean cycle the two command
-// lines stay byte-identical to what they were before this issue.
+// OMITTED, never emitted empty — and the reason is NOT that an empty value is
+// refused. In the shipped lib/goal-watch.sh the outer shape guard opens with a
+// bare no-op `"") ;;` arm, so an EMPTY value is simply ACCEPTED and the tick
+// runs on; only a NON-EMPTY malformed value reaches the refusal and exits 2.
+// (Measuring the script standalone shows exit 3 for an empty flag, but that is
+// an artifact of the bare shell — an invocation with no flags at all exits 3
+// identically. The 3 is run-state rehydration failing, never the flag. In a
+// driver-composed pass, where run state rehydrates, the empty flag is accepted.)
+// The rule stands on its own terms instead: an empty flag carries no value to
+// act on, so emitting one buys nothing, and omitting it keeps the command line
+// byte-identical to a pre-issue cycle. Both scripts still take a startup
+// refusal as a bug in the caller that composed the command line rather than as
+// something to poll through.
 //
 // Both values are script-derived: they leave the ledger below having passed
 // digitsOnly(), so nothing but digits and commas can reach a command line, and
@@ -333,6 +427,21 @@ function partialPrsFlag() {
 function partialIssuesFlag() {
   return partialIssues.length ? " --partial-issues=" + partialIssues.join(",") : "";
 }
+// #603 — same OMITTED-never-empty discipline as the two above, and on the same
+// true footing: `--solver-prs=` with no value is NOT refused. The guard's empty
+// arm is a bare no-op, so an empty value is ACCEPTED and the tick runs on; only
+// a non-empty malformed value exits 2. (See the note above on why measuring the
+// script standalone shows 3 — that is rehydration, not this flag.) The rule
+// holds because an empty flag carries no pair, so on a cycle with no
+// attributable pair the command line stays byte-identical to what it was before
+// this issue. A startup refusal is still a bug in the caller that composed the
+// command line rather than something to poll through.
+// Every member left this ledger having passed the digit test in
+// solverPairsFromResults, so nothing but digits, colons and commas can reach a
+// command line — and lib/goal-watch.sh re-refuses the shape at its own edge.
+function solverPrsFlag() {
+  return solverPrs.length ? " --solver-prs=" + solverPrs.join(",") : "";
+}
 
 function watchPrompt(cycleNo, tickNo) {
   // UBERDEV_GOAL_SOLVERS_SETTLED=1 is load-bearing, not decoration. The
@@ -345,7 +454,7 @@ function watchPrompt(cycleNo, tickNo) {
     + (watchBudgetS > 0 ? watchBudgetS : 480) + " seconds, which is far longer than the tool's default "
     + "timeout, and a timed-out call returns no exit status at all:\n\n"
     + "  " + envPrefix() + "UBERDEV_GOAL_SOLVERS_SETTLED=1 " + bashCmd(watchSh) + " --goal-id=" + goalId
-    + partialPrsFlag() + "\n\n"
+    + partialPrsFlag() + solverPrsFlag() + "\n\n"
     + "This is the /uberdev:goal watch pass (cycle " + cycleNo + ", tick " + tickNo + " of at most "
     + maxWatchTicks + "). It polls GitHub, drives the PR state machine and the merge barrier, and exits "
     + "with ONE of three documented codes:\n"
@@ -449,6 +558,14 @@ const auditEvents = [];
 // digit STRINGS (digitsOnly's output), deduped, in first-seen order.
 const partialIssues = [];
 const partialPrs = [];
+// #603 — the issue->PR corroboration ledger, `<issue>:<pr>` strings in
+// first-seen order. Run-lifetime for the same reason its neighbours are: the
+// pass that finally resolves a cycle-1 PR can be three cycles later, and a set
+// that reset with the cycle would leave that pass back on the head-ref guess.
+// First record for an issue wins — a later cycle re-solving the same issue is
+// not a correction of the earlier one, and overwriting would retro-attribute a
+// PR that is already registered and under review.
+const solverPrs = [];
 const nullsByPhase = {};
 let verdictRows = [];
 let cb1Tripped = false;                    // projected-agent ceiling
@@ -487,6 +604,7 @@ function finalize() {
     queueRemaining: queue.slice().map(Number),
     partialIssues: partialIssues.map(Number),
     partialPrs: partialPrs.map(Number),
+    solverPrs: solverPrs.slice(),
     fleetRuns: fleetRuns,
     agentsSpent: agentsSpent,
     cycles: cycleRecords,
@@ -516,65 +634,94 @@ function budgetExhausted() {
   return budget && budget.total && budget.remaining() <= 0;
 }
 
-// Projected agents for ONE cycle: the claim relay, up to maxWatchTicks watch
-// relays, the collect relay, the verdict relay — plus what the nested fleet
-// will spend per issue: its own intake relay, its PR-claim verification relay
-// (#515), the nine research/design agents a medium-tier issue costs, and up to
-// IMPLEMENT_AGENT_BUDGET implement-phase agents for the fleet's per-task
-// implementer -> reviewer -> fix chain (#508). Both fleet relays are BATCHED —
-// one each per fleet run, not per issue — so they are a flat +2, not part of
-// the per-issue term.
+// What ONE issue costs inside a nested fleet run, priced against a BUDGET
+// rather than against a source of one. This is the ONLY copy of that
+// arithmetic in this file, and it has two callers that read the budget from
+// two different places at two different moments — the pre-claim projection
+// from /goal's own relayed config, the spend accumulator from the fleet
+// envelope the claim relay hands back. Both need the same number; a second
+// typed copy is the #370 "one contract, N uncompared copies" shape, and this
+// file shipped exactly that (a literal in the projection, a derivation in the
+// accumulator) until #590.
 //
-// 24 IS A DEFAULT, NOT A CONSTANT, AND THIS PROJECTION TRACKS THE DEFAULT ONLY.
-// The fleet declares IMPLEMENT_AGENT_BUDGET as clampInt(CFG.implementBudget, 4,
-// 96, 24) and lib/solve-launcher.sh plumbs UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET
-// into the envelope this script relays verbatim, so an operator can move it
-// anywhere in 4..96. The fleet scales its OWN pre-dispatch ceiling by the
-// effective value; the per-issue term below is the arithmetic at the default and
-// does not. A raised budget therefore under-projects here — CB1 stops being the
-// breaker that binds, and the run dies against the runtime's own lifetime cap
-// with no named halt event instead. Read every number below as "at the default".
+// The term is the fleet's per-design-issue cost: the issue's OWN SOLVER, the nine
+// research/design agents a medium-tier issue costs, and up to
+// IMPLEMENT_AGENT_BUDGET implement-phase agents for the per-task
+// implementer -> reviewer -> fix chain (#508). The fleet writes it as
+// `designCount * (9 + IMPLEMENT_AGENT_BUDGET - 1)` and counts the issue's own
+// solver separately in `intakeIssues.length`; folded together that is
+// `9 + budget` per issue, which is why there is no `- 1` here.
 //
-// Consequence, stated out loud rather than buried in the arithmetic: at 33
-// agents per design-tier issue it is maxAgents that binds first, not the
-// runtime's own 1000-agent lifetime cap. CB1 halts once agentsSpent plus this
-// projection exceeds maxAgents, whose launcher default is 900
-// (lib/goal-phase0.sh), so a /goal run stops at roughly 26 design-tier issues
-// — sooner once the per-cycle relay overhead above is counted. That default
-// sits just under the runtime cap deliberately, so a long run ends on a named
-// CB1 audit event instead of dying against the runtime limit; only an operator
-// who raises maxAgents above 1000 (the clamp permits up to 2000), or who raises
-// the implement budget above its default, makes the runtime cap the binding one.
-// That is the honest price of a review gate per task; intra-issue agents queue
-// rather than accelerate on a busy host.
-function projectedAgentsForCycle(issueCount) {
+// The clamp bounds and default are the FLEET's — clampInt(CFG.implementBudget,
+// 4, 96, 24) at skills/solve-fleet/workflow.js — deliberately duplicated rather
+// than guessed, and tests/solve-fleet-workflow.test.sh G16 reads them back out
+// of the fleet constant and reds if the two drift. Clamping matters in both
+// directions: a relayed budget the fleet would refuse must be priced as the
+// fleet would RUN it, or reading the key merely swaps an under-count for an
+// over-count.
+function perIssueCostAtBudget(budget) {
   // SHARED COST: solve-fleet-per-issue-agent-cost
-  return 3 + maxWatchTicks + 2 + (issueCount * 33);
+  return 9 + clampInt(budget, 4, 96, 24);
 }
 
-// What ONE issue costs INSIDE a nested fleet run, measured against the budget
-// that fleet will actually run with rather than against the default.
+// What the fleet spends per RUN rather than per issue: its batched intake relay
+// and its batched PR-claim verification relay (#515), plus the run-shared repo
+// profile (#615 A) — one agent that derives the repo-invariant half of the
+// research lenses once, dispatched only when the run has a design-tier issue to
+// feed it. `skills/solve-fleet/workflow.js` charges it as
+// `repoProfileAgents = designCount > 0 ? 1 : 0` and really dispatches it; this
+// side has no manifest and so no tier breakdown, and prices every claimed issue
+// as design-tier, which makes `issueCount > 0` the same gate. Charging it flat
+// is why both callers below take their run-level term from here: a ceiling that
+// under-projects is not a ceiling, and a ledger that under-counts hands CB1 a
+// comparison it cannot make.
+function fleetRunCost(issueCount) {
+  return 2 + (issueCount > 0 ? 1 : 0);
+}
+
+// Projected agents for ONE cycle: the claim relay, up to maxWatchTicks watch
+// relays, the collect relay and the verdict relay, plus the whole nested fleet
+// run — its run-level term and its per-issue term.
 //
-// The projection above cannot do this — it is computed BEFORE the claim pass, so
-// no envelope exists yet and the default is the only honest number. The SPEND
-// accumulator can: by then the relayed envelope is parsed and carries the
-// operator's effective `implementBudget`. Reading it matters because the fleet
-// declares IMPLEMENT_AGENT_BUDGET as clampInt(CFG.implementBudget, 4, 96, 24)
-// and lib/solve-launcher.sh plumbs UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET into the
-// envelope this script relays verbatim, so a literal 33 understates a maxed-out
-// budget more than threefold. An accumulator that reads low is worse than no
-// accumulator at all: CB1 is the only NAMED halt, so it never fires and the run
-// dies against the runtime's own lifetime cap with no halt reason, no audit row
-// and no cycle record explaining the stop.
+// THE BUDGET IS AN INPUT, NOT A CONSTANT. The fleet declares
+// IMPLEMENT_AGENT_BUDGET as clampInt(CFG.implementBudget, 4, 96, 24), so an
+// operator can move the per-issue cost anywhere between base+4 and base+96 —
+// better than threefold at the top of the range. This projection used to freeze
+// the arithmetic at the default, which is the one number at which a literal and
+// a derivation agree, so a raised budget under-projected here by up to 72
+// agents per issue: CB1 stopped being the breaker that bound, and the run died
+// against the runtime's own lifetime cap with no named halt event (#590). It is
+// derived now, from the `implementBudget` key lib/goal-phase0.sh publishes in
+// /goal's args envelope and the claim relay pins back onto the launcher command
+// line, so the number projected here IS the number the fleet runs with.
 //
-// The clamp bounds and default are the fleet's, deliberately duplicated rather
-// than guessed — tests/solve-fleet-workflow.test.sh G16 reads them back out of
-// the fleet constant and reds if the two drift.
+// Consequence, stated out loud rather than buried in the arithmetic: at the
+// default budget a design-tier issue costs 33 agents, and it is maxAgents that
+// binds first, not the runtime's own 1000-agent lifetime cap. CB1 halts once
+// agentsSpent plus this projection exceeds maxAgents, whose launcher default is
+// 900 (lib/goal-phase0.sh), so a /goal run stops at roughly 26 design-tier
+// issues — sooner once the per-cycle relay overhead above is counted. That
+// default sits just under the runtime cap deliberately, so a long run ends on a
+// named CB1 audit event instead of dying against the runtime limit. Raising the
+// implement budget now moves this projection with it, so what makes the runtime
+// cap binding again is raising maxAgents above 1000 (the clamp permits up to
+// 2000) — and nothing else. That is the honest price of a review gate per task;
+// intra-issue agents queue rather than accelerate on a busy host.
+function projectedAgentsForCycle(issueCount) {
+  return 3 + maxWatchTicks + fleetRunCost(issueCount)
+    + (issueCount * perIssueCostAtBudget(implementBudget));
+}
+
+// The per-issue term for a fleet run whose ENVELOPE is already in hand. Same
+// arithmetic as the projection, different source: by the time the accumulator
+// runs, the claim relay has handed back the launcher's own envelope and it
+// carries the effective `implementBudget` verbatim. Read it rather than
+// re-reading /goal's config, so a launcher that resolved a different value than
+// Phase 0 published is charged as what it actually armed.
 function perIssueFleetCost(fleetArgs) {
   const cfg = (fleetArgs && typeof fleetArgs === "object" && fleetArgs.config
     && typeof fleetArgs.config === "object") ? fleetArgs.config : {};
-  // SHARED COST: solve-fleet-per-issue-agent-cost
-  return 9 + clampInt(cfg.implementBudget, 4, 96, 24);
+  return perIssueCostAtBudget(cfg.implementBudget);
 }
 
 // The fleet args envelope arrives as an agent-returned STRING. It is the only
@@ -721,11 +868,15 @@ async function runCycle() {
             : "The claimed issues are marked `solving` with no solver behind them; the watch pass below "
               + "runs with the settled-fleet marker, so it fails them and releases their claims this cycle."));
     } else {
-      // The fleet's two batched relays (intake + PR-claim verification, #515)
-      // plus its per-issue solver/design/implement-chain agents, priced off the
-      // budget in the envelope we are about to hand it. Computed BEFORE the call
-      // so the throw arm can charge the same number the clean arm charges.
-      const fleetCost = 2 + (rec.claimed.length * perIssueFleetCost(fleetArgs));
+      // The fleet's run-level term — its two batched relays (intake + PR-claim
+      // verification, #515) and the run-shared repo profile (#615 A) — plus its
+      // per-issue solver/design/implement-chain agents, priced off the budget in
+      // the envelope we are about to hand it. Both terms come from the same two
+      // helpers the projection uses, so the ceiling and the ledger cannot answer
+      // differently. Computed BEFORE the call so the throw arm can charge the
+      // same number the clean arm charges.
+      const fleetCost = fleetRunCost(rec.claimed.length)
+        + (rec.claimed.length * perIssueFleetCost(fleetArgs));
       // THE one nested call. One per cycle, for the whole cycle. See the header:
       // a nested call per issue would spend the single nesting level on the
       // wrong thing and the fleet's own agents could not run.
@@ -776,6 +927,44 @@ async function runCycle() {
           cyclePrs.forEach(function (s) { if (partialPrs.indexOf(s) < 0) partialPrs.push(s); });
           rec.partialIssues = cycleIssues.map(Number);
           rec.partialPrs = cyclePrs.map(Number);
+          // #603 — the corroboration ingest. A SIBLING of the partial ingest,
+          // not a clause of it: the pairs must be published on a cycle whose
+          // every chain ran to completion, which is precisely the cycle the
+          // partial ledger stays empty for.
+          const cyclePairs = solverPairsFromResults(out.results);
+          cyclePairs.forEach(function (s) {
+            // FIRST RECORD WINS — and BOTH halves of the relation are enforced.
+            // solverPairsFromResults establishes one-PR-per-issue AND
+            // one-issue-per-PR, but only within a single fleet return. Scanning
+            // the issue half alone silently loses the second rule the moment the
+            // accumulator spans cycles: cycle 1's `11:901` and cycle 2's `12:901`
+            // would BOTH survive, both ride the watch flag into the shell ledger,
+            // and lib/goal-state.sh would corroborate ONE PR onto TWO issues —
+            // ranked ABOVE the head-ref guess, which is the exact mis-attribution
+            // this ledger exists to remove.
+            //
+            // ASYMMETRIC WITH THE PER-CYCLE RULE, deliberately. Inside one return
+            // a PR collision drops BOTH pairs: neither has been published and
+            // there is nothing to prefer between them. Across cycles the earlier
+            // pair has already reached a watch relay and cannot be recalled, so
+            // refusing the newcomer is the only rule that is actually reachable
+            // here — and it degrades that issue to the head-ref guess, which is
+            // the safe direction (a finder answering "no PR" fails the issue on
+            // the first tick).
+            //
+            // Both halves are split once here rather than once per element.
+            const half = s.split(":");
+            const issueHalf = half[0];
+            const prHalf = half[1];
+            const collides = solverPrs.some(function (k) {
+              const q = k.split(":");
+              return q[0] === issueHalf || q[1] === prHalf;
+            });
+            if (!collides) {
+              solverPrs.push(s);
+            }
+          });
+          rec.solverPrs = cyclePairs.slice();
         }
       } catch (e) {
         rec.fleet = "threw";

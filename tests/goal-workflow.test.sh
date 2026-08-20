@@ -529,10 +529,16 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   // per-issue cost and so could not tell the arithmetic from the breaker. The
   // ceiling is pinned to the exact projection instead:
   //   projectedAgentsForCycle(min(queue=2, maxParallel=3))
-  //     = 3 (claim/collect/verdict relays) + maxWatchTicks(40) + 2 + 2 * 33
-  //     = 111,   where 33 = the fleet 9 design agents + IMPLEMENT_AGENT_BUDGET(24)
-  // so 110 must trip and 111 must not. Change the per-issue cost without
+  //     = 3 (claim/collect/verdict relays) + maxWatchTicks(40) + 2 + 1 + 2 * 33
+  //     = 112,   where 33 = the fleet 9 design agents + IMPLEMENT_AGENT_BUDGET(24)
+  // so 111 must trip and 112 must not. Change the per-issue cost without
   // changing this number and B52/B52b go red, which is the point.
+  //
+  // The lone +1 is the fleet's run-shared repo profile (#615 A) — one agent per
+  // fleet run that has any design-tier issue, which this side prices as any
+  // claimed issue at all because it has no manifest and so no tier breakdown.
+  // /goal charged a flat 2 for the fleet's run-level term and never counted it,
+  // under-projecting AND under-charging by exactly one agent every cycle (#590).
   //
   // 9, not 6, since #524: the design chain gained a BOUNDED spec-revision round
   // (item 1), a plan REVIEW gate (item 2) and a risk-gated security research
@@ -549,7 +555,7 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   // The flat term is 2, not 1 (#515): the fleet spends a batched PR-claim
   // verification relay alongside its intake relay, once per fleet run rather
   // than per issue.
-  const CYCLE_PROJECTION = 3 + 40 + 2 + (2 * 33);   // 111
+  const CYCLE_PROJECTION = 3 + 40 + 2 + 1 + (2 * 33);   // 112
   const recM = await run(buildArgs({ maxAgents: CYCLE_PROJECTION - 1 }), { agentReturns: {
     "goal-claim:c1": claim(),
     "goal-watch:c1:t1": { rc: 0, note: "drained" },
@@ -713,10 +719,10 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   // next reader trusts the message instead of re-deriving it.
   //
   // Default fixture: 2 queued issues, maxParallel 3, maxWatchTicks 40, so the
-  // projection is CYCLE_PROJECTION (111) and the pre-#515 one is 110. At a
-  // ceiling of 110, the current formula trips (111 > 110) and a formula whose
-  // flat term is reverted to 1 does not (110 > 110 is false), which is exactly
-  // the term this row exists to protect.
+  // projection is CYCLE_PROJECTION (112) and the pre-#515 one is 111. At a
+  // ceiling of 111, the current formula trips (112 > 111) and a formula whose
+  // batched-relay term is reverted to 1 does not (111 > 111 is false), which is
+  // exactly the term this row exists to protect.
   const recS = await run(buildArgs({ maxAgents: CYCLE_PROJECTION - 1 }), { agentReturns: {
     "goal-claim:c1": claim(),
     "goal-watch:c1:t1": { rc: 0, note: "drained" },
@@ -815,6 +821,14 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   out.t2CollectFlag = promptFor(recT2, "goal-collect:c1").indexOf(" --partial-issues=11") >= 0;
   // The clean-path PR set is untouched by the partial ingest.
   out.t2PrsOpened = (resT2 && resT2.cycles.length) ? resT2.cycles[0].prsOpened : null;
+  // #603 — the SAME argv channel carries the corroboration pairs. The fleet is
+  // the only party that knows which PR it opened for which issue; without the
+  // pairs the shell finder picks a PR for an issue on branch NAME alone and a
+  // stranger's `fix/500-error-page` binds to issue 500. Read off the rendered
+  // command line, because no grep over either file can assert what the driver
+  // actually composed.
+  out.t2SolverFlag = promptFor(recT2, "goal-watch:c1:t1").indexOf(" --solver-prs=11:901,12:902") >= 0;
+  out.t2SolverLedger = resT2 ? (resT2.solverPrs || []).join("|") : null;
 
   // Run T3 — the negative control. Every relay command line stays
   // byte-identical to today's on a clean cycle: the flag is OMITTED, never
@@ -835,6 +849,10 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   out.t3Issues = resT3 ? resT3.partialIssues : null;
   out.t3Clean = promptFor(recT3, "goal-watch:c1:t1").indexOf("--partial-prs=") < 0
     && promptFor(recT3, "goal-collect:c1").indexOf("--partial-issues=") < 0;
+  // #603 — the corroboration flag is NOT conditional on partialness: a clean
+  // cycle is exactly the cycle whose PRs the finder must still attribute
+  // correctly, so it rides every command line that has pairs to carry.
+  out.t3SolverFlag = promptFor(recT3, "goal-watch:c1:t1").indexOf(" --solver-prs=11:901,12:902") >= 0;
 
   // Run T4 — three shapes at once, and the row cannot pass by rejecting
   // everything: the two records with NO `chainComplete` key are not counted
@@ -860,6 +878,58 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   out.t4Issues = resT4 ? resT4.partialIssues : null;
   out.t4Prs = resT4 ? resT4.partialPrs : null;
   out.t4CollectFlag = promptFor(recT4, "goal-collect:c1").indexOf(" --partial-issues=13,14") >= 0;
+  // #603 — the shapes that must NOT reach the ledger, all in one return: a
+  // FAILED record with no PR at all, and a PUSHED_NO_PR record whose prNumber
+  // is the 0 sentinel. Pairing issue 13 with PR 0 would corroborate every
+  // lookup for issue 13 with a number no PR can ever have, and the finder would
+  // then answer "no PR" for an issue whose solver may yet be found by the
+  // guess — the over-tightening that turns a wrong-PR bug into a run halt.
+  out.t4SolverFlag = promptFor(recT4, "goal-watch:c1:t1").indexOf(" --solver-prs=12:902,14:903") >= 0;
+
+  // Run T4b — #603 the two COLLISION branches, and the near-miss that must not
+  // be read as one. Every other fleet-return fixture in this file is one-to-one,
+  // so both drop rules ran on nothing: they could be inverted, or deleted
+  // outright, and T2/T3/T4 would all stay green. The consequence of a regression
+  // is not a lost pair but a WRONG one — a corroborated pair OUTRANKS the
+  // head-ref guess in lib/goal-state.sh, so a bad pair binds an issue to a PR
+  // nobody opened for it with MORE authority than the guess #603 exists to
+  // replace. Three shapes in one return, because the two rules interact through
+  // the resolved map and asserting them apart would not catch that:
+  //
+  //   21 -> 801 then 21 -> 802   one issue disagreeing with ITSELF (pass 1's ""
+  //                              conflict marker). No pair for 21.
+  //   22 -> 803 and 23 -> 803    two issues claiming ONE PR (pass 2's per-PR
+  //                              distinct-issue count). No pair for either.
+  //   24 -> 804 twice, verbatim  NOT a collision — the same record seen twice
+  //                              agrees with itself. Exactly one pair, 24:804.
+  //
+  // The third is the reason pass 2 counts over the RESOLVED map rather than the
+  // raw records: a verbatim repeat would read as a two-issue collision under a
+  // naive occurrence count and silently drop a pair in conflict with nothing.
+  const recT4b = await run(buildArgs(), {
+    agentReturns: partialReturns(),
+    workflowReturns: fleetReturn({
+      prsOpened: [801, 802, 803, 804],
+      results: [
+        { issue: 21, status: "PR_OPENED", prNumber: 801, prProof: "CONFIRMED", chainComplete: true },
+        { issue: 21, status: "PR_OPENED", prNumber: 802, prProof: "CONFIRMED", chainComplete: true },
+        { issue: 22, status: "PR_OPENED", prNumber: 803, prProof: "CONFIRMED", chainComplete: true },
+        { issue: 23, status: "PR_OPENED", prNumber: 803, prProof: "CONFIRMED", chainComplete: true },
+        { issue: 24, status: "PR_OPENED", prNumber: 804, prProof: "CONFIRMED", chainComplete: true },
+        { issue: 24, status: "PR_OPENED", prNumber: 804, prProof: "CONFIRMED", chainComplete: true },
+      ],
+    }),
+  });
+  const resT4b = resultOf(recT4b);
+  // Read the LEDGER, not just the flag: the flag proves what reached argv, the
+  // ledger proves the set itself, and a rule that dropped everything would
+  // satisfy an "absence" assertion on the two collisions while failing the run.
+  out.t4bSolverLedger = resT4b ? (resT4b.solverPrs || []).join("|") : null;
+  out.t4bSolverFlag = promptFor(recT4b, "goal-watch:c1:t1").indexOf(" --solver-prs=24:804") >= 0;
+  // The survivor is the ONLY member — spelled as its own assertion so a future
+  // widening that let a collided pair through reds here rather than passing a
+  // substring test that only ever looked for 24:804.
+  out.t4bNoCollided = out.t4bSolverLedger === "24:804";
 
   // Run T5 — halt legibility. lib/goal-phase3.sh's partial-chain refusal reuses
   // the closed-set breaker reason `solver_failed` with `phase=partial_chain` as
@@ -939,6 +1009,55 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   out.t8Cycle2Carried = promptFor(recT8, "goal-watch:c2:t1").indexOf(" --partial-prs=901") >= 0
     && promptFor(recT8, "goal-collect:c2").indexOf(" --partial-issues=11") >= 0;
 
+  // Run T8b — #603 the one-issue-per-PR rule at RUN-LIFETIME scope, which is the
+  // scope the data actually lives at. solverPairsFromResults enforces both halves
+  // of the relation, but only inside ONE fleet return; the accumulator spans
+  // cycles, so a per-cycle-only check loses the second half exactly where two
+  // cycles can disagree. Cycle 1 reports 11:901 and cycle 2 reports 12:901 — a
+  // DIFFERENT issue naming the SAME PR. Both are individually well-formed and
+  // each passes its own cycle's collision pass alone, so nothing below the
+  // accumulator can catch this.
+  //
+  // Left unguarded, both pairs ride the cycle-2 watch flag into the shell ledger
+  // and lib/goal-state.sh corroborates PR 901 onto issues 11 AND 12, ranking that
+  // above the head-ref guess — the mis-attribution #603 exists to remove, now
+  // carrying MORE authority than the guess it replaced.
+  let t8bFleetCalls = 0;
+  const T8B_FLEET = {};
+  T8B_FLEET[FLEET_PATH] = function () {
+    t8bFleetCalls += 1;
+    return (t8bFleetCalls === 1)
+      ? { prsOpened: [901], prsPartial: [],
+          results: [{ issue: 11, status: "PR_OPENED", prNumber: 901, prProof: "CONFIRMED",
+            chainComplete: true }] }
+      : { prsOpened: [901], prsPartial: [],
+          results: [{ issue: 12, status: "PR_OPENED", prNumber: 901, prProof: "CONFIRMED",
+            chainComplete: true }] };
+  };
+  const recT8b = await run(buildArgs(), {
+    agentReturns: {
+      "goal-claim:c1": claim(),
+      "goal-watch:c1:t1": { rc: 0, note: "drained" },
+      "goal-verdicts:c1": VERDICTS,
+      "goal-collect:c1": collect({ rc: 42, decision: "loop", candidates: 1, queued: 1, queue: "12" }),
+      "goal-claim:c2": claim({ dispatch: "12", armed: "12" }),
+      "goal-watch:c2:t1": { rc: 0, note: "drained" },
+      "goal-verdicts:c2": VERDICTS,
+      "goal-collect:c2": collect(),
+    },
+    workflowReturns: T8B_FLEET,
+  });
+  const resT8b = resultOf(recT8b);
+  // The run-lifetime ledger keeps the FIRST claimant and nothing else. Asserted as
+  // the whole joined value, not a substring: "11:901" is a prefix of any longer
+  // list, so a containment test would pass with the collided pair sitting beside it.
+  out.t8bLedger = resT8b ? (resT8b.solverPrs || []).join("|") : null;
+  // ...and the cycle-2 command line carries only that pair — the ledger is the
+  // model, argv is what the shell finder actually reads, and a rule that fixed one
+  // without the other would still mis-attribute.
+  out.t8bCycle2Flag = promptFor(recT8b, "goal-watch:c2:t1").indexOf(" --solver-prs=11:901") >= 0
+    && promptFor(recT8b, "goal-watch:c2:t1").indexOf("12:901") < 0;
+
   // Runs U/V (#564) — the per-cycle SPEND accumulator, observed as a VALUE.
   //
   // Every run above asserts what the driver DID. None asserted what it CHARGED:
@@ -989,9 +1108,19 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   function perIssueCost(budget) { return FLEET_DESIGN_AGENTS + budget; }
   const GOAL_PER_ISSUE_DEFAULT = perIssueCost(BUDGET_DEFAULT);  // the default arm: base + 24
   const FLEET_BATCHED_RELAYS = 2;
+  // The fleet's THIRD run-level agent: the run-shared repo profile (#615 A),
+  // dispatched once whenever the run has a design-tier issue to feed it. /goal
+  // has no manifest at either cost site, so it prices every claimed issue as
+  // design-tier and the gate reduces to "the cycle claimed anything". It was
+  // uncounted on both sides until #590 — `grep -n repoProfile` over the goal
+  // driver returned nothing at all — so every cycle with work in it was charged
+  // and projected exactly one agent short.
+  const FLEET_REPO_PROFILE = 1;
   const CYCLE_RELAYS = 4;
   const SPEND_CLAIMED = 2;                // the default fixture claims 11,12
-  function fleetCost(issues, perIssue) { return FLEET_BATCHED_RELAYS + (issues * perIssue); }
+  function fleetCost(issues, perIssue) {
+    return FLEET_BATCHED_RELAYS + (issues > 0 ? FLEET_REPO_PROFILE : 0) + (issues * perIssue);
+  }
   function cycleTotal(issues, perIssue) { return CYCLE_RELAYS + fleetCost(issues, perIssue); }
   const THROW_MSG = "runtime refused further agents";
   const THROWING_FLEET = {};
@@ -1017,7 +1146,8 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   // Only the TOTAL is pinned here. At the default budget the per-issue term the
   // driver derives from the relayed envelope and a hardcoded literal are the
   // same number, so this row cannot tell them apart — separating them needs a
-  // run whose envelope carries a raised implementBudget, which is its own row.
+  // run whose envelope carries a raised implementBudget (runs W/X for the
+  // accumulator, runs Z for the projection).
   const recU = await run(buildArgs(), { agentReturns: spendReturns() });
   const resU = resultOf(recU);
   out.uSpend = spendMatch(resU ? resU.agentsSpent : null,
@@ -1101,6 +1231,87 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   out.xUnreadable = await spendAtBudget({ implementBudget: "abc" }, GOAL_PER_ISSUE_DEFAULT);
   out.xAbsent = await spendAtBudget(undefined, GOAL_PER_ISSUE_DEFAULT);
 
+  // Runs Z (#590) — the PRE-CLAIM PROJECTION prices the same budget.
+  //
+  // Runs W/X above prove the SPEND term derives from the relayed envelope.
+  // The projection is a DIFFERENT surface with a different input: it runs
+  // BEFORE the claim pass, so no fleet envelope exists yet and the only budget
+  // in scope is the one lib/goal-phase0.sh published in /goal's OWN args
+  // envelope. That surface carried a frozen literal, and nothing in this repo
+  // could tell the two apart — every projection row above (M/M2/S) runs at the
+  // fleet default, where a literal and a derivation are the same number.
+  //
+  // At the clamp ceiling one design-tier issue costs base+96, not base+24, so a
+  // frozen literal under-projects a two-issue cycle by 144 agents. CB1 is the
+  // only NAMED halt: under-project and it stops binding at all, and the run
+  // dies against the runtime's own lifetime cap with no halt event.
+  //
+  // Each probe BRACKETS the breaker instead of asserting a boolean: one agent
+  // below the expected projection must trip, and exactly AT it must not. A row
+  // that only asserted the trip would pass on a projection that grew for any
+  // reason whatsoever, an over-projection included.
+  const PROJ_CYCLE_RELAYS = 3;      // the claim, verdict and collect relays
+  const PROJ_WATCH_TICKS = 40;      // this fixture's maxWatchTicks bound
+  const PROJ_REPO_PROFILE = 1;      // the fleet's run-shared repo profile (#615 A)
+  function projectionFor(issues, perIssue) {
+    return PROJ_CYCLE_RELAYS + PROJ_WATCH_TICKS + FLEET_BATCHED_RELAYS
+      + (issues > 0 ? PROJ_REPO_PROFILE : 0) + (issues * perIssue);
+  }
+  // `budget === undefined` relays NO implementBudget key at all, which is the
+  // shape every pre-#590 envelope has and must still price at the fleet default.
+  async function projectionAt(budget, expected) {
+    const cfg = (budget === undefined) ? {} : { implementBudget: budget };
+    const below = await run(buildArgs(Object.assign({}, cfg, { maxAgents: expected - 1 })),
+      { agentReturns: { "goal-claim:c1": claim(), "goal-watch:c1:t1": { rc: 0, note: "drained" } } });
+    const at = await run(buildArgs(Object.assign({}, cfg, { maxAgents: expected })),
+      { agentReturns: spendReturns() });
+    const rBelow = resultOf(below);
+    const rAt = resultOf(at);
+    if (!rBelow || !rAt) return "no result";
+    if (rBelow.cb1Tripped !== true) return "no trip at " + (expected - 1) + " — the projection is under " + expected;
+    if (rAt.cb1Tripped === true) return "tripped at " + expected + " — the projection is over it";
+    return "ok";
+  }
+
+  // Run Z — an operator who raised the budget to the top of the supported range.
+  out.zRaised = await projectionAt(BUDGET_CEILING,
+    projectionFor(SPEND_CLAIMED, perIssueCost(BUDGET_CEILING)));
+
+  // Run Z2 — THE DISCRIMINATOR, and the row this issue exists for. The ceiling
+  // is set to exactly what the projection would be at the DEFAULT budget, so a
+  // frozen literal lands one agent short of its own ceiling and never trips,
+  // while a derived projection has already blown past it. No other row in this
+  // file separates the two: they agree on every value except this one.
+  out.zRaisedBeatsDefault = await (async function () {
+    const rec = await run(buildArgs({ implementBudget: BUDGET_CEILING,
+      maxAgents: projectionFor(SPEND_CLAIMED, GOAL_PER_ISSUE_DEFAULT) }),
+      { agentReturns: { "goal-claim:c1": claim(), "goal-watch:c1:t1": { rc: 0, note: "drained" } } });
+    const res = resultOf(rec);
+    if (!res) return "no result";
+    if (res.cb1Tripped !== true) return "a raised budget projected no higher than the default";
+    // ...and the guarantee CB1 exists for still holds: nothing is claimed and
+    // then stranded by the halt.
+    if (labels(rec).some(function (l) { return /^goal-claim/.test(l || ""); })) return "claimed anyway";
+    return "ok";
+  })();
+
+  // Runs Z3 — the clamp is the FLEET's, applied identically on this side.
+  // Relaying a budget the fleet would refuse must project what the fleet would
+  // actually RUN with, in both directions; reading the key without clamping it
+  // would only trade an under-projection for an over-projection, and an early
+  // CB1 halt strands a queue just as surely as a late one never fires.
+  out.zFloor = await projectionAt(BUDGET_FLOOR - 1,
+    projectionFor(SPEND_CLAIMED, perIssueCost(BUDGET_FLOOR)));
+  out.zCeiling = await projectionAt(BUDGET_CEILING + 1,
+    projectionFor(SPEND_CLAIMED, perIssueCost(BUDGET_CEILING)));
+  // A value that cannot be read as a number is not a budget of zero, and an
+  // envelope with no key at all is the pre-#590 shape: both fall to the fleet
+  // default, exactly as the spend accumulator's X rows require.
+  out.zUnreadable = await projectionAt("abc",
+    projectionFor(SPEND_CLAIMED, GOAL_PER_ISSUE_DEFAULT));
+  out.zAbsent = await projectionAt(undefined,
+    projectionFor(SPEND_CLAIMED, GOAL_PER_ISSUE_DEFAULT));
+
   // Runs Y (#564) — CB1 halts a LATER cycle because an EARLIER one was charged.
   //
   // Runs M/M2/S all trip CB1 on cycle 1, where agentsSpent is still zero. They
@@ -1123,16 +1334,17 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   const CYCLE1_TOTAL = cycleTotal(SPEND_CLAIMED, GOAL_PER_ISSUE_DEFAULT);
   // READ-ONLY MIRROR of projectedAgentsForCycle for the ONE issue cycle 2
   // claims: the three per-cycle relays it counts, the maxWatchTicks bound this
-  // fixture runs at, the two batched fleet relays, and the per-issue term. Runs
-  // M/M2/S own that surface; CYCLE_PROJECTION above stays untouched.
+  // fixture runs at, the two batched fleet relays, the run-shared repo profile,
+  // and the per-issue term. Runs M/M2/S own that surface; CYCLE_PROJECTION
+  // above stays untouched.
   //
-  // That per-issue term is a flat LITERAL in the projection — it does NOT track
-  // the relayed budget the spend term derives, which the workflow header states
-  // outright and which is tracked as its own gap. At the fleet default the two
-  // are the same number, so the named default is reused here rather than typed
-  // a fourth time; if the fleet default ever moves, the projection stops
-  // following it and this row reds naming which half moved.
-  const CYCLE2_PROJECTION = 3 + 40 + 2 + (1 * GOAL_PER_ISSUE_DEFAULT);
+  // Since #590 the per-issue term is DERIVED on the projection side too, from
+  // the implementBudget key lib/goal-phase0.sh publishes in /goal's own args
+  // envelope — it is no longer a literal frozen at the fleet default, and runs
+  // Z below are what separate the two. This run relays no budget anywhere, so
+  // the named default is the right expectation here and is reused rather than
+  // typed a fourth time.
+  const CYCLE2_PROJECTION = 3 + 40 + 2 + 1 + (1 * GOAL_PER_ISSUE_DEFAULT);
   function twoCycleReturns() {
     return {
       "goal-claim:c1": claim(),
@@ -1337,6 +1549,15 @@ else
   check t2Prs '[901]'                     "B98b the run ledger names its PR, taken from the fleet's own prsPartial subset rather than re-derived: two records claiming ONE number disagreeing about completeness is a collision prsOpened has already settled, and a second derivation here would answer it differently with nothing to compare against"
   check t2CycleIssues '[11]'              "B98c the cycle record carries the cycle's own partial set"
   check t2PrsOpened '[901,902]'           "B98d the ingested PR set is unchanged by the partial ingest — both PRs still merge (#554's non-closing trailer is what keeps the unfinished issue open, not a withheld merge)"
+  check t2SolverFlag true                 "B99a #603 the watch relay's COMMAND LINE carries --solver-prs=11:901,12:902 — the fleet's own issue->PR record, and the only thing that can tell the shell finder which PR belongs to issue N when a same-numbered stranger branch is open"
+  check t2SolverLedger '"11:901|12:902"'  "B99b #603 the pairs are a run-lifetime ledger, not a per-cycle scalar: a cycle-1 PR must still be attributable on the pass that finally merges it"
+  check t3SolverFlag true                 "B99c #603 ...and the flag is emitted on a CLEAN cycle too — corroboration is not conditional on partialness, and a row that only fired beside --partial-prs would leave every converging run guessing"
+  check t4SolverFlag true                 "B99d #603 a FAILED record with no PR, and a PUSHED_NO_PR record whose prNumber is the 0 sentinel, are both excluded — pairing an issue with PR 0 would corroborate it with a number no PR can have"
+  check t4bSolverLedger '"24:804"'        "B99h #603 both COLLISION branches drop: one issue named twice with two PR numbers disagrees with itself, and two issues claiming one PR number disagree about who owns it — neither is resolved by picking one, because a corroborated pair outranks the head-ref guess and a coin-flip would bind an issue to a PR nobody opened for it with MORE authority than the guess it replaced"
+  check t4bNoCollided true                "B99i ...and the survivor is the ledger's ONLY member — the collided issues contribute nothing at all rather than falling through to a partial or arbitrary pair"
+  check t4bSolverFlag true                "B99j ...and the same set is what reaches the watch relay's command line, which is the only channel the shell finder reads it from"
+  check t8bLedger '"11:901"'              "B99k #603 the one-issue-per-PR rule holds at RUN-LIFETIME scope too: cycle 2 naming a DIFFERENT issue against a PR cycle 1 already bound is refused, because a per-cycle-only check loses that half of the relation exactly where two cycles can disagree and the finder would then corroborate one PR onto two issues"
+  check t8bCycle2Flag true                "B99l ...and the collided pair reaches no command line either — the ledger is the model, argv is what lib/goal-state.sh actually reads, and fixing one without the other still mis-attributes"
   check t2WatchFlag true                  "B98e the watch relay's COMMAND LINE carries --partial-prs=901 — argv is the only channel from the JS ledger to the shell merge gate, and this is the assertion no grep over either file can make"
   check t2CollectFlag true                "B98f the collect relay's command line carries --partial-issues=11, which is what makes the convergence gate refuse"
   check t3Issues '[]'                     "B98g a fleet return whose every chain finished leaves the ledger empty"
@@ -1364,6 +1585,13 @@ else
   check xCeiling '"match"'                "B95b a relayed budget ABOVE the fleet ceiling is charged at the ceiling, so reading the envelope cannot make the ledger overcount either"
   check xUnreadable '"match"'             "B95c a non-numeric implementBudget is charged the fleet default, not read as a budget of zero"
   check xAbsent '"match"'                 "B95d an envelope carrying no implementBudget at all is charged the fleet default"
+
+  check zRaised '"ok"'                    "BZ1 the PRE-CLAIM projection prices the per-issue term from the budget /goal was configured with: at the clamp ceiling CB1 trips one agent below the raised projection and not at it — the projection surface is a different input from the W/X spend surface (no fleet envelope exists that early), so no row above could see this"
+  check zRaisedBeatsDefault '"ok"'        "BZ2 the discriminator: with a raised budget relayed, a ceiling set to the DEFAULT-budget projection has ALREADY been blown — a frozen literal lands one agent short of that same ceiling and never trips, which is the whole defect (#590), and the halt still aborts BEFORE the claim pass"
+  check zFloor '"ok"'                     "BZ3 a relayed budget BELOW the fleet floor projects at the floor the fleet would clamp it to"
+  check zCeiling '"ok"'                   "BZ4 a relayed budget ABOVE the fleet ceiling projects at the ceiling, so reading the key cannot make CB1 halt a run that would have fitted"
+  check zUnreadable '"ok"'                "BZ5 a non-numeric implementBudget projects the fleet default, not a budget of zero"
+  check zAbsent '"ok"'                    "BZ6 an envelope carrying no implementBudget key at all — every pre-#590 envelope — still projects the fleet default"
 
   check yCeiling '"ok"'                   "B96 CB1 halts cycle 2 ONLY BECAUSE cycle 1 was charged — the spent half of the ceiling comparison, which every earlier CB1 row (M/M2/S) leaves at zero and so cannot exercise: the audit event publishes the cycle-1 spend AND the cycle-2 projection, and with the fleet charge removed the same ceiling never trips at all"
   check yHeadroom '"ok"'                  "B96b one more agent of headroom and the same run claims cycle 2 instead — the ceiling row cannot pass on a breaker that fired early, nor on a run that ended some other way"

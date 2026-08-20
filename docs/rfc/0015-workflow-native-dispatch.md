@@ -144,7 +144,8 @@ still contains hand-off language written for a detached session.
 
 | ID | Guard |
 |---|---|
-| CB1 | projected agents (`2 + issues + (9 + implementBudget − 1) × design-tier issues`) over `maxAgents` → abort **before** any dispatch. The leading 2 is the intake relay plus the batched PR-verification relay (#515); the per-issue term is the #508 per-task chain, bounded by CB3's `implementBudget` (default 24). `T` is unknowable before the plan is written, so the projection uses the live cap — deliberately pessimistic, and the same way about the two other conditional rungs: the spec-revision round (no verdict exists yet at projection time) and the risk-gated `security` research lens — whose gate IS readable by then, but whose cost is a per-design-issue constant shared with `/goal`'s own cycle projection, which runs before any manifest exists. The plan review needs no such allowance: every accepted plan is reviewed. |
+| CB1 | projected agents (`2 + issues + (9 + implementBudget − 1) × design-tier issues + 1 repo-profile agent when the run has one`) over `maxAgents` → abort **before** any dispatch. The leading 2 is the intake relay plus the batched PR-verification relay (#515); the trailing 1 is the run-shared repo profile (#615 A), charged under the same `design-tier issues > 0` gate it actually runs under; the per-issue term is the #508 per-task chain, bounded by CB3's `implementBudget` (default 24). `T` is unknowable before the plan is written, so the projection uses the live cap — deliberately pessimistic, and the same way about the two other conditional rungs: the spec-revision round (no verdict exists yet at projection time) and the risk-gated `security` research lens — whose gate IS readable by then, but whose cost is a per-design-issue constant shared with `/goal`'s own cycle projection, which runs before any manifest exists. The plan review needs no such allowance: every accepted plan is reviewed. |
+| CB1 (`/goal`) | `/goal` runs its OWN copy of this ceiling, one cycle ahead of the fleet's: `3 + maxWatchTicks + 2 + (claimed > 0 ? 1 : 0) + claimed × (9 + implementBudget)`, compared as `agentsSpent + projection > maxAgents` before the claim relay runs, so a cycle that cannot fit is refused before any issue is claimed and stranded. It is the SAME two terms as the row above, re-expressed for a caller with no manifest: `/goal` cannot know the tier split at projection time, so it prices every claimed issue as design-tier and the repo-profile gate reduces to "the cycle claimed something", and the per-issue `− 1` folds away because the issue's own solver is counted in the same term instead of in a separate `issues` addend. `implementBudget` reaches it through the `implementBudget` key `lib/goal-phase0.sh` publishes in `/goal`'s args envelope, resolved from the same `UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET` the launcher reads and pinned back onto the launcher command line by the claim relay — so the number projected and the number armed are one number (issue #590). It was a frozen literal at the fleet default until then, which under-projected a maxed-out budget more than threefold; since CB1 is the only NAMED halt, that did not merely mis-report, it stopped the breaker firing at all and left the run to die against the runtime's own lifetime cap with no halt event. |
 | CB2 | runtime `budget` exhausted between waves → stop, report, leave remaining claims intact |
 | CB3 | (#508) live per-issue implement-phase agent counter over `implementBudget` → stop the task loop, record the remaining tasks `SKIPPED`, audit `implement_budget_exhausted`, and still deliver what is committed |
 | — | manifest/envelope cross-check: only issues the launcher actually claimed are solved; a mismatch in either direction is audited, never silent |
@@ -168,8 +169,11 @@ The linkage line is **conditional on what the run actually finished** (#554),
 because linkage and completeness were one token and a chain that stopped at task
 2 of 5 still auto-closed its issue. A single solver, and a per-task chain whose
 `chainComplete` is `true`, carry `Closes #N` and close the issue on merge. A
-chain that fell short carries the non-closing whole-line trailer
-`UberDev-Partial: #N` and no closing keyword anywhere — not in the body, not in
+chain that fell short carries the non-closing standalone-line trailer
+`UberDev-Partial: #N` — the delivery brief mandates it stand alone on its own
+line, and `/merge`'s harvest tolerates a leading list marker, surrounding
+backticks and trailing whitespace but still refuses prose on either side
+(#603) — and no closing keyword anywhere — not in the body, not in
 a commit message, since GitHub honours them in both — so the issue survives the
 merge OPEN with the unreached tasks still on it. `/merge` Step 3.4 parses that
 trailer to release the `uberdev:active` claim regardless, so an unfinished issue
@@ -187,6 +191,29 @@ there the `merge-dispatch-gate` region of `lib/goal-watch.sh` marks the
 `lib/goal-phase3.sh` refuses to emit `goal_converged` while any issue in the
 run delivered a short chain. The PR still merges; what changes is that the run
 stops reporting a convergence it did not achieve.
+
+`results[]` carries a second fact `/goal` needs, and it travels the same way
+(#603). `lib/goal-state.sh`'s issue->PR resolver prefers a PR's
+`closingIssuesReferences` link and falls back to matching the PR's HEAD BRANCH
+against `<type>/<issue>-`; that fallback selects on NAME alone, so a PR about an
+HTTP 500 error page on `fix/500-error-page` satisfies it for issue 500 and the
+`| max` tie-break hands the issue to it over the solver's own lower-numbered PR.
+Neither `--json` projection carries an author, and the claim comment records the
+worktree directory name rather than the head ref, so nothing in the shell lane
+could corroborate the guess. `solverPairsFromResults()` therefore derives
+`<issue>:<pr>` pairs from the fleet's own records, `skills/goal-pipeline/workflow.js`
+accumulates them for the whole run, and `--solver-prs=` carries them to
+`lib/goal-watch.sh`, which lands them in `goal-<id>-solver-prs.tsv` before step
+2a resolves anything. The pair becomes a third RANKED arm — `$byclose //
+$bycorr // $byhead` — never a replacement for the guess: the head-ref arm stays
+in the program whether or not a pair is on file, so a record that names a PR no
+longer in the open set (closed by hand, or an unverifiable claim the `#515`
+proof pass kept rather than zeroed) falls through to the guess instead of
+resolving to nothing. That direction is deliberate and load-bearing, because
+under `/goal` a resolution miss is terminal on the first watch tick: an arm that
+could resolve to LESS than the guess would convert a wrong-PR bug into a run
+halt. Pairs whose PR number is the `0` sentinel, and pairs in a claim collision,
+are dropped rather than guessed at.
 
 The solver stops at PR opened. It does not merge and does not chain into a
 review command; that remains `/goal`'s decision.

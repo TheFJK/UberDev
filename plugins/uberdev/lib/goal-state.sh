@@ -24,6 +24,8 @@
 #   uberdev_goal_record_partial_prs            GOAL_ID CSV [CYCLE]   (issue #592)
 #   uberdev_goal_pr_is_partial                 GOAL_ID PR            (issue #592)
 #   uberdev_goal_count_partial_prs             GOAL_ID               (issue #592)
+#   uberdev_goal_record_solver_prs             GOAL_ID CSV [CYCLE]   (issue #603)
+#   uberdev_goal_solver_pr_for_issue           GOAL_ID ISSUE         (issue #603)
 #   uberdev_goal_count_distinct_prs            GOAL_ID
 #   uberdev_goal_count_resolved_issues         GOAL_ID
 #   uberdev_goal_count_failed_issues           GOAL_ID
@@ -147,6 +149,7 @@ _UBERDEV_GOAL_WORKTREE_PREFIXES=("" ".claude/worktrees/*/" ".worktrees/*/" "work
 # stuck_loop on iteration 1.
 : "${_UBERDEV_GOAL_DEFAULT_MAX_CYCLES:=5}"
 : "${_UBERDEV_GOAL_DEFAULT_MAX_PARALLEL:=3}"
+: "${_UBERDEV_GOAL_DEFAULT_IMPLEMENT_BUDGET:=24}"         # the nested fleet's CB3 per-issue implement-phase cap; /goal's CB1 projects against it (#590)
 : "${_UBERDEV_GOAL_DEFAULT_BARRIER_TIMEOUT_S:=14400}"     # 4h
 : "${_UBERDEV_GOAL_POLL_SECS:=60}"
 : "${_UBERDEV_GOAL_STUCK_SECS:=14400}"                    # 4h
@@ -599,8 +602,8 @@ _uberdev_goal_persist_fp() {
 # ---------------------------------------------------------------------------
 
 # uberdev_goal_state_init GOAL_ID
-# D4 + T4 — Refuse unsafe $UBERDEV_TMPDIR; truncate-create the 9 per-goal
-# state files (jsonl + 8 TSVs) — enumerated in the inline comment below.
+# D4 + T4 — Refuse unsafe $UBERDEV_TMPDIR; truncate-create the 10 per-goal
+# state files (jsonl + 9 TSVs) — enumerated in the inline comment below.
 uberdev_goal_state_init() {
   local goal_id="$1"
   # #156 — refuse an unsafe goal_id before it reaches any path interpolation.
@@ -626,7 +629,7 @@ uberdev_goal_state_init() {
   # passes the mkdir -p above (the dir already exists) yet cannot accept new
   # files; the bare `: > "$f"` writes used to fail one-by-one with raw
   # "Permission denied" noise and a confusing partial-state. Fail fast on the
-  # first unwritable file with a clean diagnostic. The 9 state files:
+  # first unwritable file with a clean diagnostic. The 10 state files:
   #   jsonl                  — per-goal audit stream
   #   pr-states.tsv          — PR state-machine transitions
   #   issue-states.tsv       — issue state-machine transitions
@@ -642,6 +645,10 @@ uberdev_goal_state_init() {
   #                            pr<TAB>cycle<TAB>ts; run-lifetime, never truncated
   #                            mid-run — a cycle-1 row must still be readable by
   #                            the gate that merges that PR three cycles later)
+  #   solver-prs.tsv         — issue #603 solver-PR corroboration ledger (cols:
+  #                            issue<TAB>pr<TAB>cycle<TAB>ts; run-lifetime for the
+  #                            same reason, and what stops the head-ref fallback
+  #                            binding an issue to a same-numbered stranger)
   local f
   for f in "$tmpdir/goal-$goal_id.jsonl" \
            "$tmpdir/goal-$goal_id-pr-states.tsv" \
@@ -651,7 +658,8 @@ uberdev_goal_state_init() {
            "$tmpdir/goal-$goal_id-review-pr-attempts.tsv" \
            "$tmpdir/goal-$goal_id-held-audits.tsv" \
            "$tmpdir/goal-$goal_id-batch-prs.tsv" \
-           "$tmpdir/goal-$goal_id-partial-prs.tsv"; do
+           "$tmpdir/goal-$goal_id-partial-prs.tsv" \
+           "$tmpdir/goal-$goal_id-solver-prs.tsv"; do
     if ! : > "$f"; then
       printf 'goal-state: cannot create state file %s (unwritable UBERDEV_TMPDIR?)\n' "$f" >&2
       return 1
@@ -1705,6 +1713,118 @@ uberdev_goal_count_partial_prs() {
   awk -F'\t' '$1 != "" && !seen[$1]++ {n++} END {print n+0}' "$f"
 }
 
+# ---------------------------------------------------------------------------
+# Solver-PR corroboration ledger (issue #603) — goal-<id>-solver-prs.tsv.
+#
+# WHAT IT ANSWERS. "Which PR did THIS run's solver fleet open for issue N?" —
+# a question the head-ref fallback in _uberdev_goal_pr_for_issue_jq can only
+# GUESS at, because that arm selects purely on branch NAME. A repository is
+# full of numbers: a PR about an HTTP 500 error page on branch
+# `fix/500-error-page` satisfies `^fix/500-` exactly, and `| max` then hands
+# issue 500 to it over the solver's own lower-numbered `feat/500-…` PR. The
+# guess has no author check, no claim check and nothing else to corroborate it,
+# so the only cure is evidence from the party that actually did the work.
+#
+# WHY A FILE, AND WHY argv FEEDS IT. The fleet's per-issue {issue, prNumber}
+# records are visible in exactly one place — the return value of the nested
+# workflow() call in skills/goal-pipeline/workflow.js — and that script is
+# forbidden the filesystem (RFC 0012 §2.2, constraint 6). The consumer is this
+# library, called from a shell polling loop that never sees a JS value. So the
+# pairs ride `--solver-prs=<issue>:<pr>,…` on lib/goal-watch.sh's command line,
+# exactly like the #592 partial-chain carrier beside it, and land here.
+# Columns: issue<TAB>pr<TAB>cycle<TAB>ts.
+#
+# RUN-LIFETIME, LAST ROW WINS. A record written in cycle 1 must still answer a
+# lookup in cycle 3, so nothing truncates it mid-run. The reader takes the LAST
+# matching row for an issue: the driver's own ledger is first-write-wins and so
+# never sends a second pair for one issue, but this reader is also fed by a
+# resume and by a hand-repaired file, and answering a two-row issue with the
+# OLDER number would be the wrong direction to fail in. Reaped once per goal by
+# uberdev_goal_cleanup_run_state.
+#
+# ABSENCE IS NOT REFUSAL, AND NEITHER IS AN EXPIRED RECORD. Every helper here
+# answers "nothing recorded" for a missing goal id, a missing file and an
+# unrecorded issue, and the finder then runs the head-ref guess exactly as it did
+# before this ledger existed. The finder extends the same rule one step further:
+# the corroborated arm RANKS above the guess (`$byclose // $bycorr // $byhead`)
+# rather than replacing it, so a row naming a PR that has since left the open set
+# — closed by hand, or a claim the #515 proof pass could only mark UNVERIFIED and
+# so never zeroed — also falls through to the guess instead of resolving to
+# nothing. That is deliberate and it is the whole safety argument: under /goal a
+# resolution miss is TERMINAL on the first watch tick (goal-watch.sh's settled arm
+# fails the issue, and goal-phase3.sh's `solver_failed` breaker then halts the
+# WHOLE run), so an arm that could answer with LESS than the guess would turn a
+# wrong-PR bug into a run-halting one. Corroboration may only ever ADD an answer,
+# never subtract one — it narrows the choice where there IS live evidence to
+# narrow it with, and is invisible everywhere else.
+# ---------------------------------------------------------------------------
+
+# uberdev_goal_record_solver_prs GOAL_ID CSV [CYCLE]
+# CSV is `<issue>:<pr>[,<issue>:<pr>…]`. Append one row per pair that is not
+# already the issue's CURRENT answer, creating the ledger if it is absent. One
+# rule, stated once: the skip test asks uberdev_goal_solver_pr_for_issue, which
+# returns the LAST matching row, so "already recorded" means "already what the
+# reader would answer" — not "present somewhere in the file". That is what makes
+# this idempotent across ticks and across a resume (the watch lane re-records
+# the same set every pass), and by the same rule a pair naming a DIFFERENT PR
+# for an already-recorded issue is appended so the last-row-wins reader can
+# promote it — including a mapping that was recorded, superseded, and is now
+# being offered again.
+#
+# A malformed member is SKIPPED with a stderr breadcrumb rather than failing the
+# batch — this runs inside the watch loop, where a fail-loud write stalls the
+# whole goal, and one bad pair must not cost the run every good one. rc 0 on
+# success (including an empty CSV); rc 1 for an unsafe goal id or a genuine
+# append failure.
+#
+# CYCLE resolves argument -> ambient `cycle` -> 0, matching
+# uberdev_goal_record_partial_prs; it is a diagnostic column, never a key.
+uberdev_goal_record_solver_prs() {
+  local goal_id="$1" csv="${2:-}"
+  _uberdev_goal_validate_id "$goal_id" || return 1
+  [ -n "$csv" ] || return 0
+  local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+  local f="$tmpdir/goal-$goal_id-solver-prs.tsv"
+  local cyc="${3:-${cycle:-0}}"
+  _uberdev_goal_validate_int "$cyc" || cyc=0
+  local ts; ts="$(_uberdev_goal_now_secs)"
+  local pair issue pr row rc=0
+  # Herestring-fed `tr`, never `for pair in $csv`: zsh does not word-split an
+  # unquoted scalar and would run the body ONCE over the whole string, and a
+  # `... | while read` loop would run the body in a subshell where `rc` could
+  # never escape. Same shape as record_partial_prs above, for the same reasons.
+  while IFS= read -r pair; do
+    [ -n "$pair" ] || continue
+    issue="${pair%%:*}"
+    pr="${pair#*:}"
+    if [ "$issue" = "$pair" ] || ! _uberdev_goal_validate_int "$issue" \
+       || ! _uberdev_goal_validate_int "$pr"; then
+      printf 'goal-state: record_solver_prs: skipping malformed pair %s (want <issue>:<pr>)\n' "$pair" >&2
+      continue
+    fi
+    [ "$(uberdev_goal_solver_pr_for_issue "$goal_id" "$issue" 2>/dev/null)" = "$pr" ] && continue
+    printf -v row '%s\t%s\t%s\t%s' "$issue" "$pr" "$cyc" "$ts"
+    _uberdev_goal_append "$f" "$row" || rc=1
+  done <<<"$(printf '%s\n' "$csv" | tr ',' '\n')"
+  return "$rc"
+}
+
+# uberdev_goal_solver_pr_for_issue GOAL_ID ISSUE
+# Echo the PR number this run's fleet reported for ISSUE, or nothing. rc 1 for
+# an unsafe goal id, a non-integer issue, an absent/unreadable ledger and an
+# unrecorded issue — four different ways of saying "no evidence", all of which
+# the finder must read as "keep guessing", never as an error.
+uberdev_goal_solver_pr_for_issue() {
+  local goal_id="$1" issue="$2"
+  _uberdev_goal_validate_id "$goal_id" || return 1
+  _uberdev_goal_validate_int "$issue" || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
+  local f="$tmpdir/goal-$goal_id-solver-prs.tsv"
+  [ -r "$f" ] || return 1
+  awk -F'\t' -v i="$issue" \
+    '$1==i && $2 ~ /^[0-9]+$/ {p=$2} END {if (p=="") exit 1; print p}' "$f"
+}
+
 # uberdev_goal_count_distinct_prs GOAL_ID
 # Count of DISTINCT PR numbers recorded in goal-<id>-pr-states.tsv (0 when the
 # file is absent/empty). Returns a CLEAN integer — the prior
@@ -1826,10 +1946,14 @@ uberdev_goal_find_pr_for_issue() {
   # (rc 0 + empty) — without it a transient gh outage stalls the goal until the
   # 150m solve-timeout with a MISattributed "agent idle" diagnostic. Still
   # fail-open (return empty, rc 0) so the caller keeps waiting/re-polls.
+  # #603 — the fleet's own record for this issue, when there is one. Resolved
+  # BEFORE the fetch so the filter gh runs already carries it; empty whenever
+  # nothing corroborates, which leaves the head-ref guess exactly as it was.
+  local corroborated; corroborated="$(_uberdev_goal_corroborated_pr "$n")"
   local out rc
   out="$(gh pr list --state open --limit 200 \
     --json number,closingIssuesReferences,headRefName \
-    --jq "$(_uberdev_goal_pr_for_issue_jq "$n")" \
+    --jq "$(_uberdev_goal_pr_for_issue_jq "$n" "$corroborated")" \
     2>/dev/null)"
   rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -1925,12 +2049,82 @@ _UBERDEV_GOAL_HEAD_REF_TYPES='feat|fix|refactor|test|docs|chore|perf|build|ci|st
 #
 # The trailing `-` after ${n} is load-bearing and survives the widening: it is
 # what keeps `fix/30-x` out of issue 300 (BT73/BT73d).
+#
+# #603 — CORROBORATION. The head-ref arm selects purely on NAME, so any branch
+# in the repository that happens to be named `<type>/N-…` binds to issue N: the
+# executed reproducer is a PR about an HTTP 500 error page on `fix/500-error-page`
+# taking issue 500, and `| max` handing it that issue even with the solver's own
+# `feat/500-real-solver` PR open beside it on a lower number. Nothing in the two
+# `--json` projections could ever have filtered it — neither one projects an
+# author, and the claim comment is not a corroboration source either
+# (lib/solve-launcher.sh records the WORKTREE DIRECTORY name, not the PR head).
+#
+# So a THIRD arm carries EVIDENCE: the PR number this run's solver fleet
+# reported for this issue, read from the #603 ledger by
+# _uberdev_goal_corroborated_pr and emitted as `$bycorr`.
+#
+# IT RANKS, IT DOES NOT REPLACE — `$byclose // $bycorr // $byhead`. The head-ref
+# guess stays in the program unconditionally, and that is the whole safety
+# argument, not a detail of the wiring. A recorded number is only useful while
+# the PR it names is still OPEN, and it can stop being open for reasons that say
+# nothing about the issue: a human or the solver closes it, or the #515 proof
+# pass could not verify the claim at all (markUnverifiable KEEPS the number on
+# http 0/401/429/5xx, so a stale or mis-parsed one is never zeroed). Let the
+# corroborated arm REPLACE the guess and every one of those cases resolves to
+# NOTHING — and under /goal nothing is terminal on the spot: the settled arm in
+# lib/goal-watch.sh fails the issue on tick 1 and goal-phase3.sh's
+# `solver_failed` breaker halts the WHOLE run (see the consequence paragraph
+# above). The presence of evidence would then be strictly worse than its
+# absence, which is the one direction this ledger must never fail in. Ranked, a
+# record that resolves to nothing simply falls through to the guess the run
+# always had. BT73g.expired-record-degrades-to-the-guess and its no-ledger twin
+# pin exactly that, in both directions.
+#
+# The closes-link still outranks both: it is a deliberate statement about THIS
+# issue rather than a name collision or an inference (#290.4(b), BT73e). And the
+# chain is emitted from one place in one shape — `null` stands in for `$bycorr`
+# when there is nothing to corroborate with — so there is no second ranking
+# program to drift against the first.
 _uberdev_goal_pr_for_issue_jq() {
-  local n="$1"
+  local n="$1" corroborated="${2:-}"
+  # The literal `null` (not an omitted binding) keeps the emitted program the
+  # SAME SHAPE in both cases: `null // $byhead` is `$byhead`, so the no-evidence
+  # path is the pre-#603 program exactly, with no second `printf` to drift.
+  local bycorr='null'
+  if [ -n "$corroborated" ]; then
+    bycorr="([\$prs[] | select(.number == ${corroborated}) | .number] | max)"
+  fi
   printf '%s' ". as \$prs
           | ([\$prs[] | select(any(.closingIssuesReferences[]?; .number == ${n})) | .number] | max) as \$byclose
+          | ${bycorr} as \$bycorr
           | ([\$prs[] | select(.headRefName | test(\"^(${_UBERDEV_GOAL_HEAD_REF_TYPES})/${n}-\")) | .number] | max) as \$byhead
-          | (\$byclose // \$byhead // empty)"
+          | (\$byclose // \$bycorr // \$byhead // empty)"
+}
+
+# _uberdev_goal_corroborated_pr ISSUE_NUM
+# The ONE place both finders read the #603 ledger, so the live route and the
+# snapshot route cannot disagree about what evidence exists. Prints a validated
+# PR number, or NOTHING when there is nothing to corroborate with: no goal id in
+# scope (every non-/goal caller), an unsafe one, no ledger, or no row for this
+# issue. rc is always 0 — an absent record is the normal state, not a failure,
+# and the caller must fall through to the head-ref guess on it rather than
+# refuse.
+#
+# The env var, not a `GOAL_ID` scalar, and it JOINS to the writer: lib/goal-watch.sh
+# records under `$GOAL_ID`, and `uberdev_goal_read_run_state` — which that script
+# calls before the recording line — ends with an unconditional
+# `export UBERDEV_GOAL_ID="$GOAL_ID"`, so the two names hold the same value in the
+# process that writes and the process that reads. Same gate the #290.3 failure
+# counter uses (_uberdev_goal_gh_failure_counter_path). The re-validation is the R3 gh-argument-injection gate applied a second
+# time at the interpolation site: the value crossed a command line and a file to
+# get here, and it is about to be spliced into a jq program.
+_uberdev_goal_corroborated_pr() {
+  local goal_id="${UBERDEV_GOAL_ID:-}"
+  _uberdev_goal_validate_id "$goal_id" || return 0
+  local pr
+  pr="$(uberdev_goal_solver_pr_for_issue "$goal_id" "$1" 2>/dev/null)" || return 0
+  _uberdev_goal_validate_int "$pr" || return 0
+  printf '%s' "$pr"
 }
 
 # uberdev_goal_pr_list_snapshot
@@ -1963,8 +2157,11 @@ uberdev_goal_find_pr_for_issue_from_json() {
   local n="$1" snapshot="${2:-}"
   _uberdev_goal_validate_int "$n" || return 1
   [ -n "$snapshot" ] || return 0
+  # #603 — same corroboration as the live finder, through the same resolver, so
+  # the two routes cannot answer differently about which PR owns an issue.
+  local corroborated; corroborated="$(_uberdev_goal_corroborated_pr "$n")"
   local out
-  out="$(jq -r "$(_uberdev_goal_pr_for_issue_jq "$n")" <<<"$snapshot" 2>/dev/null)" || return 0
+  out="$(jq -r "$(_uberdev_goal_pr_for_issue_jq "$n" "$corroborated")" <<<"$snapshot" 2>/dev/null)" || return 0
   # jq prints the literal `null` for a `max` over an empty array that escaped
   # the `// empty` guard on a malformed snapshot; never let that reach a caller
   # that only checks for emptiness before feeding the value to `gh`.
@@ -4135,7 +4332,8 @@ uberdev_goal_cleanup_run_state() {
   local tmpdir="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}"
   _uberdev_goal_validate_id "${GOAL_ID:-}" || return 0
   local sc="$tmpdir/goal-$GOAL_ID-runstate"
-  # The #592 partial-chain ledger is reaped here beside the batch registry.
+  # The #592 partial-chain ledger and the #603 solver-PR ledger are reaped here
+  # beside the batch registry.
   # Read-before-reap is safe by inspection: the only call site that runs on a
   # converged goal is the `uberdev_goal_cleanup_run_state` call on the
   # `goal_converged` exit path in lib/goal-phase3.sh, which sits AFTER that
@@ -4144,7 +4342,8 @@ uberdev_goal_cleanup_run_state() {
   # Leaving it behind would strand one file per goal in $UBERDEV_TMPDIR.
   rm -f "$sc" "${sc}.queue" "${sc}.active" "${sc}.candidates" \
         "$tmpdir/goal-$GOAL_ID-batch-prs.tsv" \
-        "$tmpdir/goal-$GOAL_ID-partial-prs.tsv" 2>/dev/null
+        "$tmpdir/goal-$GOAL_ID-partial-prs.tsv" \
+        "$tmpdir/goal-$GOAL_ID-solver-prs.tsv" 2>/dev/null
   # Remove the fixed-path pointer only if it still names THIS goal, so a
   # concurrent goal's pointer is never clobbered.
   local aid="$tmpdir/goal-active-id.txt"

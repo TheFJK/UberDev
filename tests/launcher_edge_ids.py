@@ -6,25 +6,49 @@ THE CLASS. `plugins/uberdev/lib/solve-launcher.sh` set
 `UBERDEV_ROOT_EDGE_ID="solve.lead.$TIER"`, and `$TIER` is one of
 trivial|small|medium — so every value that line could produce named an
 edge that does not exist in `plugins/uberdev/policy/solve-run-tree-v1.json`
-(whose only `solve.lead.*` edges are `.orchestrator`, `.brainstorm` and
-`.finish_branch`). Nothing read the variable, so nothing ever noticed. This is
-the #370 shape — a declaration naming a pipeline surface that nobody compares
-against the tree — on the shell-runtime side; issue #510 fixed the manifest side
-with `tests/solve-run-tree-scope.test.sh`.
+(whose only `solve.lead.*` edges WERE `.orchestrator`, `.brainstorm` and
+`.finish_branch` — themselves orphans, dispatched by nothing, retired by #607, so
+that namespace now holds no edge at all: see RETIRED_PREFIXES under L1). Nothing
+read the variable, so nothing ever noticed. This is the #370 shape — a
+declaration naming a pipeline surface that nobody compares against the tree — on
+the shell-runtime side; issue #510 fixed the manifest side with
+`tests/solve-run-tree-scope.test.sh`.
 
 WHAT IT CHECKS. Four rules, all anchored on the manifest as the single source
-of truth. The accepted vocabulary is DERIVED from the tree, never hardcoded
-here, so renaming an edge in the manifest changes what this guard accepts.
+of truth. What RESOLVES is the manifest's business alone — no edge id is
+hardcoded here, so renaming an edge in the manifest changes what this guard
+accepts. What is IN SCOPE is that vocabulary plus one declared list of retired
+namespaces (`RETIRED_PREFIXES`), and the two are held from drifting by a
+precondition error rather than left to agree by luck; L1 says why.
 
-  L1 — LITERAL RESOLUTION. Guarded prefixes come from the tree: every key of
-       `edges` with three or more dot-segments whose first segment is `solve`
-       contributes `<seg0>.<seg1>.` (today: `solve.issue.` and `solve.lead.`).
-       Every `<prefix>[A-Za-z0-9_${}<>-]+` token in the launcher — in code, in a
+  L1 — LITERAL RESOLUTION. Guarded prefixes are the tree's own plus the ones
+       this file declares retired. DERIVED: every key of `edges` with three or
+       more dot-segments whose first segment is `solve` contributes
+       `<seg0>.<seg1>.` (today: `solve.issue.`, and nothing else). DECLARED:
+       every entry of `RETIRED_PREFIXES` (today: `solve.lead.`). Every
+       `<prefix>[A-Za-z0-9_${}<>-]+` token in the launcher — in code, in a
        comment, in a string alike — must be an exact key of `edges`. The
        vocabulary is closed, so an UNRESOLVABLE id is a WRONG id:
        `solve.lead.$TIER`, `solve.lead.${TIER}` and `solve.lead.<tier>` are
        violations by construction. Requiring a third segment is what keeps the
        launcher's `commands/solve.md` references out of the match set.
+
+       WHY THE DECLARED HALF EXISTS (#607). Derivation alone made this guard's
+       reach an ACCIDENT of the manifest's contents. The three `solve.lead.*`
+       edges were orphans — `role: null`, `route: null`, dispatched by nothing —
+       and they were also the SOLE source of the `solve.lead.` prefix, so
+       retiring them silently un-guarded the exact namespace #536 was filed
+       about: with the tree at 51 edges and no declared half, the E4 row of
+       tests/solve-run-tree.test.sh (a fictional `solve.lead.$TIER` in the
+       carrier-failure string) went rc 1 -> rc 0, measured. A retired prefix
+       therefore stays GUARDED and becomes permanently UNRESOLVABLE — every
+       token under it is a finding by construction, since `edges` can hold no key
+       there. That converts a coupling nobody declared into one that is written
+       down, and the two halves may never disagree: an `edges` key under a
+       retired prefix is a PRECONDITION ERROR (exit 2), not a verdict, because at
+       that point the prefix is both retired and live and no answer about the
+       launcher would mean anything. E71 and E72 in tests/solve-run-tree.test.sh
+       pin the declaration, the refusal and its want-0 floor.
 
   L2 — ASSIGNMENT-SITE BACKSTOP. Every line assigning a `*EDGE_ID` variable must
        have a bare double-quoted literal RHS (no `$`, no backtick, no backslash)
@@ -74,7 +98,12 @@ close, so the gap is written down rather than left implied.
   * NOT A TREE-CONSISTENCY CHECKER. It deliberately does NOT assert that
     `root_edge_id` is a key of `edges` — that invariant belongs to
     `tests/solve-run-tree.test.sh`, and duplicating it here would give a
-    mutated-tree fixture two possible causes and destroy the attribution.
+    mutated-tree fixture two possible causes and destroy the attribution. The
+    ONE precondition it does read across the two inputs is the retired-prefix
+    collision under L1, and the distinction is not a loophole: that one compares
+    the tree against a declaration THIS FILE OWNS, which no other guard knows
+    exists, so there is nowhere else it could live and no second cause it could
+    be confused with.
   * NOT A READER CHECK. It proves an emitted id RESOLVES; it cannot prove any
     descendant ever reads it. The orphan half of #536 is a human judgement.
   * L1 AND L2 ARE NOT SHELL-AWARE. For those two the launcher is scanned as
@@ -363,6 +392,17 @@ from typing import NamedTuple
 # (`$TIER`, `${TIER}`, `<tier>`). `.` is excluded — see DECLARED LIMITS.
 TOKEN_TAIL = r"[A-Za-z0-9_${}<>-]+"
 
+# Namespaces that stay GUARDED after their last edge is gone (#607). L1's
+# prefixes are otherwise DERIVED from `edges`, which made the guard's reach an
+# accident of the manifest's contents; retiring the three orphan `solve.lead.*`
+# edges would have taken the `solve.lead.` namespace out of scope entirely and
+# let #536's own defect back in. An entry here is permanently unresolvable by
+# construction — `edges` may hold no key under it, and `token_pattern` refuses
+# outright if one appears — so a token under it is always a finding. Written as
+# a tuple so `str.startswith` takes it whole. See the WHY THE DECLARED HALF
+# EXISTS paragraph under L1.
+RETIRED_PREFIXES = ("solve.lead.",)
+
 # L2's assignment sites. The optional declaration keyword widens the plan's
 # `^[ \t]*[A-Z0-9_]*EDGE_ID=` so that `export UBERDEV_ROOT_EDGE_ID="$X"` — the
 # exact shape L1 cannot see — is caught rather than waved through.
@@ -565,18 +605,43 @@ def load_tree(label: str) -> tuple[set[str], str]:
     return set(edges), root
 
 
+def retired_prefix(token: str) -> str:
+    """The declared-retired prefix `token` sits under, or `""` if it sits under none."""
+    for prefix in RETIRED_PREFIXES:
+        if token.startswith(prefix):
+            return prefix
+    return ""
+
+
 def token_pattern(label: str, edge_ids: set[str], root: str) -> re.Pattern[str]:
-    """Compile the guarded-token extractor from the tree's own vocabulary."""
-    prefixes = set()
+    """Compile the guarded-token extractor: the tree's vocabulary plus the retired one."""
+    derived = set()
     for edge in edge_ids:
         segments = edge.split(".")
         if len(segments) >= 3 and segments[0] == "solve":
-            prefixes.add(f"{segments[0]}.{segments[1]}.")
-    if not prefixes:
+            derived.add(f"{segments[0]}.{segments[1]}.")
+    # The anti-vacuity floor reads the DERIVED half alone. RETIRED_PREFIXES is
+    # never empty, so folding it in first would make this check unfailable and
+    # a manifest that had lost every live `solve.<area>.<name>` edge would go on
+    # reporting a clean run against a vocabulary of retired names only.
+    if not derived:
         raise Fatal(
             f"{label}: no 'solve.<area>.<name>' edge in the manifest -- there is no "
             "vocabulary left to guard, so a green run would mean nothing"
         )
+    # A prefix cannot be retired and live at once. Refusing here (exit 2) rather
+    # than rendering a verdict is the E10 rule applied to the declaration: with
+    # the two halves in contradiction, nothing this file could say about the
+    # launcher would mean anything.
+    collision = sorted(edge for edge in edge_ids if retired_prefix(edge))
+    if collision:
+        raise Fatal(
+            f"{label}: {len(collision)} edge(s) sit under a prefix declared retired in "
+            f"RETIRED_PREFIXES -- {', '.join(collision)}. A retired namespace resolves to "
+            "nothing by construction, so either the edge is real (drop the prefix from "
+            "RETIRED_PREFIXES) or it is not (drop the edge)"
+        )
+    prefixes = derived | set(RETIRED_PREFIXES)
     pattern = re.compile("(?:%s)%s" % ("|".join(re.escape(p) for p in sorted(prefixes)), TOKEN_TAIL))
     if not pattern.fullmatch(root):
         raise Fatal(
@@ -1109,7 +1174,17 @@ def scan(text: str, edge_ids: set[str], root: str, pattern: re.Pattern[str]) -> 
             token = match.group(0)
             matched.append(token)
             if token not in edge_ids:
-                findings.append((number, f"unresolvable edge id '{token}' (not a key of edges)"))
+                # A retired namespace is reported as such, never as a typo: the
+                # cause is different, the fix is different, and E4/E5 pin the
+                # attribution so the two paths cannot silently merge.
+                retired = retired_prefix(token)
+                if retired:
+                    findings.append((number, (
+                        f"retired edge id '{token}' -- the '{retired}' namespace is "
+                        "declared retired in RETIRED_PREFIXES and resolves to nothing"
+                    )))
+                else:
+                    findings.append((number, f"unresolvable edge id '{token}' (not a key of edges)"))
         if number not in heredoc:
             for reason in binding_findings(line):
                 findings.append((number, reason))

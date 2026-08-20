@@ -1,5 +1,5 @@
 /* META-BEGIN */
-export const meta = { "name": "review-fleet", "description": "Shared Workflow-native child-dispatch engine for /uberdev:review-pr and /uberdev:simplify (RFC 0012 §3.1). ONE script, one `mode` branch, nine re-entrant `stage` values: review (the 6-reviewer Phase 1 fanout), verify (one finding-verifier child per eligible Phase 1 blocker finding, #431), fix (ONE code-fixer child against controller-supplied authority), simplify (the 3-lens code-simplifier fanout), defer (findings-to-issues), and the four Phase 3 CI stages ci-classify, ci-fix, ci-conflicts and ci-defer (#383). The script DISPATCHES AND WAITS ONLY — every digest, every artifact validation and every git/gh mutation stays in the calling session's Bash via lib/code_fixer_contract.py, which is why the stages are separate Workflow calls rather than one run.", "phases": ["Phase 1 — Review fanout","Phase 1 — Verify","Phase 1 — Fix","Phase 2 — Simplify","Phase 2.5 — Defer issues","Phase 3 — CI classify","Phase 3 — CI fix","Phase 3 — CI conflicts","Phase 3 — CI defer"], "whenToUse": "Invoked verbatim by skills/review-fleet/SKILL.md's stage recipes after the /uberdev:review-pr or /uberdev:simplify preflight emits an args envelope with pipeline=review-fleet." };
+export const meta = { "name": "review-fleet", "description": "Shared Workflow-native child-dispatch engine for /uberdev:review-pr and /uberdev:simplify (RFC 0012 §3.1). ONE script, one `mode` branch, nine re-entrant `stage` values: review (the 7-reviewer Phase 1 fanout), verify (one finding-verifier child per eligible Phase 1 blocker finding, #431), fix (ONE code-fixer child against controller-supplied authority), simplify (the 3-lens code-simplifier fanout), defer (findings-to-issues), and the four Phase 3 CI stages ci-classify, ci-fix, ci-conflicts and ci-defer (#383). The script DISPATCHES AND WAITS ONLY — every digest, every artifact validation and every git/gh mutation stays in the calling session's Bash via lib/code_fixer_contract.py, which is why the stages are separate Workflow calls rather than one run.", "phases": ["Phase 1 — Review fanout","Phase 1 — Verify","Phase 1 — Fix","Phase 2 — Simplify","Phase 2.5 — Defer issues","Phase 3 — CI classify","Phase 3 — CI fix","Phase 3 — CI conflicts","Phase 3 — CI defer"], "whenToUse": "Invoked verbatim by skills/review-fleet/SKILL.md's stage recipes after the /uberdev:review-pr or /uberdev:simplify preflight emits an args envelope with pipeline=review-fleet." };
 /* META-END */
 
 // skills/review-fleet/workflow.js — RFC 0012 §3.1, built to the P2 seam.
@@ -1682,13 +1682,14 @@ function recordChild(entry, ret, phaseName) {
 // BARRIER JUSTIFIED: parallel() resolves only after every thunk settles, and
 // that is exactly what the next step needs — the controller's aggregate writer
 // consumes the FULL roster (post_review_write_aggregate_v2 re-validates the
-// closed six-edge roster; encode-aggregate does the same for the three lenses),
-// and "the ordinary aggregate exists only after all six reviewer slots have
-// valid evidence" (skills/post-impl-review/SKILL.md failure boundary). There is
-// no partial-consumption step that a barrier-free pipeline() could overlap
-// with, so pipeline() would buy nothing here and would make this the first
-// shipped call site of an API whose semantics are pinned only by harness
-// self-tests. See the SKILL.md "Why parallel(), not pipeline()" note.
+// closed seven-edge roster; encode-aggregate does the same for the three
+// lenses), and "The ordinary aggregate exists only after all seven reviewer
+// slots have valid evidence" (skills/post-impl-review/SKILL.md failure
+// boundary). There is no partial-consumption step that a barrier-free
+// pipeline() could overlap with, so pipeline() would buy nothing here and
+// would make this the first shipped call site of an API whose semantics are
+// pinned only by harness self-tests. See the SKILL.md "Why parallel(), not
+// pipeline()" note.
 async function dispatchRoster(roster, phaseName, buildPrompt, agentTypeOf, schema, waveSize) {
   for (let i = 0; i < roster.length; i += waveSize) {
     const batch = roster.slice(i, i + waveSize);
@@ -1755,7 +1756,7 @@ async function main() {
       }
       if (!isSafeAbsPath(diffPathAbs)) return abort("bad_diff_path", diffPathAbs);
       // BEFORE nonceGate on purpose: a wiring regression must burn no nonce and
-      // dispatch no child. Six reviewers with no stated output contract is the
+      // dispatch no child. Seven reviewers with no stated output contract is the
       // #403 failure — every result is refused by
       // uberdev_child_validate_phase1_review_result and the aggregate is
       // suppressed, which costs a whole fanout to learn.

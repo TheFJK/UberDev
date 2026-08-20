@@ -2,7 +2,7 @@
 
 | Field          | Value                                                                                                                                                                                                                 |
 | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Status**     | Draft (2026-05-16 — awaiting implementation)                                                                                                                                                                          |
+| **Status**     | Draft (2026-05-16 — awaiting implementation) — **SUPERSEDED IN PART (2026-08-19): see §2.1a**                                                                                                                                                                          |
 | **Author**     | TheFJK                                                                                                                                                                                                                 |
 | **Created**    | 2026-05-16                                                                                                                                                                                                             |
 | **Targets**    | NEW: `plugins/uberdev/commands/dev.md`, `plugins/uberdev/skills/dev-pipeline/SKILL.md`, `tests/dev.test.sh`, `tests/dev-pipeline.test.sh`. MODIFIED: `commands/install-aliases.md`, `commands/uninstall-aliases.md`, `README.md`, `CHANGELOG.md`, `.claude-plugin/marketplace.json`, `plugins/uberdev/.claude-plugin/plugin.json` |
@@ -27,12 +27,44 @@ The product purpose: a fast lane for ideas too small to justify a brainstorm/spe
 
 A three-agent codebase audit (2026-05-16) established:
 
-1. `/solve` has four tiers (`trivial` → `large`), but **every tier — even `trivial` — terminates in `finish-branch` → `gh pr create` → full `/review-pr`**, an unskippable 6-agent fanout (`post-impl-review/SKILL.md:89-101`). `trivial`/`small` are also **single-agent**. No "parallel agents + skip spec/plan + light review" path exists.
+1. `/solve` has four tiers (`trivial` → `large`), but **every tier — even `trivial` — terminates in `finish-branch` → `gh pr create` → full `/review-pr`**, an unskippable 6-agent fanout (`post-impl-review/SKILL.md`). `trivial`/`small` are also **single-agent**. No "parallel agents + skip spec/plan + light review" path exists. *(Both counts superseded — see §2.1a.)*
 2. The parallel primitive is `dispatching-parallel-agents` — fire N `Task()` in one message, aggregate. `subagent-driven-dev` adds the safety discipline worth borrowing (disjoint "Owns" file-allowlists, controller-only git, one task per agent) **but requires a written plan doc with a `## Execution Waves` block** (`subagent-driven-dev/SKILL.md:18-27,63`). No doc-less parallel path exists.
-3. `/review-pr` **cannot be made fast** — no flag skips its Phase 1 6-agent fanout. `/simplify`'s 3-agent fanout is the lightest existing review primitive.
+3. `/review-pr` **cannot be made fast** — no flag skips its Phase 1 6-agent fanout. `/simplify`'s 3-agent fanout is the lightest existing review primitive. *(Phase 1 count superseded — see §2.1a.)*
 4. The `prototype` label is **greenfield** — zero hits repo-wide. `gh label create --force` (idempotent) is the established label-creation idiom (`finish-branch/SKILL.md:287`).
 
 `/dev` is therefore genuinely new behaviour, not a re-skin of an existing tier.
+
+### 2.1a — SUPERSEDED IN PART (2026-08-19)
+
+**Issues #619 and #606. Applies to the figures §2.1 argues from — and to every
+other "6-agent" figure in this document — never to the conclusion they support,
+which still holds and holds slightly harder.** This section is a record of what
+was true on 2026-05-16; three of its load-bearing facts have moved since, so
+they are corrected here rather than rewritten above.
+
+1. **The tier ladder is three rungs, not four.** #619 deleted the `large` rung.
+   `lib/solve_triage.py` declares `trivial` → `medium`, with `medium` as the
+   ceiling; RFC 0013 §0A.1 is the record of that collapse. Read §2.1's "four
+   tiers (`trivial` → `large`)" as three tiers, `trivial` → `medium`. The
+   argument is untouched: every surviving rung still terminates in
+   `finish-branch` → `gh pr create` → full `/review-pr`.
+2. **The `/review-pr` Phase 1 fanout is SEVEN reviewers, not six.** The
+   `convention-compliance` lens joined the roster after this RFC was written.
+   Every "6-agent" figure below reads **7** today, which makes the gap this RFC
+   identifies one agent wider than it argued, not narrower.
+3. **The roster citation is re-anchored on a symbol.** This RFC originally
+   pointed at a line range in `post-impl-review/SKILL.md` (lines 89–101, as that
+   file stood in May 2026). Those lines now land on the `## Emphasis` example
+   fence, not on the roster. The stable anchor is the heading
+   `### Step 2: Dispatch 7 required routed reviewers`, and it is not a second
+   place to keep the figure in step by hand: `tests/docs-accuracy.test.sh` T20
+   counts the `review_pr.review.*` edges in that skill's
+   `child-callsite-contracts-v1` block and compares the heading, this note, and
+   every live prose surface against the count. The heading and the figure move
+   together or CI reds.
+
+The other `file:line` citations below were **not** re-anchored — treat any of
+them as a pointer into the May-2026 tree, not into the shipped one.
 
 ### 2.2 The solo-dev prototype workflow
 

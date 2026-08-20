@@ -211,7 +211,7 @@ Workflow({scriptPath: "$CLAUDE_PLUGIN_ROOT/skills/solve-fleet/workflow.js"}, <th
 
 | ID | Guard |
 |---|---|
-| CB1 | projected agents (`2 + issues + (9 + implementBudget − 1) × design-tier issues + 1 repo-profile agent when the run has one`) over `maxAgents` → abort **before** any dispatch. The leading 2 is the intake relay plus the batched PR-verification relay (#515); the trailing 1 is the run-shared repo profile (#615), charged under the same `design-tier issues > 0` gate it actually runs under — a run-level term, which is the whole point of hoisting it, and charged at all for the reason the proof relay is: a ceiling that under-projects is not a ceiling. **RFC 0015's copy of this row predates that term and is one agent short; this row is the current reading.** The per-issue term is the #508 per-task chain, bounded by CB3's `implementBudget` (default 24). `T` is unknowable before the plan is written, so the projection uses the live cap — deliberately pessimistic, and the same way about the two other conditional rungs: the spec-revision round (no verdict exists yet at projection time) and the risk-gated `security` research lens — whose gate IS readable by then, but whose cost is a per-design-issue constant shared with `/goal`'s own cycle projection, which runs before any manifest exists. The plan review needs no such allowance: every accepted plan is reviewed. |
+| CB1 | projected agents (`2 + issues + (9 + implementBudget − 1) × design-tier issues + 1 repo-profile agent when the run has one`) over `maxAgents` → abort **before** any dispatch. The leading 2 is the intake relay plus the batched PR-verification relay (#515); the trailing 1 is the run-shared repo profile (#615), charged under the same `design-tier issues > 0` gate it actually runs under — a run-level term, which is the whole point of hoisting it, and charged at all for the reason the proof relay is: a ceiling that under-projects is not a ceiling. RFC 0015 §4.2 carries the same reading, alongside the `/goal`-side copy of the ceiling that prices a whole cycle. The per-issue term is the #508 per-task chain, bounded by CB3's `implementBudget` (default 24). `T` is unknowable before the plan is written, so the projection uses the live cap — deliberately pessimistic, and the same way about the two other conditional rungs: the spec-revision round (no verdict exists yet at projection time) and the risk-gated `security` research lens — whose gate IS readable by then, but whose cost is a per-design-issue constant shared with `/goal`'s own cycle projection, which runs before any manifest exists. The plan review needs no such allowance: every accepted plan is reviewed. |
 | CB2 | runtime `budget` exhausted, checked once per **admission** → the window stops taking work, chains already in flight finish, every issue never admitted keeps its claim. Audited once per run, not once per lane. |
 | CB3 | a **live** counter of implement-phase agents per issue against `implementBudget`. On exhaustion the task loop stops, the remaining tasks are recorded `SKIPPED`, `implement_budget_exhausted` is audited — and delivery still runs on what is already committed (the one dispatch deliberately exempt, so reviewed commits never strand in a worktree). |
 | — | a per-issue chain that throws is caught and recorded as `FAILED` for that issue only; one bad issue never takes the batch down |
@@ -310,8 +310,18 @@ same token:
 
 - `chainComplete: true` → the delivery brief mandates `Closes #N` in the PR
   body, and GitHub closes the issue when that PR merges.
-- `chainComplete: false` → it mandates the non-closing, whole-line trailer
-  `UberDev-Partial: #N` instead, and forbids any GitHub closing keyword standing
+- `chainComplete: false` → it mandates the non-closing trailer
+  `UberDev-Partial: #N` instead — which must **stand alone on its own line**,
+  with nothing before or after it (#603). That mandate is deliberate
+  producer-side strictness, not the only thing holding the claim up: `/merge`
+  harvests the trailer with a line-anchored match that was relaxed in the same
+  change to tolerate the decorations a free-text writer reaches for, so a
+  bulleted or backticked trailer IS harvested. What that anchor still misses is
+  a trailer buried in a sentence — harvested as nothing, stranding the claim on
+  a still-open issue. The tolerated set is owned by
+  `skills/merge-pipeline/SKILL.md` Step 3.4 and is a consumer-end safety net;
+  this end asks for the bare line because the producer is the end that can give
+  it. The brief also forbids any GitHub closing keyword standing
   in front of this issue's number in the body **or** in any commit message on
   the branch (GitHub honours them in both). The issue therefore stays **OPEN**
   when the PR merges — the tasks the chain never reached still need an issue to
@@ -411,9 +421,19 @@ ran leaves every verification count at zero, which is byte-identical to a batch
 that had no PR claim to prove. So the catch runs the same two steps the pass's
 own catch runs — the coherence classification, then marking every retained claim
 `UNVERIFIED` — and audits **`pr_proof_not_run`**. `probed: 0` beside a non-zero
-`unverified` is the shape, and that audit row is the only thing telling a thrown
-run apart from one with nothing to prove: another two facts separated only by
-the audit trail. Nothing is downgraded — unproven is reported as unproven.
+`unverified` is the shape **once that recovery completes**, and that audit row
+is the only thing telling a thrown run apart from one with nothing to prove:
+another two facts separated only by the audit trail. Nothing is downgraded —
+unproven is reported as unproven.
+
+The recovery is itself wrapped, and that is the one case where the shape above
+does not hold. If the classification or the marking throws, no claim is ever
+marked, so `unverified` stays at zero beside `probed: 0` — the exact signature a
+batch with nothing to prove publishes, which is the confusion the row exists to
+resolve. The run's results are still finalized rather than lost, and
+**`pr_proof_not_run_recovery_failed`** is audited beside `pr_proof_not_run`,
+carrying the recovery's own failure reason. So a zero `unverified` is never
+evidence the claims were checked: read both rows, never the counts.
 
 `relayRc` carries the relay's rc **only** when the relay both ran and answered
 with an integer `rc`. Every other exit publishes `null`: no PR was claimed, so
