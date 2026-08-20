@@ -3210,6 +3210,41 @@ UBERDEV_CARRIER_BACKEND=codex
 wf_evidence_must_fail carrier-backend-mismatch roster-mismatch
 UBERDEV_CARRIER_BACKEND=workflow
 
+# A result REWRITTEN after the status that attests to it is a SUBSTITUTED
+# reviewer opinion (#645). The nonce cannot see it -- one nonce is minted per
+# ITERATION and every re-dispatch of that iteration inherits it -- and neither
+# can any digest equality in this builder, because both digests are computed
+# from the SAME rewritten bytes. Observed live on PR #641: a blocker became a
+# suggestion and the lens verdict flipped, with the capture reporting nothing.
+#
+# It gets its OWN class. `roster-mismatch` would send the operator to look for a
+# child that never bound itself, which is a different investigation entirely.
+WF_FIRST_RESULT="$WF_EVIDENCE_ROOT/children/correctness-iter01/result.md"
+cp "$WF_FIRST_RESULT" "$WF_EVIDENCE_ROOT/first-result.bak"
+python3 -I -B - "$WF_FIRST_RESULT" "$WF_FIRST_STATUS" <<'PY'
+import os,sys
+result,status=sys.argv[1:]
+open(result,"w").write("```yaml\nverdict: APPROVE\nfindings: []\nconfidence: high\n```\n")
+# 696 seconds is the measured gap on the run that produced #645.
+newer=os.stat(status).st_mtime_ns+696_000_000_000
+os.utime(result,ns=(newer,newer))
+PY
+wf_evidence_must_fail rewritten-result result-rewritten-after-status
+cp "$WF_EVIDENCE_ROOT/first-result.bak" "$WF_FIRST_RESULT"
+python3 -I -B - "$WF_FIRST_RESULT" "$WF_FIRST_STATUS" <<'PY'
+import os,sys
+result,status=sys.argv[1:]
+older=os.stat(status).st_mtime_ns-8_000_000_000
+os.utime(result,ns=(older,older))
+PY
+# The positive control: with the protocol's own write order restored the SAME
+# roster aggregates cleanly again, so the row above is a statement about
+# ordering rather than about a directory this probe permanently poisoned.
+WF_REORDERED_LEDGER="$(post_review_validated_evidence_complete \
+  "$WF_EVIDENCE_ROOT/validated" 6 "$WF_EVIDENCE_ROOT/initial" \
+  "$WF_EVIDENCE_ROOT/repair" "$WF_EVIDENCE_ROOT")"
+[ -f "$WF_REORDERED_LEDGER" ]
+
 # One dispatcher per wave: a ledger mixing a receipt row with binding rows
 # describes six children that did not come from one fanout.
 python3 -I -B - "$WF_EVIDENCE_ROOT/initial" <<'PY'
