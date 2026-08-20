@@ -11,7 +11,7 @@ on a `proto/<slug>` branch: parse + scope-gate, decompose, parallel build, integ
 commit, light review, PR + label + harden issue, report.
 
 `/dev` exists to build a **minimal working prototype or small function fast** — via
-parallel `Task()` subagents — deliberately **skipping** the spec → plan → 6-agent
+parallel `Task()` subagents — deliberately **skipping** the spec → plan → 7-agent
 `/review-pr` machinery that `/solve` and `/turbo` run. A prototype is a distinct
 artifact class: rough, honestly labelled, and tracked back to production by an
 auto-filed harden issue. The pipeline never lowers the security floor and never lets

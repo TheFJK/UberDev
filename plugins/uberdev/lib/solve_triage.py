@@ -604,9 +604,17 @@ def classify(value: dict[str, Any], floor: str | None, ceiling: str | None, over
     # escalated to medium" rather than "was always medium".
     labelled = [ESCALATION_LABELS[name] for name in labels if name in ESCALATION_LABELS]
     if labelled:
-        # Exactly one token, ever: `matched_rules` is length-capped and
-        # duplicate-checked by the routing-context validator, so emitting one per
-        # label would be a dispatch failure rather than merely noisy.
+        # Exactly one token, ever -- and NOT because a second one would be
+        # refused. Both emitters collapse `matched` with `dict.fromkeys(...)` on
+        # the statement before they call `assert_rule_tokens`, and the
+        # routing-context validator's duplicate check and length cap in
+        # lib/agent-dispatch.sh read the already-deduped list this function
+        # returns, so a duplicate reaches neither. Nor is there room to run out
+        # of: after #619 this map spans 2 distinct tiers, so per-label emission
+        # would add at most two tokens against a cap of 32. What it would
+        # actually cost is the TRAIL -- two rungs recorded for one decision.
+        # The ratchet's record is the highest label an earlier run wrote, so
+        # that is the one this emits.
         highest = max(labelled, key=TIERS.index)
         if TIERS.index(highest) > TIERS.index(raw):
             raw = highest

@@ -10,7 +10,7 @@ Run a comprehensive pull request review using multiple specialized agents, each 
 
 **Review Aspects (optional):** "$ARGUMENTS"
 
-`/uberdev:review-pr` is a true **two-phase** command. Both phases run by default — flow: **post-impl-review fanout (6 agents via `uberdev:post-impl-review` skill) → fix loop → simplify fanout (3 lenses) → final aggregation**.
+`/uberdev:review-pr` is a true **two-phase** command. Both phases run by default — flow: **post-impl-review fanout (7 agents via `uberdev:post-impl-review` skill) → fix loop → simplify fanout (3 lenses) → final aggregation**.
 
 ## Routed child builder
 
@@ -1505,7 +1505,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    - **simplify** - Simplify code for clarity and maintainability
    - **all** - Run all applicable reviews (default)
 
-   Note: aspect filters are captured into `ASPECT_LIST` in Step 1 and passed to `Skill(uberdev:post-impl-review)` as the `aspect_emphasis` input (Step 4). The skill appends a `## Emphasis` section to every reviewer's brief, listing the requested aspects verbatim. The 6 agents always run; cap-controlled wave membership is independent of emphasis, so emphasis is advisory and never gates dispatch. `/uberdev:review-pr tests` produces a measurably different brief from `/uberdev:review-pr all` — the former includes `## Emphasis: tests`, the latter omits the section entirely.
+   Note: aspect filters are captured into `ASPECT_LIST` in Step 1 and passed to `Skill(uberdev:post-impl-review)` as the `aspect_emphasis` input (Step 4). The skill appends a `## Emphasis` section to every reviewer's brief, listing the requested aspects verbatim. The 7 agents always run; cap-controlled wave membership is independent of emphasis, so emphasis is advisory and never gates dispatch. `/uberdev:review-pr tests` produces a measurably different brief from `/uberdev:review-pr all` — the former includes `## Emphasis: tests`, the latter omits the section entirely.
 
 3. **Identify Changed Files**
    - Run `git diff --name-only` to see modified files

@@ -4070,6 +4070,229 @@ else
 fi
 # === END T19 README tier vocabulary ===
 
+# === BEGIN T20 review-fanout cardinality and the /dev RFC's archived counts ===
+# T20 — #606. Two counts drifted the moment the surfaces that state them moved
+# and the prose that quotes them did not:
+#
+#   * The Phase 1 reviewer roster grew to SEVEN (the `convention` lens joined),
+#     and SEVENTEEN sites across EIGHT live files still promised six —
+#     `commands/review-pr.md` twice, `skills/dev-pipeline/SKILL.md`, both SDD
+#     flow diagrams, `finish-branch/SKILL.md`, and — worst — the review-fleet
+#     engine describing itself: its SKILL.md guard table, four comments in
+#     `workflow.js` and five in `lib/review-fleet-args.sh`, plus the ledger check
+#     in `lib/review-aggregate.sh`. Every one of them is what a reader sizes the
+#     review budget, the nonce pool or the agent ceiling from.
+#   * v0.50.0 collapsed the tier ladder to three rungs, and `docs/rfc/0003`'s
+#     motivation section still argued from "four tiers (`trivial` → `large`)"
+#     and "an unskippable 6-agent fanout", citing a line RANGE that now lands on
+#     an `## Emphasis` example fence rather than on the roster.
+#
+# DERIVED on both halves. The roster size is COUNTED out of the
+# `child-callsite-contracts-v1` block in `post-impl-review/SKILL.md` — the wire
+# contract, the one surface that cannot be wrong about how many children are
+# dispatched — and the ladder is read out of `lib/solve_triage.py` exactly as
+# T19 reads it. Nothing below retypes either figure.
+#
+# The two halves are treated DIFFERENTLY on purpose. Live prose is corrected in
+# place; an RFC is an archival record of what was true when it was written, so
+# T20.4/T20.5 require a DATED superseded-in-part note (the form RFC 0013 §0A
+# already uses) instead of a rewritten §2.1 — and require the note to carry the
+# symbol anchor that replaced the rotted `SKILL.md:89-101` offset, because a
+# re-anchor is the only half of the correction that stops the citation rotting
+# again on the next edit above it.
+if python3 - "$PLUGIN_DIR" "$RFC_DIR/0003-dev-command.md" "$PLUGIN_DIR/lib/solve_triage.py" <<'PY_T20'
+import importlib.util, json, pathlib, re, sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+rfc = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").replace("\r\n", "\n")
+spec = importlib.util.spec_from_file_location("st_t20", sys.argv[3])
+st = importlib.util.module_from_spec(spec); spec.loader.exec_module(st)
+tiers = list(st.TIERS)
+
+roster_md = plugin_dir / "skills" / "post-impl-review" / "SKILL.md"
+roster_text = roster_md.read_text(encoding="utf-8").replace("\r\n", "\n")
+ok = True
+
+# T20.1 — anti-vacuity for the roster. A renamed marker or a reshaped block
+# yields zero reviewer edges, and every comparison below would then be measured
+# against a number nothing produced.
+block = re.search(r"<!-- BEGIN child-callsite-contracts-v1 -->\n```json\n(.*?)\n```",
+                  roster_text, re.DOTALL)
+roster = 0
+if block is None:
+    print("T20.1 post-impl-review/SKILL.md has no child-callsite-contracts-v1 json block"); ok = False
+else:
+    try:
+        edges = json.loads(block.group(1))
+    except ValueError as error:
+        print("T20.1 the post-impl-review callsite block is not valid JSON: %s" % error); ok = False
+        edges = {}
+    roster = len([e for e in edges if e.startswith("review_pr.review.")])
+    if roster < 5:
+        print("T20.1 only %d review_pr.review.* edge(s) in the callsite block — too few to be the roster" % roster)
+        ok = False
+
+# T20.2 — anti-vacuity for the scan. TWO tiers, because a detector keyed on
+# proximity alone is blind in exactly the files that get this wrong: a file whose
+# whole subject is the fanout stops re-naming it, so `review-fleet/workflow.js`
+# could say "closed six-edge roster" three lines under a REVIEW_ROSTER of seven
+# and no paragraph-proximity scan would ever reach it.
+#
+#   PROXIMITY tier — every `*.md` under the plugin. A cardinality token must sit
+#   within a bounded window of a fanout NAME in the same paragraph, so a reflow
+#   cannot hide a claim and a distant unrelated count cannot invent one. This
+#   tier alone may read the GENERIC noun `agents`, which means nothing on its own.
+#
+#   OWNER tier — every file, any extension, that names a `review_pr.review.*`
+#   edge. The set is DERIVED by grep, never listed: a file that names the edges
+#   is a file describing this roster, and adding a new one opts it in for free.
+#   No proximity is required there, so the nouns are narrowed to the ones that
+#   are self-anchoring (`reviewer*`, `edge roster`) — never bare `agents`, which
+#   is why "The one agent-returned string" is not read as a roster claim.
+#
+# Number-WORDS count as much as digits. TEN of the seventeen stale sites spelled
+# it out — "six children", "six-edge roster", "Six reviewers" — and the row's
+# first shape, `(\d+)[- ]agents?`, could see FOUR of them: a digit-only detector
+# reading one noun IS the hand-picked census this row exists to stop being. A
+# numeral is skipped when a preceding `Phase`/`Step`/`Wave`/`#` makes it an
+# ordinal rather than a count, or when an arrow makes it the left side of an
+# `N -> M` historical transition (the `5 → 6 reviewers` record of #73 is TRUE
+# about #73 and must stay).
+#
+# A zero harvest means the detector stopped detecting, not that the docs are
+# clean, so the floor below is set well under the live count.
+NAME = r"(?:post-impl-review|/review-pr|review-pr|review-fleet|REVIEW_ROSTER)"
+WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+         "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+NUM = r"(?:\d+|" + "|".join(sorted(WORDS)) + r")"
+ROSTER_NOUN = r"(?:reviewers?|reviewer[- ](?:subagents?|agents?|slots?|lenses)|(?:edge|reviewer) roster)"
+ANY_NOUN = r"(?:" + ROSTER_NOUN + r"|agents?)"
+def count_re(noun):
+    return r"(?<![\w-])(" + NUM + r")[- ]" + noun + r"\b"
+NOT_A_COUNT = re.compile(r"(?:[Pp]hase|[Ss]tage|[Ss]tep|[Ww]ave|[Oo]ption|[Ii]teration|#|->|→)\s*$")
+WINDOW = 240
+forward = re.compile(NAME + r".{0,%d}?" % WINDOW + count_re(ANY_NOUN), re.DOTALL | re.IGNORECASE)
+backward = re.compile(count_re(ANY_NOUN) + r".{0,%d}?" % WINDOW + NAME, re.DOTALL | re.IGNORECASE)
+owner_only = re.compile(count_re(ROSTER_NOUN), re.IGNORECASE)
+scanned = sorted(p for p in plugin_dir.rglob("*")
+                 if p.is_file() and p.suffix in (".md", ".js", ".sh"))
+owners = set(p for p in scanned
+             if "review_pr.review." in p.read_text(encoding="utf-8", errors="replace"))
+claims = []
+for path in scanned:
+    patterns = ([forward, backward] if path.suffix == ".md" else [])
+    if path in owners:
+        patterns = patterns + [owner_only]
+    if not patterns:
+        continue
+    lines = path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n").splitlines()
+    start = 0
+    for idx in range(len(lines) + 1):
+        if idx == len(lines) or not lines[idx].strip():
+            para = " ".join(lines[start:idx])
+            offsets = set()
+            for pattern in patterns:
+                for hit in pattern.finditer(para):
+                    if hit.start(1) in offsets or NOT_A_COUNT.search(para[:hit.start(1)]):
+                        continue
+                    offsets.add(hit.start(1))
+                    token = hit.group(1).lower()
+                    stated = WORDS[token] if token in WORDS else int(token)
+                    claims.append((path.relative_to(plugin_dir).as_posix(), start + 1, stated))
+            start = idx + 1
+if len(claims) < 20:
+    print("T20.2 the fanout-cardinality detector found %d claim(s) in %s — it has stopped detecting"
+          % (len(claims), plugin_dir))
+    ok = False
+if not any(path.endswith(".js") or path.endswith(".sh") for path, _, _ in claims):
+    print("T20.2 the owner tier harvested nothing outside *.md — the derived owner set has gone empty")
+    ok = False
+
+# T20.3 — forward. Every live prose surface that sizes the fanout sizes it the
+# way the wire contract does.
+wrong = ["%s:%d says %d" % row for row in claims if roster and row[2] != roster]
+if wrong:
+    print("T20.3 live prose sizes the Phase 1 reviewer fanout wrongly (the callsite block dispatches %d): %s"
+          % (roster, "; ".join(wrong)))
+    ok = False
+
+# T20.4 — the RFC keeps its record AND carries a dated correction. `Draft` in
+# the Status field is part of the record; the amendment marker is what tells a
+# reader the motivation below it argues from figures that have since moved.
+if not re.search(r"SUPERSEDED IN PART \(2026-08-19\)", rfc):
+    print("T20.4 docs/rfc/0003-dev-command.md carries no dated superseded-in-part note for its §2.1 counts")
+    ok = False
+
+# T20.5 — and the note states BOTH corrected figures, derived, plus the symbol
+# that replaced the rotted line-range citation. The heading is read out of the
+# roster file, so growing the roster reds this row rather than silently
+# re-rotting the anchor.
+heading = re.search(r"^### Step 2: Dispatch (\d+) required routed reviewers$",
+                    roster_text, re.MULTILINE)
+if heading is None:
+    print("T20.5 post-impl-review/SKILL.md has no '### Step 2: Dispatch N required routed reviewers' heading to anchor on")
+    ok = False
+elif roster and int(heading.group(1)) != roster:
+    print("T20.5 the roster heading says %s reviewers; the callsite block dispatches %d"
+          % (heading.group(1), roster))
+    ok = False
+else:
+    needles = [
+        heading.group(0).lstrip("# "),
+        "`%s` → `%s`" % (tiers[0], tiers[-1]),
+        "%d" % roster,
+    ]
+    absent = [n for n in needles if n not in rfc]
+    if absent:
+        print("T20.5 the RFC 0003 correction note omits: %s" % "; ".join(repr(n) for n in absent))
+        ok = False
+    if re.search(r"post-impl-review/SKILL\.md:\d", rfc):
+        print("T20.5 docs/rfc/0003-dev-command.md still cites post-impl-review/SKILL.md by line offset")
+        ok = False
+
+# T20.6 — a RETYPED quotation rots the same way a retyped count does, and it
+# rots invisibly: `review-fleet/workflow.js` quoted "all six reviewer slots" and
+# attributed it to `post-impl-review/SKILL.md`, which says seven. The shipped
+# tree misquoted its own cited source, and a cardinality scan cannot catch that
+# because the number is inside quotation marks that claim someone else wrote it.
+# So every span this engine quotes AND attributes to that file must still be in
+# it. Comment wrapping is normalised away first (`//` and `#` continuations),
+# because the quotation that was wrong spanned two comment lines and no
+# line-oriented grep could have matched it whole. Case is folded: these are
+# mid-sentence quotations, so a leading capital is the quoter's, not a
+# divergence. Only the DERIVED owner set is read, and only its source files —
+# markdown carries `#` as syntax, which this normalisation would eat.
+attributed = 0
+for path in sorted(p for p in owners if p.suffix in (".js", ".sh")):
+    flat = re.sub(r"\s+", " ",
+                  re.sub(r"\n\s*(?://+|#+)\s*", " ",
+                         path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")))
+    for quoted in re.finditer(r"[\"“]([^\"“”]{20,300})[\"”]", flat):
+        if "post-impl-review/SKILL.md" not in flat[quoted.end():quoted.end() + 160]:
+            continue
+        attributed += 1
+        needle = re.sub(r"\s+", " ", quoted.group(1)).strip().casefold()
+        if needle not in re.sub(r"\s+", " ", roster_text).casefold():
+            print("T20.6 %s quotes %r and credits post-impl-review/SKILL.md, which does not contain it"
+                  % (path.relative_to(plugin_dir).as_posix(), quoted.group(1)))
+            ok = False
+if attributed < 2:
+    print("T20.6 found %d attributed quotation(s) in the review-fleet sources — it has stopped detecting"
+          % attributed)
+    ok = False
+
+sys.exit(0 if ok else 1)
+PY_T20
+then
+  echo "  PASS  T20 the Phase 1 fanout size is derived-equal across live prose, and RFC 0003's archived counts carry a dated correction"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T20 a review-fanout cardinality or the /dev RFC's archived counts disagree with the shipped tree"
+  echo "        files: $PLUGIN_DIR/**/*.md, $RFC_DIR/0003-dev-command.md"
+  FAIL=$((FAIL + 1))
+fi
+# === END T20 review-fanout cardinality and the /dev RFC's archived counts ===
+
 echo
 echo "== Summary =="
 echo "  passed: $PASS"

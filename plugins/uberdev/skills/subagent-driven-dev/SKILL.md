@@ -64,11 +64,11 @@ A run of this skill never parks on a judgement call. `--turbo` is unattended by 
 What is new is the record. A judgement the controller makes instead of stalling on it is a **ruling**, and every ruling gets one line on disk at the moment it is made:
 
 - **Where.** One append-only `rulings.md` per run, in the controller's private run directory — the same directory that holds each task's `task_path` and fix ledger. Never inside the feature worktree, for the reason `## Fix ledger` already gives: an untracked file there is exactly what `git add -A` sweeps into a task commit, and it perturbs the post-wave full-test-suite run.
-- **How.** `sdd_append_ruling <rulings_path> <decision> <why> <cost>` creates the file at mode `0600` on the first call and appends one line per call after it, never truncating and never rewriting.
-- **Shape.** `Ruling: <decision> — <why> — <cost>`: what you decided, why you decided it, and what it costs if it turns out to be wrong. All three fields are required — the helper returns rc `2` rather than writing a half-line, exactly as the fix-ledger helpers do.
+- **How.** `sdd_append_ruling "$SDD_RULINGS" <decision> <why> <cost>` creates the file at mode `0600` on the first call and appends one line per call after it, never truncating and never rewriting. `SDD_RULINGS` is established once, in the routed-adapter fence above, and is the only path any call site passes — the helper refuses a relative one, so a run that never set it cannot record a ruling at all.
+- **Shape.** `Ruling: <decision> — <why> — <cost>`: what you decided, why you decided it, and what it costs if it turns out to be wrong. All three fields are required, and each must be **one line** — an embedded newline or carriage return would split one ruling into two rows in a file step 5 reads back line by line. Both refusals return rc `2` rather than writing a half-line or a silently reflowed one, exactly as the fix-ledger helpers do.
 - **A decision not on disk was not made.** Rulings are no more prose the controller is asked to remember than the caps are: the file is the record, and step 5 reads it back rather than reconstructing it from memory.
 
-What counts as a ruling: overriding a step of the plan, choosing between two defensible approaches, parking a finding once a cap fires, resequencing a wave, or accepting a finding as out of scope for this run.
+What counts as a ruling: overriding a step of the plan, choosing between two defensible approaches, parking a finding once a cap fires, resequencing a wave, or accepting a finding as out of scope for this run. Each of those has a named call site in `## The Process` and in `## Handling Implementer Status` below — the record is written by the step that makes the call, not reconstructed at the end of the run.
 
 ## When to Use
 
@@ -95,7 +95,19 @@ SDD_WORKTREE="$(git rev-parse --show-toplevel)"
 SDD_RISK_JSON="$(python3 -I -B -c 'import json,sys; r=json.loads(sys.argv[1]); print(json.dumps(r.get("root_decision",{}).get("risk_signals",r.get("risk_signals",[])),separators=(",",":")),end="")' "$SDD_ROOT_REQUEST_JSON")"
 SDD_CHILD_TIMEOUT="${SDD_CHILD_TIMEOUT:-600}"
 case "$SDD_CHILD_TIMEOUT" in ''|*[!0-9]*|0) return 2 ;; esac
+SDD_RUN_DIR="$(_uberdev_child_context_run_dir "$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["context_file"],end="")' "$SDD_ROOT_REQUEST_JSON")")" || return 2
+case "$SDD_RUN_DIR" in /*) ;; *) return 2 ;; esac
+SDD_RULINGS="$SDD_RUN_DIR/rulings.md"
 ```
+
+`SDD_RULINGS` is the run's one rulings file, and establishing it here is what
+makes `## Rulings` executable: `sdd_append_ruling` refuses a relative path, and
+until this line nothing produced an absolute one. The run directory is derived
+by `_uberdev_child_context_run_dir` — the same helper `lib/child-dispatch.sh`
+uses for its own confinement checks — rather than re-derived from the context
+path here, so the skill cannot come to disagree with the library about where a
+run lives. That directory is the private one the fix ledgers and every
+`task_path` already sit in, never the feature worktree.
 
 The runtime helper validates the registered edge, immutable carrier, instance,
 inputs, risks, confinement, and allocation. It atomically creates the private
@@ -267,9 +279,20 @@ sdd_append_ruling() {
   [ -n "$decision" ] || return 2
   [ -n "$why" ] || return 2
   [ -n "$cost" ] || return 2
+  # The one-line guard lives beside the format string it protects, below.
   python3 -I -B - "$rulings_path" "$decision" "$why" "$cost" <<'PY' || return 2
 import os,sys
 rulings,decision,why,cost=sys.argv[1:]
+# One line per call is the whole contract: step 5 reads this file back by LINE
+# and pushes each one into the PR body. A newline inside a field would split one
+# ruling into two rows -- the second with no decision, no why and no cost and
+# nothing marking it as half of one -- and a carriage return does the same to
+# any reader that splits on CRLF. Refused with the same rc 2 an empty field
+# draws, never stripped: stripping rewrites the decision instead of rejecting
+# it, and a silently rewritten ruling is worse than a missing one.
+for field in (decision,why,cost):
+    if "\n" in field or "\r" in field:
+        print('uberdev sdd: ruling_field_not_one_line',file=sys.stderr); raise SystemExit(2)
 entry=("Ruling: %s — %s — %s\n" % (decision,why,cost)).encode("utf-8")
 fd=os.open(rulings,os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW,0o600)
 with os.fdopen(fd,"ab") as stream: stream.write(entry)
@@ -639,19 +662,19 @@ digraph when_to_use {
 2. **Create TodoWrite** with one todo per task, labeled with its wave (e.g., `[wave-2] Task 4: ...`).
 3. **Verify clean baseline:** `git status` is clean; you're on the feature branch in the feature-branch worktree. Capture `BASELINE_SHA=$(git rev-parse HEAD)` — useful only for diagnostic logging now that the post-impl-review's `commit_range` is computed independently inside `/uberdev:review-pr` Phase 1.
 4. **For each wave (sequential):**
-   a. Build every implementer handoff from `./implementer-prompt.md`, using edge `sdd.task.implement`, role `implementation-worker`, phase `implementation`, and instance stage `implement`. Prepare every handoff, preflight the complete wave, then dispatch before waiting. Each handoff carries exact manifest keys, including canonical absolute `allowed_paths` and `denied_paths`. Each handoff also carries the no-subagents contract, stated on both dispatch paths so it survives either — the routed directive emits it at the wire (`lib/child-dispatch.sh`) and `./implementer-prompt.md` states it in the template the child actually reads, so it holds on the non-Workflow fallback too: an implementer does all of its own task, never dispatching a subagent to implement part of it and never a reviewer to check its work, because review arrives from this controller after the implementer reports and every reviewer a worker spawns for itself duplicates the task review this loop already dispatches — a full extra review seat per task. After preparation and before launch, `sdd_launch_prepared_batch` refuses any wave whose implementers' `allowed_paths` intersect — by equality *or* directory containment — with rc `3`, and any wave whose implementer ownership is absent with rc `2`; in both cases it dispatches **nothing**. An overlap is a **plan** defect: route that wave into the BLOCKED ladder and fix the decomposition — never "dispatch anyway".
+   a. Build every implementer handoff from `./implementer-prompt.md`, using edge `sdd.task.implement`, role `implementation-worker`, phase `implementation`, and instance stage `implement`. Prepare every handoff, preflight the complete wave, then dispatch before waiting. Each handoff carries exact manifest keys, including canonical absolute `allowed_paths` and `denied_paths`. Each handoff also carries the no-subagents contract, stated on both dispatch paths so it survives either — the routed directive emits it at the wire (`lib/child-dispatch.sh`) and `./implementer-prompt.md` states it in the template the child actually reads, so it holds on the non-Workflow fallback too: an implementer does all of its own task, never dispatching a subagent to implement part of it and never a reviewer to check its work, because review arrives from this controller after the implementer reports and every reviewer a worker spawns for itself duplicates the task review this loop already dispatches — a full extra review seat per task. After preparation and before launch, `sdd_launch_prepared_batch` refuses any wave whose implementers' `allowed_paths` intersect — by equality *or* directory containment — with rc `3`, and any wave whose implementer ownership is absent with rc `2`; in both cases it dispatches **nothing**. An overlap is a **plan** defect: route that wave into the BLOCKED ladder and fix the decomposition — never "dispatch anyway". Re-cutting or resequencing a wave is a ruling: record it with `sdd_append_ruling "$SDD_RULINGS" <decision> <why> <cost>` before you dispatch the replacement wave.
    b. **Implementers never run git.** They edit files, run their tests, and report `Status + changed file paths + test results`.
    c. After all dispatch receipts exist, wait for all wave implementers with `uberdev_wait_child`; read each immutable result artifact only after its wait succeeds.
    d. For each completed implementer (in task ID order, sequential): controller stages **only that task's reported paths** with `git add <paths>` and commits with the task-specific message.
-   e. Run the project's full test command in the worktree once after all wave commits land. If it fails, identify which task regressed and re-dispatch edge `sdd.task.implement` to that task's `implementation-worker`, with stage `implement` and the next attempt plus the failure context. Order every such re-dispatch: wait → `sdd_snapshot_batch_results` → read the failure from the snapshotted result → `sdd_round_permitted retest_rounds <next round>` → on rc `0` append the round with `sdd_append_fix_ledger` and build the inputs with `failure_path=<that task's ledger>` before dispatching; on rc `3` call `sdd_note_cap_exhausted` and stop. Re-test after each fix, capped at `retest_rounds` (2) suspected-implementer re-dispatches for the wave — still red after the cap means halt the wave with committed work intact and escalate (BLOCKED ladder); never loop further.
+   e. Run the project's full test command in the worktree once after all wave commits land. If it fails, identify which task regressed and re-dispatch edge `sdd.task.implement` to that task's `implementation-worker`, with stage `implement` and the next attempt plus the failure context. Order every such re-dispatch: wait → `sdd_snapshot_batch_results` → read the failure from the snapshotted result → `sdd_round_permitted retest_rounds <next round>` → on rc `0` append the round with `sdd_append_fix_ledger` and build the inputs with `failure_path=<that task's ledger>` before dispatching; on rc `3` call `sdd_note_cap_exhausted`, record the park with `sdd_append_ruling "$SDD_RULINGS" <decision> <why> <cost>`, and stop. Re-test after each fix, capped at `retest_rounds` (2) suspected-implementer re-dispatches for the wave — still red after the cap means halt the wave with committed work intact and escalate (BLOCKED ladder); never loop further.
    f. For each committed task, build a `sdd.task.spec_review` handoff for role `spec-compliance-reviewer` from `./spec-reviewer-prompt.md`. Prepare all wave-eligible reviewers, preflight the batch, then dispatch before waiting. Pass each reviewer these context inputs:
       - `spec_path`: absolute design spec
       - `plan_path`: absolute implementation plan
       - `commit_sha`: controller-created task commit
       - `allowed_paths`: canonical absolute ownership paths
       - `report_path`: immutable implementer result
-   g. Loop spec fix-up per task until that task's reviewer approves, capped at `fix_rounds` (3) iterations per task. Fixes use `sdd.task.implement`/`implementation-worker`, stage `spec-fix`, and the next attempt; re-reviews use `sdd.task.spec_review` with the next attempt. Order each iteration: wait → `sdd_snapshot_batch_results` → read the reviewer verdict from the snapshotted result → `sdd_round_permitted fix_rounds <next round>` → on rc `0` append the reviewer's findings with `sdd_append_fix_ledger` and build the fix inputs with `failure_path=<that task's ledger>` before dispatching; on rc `3` call `sdd_note_cap_exhausted` and route the task into the BLOCKED ladder. Fix dispatches still don't run git — controller amends the task's commit (or creates a fix-up commit) using the implementer's reported new paths.
-   h. As soon as a task's spec review approves, add its `sdd.task.quality_review`/`code-reviewer` handoff to the next eligible quality batch. Prepare all handoffs, preflight the batch, then dispatch before waiting. Do NOT hold all quality reviews hostage to the slowest sibling's spec fix-loop. Quality fixes use `sdd.task.implement`, stage `quality-fix`; quality re-reviews use the quality edge with the next attempt. Same `fix_rounds` (3) cap per task, guarded the same way: wait → `sdd_snapshot_batch_results` → verdict → `sdd_round_permitted fix_rounds <next round>` → rc `0` appends with `sdd_append_fix_ledger` and dispatches with `failure_path=<that task's ledger>`; rc `3` calls `sdd_note_cap_exhausted` and routes into the BLOCKED ladder.
+   g. Loop spec fix-up per task until that task's reviewer approves, capped at `fix_rounds` (3) iterations per task. Fixes use `sdd.task.implement`/`implementation-worker`, stage `spec-fix`, and the next attempt; re-reviews use `sdd.task.spec_review` with the next attempt. Order each iteration: wait → `sdd_snapshot_batch_results` → read the reviewer verdict from the snapshotted result → `sdd_round_permitted fix_rounds <next round>` → on rc `0` append the reviewer's findings with `sdd_append_fix_ledger` and build the fix inputs with `failure_path=<that task's ledger>` before dispatching; on rc `3` call `sdd_note_cap_exhausted`, record the park with `sdd_append_ruling "$SDD_RULINGS" <decision> <why> <cost>`, and route the task into the BLOCKED ladder. Fix dispatches still don't run git — controller amends the task's commit (or creates a fix-up commit) using the implementer's reported new paths.
+   h. As soon as a task's spec review approves, add its `sdd.task.quality_review`/`code-reviewer` handoff to the next eligible quality batch. Prepare all handoffs, preflight the batch, then dispatch before waiting. Do NOT hold all quality reviews hostage to the slowest sibling's spec fix-loop. Quality fixes use `sdd.task.implement`, stage `quality-fix`; quality re-reviews use the quality edge with the next attempt. Same `fix_rounds` (3) cap per task, guarded the same way: wait → `sdd_snapshot_batch_results` → verdict → `sdd_round_permitted fix_rounds <next round>` → rc `0` appends with `sdd_append_fix_ledger` and dispatches with `failure_path=<that task's ledger>`; rc `3` calls `sdd_note_cap_exhausted`, records the park with `sdd_append_ruling "$SDD_RULINGS" <decision> <why> <cost>`, and routes into the BLOCKED ladder.
    i. Mark every task in the wave complete in TodoWrite.
    j. **Mark wave complete.** No additional accumulation required at the SDD layer — `/uberdev:review-pr` Phase 1, chained post-push from `finish-branch`, computes its own `changed_paths` and `commit_range` against the pushed PR.
 
@@ -693,7 +716,7 @@ model_invocation: false
 
 5. Hand off to `uberdev:finish-branch` (no flag arg). The branch close-out detects unattended mode via the inherited `UBERDEV_TURBO=1` environment variable from the selected dispatch backend — under that signal, `finish-branch` auto-selects "Push and Create PR" without prompting (#97). For `medium` tier, `pr-test-analyzer` was dispatched in Step 4.5 (above) and its findings are now on disk at `<summary_dir>/pr-test-analyzer-<plan-scope>.md`. `finish-branch` will discover and include them in the PR body's `## Reviewer findings summary` section. Post-implementation reviewer fanout is hosted by `/uberdev:review-pr` Phase 1 (chained from `finish-branch` after PR push); no reviewer *fanout* is dispatched from `subagent-driven-dev` itself (see Step 4.5 for the carve-out vs the retired `uberdev:post-impl-review` fanout).
 
-   **Rulings roll-up.** Before that handoff, read the run's `rulings.md` and emit every line it holds under a `## Rulings I made` heading, in write order, each still carrying what it costs if wrong — the roll-up is exhaustive: if the file holds a ruling, this list holds it. That is what goes in this run's final message.
+   **Rulings roll-up.** Before that handoff, read the run's `rulings.md` at `$SDD_RULINGS` — the one file every call site above appended to — and emit every line it holds under a `## Rulings I made` heading, in write order, each still carrying what it costs if wrong — the roll-up is exhaustive: if the file holds a ruling, this list holds it. That is what goes in this run's final message.
    The same `## Rulings I made` block also goes into the `## Summary` body composed for the `finish-branch` Option-2 PR, not only into the message this run ends with: `finish-branch` collects `post-impl-review-*.md` and `pr-test-analyzer*.md` from the run directory and nothing else, so `rulings.md` reaches whoever reviews the PR only because this step writes it there.
 
 ### Parallel Dispatch Pattern
@@ -721,7 +744,7 @@ model_invocation: false
             hand off to uberdev:finish-branch
                 ↓ (finish-branch pushes PR, then chains)
             /uberdev:review-pr
-                Phase 1: uberdev:post-impl-review (6 agents, 1 message)
+                Phase 1: uberdev:post-impl-review (7 agents, 1 message)
                 Phase 2: simplify lenses (3 agents, 1 message)
 ```
 
@@ -784,7 +807,7 @@ Handle each appropriately:
 
 **DONE_WITH_CONCERNS:** The implementer completed the work but flagged doubts. Read the concerns before proceeding. If the concerns are about correctness or scope, address them before review. If they're observations (e.g., "this file is getting large"), note them and proceed to review.
 
-**NEEDS_CONTEXT:** The implementer needs information that wasn't provided. Provide the missing context and re-dispatch — at most `context_rounds` (2) answer-and-re-dispatch cycles per task. Call `sdd_round_permitted context_rounds <next round>` before minting the next instance id: on rc `0` append the supplied context to that task's fix ledger with `sdd_append_fix_ledger` and re-dispatch with `failure_path=<that task's ledger>`; on rc `3` call `sdd_note_cap_exhausted` and route into the BLOCKED ladder below.
+**NEEDS_CONTEXT:** The implementer needs information that wasn't provided. Provide the missing context and re-dispatch — at most `context_rounds` (2) answer-and-re-dispatch cycles per task. Call `sdd_round_permitted context_rounds <next round>` before minting the next instance id: on rc `0` append the supplied context to that task's fix ledger with `sdd_append_fix_ledger` and re-dispatch with `failure_path=<that task's ledger>`; on rc `3` call `sdd_note_cap_exhausted`, record the park with `sdd_append_ruling "$SDD_RULINGS" <decision> <why> <cost>`, and route into the BLOCKED ladder below.
 
 **BLOCKED:** The implementer cannot complete the task. Assess the blocker:
 1. If it's a context problem, provide more context and re-dispatch the same stable edge
@@ -792,7 +815,9 @@ Handle each appropriately:
 3. If the task is too large, break it into smaller pieces
 4. If the plan itself is wrong, escalate to the human
 
-**REFUSED:** The implementer judged the handoff itself unexecutable — it conflicts with repository instructions, demands delegation or a scope change a leaf worker may not make, or asks for something unsafe. This is a verdict on the instruction, not on the difficulty, so the same task is **never re-dispatched with unchanged handoff data**: fix the plan, re-scope the task so the instruction is one a leaf worker may carry out, or escalate to the human. Adding context does not answer a refusal.
+Whichever arm you take is a judgement made instead of stalling on it, so write it down as you take it: `sdd_append_ruling "$SDD_RULINGS" <decision> <why> <cost>` — the decision (which arm and why that one), and what it costs if the arm was wrong.
+
+**REFUSED:** The implementer judged the handoff itself unexecutable — it conflicts with repository instructions, demands delegation or a scope change a leaf worker may not make, or asks for something unsafe. This is a verdict on the instruction, not on the difficulty, so the same task is **never re-dispatched with unchanged handoff data**: fix the plan, re-scope the task so the instruction is one a leaf worker may carry out, or escalate to the human. Adding context does not answer a refusal. A refusal you act on is a ruling on the instruction, so record which of those three you chose with `sdd_append_ruling "$SDD_RULINGS" <decision> <why> <cost>` before re-dispatching anything.
 
 **Never** ignore an escalation or retry unchanged context and risk evidence. If the implementer said it's stuck, something needs to change.
 
@@ -883,7 +908,7 @@ Ownership map:
 
 [For medium tier: SDD Step 4.5 dispatches pr-test-analyzer pre-merge before the finish-branch handoff]
 
-[Hand off to uberdev:finish-branch — which pushes the PR and chains into /uberdev:review-pr Phase 1 (6 reviewer agents, advisory — roster owned by post-impl-review/SKILL.md)]
+[Hand off to uberdev:finish-branch — which pushes the PR and chains into /uberdev:review-pr Phase 1 (7 reviewer agents, advisory — roster owned by post-impl-review/SKILL.md)]
 ```
 
 ## Advantages
@@ -946,7 +971,7 @@ Ownership map:
 - Don't rush them into implementation
 
 **If reviewer finds issues:**
-- The controller calls `sdd_round_permitted fix_rounds <next round>` first. On rc `0` it appends the round's findings to that task's fix ledger with `sdd_append_fix_ledger` and dispatches a new `implementation-worker` allocation on the implementation edge with `failure_path` pointing at that ledger — so the fixer opens one file and sees rounds 1..N instead of re-deriving what the reviewer already priced in. On rc `3` it calls `sdd_note_cap_exhausted` and routes the task into the BLOCKED ladder.
+- The controller calls `sdd_round_permitted fix_rounds <next round>` first. On rc `0` it appends the round's findings to that task's fix ledger with `sdd_append_fix_ledger` and dispatches a new `implementation-worker` allocation on the implementation edge with `failure_path` pointing at that ledger — so the fixer opens one file and sees rounds 1..N instead of re-deriving what the reviewer already priced in. On rc `3` it calls `sdd_note_cap_exhausted`, records the parked finding with `sdd_append_ruling "$SDD_RULINGS" <decision> <why> <cost>`, and routes the task into the BLOCKED ladder.
 - Reviewer reviews again
 - Repeat until approved or the task's `fix_rounds` cap (3) is exhausted — then route through the BLOCKED ladder, never an unbounded loop
 - Don't skip the re-review

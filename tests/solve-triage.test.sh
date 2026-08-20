@@ -908,4 +908,72 @@ assert "trivial:bounded-explicit-signal" in v["matched_rules"], v
 PY_L9A
 PASS=$((PASS+1))
 
+# L10 (#606) -- the JUSTIFICATION beside the highest-only escalation emission,
+# EXECUTED rather than asserted. The comment used to say that emitting one token
+# per label "would be a dispatch failure rather than merely noisy". Nothing in
+# the tree makes that true, and these rows are why:
+#
+#   L10a  both emitters dedupe with `dict.fromkeys(...)` on the statement BEFORE
+#         they call assert_rule_tokens, so a duplicate token never reaches the
+#         local validator at all;
+#   L10b  the routing-context validator's duplicate check and length cap in
+#         lib/agent-dispatch.sh read the ALREADY-deduped list this module
+#         returns, so they cannot see one either;
+#   L10c  and per-label emission could not reach that cap regardless -- after
+#         #619 ESCALATION_LABELS spans two distinct tiers, so the worst case is
+#         two tokens against a cap of 32. Inert duplicates, never a refusal.
+#
+# The prose row is DERIVED: the cap comes out of lib/agent-dispatch.sh and the
+# tier span out of this module, so re-capping the validator or re-opening a rung
+# reds this row rather than leaving a third retyped figure behind. That is the
+# whole class -- #606 was a justification that named a mechanism which does not
+# fire, and no row in this suite had ever read it.
+python3 - "$TRIAGE" "$ROOT/plugins/uberdev/lib/agent-dispatch.sh" <<'PY_L10'
+import importlib.util, pathlib, re, sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+dispatch = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+spec = importlib.util.spec_from_file_location("solve_triage_l10", sys.argv[1])
+st = importlib.util.module_from_spec(spec); spec.loader.exec_module(st)
+lines = source.splitlines()
+
+# L10a -- the dedupe is the statement immediately before every validator call.
+calls = [i for i, line in enumerate(lines)
+         if "assert_rule_tokens(" in line and not line.lstrip().startswith("def ")]
+assert len(calls) == 2, calls
+for i in calls:
+    assert "dict.fromkeys(" in lines[i - 1], (i, lines[i - 1])
+
+# L10b -- and the routing-context validator reads that deduped list, so its own
+# duplicate check and cap sit downstream of the dedupe, not upstream of it.
+caps = re.findall(r"len\(rules\)>(\d+)", dispatch)
+assert caps and len(set(caps)) == 1, caps
+cap = int(caps[0])
+assert "len(rules)!=len(set(rules))" in dispatch
+
+# L10c -- the whole label vocabulary spans this many distinct tiers, so per-label
+# emission adds at most this many tokens. Derived from the module, never typed.
+span = len(set(st.ESCALATION_LABELS.values()))
+assert span == 2, sorted(set(st.ESCALATION_LABELS.values()))
+assert span < cap, (span, cap)
+
+# L10d -- the comment states that reason, and no longer the refuted one. The
+# contiguous block immediately above the highest-only selection.
+anchor = [i for i, line in enumerate(lines) if "highest = max(labelled" in line]
+assert len(anchor) == 1, anchor
+i = anchor[0]; block = []
+while i > 0 and lines[i - 1].lstrip().startswith("#"):
+    i -= 1; block.append(lines[i])
+# Anti-vacuity: a renamed selection line yields an EMPTY block, and every
+# containment check below would then pass on nothing at all.
+assert len(block) >= 3, block
+comment = " ".join(re.sub(r"^\s*#\s?", "", line) for line in reversed(block))
+comment = re.sub(r"\s+", " ", comment).strip()
+assert "dispatch failure" not in comment, comment
+for needle in ("dict.fromkeys", "assert_rule_tokens",
+               "cap of %d" % cap, "%d distinct tiers" % span):
+    assert needle in comment, (needle, comment)
+PY_L10
+PASS=$((PASS+1))
+
 echo "solve-triage: $PASS passed"
