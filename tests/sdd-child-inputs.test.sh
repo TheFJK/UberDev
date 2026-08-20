@@ -2206,4 +2206,268 @@ for entry in entries:
     assert entry.read_bytes() == expected, f"refused re-run mutated {entry.name}"
 PY
 
+
+# ── B-A … B-G: SDD_BATCH_TASK_IDS is a documented, fail-closed, cross-shell ──
+# input (#650). Four separate claims; the first three share one driver, and B-G
+# reads the prose:
+#
+#   1. The batch loop iterates ONCE PER ID under bash AND under zsh. The shipped
+#      `for task_id in $SDD_BATCH_TASK_IDS` relied on an unquoted expansion
+#      word-splitting; zsh does not split a scalar, so the loop ran once with
+#      `task_id` set to the whole string, the REAL `sdd_validate_positive_decimal`
+#      refused the merged token, and the fence returned 2 having dispatched
+#      nothing — fail-closed-unrunnable, never a silent merge.
+#   2. Unset / empty / whitespace-only is a CALLER ERROR (rc 2), not an empty
+#      batch. Without a guard the loop iterates zero times, the prepared set stays
+#      empty, `sdd_assert_wave_disjoint` returns 0 from its `-gt 0 || return 0`
+#      arm, and the batch "succeeds" having dispatched nothing.
+#   3. The loop runs in the CALLER'S shell. `sdd_dispatch_prepared` mutates the
+#      `SDD_PREPARED_*` arrays that `sdd_launch_prepared_batch` reads after the
+#      loop, so a pipeline subshell would discard every prepared entry and launch
+#      an empty batch. The driver reports a per-id LOG line count and a shell
+#      variable incremented in the loop body and read after it: the log survives a
+#      subshell, the variable does not, so `dispatched=0 lines=3` is exactly the
+#      shape a piped loop produces and exactly what these rows refuse.
+#   4. The contract is written down where a reader of the skill body meets it,
+#      not only enforced in the fence — B-G, below the driver rows.
+#
+# The driver takes <runtime> <callsite> <log> on argv so the SAME file runs under
+# both shells, mirroring `sdd-routed-lifecycle`'s L-G fixture, and uses only
+# constructs proven in both (`${@:N:1}`, `[ … ]`, `case`, arithmetic expansion) —
+# no `printf -v`, no `[[ =~ ]]`, no `BASH_REMATCH`, no `type -t`.
+#
+# It deliberately does NOT reuse `sdd_dispatch_case` (`:295`), whose `printf -v`
+# is a bashism, and it deliberately does NOT become a new `*-zsh.test.sh` file:
+# `plugins/uberdev/docs/testing.md:41` binds that glob to fixtures `test.yml`
+# invokes WITH zsh, and this one re-invokes zsh internally from a bash fixture,
+# adding no CI entry.
+cat >"$TMP/batch-loop-driver.sh" <<'DRIVER'
+# argv: <runtime.sh> <batch-callsite.sh> <dispatch log>
+#
+# Deliberately NO `set -e` and no `set -u`: every row's verdict is the fence's
+# OWN return code, printed on the last line. A shell that aborted on the first
+# non-zero would print nothing at all, and an empty capture is a far less
+# readable failure than `rc=2 dispatched=0 lines=0`.
+BATCH_RUNTIME="$1"
+BATCH_CALLSITE="$2"
+BATCH_DISPATCH_LOG="$3"
+: >"$BATCH_DISPATCH_LOG"
+
+# Only the stubs below consume it, and none of them read it; set so that sourcing
+# the runtime fence never meets it undefined.
+SDD_WORKTREE=/
+. "$BATCH_RUNTIME"
+
+# Everything the fence calls is stubbed EXCEPT the validators, which stay real —
+# they are what turns a merged `41 42 43` token into the rc 2 this row reads.
+# `sdd_plan_scope` therefore has to return something the REAL
+# `sdd_validate_plan_scope` accepts: twelve lowercase hex characters.
+wave=1
+attempt=1
+stage=implement
+edge_id=sdd.task.implement
+plan_path=/dev/null
+SDD_RISK_JSON='[]'
+SDD_CHILD_TIMEOUT=5
+DISPATCHED=0
+sdd_begin_batch() { :; }
+sdd_plan_scope() { printf '%s' abcdef012345; }
+uberdev_child_instance_id() { printf '%s' "${@:1:1}"; }
+sdd_inputs_for_task() { printf '%s' '{}'; }
+sdd_canonicalize_owned_paths() { printf '%s' "${@:1:1}"; }
+uberdev_child_inputs_validate() { printf '%s' "${@:2:1}"; }
+# Appends to the log AND increments a variable read after the loop. The log
+# survives a pipeline subshell; the variable does not. That asymmetry is the
+# subshell falsifier.
+sdd_dispatch_prepared() {
+  DISPATCHED=$((DISPATCHED + 1))
+  printf '%s\n' "${@:2:1}" >>"$BATCH_DISPATCH_LOG"
+}
+sdd_launch_prepared_batch() { :; }
+sdd_snapshot_batch_results() { :; }
+sdd_wait_prepared_batch() { :; }
+
+# Sourced inside a function, exactly as the fixture at `:295-300` does it, so the
+# fence's `return 2` and its in-place array mutations must both work in the
+# caller's shell.
+run_batch() { . "$BATCH_CALLSITE"; }
+batch_rc=0
+run_batch || batch_rc=$?
+printf 'rc=%s dispatched=%s lines=%s\n' \
+  "$batch_rc" "$DISPATCHED" "$(wc -l <"$BATCH_DISPATCH_LOG" | tr -d ' ')"
+DRIVER
+
+# zsh is FATAL here, never SKIP: the cross-shell claim is the whole point of
+# these rows, and a SKIP would report an unproven claim as a pass. This file
+# already refused to run on Windows above, so anything reaching this line is a
+# Unix runner, and the ubuntu job runs five zsh fixtures already.
+command -v zsh >/dev/null 2>&1 || {
+  printf 'sdd-child-inputs: FATAL zsh is not on PATH — the cross-shell batch-loop claim cannot be proven\n' >&2
+  exit 2
+}
+
+BATCH_ROW_OUT=''
+BATCH_ROW_ERR="$TMP/batch-loop.err"
+# batch_row <label> <shell> set|unset <ids> <expected line>
+batch_row() {
+  local batch_label="$1" batch_shell="$2" batch_mode="$3" batch_ids="$4" batch_want="$5"
+  local batch_driver_rc=0
+  if [ "$batch_mode" = unset ]; then
+    BATCH_ROW_OUT="$(env -u SDD_BATCH_TASK_IDS "$batch_shell" "$TMP/batch-loop-driver.sh" \
+      "$TMP/runtime.sh" "$TMP/batch-callsite.sh" "$TMP/batch-loop.log" \
+      2>"$BATCH_ROW_ERR")" || batch_driver_rc=$?
+  else
+    BATCH_ROW_OUT="$(env "SDD_BATCH_TASK_IDS=$batch_ids" "$batch_shell" "$TMP/batch-loop-driver.sh" \
+      "$TMP/runtime.sh" "$TMP/batch-callsite.sh" "$TMP/batch-loop.log" \
+      2>"$BATCH_ROW_ERR")" || batch_driver_rc=$?
+  fi
+  [ "$batch_driver_rc" -eq 0 ] || {
+    printf '%s the batch-loop driver itself died under %s (rc=%s): [%s]\n' \
+      "$batch_label" "$batch_shell" "$batch_driver_rc" "$(<"$BATCH_ROW_ERR")" >&2
+    exit 1
+  }
+  [ "$BATCH_ROW_OUT" = "$batch_want" ] || {
+    printf '%s %s reported [%s], expected [%s]: %s\n' \
+      "$batch_label" "$batch_shell" "$BATCH_ROW_OUT" "$batch_want" "$(<"$BATCH_ROW_ERR")" >&2
+    exit 1
+  }
+}
+
+# B-A / B-B — one dispatch per id, in BOTH shells. Equality on the whole line,
+# not a floor: `dispatched=3 lines=3` and nothing else is the contract.
+batch_row B-A bash set '41 42 43' 'rc=0 dispatched=3 lines=3'
+batch_row B-B zsh  set '41 42 43' 'rc=0 dispatched=3 lines=3'
+
+# B-C / B-D / B-E / B-F — fail closed. Unset, empty and whitespace-only all
+# collapse to the same empty value and must each be refused with rc 2, in both
+# shells, having dispatched nothing.
+batch_row B-C bash unset ''      'rc=2 dispatched=0 lines=0'
+batch_row B-D bash set   ''      'rc=2 dispatched=0 lines=0'
+batch_row B-E bash set   '   '   'rc=2 dispatched=0 lines=0'
+batch_row B-F zsh  unset ''      'rc=2 dispatched=0 lines=0'
+
+# B-G — the contract is DOCUMENTED, not just enforced. `SDD_BATCH_TASK_IDS` has
+# no run-once assignment site because it is per-batch, so the only thing that can
+# tell a reader it is a controller-supplied input is the PROSE beside the fence.
+#
+# The fence's own `# SDD_BATCH_TASK_IDS is a controller-supplied input (see
+# above)` comment must NOT satisfy this row — a shell comment inside the code
+# block is not documentation a reader of the skill body meets, and accepting it
+# made an earlier draft of this row green with the prose paragraph deleted. So
+# the matching line is required to be markdown (not `^\s*#`) and to sit ABOVE the
+# `Executable batch shape` sentence, which is also where the fence-extraction
+# regex at `:33-37` forces it to go.
+python3 -I -B - "$SKILL" <<'PY'
+import sys
+from pathlib import Path
+
+lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+sentence = "Executable batch shape (substitute the edge/role/stage from the table):"
+anchors = [i for i, line in enumerate(lines) if line == sentence]
+if len(anchors) != 1:
+    raise SystemExit(
+        f"B-G expected exactly one 'Executable batch shape' sentence, found {len(anchors)}"
+    )
+prose = [
+    line
+    for line in lines[: anchors[0]]
+    if "SDD_BATCH_TASK_IDS" in line
+    and "controller-supplied input" in line
+    and not line.lstrip().startswith("#")
+]
+if not prose:
+    raise SystemExit(
+        "B-G SKILL.md never documents SDD_BATCH_TASK_IDS as a controller-supplied "
+        "input in prose above the executable batch fence"
+    )
+PY
+
+# ── P-A … P-F: the head region names the lane split, and nothing forward-refs ─
+# the foreclosed `sdd-waves` workflow (#650).
+#
+# P-D and P-E are falsifiers pointing in OPPOSITE directions, and both are
+# required. `skills/subagent-driven-dev` is a registered PERMANENT divergence
+# (`sdd-parallel-implementer-waves`, RFC 0019 §6) whose stated core principle is
+# parallel-by-default, so deleting that principle would put the skill and the
+# divergence register out of step — P-D reds on the deletion. Leaving the
+# forward reference in place contradicts RFC 0020 §1 and RFC 0012 §3.6's
+# retraction — P-E reds on that. The edit that satisfies both is a NARROWING.
+SKILL_HEAD="$TMP/skill-head.md"
+python3 -I -B - "$SKILL" "$SKILL_HEAD" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+# Anchored on the headings, never on line numbers: this region is edited by the
+# same change these rows cover, so a line pin would rot on the commit that adds
+# them.
+region = re.search(
+    r"^# Subagent-Driven Development$\n(.*?)(?=^## Loop caps$)",
+    text,
+    re.DOTALL | re.MULTILINE,
+)
+if region is None:
+    raise SystemExit(
+        "SKILL.md has no '# Subagent-Driven Development' … '## Loop caps' region"
+    )
+body = region.group(1)
+if not body.strip():
+    raise SystemExit("the '# Subagent-Driven Development' head region is empty")
+Path(sys.argv[2]).write_text(body, encoding="utf-8")
+PY
+
+# P-A / P-B — the region names both lanes.
+grep -qF 'session lane' "$SKILL_HEAD" || {
+  printf 'P-A the SKILL.md head region never says "session lane"\n' >&2
+  exit 1
+}
+grep -qF 'Workflow lane' "$SKILL_HEAD" || {
+  printf 'P-B the SKILL.md head region never says "Workflow lane"\n' >&2
+  exit 1
+}
+
+# P-C — and says what the Workflow lane IS, in the same paragraph. This file's
+# house style is one unwrapped line per paragraph, so same-line is same-paragraph.
+# A bare file-wide `sequential` would pass on the pre-existing "Sequential
+# execution of independent tasks wastes wall-clock time", which says the
+# opposite of what this row is for.
+lane_workflow_lines="$(grep -F 'Workflow lane' "$SKILL_HEAD" || true)"
+grep -qF 'sequential' <<<"$lane_workflow_lines" || {
+  printf 'P-C no paragraph names the Workflow lane AND calls it sequential: [%s]\n' \
+    "$lane_workflow_lines" >&2
+  exit 1
+}
+
+# P-D — NARROWED, NOT DELETED. See the divergence-register note above.
+grep -qF 'Parallel-by-default' "$SKILL_HEAD" || {
+  printf 'P-D the parallel-by-default core principle was deleted rather than narrowed\n' >&2
+  exit 1
+}
+grep -qF 'maximum throughput, zero races' "$SKILL_HEAD" || {
+  printf 'P-D the core principle lost its "maximum throughput, zero races" clause\n' >&2
+  exit 1
+}
+
+# P-E — no surface of this file still describes `sdd-waves` as a FUTURE workflow
+# inheriting the cap names. RFC 0020 §1 forecloses it and RFC 0012 §3.6 records
+# the retraction.
+for forward_ref in 'future `sdd-waves`' 'future sdd-waves script'; do
+  forward_hits="$(grep -cF "$forward_ref" "$SKILL" || true)"
+  [ "$forward_hits" -eq 0 ] || {
+    printf 'P-E SKILL.md still forward-references the foreclosed sdd-waves workflow (%s hit(s) of "%s")\n' \
+      "$forward_hits" "$forward_ref" >&2
+    exit 1
+  }
+done
+
+# P-F — ANTI-VACUITY for P-E. Two counts of zero are also what a wrong path or a
+# renamed file produce. The retraction is required to be RECORDED, not merely
+# deleted, so the token must still be present — in the retraction note, never in
+# a forward reference.
+grep -qF 'sdd-waves' "$SKILL" || {
+  printf 'P-F SKILL.md no longer mentions sdd-waves at all, so P-E proves nothing — the retraction must be recorded, not deleted\n' >&2
+  exit 1
+}
+
 echo 'sdd-child-inputs: PASS'
