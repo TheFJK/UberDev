@@ -4,6 +4,89 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.51.4] — 2026-08-19
+
+### Fixed - the head-ref fallback bound an issue to any PR that happened to share its number
+
+`lib/goal-state.sh`'s issue->PR resolver falls back to matching a PR's HEAD
+BRANCH against `<type>/<issue>-` when no `closingIssuesReferences` link exists,
+and that arm selected purely on NAME. Executed against the shipped function, a
+fixture carrying one PR — `{"number":901,"headRefName":"fix/500-error-page"}` —
+resolved issue **500** to PR **901**: a PR about an HTTP 500 error page, by a
+stranger, with no relationship to the issue at all. Adding the real solver PR
+(`feat/500-real-solver`, #880) beside it did not help; `| max` still handed the
+issue to 901. Neither `--json` projection carries an author, so no arm *could*
+have filtered on one, and the claim comment is not a corroboration source either
+(`lib/solve-launcher.sh` records the worktree directory name, not the PR head
+ref). Downstream, `lib/goal-watch.sh` registers that PR into the batch registry
+and drives `/review-pr` and `/merge` against it.
+
+The fix plumbs EVIDENCE from the only party that has it. `skills/solve-fleet/`
+returns per-issue `results[]` records; `skills/goal-pipeline/workflow.js` now
+derives `<issue>:<pr>` pairs from them (`solverPairsFromResults`), accumulates
+them for the whole run, and carries them to `lib/goal-watch.sh` on
+`--solver-prs=` — the same argv channel `--partial-prs` uses, because RFC 0012
+§2.2 constraint 6 forbids that script the filesystem. The watch lane lands them
+in a new run-lifetime ledger `goal-<id>-solver-prs.tsv` before step 2a resolves
+anything, and `_uberdev_goal_pr_for_issue_jq` gains a third ranked arm that
+selects on the recorded NUMBER: `$byclose // $bycorr // $byhead`.
+
+**It ranks, it never replaces — the resolver can only ever degrade to the old
+guess, never to "no PR".** The head-ref arm stays in the program
+unconditionally, and that is the safety argument rather than a wiring detail. A
+recorded number is only useful while the PR it names is still OPEN, and it can
+stop being open for reasons that say nothing about the issue: a human or the
+solver closes it, or the `#515` proof pass could not verify the claim at all
+(`markUnverifiable` KEEPS the number on http 0/401/429/5xx, so a stale or
+mis-parsed one is never zeroed). Under `/goal` a resolution miss is TERMINAL on
+the first watch tick — the settled arm fails the issue and
+`lib/goal-phase3.sh`'s `solver_failed` breaker then halts the WHOLE run — so had
+the corroborated arm *replaced* the guess, every one of those cases would have
+turned a wrong-PR bug into a run-halting one, and the presence of evidence would
+have resolved to strictly less than its absence. Ranked, a record that names
+nothing open simply falls through to the guess the run always had. Pairs whose
+PR number is the `0` no-PR sentinel, and pairs in a claim collision, are dropped
+rather than guessed at, which leaves those issues on the guess too. A
+`closingIssuesReferences` link still outranks everything: it is a deliberate
+statement about the issue, not a name collision.
+
+Residual, stated plainly: an issue for which the fleet opened no PR at all
+(`PUSHED_NO_PR`, `FAILED`) gets no ledger row, so a same-numbered stranger
+branch can still win the guess for it. Narrowing that case would remove the only
+link such an issue has, and the terminal-miss cost above makes that the wrong
+trade.
+
+### Fixed - a partial-delivery trailer the producer actually emits was harvested as nothing
+
+`/merge` Step 3.4 harvested the non-closing `UberDev-Partial: #N` claim-release
+trailer with `grep -oE '^UberDev-Partial: #[0-9]+$'`. Run against the shipped
+fence's own pipeline, only the completely bare line matched. The same trailer
+wrapped in backticks, the same trailer rendered as a `-` list item, and a line
+with one trailing space all harvested **nothing** — and the miss is silent by
+construction: an unmatched body produces an empty array, the loop runs zero
+times, rc stays 0, and the stranded
+`uberdev:active` claim is indistinguishable from a PR that carried no trailer.
+The claim then blocks every later `/solve`, `/turbo` and `/goal` Phase 1 on a
+still-OPEN issue. The sole producer, `prLinkLine()` in
+`skills/solve-fleet/workflow.js`, renders the trailer INSIDE BACKTICKS and
+imposed no standalone-line rule — the word "line" was the only thing holding the
+anchored consumer up, and it is prose to a free-text agent.
+
+Fixed at BOTH ends, because either alone leaves the class open:
+
+- **Consumer** (`skills/merge-pipeline/SKILL.md`, fence bumped to
+  `merge-issue-cleanup-fence-v3`): the harvest now tolerates a leading list
+  marker (`-`/`*`/`+`), surrounding backticks and trailing whitespace — and
+  nothing else. It is still line-anchored. The list-marker class deliberately
+  excludes ordered markers, which would put a stray digit in front of the issue
+  number for the `[0-9]+` extraction to harvest.
+- **Producer** (`prLinkLine()`): the partial arm now mandates the trailer STAND
+  ALONE on its own line, with nothing before or after it.
+
+The boundary is pinned in both directions: `MZ3.h` (prose *before* the trailer)
+passes unchanged, and a new `MZ3.n` refuses prose *after* it. `/merge` runs on
+every PR, so a sentence that merely discusses a claim must never release it.
+
 ## [0.51.3] — 2026-08-19
 
 ### Added - the four remaining published solve-fleet contracts are compared against the script

@@ -310,8 +310,12 @@ same token:
 
 - `chainComplete: true` → the delivery brief mandates `Closes #N` in the PR
   body, and GitHub closes the issue when that PR merges.
-- `chainComplete: false` → it mandates the non-closing, whole-line trailer
-  `UberDev-Partial: #N` instead, and forbids any GitHub closing keyword standing
+- `chainComplete: false` → it mandates the non-closing trailer
+  `UberDev-Partial: #N` instead — which must **stand alone on its own line**,
+  with nothing before or after it (#603): `/merge` harvests it with a
+  line-anchored match, so a trailer the writer bulleted, backticked or buried in
+  a sentence is harvested as nothing and strands the claim on a still-open issue
+  — and forbids any GitHub closing keyword standing
   in front of this issue's number in the body **or** in any commit message on
   the branch (GitHub honours them in both). The issue therefore stays **OPEN**
   when the PR merges — the tasks the chain never reached still need an issue to

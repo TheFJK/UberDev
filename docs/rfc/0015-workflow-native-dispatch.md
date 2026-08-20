@@ -169,8 +169,11 @@ The linkage line is **conditional on what the run actually finished** (#554),
 because linkage and completeness were one token and a chain that stopped at task
 2 of 5 still auto-closed its issue. A single solver, and a per-task chain whose
 `chainComplete` is `true`, carry `Closes #N` and close the issue on merge. A
-chain that fell short carries the non-closing whole-line trailer
-`UberDev-Partial: #N` and no closing keyword anywhere — not in the body, not in
+chain that fell short carries the non-closing standalone-line trailer
+`UberDev-Partial: #N` — the delivery brief mandates it stand alone on its own
+line, and `/merge`'s harvest tolerates a leading list marker, surrounding
+backticks and trailing whitespace but still refuses prose on either side
+(#603) — and no closing keyword anywhere — not in the body, not in
 a commit message, since GitHub honours them in both — so the issue survives the
 merge OPEN with the unreached tasks still on it. `/merge` Step 3.4 parses that
 trailer to release the `uberdev:active` claim regardless, so an unfinished issue
@@ -188,6 +191,29 @@ there the `merge-dispatch-gate` region of `lib/goal-watch.sh` marks the
 `lib/goal-phase3.sh` refuses to emit `goal_converged` while any issue in the
 run delivered a short chain. The PR still merges; what changes is that the run
 stops reporting a convergence it did not achieve.
+
+`results[]` carries a second fact `/goal` needs, and it travels the same way
+(#603). `lib/goal-state.sh`'s issue->PR resolver prefers a PR's
+`closingIssuesReferences` link and falls back to matching the PR's HEAD BRANCH
+against `<type>/<issue>-`; that fallback selects on NAME alone, so a PR about an
+HTTP 500 error page on `fix/500-error-page` satisfies it for issue 500 and the
+`| max` tie-break hands the issue to it over the solver's own lower-numbered PR.
+Neither `--json` projection carries an author, and the claim comment records the
+worktree directory name rather than the head ref, so nothing in the shell lane
+could corroborate the guess. `solverPairsFromResults()` therefore derives
+`<issue>:<pr>` pairs from the fleet's own records, `skills/goal-pipeline/workflow.js`
+accumulates them for the whole run, and `--solver-prs=` carries them to
+`lib/goal-watch.sh`, which lands them in `goal-<id>-solver-prs.tsv` before step
+2a resolves anything. The pair becomes a third RANKED arm — `$byclose //
+$bycorr // $byhead` — never a replacement for the guess: the head-ref arm stays
+in the program whether or not a pair is on file, so a record that names a PR no
+longer in the open set (closed by hand, or an unverifiable claim the `#515`
+proof pass kept rather than zeroed) falls through to the guess instead of
+resolving to nothing. That direction is deliberate and load-bearing, because
+under `/goal` a resolution miss is terminal on the first watch tick: an arm that
+could resolve to LESS than the guess would convert a wrong-PR bug into a run
+halt. Pairs whose PR number is the `0` sentinel, and pairs in a claim collision,
+are dropped rather than guessed at.
 
 The solver stops at PR opened. It does not merge and does not chain into a
 review command; that remains `/goal`'s decision.

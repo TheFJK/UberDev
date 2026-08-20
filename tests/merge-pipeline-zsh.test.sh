@@ -84,10 +84,21 @@
 #                                       `case … continue` skip; an issue carrying
 #                                       BOTH forms is then edited twice, the
 #                                       second time under the wrong reason.
-#   MZ3.h  prose-negative            -- relax either anchor of
-#                                       `^UberDev-Partial: #[0-9]+$`; the trailer
-#                                       then fires from mid-sentence prose (the
-#                                       twin of MZ3.b's `preclose #61`).
+#   MZ3.h  prose-negative            -- relax either anchor of the partial
+#                                       harvest past the bounded #603 decoration
+#                                       set; the trailer then fires from
+#                                       mid-sentence prose (the twin of MZ3.b's
+#                                       `preclose #61`).
+#   MZ3.k/l/m standalone decorations -- re-tighten the harvest to a bare
+#                                       `^UberDev-Partial: #N$`; a trailer the
+#                                       producer bulleted, backticked or left a
+#                                       trailing space on is then harvested as
+#                                       NOTHING and the claim strands silently
+#                                       on a still-OPEN issue (#603).
+#   MZ3.n  trailing-prose-negative   -- widen the #603 relaxation into an
+#                                       unanchoring; a sentence that merely
+#                                       discusses a claim then releases it, on
+#                                       every PR /merge runs over.
 #   MZ3.i  neither-form              -- floor row for the two-harvest no-op (and
 #                                       the empty-array expansion of the SECOND
 #                                       array under `set -u` — MZ3.c only ever
@@ -308,7 +319,7 @@ fi
 MARKERS="merge-lock-acquire-fence-v1
 merge-lock-heartbeat-touch-fence-v1
 merge-lock-release-fence-v1
-merge-issue-cleanup-fence-v2
+merge-issue-cleanup-fence-v3
 merge-autoreview-dispatch-fence-v1"
 
 while IFS= read -r m; do
@@ -353,7 +364,7 @@ MZ1_READY=0; MZ2_READY=0; MZ3_READY=0; MZ4_READY=0; MZ5_READY=0
 assert_extract merge-lock-acquire-fence-v1          "$ACQUIRE_SLICE"   'RUN_ID_REGEX=' && MZ1_READY=1
 assert_extract merge-lock-heartbeat-touch-fence-v1  "$TOUCH_SLICE"     "jq -r '.run_id // empty'" && MZ2_READY=1
 assert_extract merge-lock-release-fence-v1          "$RELEASE_SLICE"   'rm -rf "$LOCK_DIR"' || MZ2_READY=0
-assert_extract merge-issue-cleanup-fence-v2         "$CLEANUP_SLICE"   'CLOSED_ISSUES=' && MZ3_READY=1
+assert_extract merge-issue-cleanup-fence-v3         "$CLEANUP_SLICE"   'CLOSED_ISSUES=' && MZ3_READY=1
 assert_extract merge-autoreview-dispatch-fence-v1   "$DISPATCH_SLICE"  'AUTO_REVIEW_MARKER_DIR' && MZ4_READY=1
 assert_extract merge-trust-gate-fence-v1            "$TRUSTGATE_SLICE" 'discover_review_verdict_json "$PR_NUMBER"' --dedent && MZ5_READY=1
 
@@ -532,7 +543,7 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# MZ3 — `merge-issue-cleanup-fence-v2` (Step 3.4).
+# MZ3 — `merge-issue-cleanup-fence-v3` (Step 3.4).
 # `gh` and `_uberdev_audit_emit` are shell FUNCTIONS, not PATH executables:
 # a function wins over PATH lookup in every POSIX shell and needs no exec bit
 # (the precedent is merge.test.sh M97). `git`, `jq`, `awk`, `grep` stay real.
@@ -568,6 +579,26 @@ MZ3_NEITHER_BODY='Refactors the discovery projection. Background in #33.'
 # Built with real CR bytes: a body edited in the GitHub web textarea decodes to
 # CRLF, and a `$`-anchored match with no CR strip silently harvests nothing.
 MZ3_CRLF_BODY="$(printf 'intro\r\nUberDev-Partial: #88\r\n')"
+
+# #603 — the near-misses. The producer is a free-text agent told to emit a
+# "line"; the three shapes below are what it writes when it renders that line
+# into a markdown body, and every one of them was harvested as NOTHING by the
+# v2 anchor, stranding `uberdev:active` on a still-OPEN issue. They are still
+# STANDALONE lines — the trailer is the only content the line carries — so
+# tolerating them costs the anchor none of its authority, which is why the
+# relaxation is bounded to exactly these three decorations (leading list
+# marker, surrounding backticks, trailing whitespace) rather than unanchored.
+MZ3_PARTIAL_BACKTICK_BODY='intro
+`UberDev-Partial: #66`'
+MZ3_PARTIAL_BULLET_BODY='intro
+- `UberDev-Partial: #67`'
+MZ3_PARTIAL_TRAILWS_BODY='UberDev-Partial: #68   '
+# The BOUNDARY, and the row that proves the relaxation is not an unanchoring:
+# once prose follows the trailer on its own line the line is no longer the
+# trailer, and /merge runs on EVERY PR — a sentence that merely discusses a
+# claim must never release it. The producer mandate (the trailer MUST stand
+# alone) is the half that keeps this form from being emitted at all.
+MZ3_PARTIAL_TRAILPROSE_BODY='- `UberDev-Partial: #69` — chain stopped at task 3'
 
 mz3_run() {   # mz3_run <label> [NAME=VALUE ...]
   _m3_box="$SANDBOXES/mz3-$1"; shift
@@ -690,13 +721,17 @@ else
   fi
 
   # -- MZ3.h prose-negative --------------------------------------------------
-  # The twin of MZ3.b: the trailer is whole-line, so prose that merely mentions
-  # it must not release anything. /merge runs on EVERY PR, so an unanchored
-  # match would let a drive-by sentence strip a claim a live solver still holds.
+  # The twin of MZ3.b: the trailer must be the whole content of its line, so
+  # prose that merely mentions it must not release anything. /merge runs on
+  # EVERY PR, so an unanchored match would let a drive-by sentence strip a claim
+  # a live solver still holds. #603 relaxed the harvest to tolerate a leading
+  # list marker, surrounding backticks and trailing whitespace (MZ3.k/l/m) —
+  # this row and MZ3.n are the two that pin that relaxation as a BOUNDED one
+  # rather than an unanchoring.
   mz3_run h "BODY=$MZ3_PARTIAL_PROSE_BODY" 'PR_JSON_RAW='
   MZ3H_N="$(count_lines "$MZ3_GHLOG")"
   if [ "$LAST_RC" -eq 0 ] && [ "$MZ3H_N" = "0" ]; then
-    pass "MZ3.h prose-negative — a mid-sentence 'UberDev-Partial: #50' never reaches gh (whole-line anchor holds)"
+    pass "MZ3.h prose-negative — a mid-sentence 'UberDev-Partial: #50' never reaches gh (the line anchor holds)"
   else
     fail "MZ3.h prose-negative — rc=$LAST_RC calls=$MZ3H_N: $(tr '\n' ' ' < "$MZ3_GHLOG")"
   fi
@@ -726,6 +761,45 @@ else
     pass "MZ3.j crlf — a CRLF body still releases the claim (the harvest strips CR before anchoring)"
   else
     fail "MZ3.j crlf — rc=$LAST_RC calls=$MZ3J_N [$MZ3J_1]; stderr: $(tr '\n' ' ' < "$LAST_ERR")"
+  fi
+
+  # -- MZ3.k/l/m standalone-line decorations (#603) ---------------------------
+  # Each body's trailer is the ONLY content on its line; only the decoration
+  # differs. A miss here is silent by construction — the harvest finds nothing,
+  # the loop iterates zero times, rc stays 0 — so the stranded claim looks
+  # exactly like "this PR carried no trailer".
+  mz3_decor() {   # mz3_decor <label> <body> <issue> <why>
+    mz3_run "$1" "BODY=$2" 'PR_JSON_RAW='
+    _md_n="$(count_lines "$MZ3_GHLOG")"
+    _md_1="$(sed -n '1p' "$MZ3_GHLOG")"
+    _md_audits=0
+    while IFS= read -r ev; do
+      case "$ev" in *'"reason":"merge-partial"'*) _md_audits=$((_md_audits + 1)) ;; esac
+    done < "$MZ3_AUDITLOG"
+    if [ "$LAST_RC" -eq 0 ] && [ "$_md_n" = "1" ] \
+       && [ "$_md_1" = "issue edit $3 --remove-label uberdev:active --remove-assignee @me" ] \
+       && [ "$_md_audits" -eq 1 ]; then
+      pass "MZ3.$1 $4 — the trailer still releases the claim exactly once, reason merge-partial"
+    else
+      fail "MZ3.$1 $4 — rc=$LAST_RC calls=$_md_n partial_audits=$_md_audits [$_md_1]; stderr: $(tr '\n' ' ' < "$LAST_ERR")"
+    fi
+  }
+  mz3_decor k "$MZ3_PARTIAL_BACKTICK_BODY" 66 "backticked-standalone"
+  mz3_decor l "$MZ3_PARTIAL_BULLET_BODY"   67 "bulleted-backticked-standalone"
+  mz3_decor m "$MZ3_PARTIAL_TRAILWS_BODY"  68 "trailing-whitespace"
+
+  # -- MZ3.n trailing-prose-negative (#603) ----------------------------------
+  # The boundary of the k/l/m relaxation, and the twin of MZ3.h pointed the
+  # other way: MZ3.h refuses prose BEFORE the trailer, this refuses prose
+  # AFTER it. Without this row "tolerate a bullet and backticks" is
+  # indistinguishable from "match anywhere on the line", which is the
+  # unanchoring MZ3.h exists to forbid.
+  mz3_run n "BODY=$MZ3_PARTIAL_TRAILPROSE_BODY" 'PR_JSON_RAW='
+  MZ3N_N="$(count_lines "$MZ3_GHLOG")"
+  if [ "$LAST_RC" -eq 0 ] && [ "$MZ3N_N" = "0" ]; then
+    pass "MZ3.n trailing-prose-negative — a trailer with commentary after it on the same line never reaches gh"
+  else
+    fail "MZ3.n trailing-prose-negative — rc=$LAST_RC calls=$MZ3N_N: $(tr '\n' ' ' < "$MZ3_GHLOG")"
   fi
 fi
 

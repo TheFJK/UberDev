@@ -1521,6 +1521,14 @@ function probedNums(record) {
   const partialLinkOk = function (t) {
     return t.indexOf("Closes #11") < 0             // the closing token is absent outright
       && t.indexOf("UberDev-Partial: #11") >= 0    // the non-closing linkage is mandated
+      // #603 — and it must be mandated as a STANDALONE LINE. /merge harvests the
+      // trailer with a line-anchored match, so a trailer the writer wrapped in a
+      // sentence, a bullet or a code span is harvested as NOTHING and the
+      // `uberdev:active` claim strands on a still-OPEN issue — silently, because
+      // an unharvested body is indistinguishable from a body that carried no
+      // trailer. "the line" alone was the only thing holding that contract up,
+      // and it is prose to the free-text agent this prompt is written for.
+      && t.indexOf("MUST STAND ALONE on its own line") >= 0
       && t.indexOf("STOPPED EARLY") >= 0;          // anti-vacuity: this really IS the partial arm
   };
 
