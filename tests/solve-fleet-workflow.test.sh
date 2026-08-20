@@ -4935,6 +4935,168 @@ else
   fail "S20 expected exactly 1 nested workflow({ call into solve-fleet, found $GOAL_NEST_COUNT"
 fi
 
+# ---------------------------------------------------------------------------
+# P — #646: the PRODUCER emits exactly what the CONSUMER accepts.
+#
+# `UberDev-Partial: #N` has one producer (prLinkLine, in this script) and one
+# consumer (/merge Step 3.4's harvest). #603 made the CONSUMER tolerant —
+# leading list marker, surrounding backticks, trailing whitespace — because the
+# producer is a free-text agent and those were the decorations it reached for.
+# That tolerance had a measured cost: a bullet whose entire content is the
+# trailer is byte-for-byte identical whether it was EMITTED by a solver or
+# WRITTEN by a human documenting the format, so a documenting PR body released a
+# claim a live solver still held (#646).
+#
+# #646 fixes the emission instead of widening the parse. The mandate now renders
+# the trailer FLUSH and UNDECORATED on a line of its own, which is the shape the
+# writer copies, and /merge's harvest drops the decoration tolerance.
+#
+# These rows are the JOIN between the two ends, and they are the reason the
+# consumer can be tightened at all: P3 feeds the producer's own rendered line to
+# the consumer's LIVE expression, read out of merge-pipeline/SKILL.md on every
+# run. Two hand-compared copies is the class this repo keeps re-learning; a row
+# that EXECUTES one against the other cannot drift.
+#
+# prLinkLine is extracted from the shipped source and CALLED — never
+# transcribed. A test that runs a copy of the code it guards is permanently
+# green (a replica test proves nothing about the tree it ships in).
+# ---------------------------------------------------------------------------
+echo "== P: prLinkLine emits the flush trailer /merge's harvest accepts (#646) =="
+
+P_MERGE_SKILL="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/SKILL.md"
+
+if [ ! -r "$P_MERGE_SKILL" ]; then
+  fail "P0 merge-pipeline/SKILL.md is missing or unreadable — every P row below would be vacuous: $P_MERGE_SKILL"
+  P_OUT="extracted=0"
+  P_ERE=""
+else
+  # Extract the function's own source and eval it, so the rows call the SHIPPED
+  # builder. The closing brace is matched at column 0 (`\n}\n`): every line of
+  # this builder's body is indented, so the first such brace is its own.
+  # The eval'd text is a slice of a TRACKED file in this repository, never input
+  # from anywhere else — evaluating it is the point of the row (a transcribed
+  # copy of the builder would be permanently green no matter what ships).
+  P_OUT="$(node -e '
+    const fs = require("fs");
+    // CRLF-normalised at read: only plugins/uberdev/hooks/** is pinned to LF in
+    // .gitattributes, so on the windows job this script checks out with CRLF and
+    // the "\n}\n" brace search below would find nothing — extracted=0, and every
+    // row red on one job only.
+    const src = fs.readFileSync(process.argv[1], "utf8").split("\r\n").join("\n");
+    const start = src.indexOf("function prLinkLine(");
+    if (start < 0) { console.log("extracted=0 reason=no-builder"); process.exit(0); }
+    const end = src.indexOf("\n}\n", start);
+    if (end < 0) { console.log("extracted=0 reason=no-close"); process.exit(0); }
+    let fn = null;
+    try { fn = eval("(" + src.slice(start, end + 2) + ")"); }
+    catch (e) { console.log("extracted=0 reason=eval"); process.exit(0); }
+    if (typeof fn !== "function") { console.log("extracted=0 reason=not-a-function"); process.exit(0); }
+    let partial = "", complete = "";
+    try { partial = fn(11, false); complete = fn(11, true); }
+    catch (e) { console.log("extracted=0 reason=call"); process.exit(0); }
+    console.log("extracted=1");
+    if (partial.indexOf("`UberDev-Partial: #11`") >= 0) console.log("partialCodeSpan=1");
+    partial.split("\n").forEach(function (l) {
+      if (l.indexOf("UberDev-Partial: #11") >= 0) console.log("PLINE:" + l);
+    });
+    complete.split("\n").forEach(function (l) {
+      if (l.indexOf("Closes #11") >= 0) console.log("CLINE:" + l);
+    });
+  ' "$WORKFLOW" 2>&1)"
+
+  # The consumer's LIVE expression, read out of the fence that runs it. Anchored
+  # on the pipeline line itself (`| grep -oE '...'`) so a prose mention of the
+  # trailer cannot be picked up as a second, stale copy.
+  P_ERE="$(sed -n "s/^[[:space:]]*| grep -oE '\(\^[^']*UberDev-Partial:[^']*\)'.*/\1/p" "$P_MERGE_SKILL")"
+fi
+
+P_ERE_N="$(grep -c . <<<"$P_ERE")"
+P_PLINE_N=0
+P_PLINE_MATCHED=0
+P_PLINE_FIRST=""
+P_CLINE_N=0
+P_CLINE_FIRST=""
+while IFS= read -r p_row; do
+  case "$p_row" in
+    PLINE:*)
+      p_line="${p_row#PLINE:}"
+      P_PLINE_N=$((P_PLINE_N + 1))
+      [ -n "$P_PLINE_FIRST" ] || P_PLINE_FIRST="$p_line"
+      if [ -n "$P_ERE" ] && grep -qE "$P_ERE" <<<"$p_line"; then
+        P_PLINE_MATCHED=$((P_PLINE_MATCHED + 1))
+      fi
+      ;;
+    CLINE:*)
+      p_line="${p_row#CLINE:}"
+      P_CLINE_N=$((P_CLINE_N + 1))
+      [ -n "$P_CLINE_FIRST" ] || P_CLINE_FIRST="$p_line"
+      ;;
+  esac
+done <<<"$P_OUT"
+
+# P1 — ANTI-VACUITY. Without this row a builder that stopped rendering the
+# trailer at all would satisfy every "no decorated line" assertion below by
+# rendering nothing, and the join would pass over an empty set.
+if grep -q '^extracted=1$' <<<"$P_OUT" && [ "$P_PLINE_N" -ge 1 ] && [ "$P_CLINE_N" -ge 1 ]; then
+  pass "P1 prLinkLine was extracted from the shipped script and CALLED, and both arms render their trailer"
+else
+  fail "P1 the builder did not render both arms — every row below would be vacuous: $P_OUT"
+fi
+
+# P2 — the consumer half of the join really was read. An empty ERE would make
+# P3's grep match nothing and P6's negatives pass by accident.
+if [ "$P_ERE_N" = "1" ] && [ -n "$P_ERE" ]; then
+  pass "P2 /merge's live partial-harvest expression was read from merge-pipeline/SKILL.md (exactly one copy)"
+else
+  fail "P2 expected exactly ONE partial-harvest expression in $P_MERGE_SKILL, found $P_ERE_N: $P_ERE"
+fi
+
+# P3 — THE JOIN. The producer's rendered line, fed to the consumer's own
+# expression. Exactly one line may carry the trailer: a second rendering is how
+# a writer is shown two shapes and copies the decorated one.
+if [ "$P_PLINE_N" = "1" ] && [ "$P_PLINE_MATCHED" = "1" ]; then
+  pass "P3 the mandate renders the trailer on exactly ONE line, and /merge's live harvest accepts that line"
+else
+  fail "P3 producer/consumer join broken — lines carrying the trailer: $P_PLINE_N, accepted by the harvest: $P_PLINE_MATCHED, first line: [$P_PLINE_FIRST]"
+fi
+
+# P4 — the specific regression, named. The pre-#646 mandate read "MUST contain
+# the line \`UberDev-Partial: #N\`", so the shape the writer was shown was a
+# code span, and a code span is what several of them wrote into the body.
+if grep -q '^partialCodeSpan=1$' <<<"$P_OUT"; then
+  fail "P4 the mandate still renders the trailer inside a code span — that is the decorated shape the writer copies into the PR body"
+else
+  pass "P4 the mandate never renders the trailer inside a code span: the only shape shown is the flush line"
+fi
+
+# P5 — the complete arm renders flush too. GitHub's closing-keyword parser does
+# not need it to, but the two arms share one prefix by design (so they cannot
+# drift apart), and this row is what notices if that prefix silently reverts to
+# the inline form for one of them.
+if [ "$P_CLINE_N" = "1" ] && grep -qE '^Closes #11[[:space:]]*$' <<<"$P_CLINE_FIRST"; then
+  pass "P5 the complete arm mandates its closing keyword the same way — one flush, undecorated line"
+else
+  fail "P5 the complete arm's closing keyword is not a single flush line — lines: $P_CLINE_N, first: [$P_CLINE_FIRST]"
+fi
+
+# P6 — NEGATIVE CONTROL for P3. An expression that accepted anything would pass
+# P3 for free; these are the shapes a HUMAN writes when documenting the trailer,
+# and every one of them must be refused. `- UberDev-Partial: #N` is the exposure
+# #646 was filed on.
+P_NEG_ACCEPTED=""
+for p_dec in '- UberDev-Partial: #11' '* UberDev-Partial: #11' '+ UberDev-Partial: #11' \
+             '`UberDev-Partial: #11`' '- `UberDev-Partial: #11`' '    UberDev-Partial: #11' \
+             'see UberDev-Partial: #11 for context' '- UberDev-Partial: #11 — chain stopped'; do
+  if [ -n "$P_ERE" ] && grep -qE "$P_ERE" <<<"$p_dec"; then
+    P_NEG_ACCEPTED="$P_NEG_ACCEPTED [$p_dec]"
+  fi
+done
+if [ -n "$P_ERE" ] && [ -z "$P_NEG_ACCEPTED" ]; then
+  pass "P6 the harvest refuses every decorated and prose form — a body that DOCUMENTS the trailer releases nothing"
+else
+  fail "P6 the harvest still accepts a form the producer never emits:$P_NEG_ACCEPTED"
+fi
+
 echo ""
 echo "== Summary =="
 echo "  passed: $PASS"

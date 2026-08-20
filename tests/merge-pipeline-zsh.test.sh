@@ -85,17 +85,28 @@
 #                                       BOTH forms is then edited twice, the
 #                                       second time under the wrong reason.
 #   MZ3.h  prose-negative            -- relax either anchor of the partial
-#                                       harvest past the bounded #603 decoration
-#                                       set; the trailer then fires from
+#                                       harvest past the trailing-whitespace
+#                                       tolerance; the trailer then fires from
 #                                       mid-sentence prose (the twin of MZ3.b's
 #                                       `preclose #61`).
-#   MZ3.k/l/m standalone decorations -- re-tighten the harvest to a bare
-#                                       `^UberDev-Partial: #N$`; a trailer the
-#                                       producer bulleted, backticked or left a
+#   MZ3.k/l/p decoration-negatives   -- re-widen the harvest to tolerate a
+#                                       leading list marker or surrounding
+#                                       backticks (the #603 relaxation, retired
+#                                       by #646 once the producer was hardened);
+#                                       a PR body that merely DOCUMENTS the
+#                                       trailer in a bullet then releases a claim
+#                                       a LIVE solver still holds, strips the
+#                                       assignee, and writes a merge-partial
+#                                       audit row asserting it was legitimate.
+#   MZ3.m  trailing-whitespace       -- re-tighten the RIGHT anchor to a bare
+#                                       `$`; a trailer the producer left a
 #                                       trailing space on is then harvested as
 #                                       NOTHING and the claim strands silently
-#                                       on a still-OPEN issue (#603).
-#   MZ3.n  trailing-prose-negative   -- widen the #603 relaxation into an
+#                                       on a still-OPEN issue. This is the one
+#                                       tolerance #646 kept: whitespace is
+#                                       invisible, so it cannot be what turns an
+#                                       emission into documentation.
+#   MZ3.n  trailing-prose-negative   -- widen the right anchor into an
 #                                       unanchoring; a sentence that merely
 #                                       discusses a claim then releases it, on
 #                                       every PR /merge runs over.
@@ -319,7 +330,7 @@ fi
 MARKERS="merge-lock-acquire-fence-v1
 merge-lock-heartbeat-touch-fence-v1
 merge-lock-release-fence-v1
-merge-issue-cleanup-fence-v3
+merge-issue-cleanup-fence-v4
 merge-autoreview-dispatch-fence-v1"
 
 while IFS= read -r m; do
@@ -364,7 +375,7 @@ MZ1_READY=0; MZ2_READY=0; MZ3_READY=0; MZ4_READY=0; MZ5_READY=0
 assert_extract merge-lock-acquire-fence-v1          "$ACQUIRE_SLICE"   'RUN_ID_REGEX=' && MZ1_READY=1
 assert_extract merge-lock-heartbeat-touch-fence-v1  "$TOUCH_SLICE"     "jq -r '.run_id // empty'" && MZ2_READY=1
 assert_extract merge-lock-release-fence-v1          "$RELEASE_SLICE"   'rm -rf "$LOCK_DIR"' || MZ2_READY=0
-assert_extract merge-issue-cleanup-fence-v3         "$CLEANUP_SLICE"   'CLOSED_ISSUES=' && MZ3_READY=1
+assert_extract merge-issue-cleanup-fence-v4         "$CLEANUP_SLICE"   'CLOSED_ISSUES=' && MZ3_READY=1
 assert_extract merge-autoreview-dispatch-fence-v1   "$DISPATCH_SLICE"  'AUTO_REVIEW_MARKER_DIR' && MZ4_READY=1
 assert_extract merge-trust-gate-fence-v1            "$TRUSTGATE_SLICE" 'discover_review_verdict_json "$PR_NUMBER"' --dedent && MZ5_READY=1
 
@@ -543,7 +554,7 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# MZ3 — `merge-issue-cleanup-fence-v3` (Step 3.4).
+# MZ3 — `merge-issue-cleanup-fence-v4` (Step 3.4).
 # `gh` and `_uberdev_audit_emit` are shell FUNCTIONS, not PATH executables:
 # a function wins over PATH lookup in every POSIX shell and needs no exec bit
 # (the precedent is merge.test.sh M97). `git`, `jq`, `awk`, `grep` stay real.
@@ -580,20 +591,37 @@ MZ3_NEITHER_BODY='Refactors the discovery projection. Background in #33.'
 # CRLF, and a `$`-anchored match with no CR strip silently harvests nothing.
 MZ3_CRLF_BODY="$(printf 'intro\r\nUberDev-Partial: #88\r\n')"
 
-# #603 — the near-misses. The producer is a free-text agent told to emit a
-# "line"; the three shapes below are what it writes when it renders that line
-# into a markdown body, and every one of them was harvested as NOTHING by the
-# v2 anchor, stranding `uberdev:active` on a still-OPEN issue. They are still
-# STANDALONE lines — the trailer is the only content the line carries — so
-# tolerating them costs the anchor none of its authority, which is why the
-# relaxation is bounded to exactly these three decorations (leading list
-# marker, surrounding backticks, trailing whitespace) rather than unanchored.
+# #603's near-misses, RETIRED as acceptances by #646. These are the shapes a
+# free-text writer reached for when the mandate showed it the trailer inline and
+# wrapped in backticks: it bulleted the line, code-spanned it, or both. #603
+# bought them back by tolerating the decoration on the CONSUMER end, which cost
+# exactly what the issue's exposure table measured — a PR body that merely
+# DOCUMENTS the trailer in a bullet is byte-for-byte the same line as an
+# emission, so documentation released a claim a LIVE solver still held.
+#
+# #646 took the other half of that trade instead: prLinkLine() now renders the
+# mandated line FLUSH and UNDECORATED, on a line of its own, and
+# tests/solve-fleet-workflow.test.sh P1-P6 pin that rendering against this
+# fence's own expression. With the producer emitting what the harvest accepts,
+# the decoration tolerance is no longer load-bearing and the ambiguity it bought
+# is refused: k, l and p below are NEGATIVE rows.
 MZ3_PARTIAL_BACKTICK_BODY='intro
 `UberDev-Partial: #66`'
 MZ3_PARTIAL_BULLET_BODY='intro
 - `UberDev-Partial: #67`'
+# The undecorated bullet — the exposure shape #646 names in as many words: "a
+# bullet whose entire content is the trailer". It is the single most plausible
+# way a human documents the trailer in a PR body, and under the #603 expression
+# it released the claim.
+MZ3_PARTIAL_BULLET_BARE_BODY='intro
+- UberDev-Partial: #71'
+# The one decoration #646 KEPT. Trailing whitespace is invisible, so it cannot
+# be what turns an emission into documentation: every body that carries it reads
+# identically to the flush form a reader sees. Dropping it would re-open the
+# #603 strand risk (a writer that ends the line with a markdown hard-break) and
+# buy no ambiguity back.
 MZ3_PARTIAL_TRAILWS_BODY='UberDev-Partial: #68   '
-# The BOUNDARY, and the row that proves the relaxation is not an unanchoring:
+# The BOUNDARY, and the row that proves the right anchor is not a suffix match:
 # once prose follows the trailer on its own line the line is no longer the
 # trailer, and /merge runs on EVERY PR — a sentence that merely discusses a
 # claim must never release it. The producer mandate (the trailer MUST stand
@@ -606,9 +634,9 @@ MZ3_PARTIAL_TRAILPROSE_BODY='- `UberDev-Partial: #69` — chain stopped at task 
 # leading whitespace run and harvested 70 from exactly this shape, which would
 # strip uberdev:active and the assignee from a live issue and write a
 # merge-partial audit row asserting a legitimate release — and /merge runs over
-# EVERY PR, so any body quoting the format would do it. The three producer
-# renderings k/l/m are all left-flush, so nothing legitimate needs the
-# tolerance; this row is what stops it being re-added.
+# EVERY PR, so any body quoting the format would do it. The producer's own
+# rendering is left-flush, so nothing legitimate needs the tolerance; this row
+# is what stops it being re-added.
 MZ3_PARTIAL_INDENTED_BODY='Mark a partial delivery like this:
 
     UberDev-Partial: #70
@@ -740,9 +768,10 @@ else
   # prose that merely mentions it must not release anything. /merge runs on
   # EVERY PR, so an unanchored match would let a drive-by sentence strip a claim
   # a live solver still holds. #603 relaxed the harvest to tolerate a leading
-  # list marker, surrounding backticks and trailing whitespace (MZ3.k/l/m) —
-  # this row and MZ3.n are the two that pin that relaxation as a BOUNDED one
-  # rather than an unanchoring.
+  # list marker, surrounding backticks and trailing whitespace; #646 retired
+  # the first two once the producer stopped emitting them (MZ3.k/l/p are now
+  # negatives) and kept only the invisible one (MZ3.m) — this row and MZ3.n are
+  # the two that pin what is left as a BOUNDED tolerance, not an unanchoring.
   mz3_run h "BODY=$MZ3_PARTIAL_PROSE_BODY" 'PR_JSON_RAW='
   MZ3H_N="$(count_lines "$MZ3_GHLOG")"
   if [ "$LAST_RC" -eq 0 ] && [ "$MZ3H_N" = "0" ]; then
@@ -778,11 +807,21 @@ else
     fail "MZ3.j crlf — rc=$LAST_RC calls=$MZ3J_N [$MZ3J_1]; stderr: $(tr '\n' ' ' < "$LAST_ERR")"
   fi
 
-  # -- MZ3.k/l/m standalone-line decorations (#603) ---------------------------
+  # -- MZ3.k/l/p decoration-negatives (#646), MZ3.m the kept tolerance --------
   # Each body's trailer is the ONLY content on its line; only the decoration
-  # differs. A miss here is silent by construction — the harvest finds nothing,
-  # the loop iterates zero times, rc stays 0 — so the stranded claim looks
-  # exactly like "this PR carried no trailer".
+  # differs. #603 accepted all four shapes because the producer demonstrably
+  # emitted them and a miss is silent by construction — the harvest finds
+  # nothing, the loop iterates zero times, rc stays 0 — so a stranded claim
+  # looks exactly like "this PR carried no trailer".
+  #
+  # #646 retires three of those acceptances by fixing the emission instead:
+  # prLinkLine() renders the mandated line flush and undecorated, so a bulleted
+  # or backticked line is no longer something the producer writes — while it
+  # remains exactly what a HUMAN writes when documenting the format. Accepting
+  # it therefore buys nothing and costs a claim release off documentation, on
+  # every PR /merge runs over. The one tolerance that survives is whitespace
+  # (MZ3.m): invisible, so it can never be the thing that makes a line
+  # documentation rather than an emission.
   mz3_decor() {   # mz3_decor <label> <body> <issue> <why>
     mz3_run "$1" "BODY=$2" 'PR_JSON_RAW='
     _md_n="$(count_lines "$MZ3_GHLOG")"
@@ -799,14 +838,27 @@ else
       fail "MZ3.$1 $4 — rc=$LAST_RC calls=$_md_n partial_audits=$_md_audits [$_md_1]; stderr: $(tr '\n' ' ' < "$LAST_ERR")"
     fi
   }
-  mz3_decor k "$MZ3_PARTIAL_BACKTICK_BODY" 66 "backticked-standalone"
-  mz3_decor l "$MZ3_PARTIAL_BULLET_BODY"   67 "bulleted-backticked-standalone"
+  # The negative twin: the decorated line must reach gh ZERO times. Asserting
+  # the call count (not just "not this issue") is what makes the row see a
+  # release under the wrong issue number too.
+  mz3_refuse() {   # mz3_refuse <label> <body> <why>
+    mz3_run "$1" "BODY=$2" 'PR_JSON_RAW='
+    _mr_n="$(count_lines "$MZ3_GHLOG")"
+    if [ "$LAST_RC" -eq 0 ] && [ "$_mr_n" = "0" ]; then
+      pass "MZ3.$1 $3 — a decorated trailer is documentation, not an emission: it never reaches gh"
+    else
+      fail "MZ3.$1 $3 — rc=$LAST_RC calls=$_mr_n: $(tr '\n' ' ' < "$MZ3_GHLOG")"
+    fi
+  }
+  mz3_refuse k "$MZ3_PARTIAL_BACKTICK_BODY"    "backticked-standalone-negative"
+  mz3_refuse l "$MZ3_PARTIAL_BULLET_BODY"      "bulleted-backticked-standalone-negative"
+  mz3_refuse p "$MZ3_PARTIAL_BULLET_BARE_BODY" "bulleted-bare-standalone-negative"
   mz3_decor m "$MZ3_PARTIAL_TRAILWS_BODY"  68 "trailing-whitespace"
 
   # -- MZ3.n trailing-prose-negative (#603) ----------------------------------
-  # The boundary of the k/l/m relaxation, and the twin of MZ3.h pointed the
-  # other way: MZ3.h refuses prose BEFORE the trailer, this refuses prose
-  # AFTER it. Without this row "tolerate a bullet and backticks" is
+  # The RIGHT anchor's boundary, and the twin of MZ3.h pointed the other way:
+  # MZ3.h refuses prose BEFORE the trailer, this refuses prose AFTER it.
+  # Without this row "tolerate trailing whitespace" (MZ3.m) is
   # indistinguishable from "match anywhere on the line", which is the
   # unanchoring MZ3.h exists to forbid.
   mz3_run n "BODY=$MZ3_PARTIAL_TRAILPROSE_BODY" 'PR_JSON_RAW='
@@ -818,9 +870,9 @@ else
   fi
 
   # -- MZ3.o indented-code-block negative (#603) -----------------------------
-  # The LEFT anchor's boundary, and the one k/l/m cannot imply: they all sit
+  # The LEFT anchor's boundary, and the one MZ3.f/m cannot imply: both sit
   # flush, so a relaxation that also tolerated leading whitespace would keep
-  # every one of them green while turning documentation into a claim release.
+  # both green while turning documentation into a claim release.
   mz3_run o "BODY=$MZ3_PARTIAL_INDENTED_BODY" 'PR_JSON_RAW='
   MZ3O_N="$(count_lines "$MZ3_GHLOG")"
   if [ "$LAST_RC" -eq 0 ] && [ "$MZ3O_N" = "0" ]; then
