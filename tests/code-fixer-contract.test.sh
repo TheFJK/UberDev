@@ -2075,6 +2075,14 @@ with scratch_dir("code-fixer-index-refusal-") as temporary:
     assert not tuple(git_dir.glob(".code-fixer-private-git-*"))
 
 with scratch_dir("code-fixer-reuc-") as temporary:
+    # #643 -- resolving ANY merge conflict makes git write a REUC (resolve-undo)
+    # extension into .git/index, and this parser used to refuse the result
+    # outright. That is the common case rather than a corner: /review-pr Phase 0
+    # consolidates (so it resolves conflicts), then Phase 1's fixer calls
+    # prepare-authority, which reads this very index. Resolve-undo is inert for
+    # the staged tree -- measured below -- so the parser must READ a REUC index.
+    # Pre-cleaning it with `git read-tree HEAD` at the call site was the field
+    # workaround, not the fix, and is deliberately not what this asserts.
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -2098,22 +2106,143 @@ with scratch_dir("code-fixer-reuc-") as temporary:
     conflict.write_bytes(b"resolved\n")
     git(repo, "add", "--", conflict.name)
     assert git(repo, "ls-files", "--resolve-undo").stdout
+    reuc_tree = git(repo, "write-tree").stdout.decode().strip()
     reuc_index_path = pathlib.Path(module._git_index_path(str(repo)))
     reuc_index = regular_snapshot(reuc_index_path)
     assert b"REUC" in reuc_index[0]
-    expect_contract_reason(
-        lambda: module._index_tree_sha(str(repo)), "index_tree_unreadable"
+
+    def index_extension_spans(payload):
+        offset, limit, _sparse = module._index_entry_layout(payload)
+        spans = {}
+        while offset < limit:
+            signature = payload[offset : offset + 4]
+            size = int.from_bytes(payload[offset + 4 : offset + 8], "big")
+            spans[signature] = (offset, offset + 8 + size)
+            offset += 8 + size
+        assert offset == limit, (offset, limit)
+        return spans
+
+    def resealed(body):
+        return body + hashlib.sha1(body).digest()
+
+    def with_extension(payload, signature, body=b""):
+        return resealed(
+            payload[:-20] + signature + len(body).to_bytes(4, "big") + body
+        )
+
+    def index_probe(parent, signature, payload):
+        parent.mkdir(exist_ok=True)
+        probe = parent / ("index-" + signature.decode("ascii"))
+        probe.write_bytes(payload)
+        return probe
+
+    def git_reads_index(index_path):
+        environment = dict(os.environ)
+        environment["GIT_INDEX_FILE"] = str(index_path)
+        return subprocess.run(
+            ["git", "-C", str(repo), "-c", "gc.auto=0",
+             "-c", "maintenance.auto=false", "ls-files"],
+            env=environment,
+            capture_output=True,
+        )
+
+    reuc_spans = index_extension_spans(reuc_index[0])
+    assert set(reuc_spans) >= {b"TREE", b"REUC"}, sorted(reuc_spans)
+
+    # The parser reads it, records the extension, and lands on git's own tree.
+    reuc_entries, reuc_extensions = module._parse_raw_index(
+        reuc_index[0], split_overlay=False
     )
-    expect_contract_reason(
-        lambda: module._build_index_candidate(
-            str(repo),
-            reuc_index[0],
-            reuc_index[4],
-            {},
-        ),
-        "index_tree_unreadable",
+    assert reuc_extensions[b"REUC"], sorted(reuc_extensions)
+    assert [row[3] for row in reuc_entries] == [conflict.name.encode("ascii")]
+    assert module._index_tree_sha(str(repo)) == reuc_tree
+    assert module._build_index_candidate(
+        str(repo), reuc_index[0], reuc_index[4], {}
     )
     assert regular_snapshot(reuc_index_path) == reuc_index
+
+    # The measurement #643 asks for, taken on the bytes git itself wrote:
+    # deleting the resolve-undo extension leaves the tree bit-identical, which
+    # is why refusing it was never protecting anything. REUC is the trailing
+    # extension here, so the strip is a truncation plus a fresh SHA-1 trailer.
+    reuc_start, reuc_end = reuc_spans[b"REUC"]
+    assert reuc_end == len(reuc_index[0]) - 20, (reuc_end, len(reuc_index[0]))
+    stripped_parent = pathlib.Path(temporary) / "no resolve undo"
+    stripped_parent.mkdir()
+    stripped_index = stripped_parent / "index"
+    stripped_index.write_bytes(resealed(reuc_index[0][:reuc_start]))
+    assert b"REUC" not in stripped_index.read_bytes()
+    assert git_reads_index(stripped_index).returncode == 0
+    stripped_environment = dict(os.environ)
+    stripped_environment["GIT_INDEX_FILE"] = str(stripped_index)
+    stripped_tree = subprocess.run(
+        ["git", "-C", str(repo), "-c", "gc.auto=0",
+         "-c", "maintenance.auto=false", "write-tree"],
+        env=stripped_environment,
+        capture_output=True,
+        check=True,
+    ).stdout.decode().strip()
+    assert stripped_tree == reuc_tree, (stripped_tree, reuc_tree)
+    assert module._index_tree_sha(
+        str(repo), extra_env={"GIT_INDEX_FILE": str(stripped_index)}
+    ) == reuc_tree
+
+    # The extension policy, pinned to git's OWN rule rather than to a
+    # transcription of it (gitformat-index, read_index_extension):
+    #   first byte 'A'..'Z'  => OPTIONAL. git prints "ignoring <SIG> extension"
+    #                           and reads on.
+    #   any other first byte => MANDATORY. git refuses the whole index
+    #                           ("index uses <sig> extension, which we do not
+    #                           understand") and exits non-zero.
+    probe_parent = pathlib.Path(temporary) / "extension probes"
+    for signature, git_reads_on in ((b"ZZZZ", True), (b"zzzz", False)):
+        probe = index_probe(
+            probe_parent, signature, with_extension(reuc_index[0], signature)
+        )
+        observed = git_reads_index(probe)
+        assert (observed.returncode == 0) is git_reads_on, (signature, observed)
+
+    # Direction 1 -- an unknown OPTIONAL extension is recorded and skipped, not
+    # refused. EOIE and IEOT are exactly this class: `index.threads` and
+    # `feature.manyFiles` put them on the index of an ordinary checkout, so a
+    # blanket refusal here would resurface #643 under a different config.
+    optional_probe = index_probe(
+        probe_parent, b"ZZZZ", with_extension(reuc_index[0], b"ZZZZ", b"opaque")
+    )
+    _optional_entries, optional_extensions = module._parse_raw_index(
+        optional_probe.read_bytes(), split_overlay=False
+    )
+    assert optional_extensions[b"ZZZZ"] == b"opaque", sorted(optional_extensions)
+    assert module._index_tree_sha(
+        str(repo), extra_env={"GIT_INDEX_FILE": str(optional_probe)}
+    ) == reuc_tree
+
+    # Direction 2 -- MANDATORY extensions this parser does not implement stay
+    # refused, and the refusal carries its own token. `sdir` is the deliberate
+    # one: a sparse index lets a single entry stand for a whole subtree, so the
+    # stage rows derived here would no longer describe the same tree. `zzzz`
+    # stands for every unknown mandatory signature. `index_tree_unreadable` is
+    # the wrong token for both -- the index was read perfectly, and #643 records
+    # an operator sent hunting for corruption that was never there.
+    for signature in (b"sdir", b"zzzz"):
+        refused_probe = index_probe(
+            probe_parent, signature, with_extension(reuc_index[0], signature)
+        )
+        expect_contract_reason(
+            lambda payload=refused_probe.read_bytes(): module._parse_raw_index(
+                payload, split_overlay=False
+            ),
+            "index_extension_refused",
+        )
+        expect_contract_reason(
+            lambda path=refused_probe: module._index_tree_sha(
+                str(repo), extra_env={"GIT_INDEX_FILE": str(path)}
+            ),
+            "index_extension_refused",
+        )
+
+    assert regular_snapshot(reuc_index_path) == reuc_index
+    assert not tuple(reuc_index_path.parent.glob(".code-fixer-private-git-*"))
 
 with scratch_dir("code-fixer-split-linked-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
