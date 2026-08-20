@@ -401,10 +401,13 @@ function claimPrompt(cycleNo) {
 // nor reach into a running shell. argv is the whole channel.
 //
 // OMITTED, never emitted empty — and the reason is NOT that an empty value is
-// refused. Measured against the shipped script: `--partial-prs=` with no value
-// exits 3 (the outer shape guard opens with a no-op `"") ;;` arm, so an empty
-// scalar passes it untouched and the run dies later, at run-state rehydration),
-// while a non-empty malformed value exits 2 as the guard's own message says.
+// refused. In the shipped lib/goal-watch.sh the outer shape guard opens with a
+// bare no-op `"") ;;` arm, so an EMPTY value is simply ACCEPTED and the tick
+// runs on; only a NON-EMPTY malformed value reaches the refusal and exits 2.
+// (Measuring the script standalone shows exit 3 for an empty flag, but that is
+// an artifact of the bare shell — an invocation with no flags at all exits 3
+// identically. The 3 is run-state rehydration failing, never the flag. In a
+// driver-composed pass, where run state rehydrates, the empty flag is accepted.)
 // The rule stands on its own terms instead: an empty flag carries no value to
 // act on, so emitting one buys nothing, and omitting it keeps the command line
 // byte-identical to a pre-issue cycle. Both scripts still take a startup
@@ -425,12 +428,14 @@ function partialIssuesFlag() {
   return partialIssues.length ? " --partial-issues=" + partialIssues.join(",") : "";
 }
 // #603 — same OMITTED-never-empty discipline as the two above, and on the same
-// true footing: `--solver-prs=` with no value is NOT refused. Measured, it
-// exits 3 through the guard's no-op empty arm, where a non-empty malformed
-// value exits 2. The rule holds because an empty flag carries no pair, so on a
-// cycle with no attributable pair the command line stays byte-identical to what
-// it was before this issue. A startup refusal is still a bug in the caller that
-// composed the command line rather than something to poll through.
+// true footing: `--solver-prs=` with no value is NOT refused. The guard's empty
+// arm is a bare no-op, so an empty value is ACCEPTED and the tick runs on; only
+// a non-empty malformed value exits 2. (See the note above on why measuring the
+// script standalone shows 3 — that is rehydration, not this flag.) The rule
+// holds because an empty flag carries no pair, so on a cycle with no
+// attributable pair the command line stays byte-identical to what it was before
+// this issue. A startup refusal is still a bug in the caller that composed the
+// command line rather than something to poll through.
 // Every member left this ledger having passed the digit test in
 // solverPairsFromResults, so nothing but digits, colons and commas can reach a
 // command line — and lib/goal-watch.sh re-refuses the shape at its own edge.

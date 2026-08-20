@@ -602,8 +602,8 @@ _uberdev_goal_persist_fp() {
 # ---------------------------------------------------------------------------
 
 # uberdev_goal_state_init GOAL_ID
-# D4 + T4 — Refuse unsafe $UBERDEV_TMPDIR; truncate-create the 9 per-goal
-# state files (jsonl + 8 TSVs) — enumerated in the inline comment below.
+# D4 + T4 — Refuse unsafe $UBERDEV_TMPDIR; truncate-create the 10 per-goal
+# state files (jsonl + 9 TSVs) — enumerated in the inline comment below.
 uberdev_goal_state_init() {
   local goal_id="$1"
   # #156 — refuse an unsafe goal_id before it reaches any path interpolation.

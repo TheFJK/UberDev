@@ -1319,12 +1319,27 @@ CLOSED_ISSUES=($(printf '%s' "$PR_BODY_FOR_CLEANUP" \
 # empty array, the loop runs zero times, rc stays 0, and the stranded claim is
 # indistinguishable from a PR that carried no trailer. So the anchors STAY, and
 # what is tolerated between them is only what leaves the line carrying NOTHING
-# BUT THE TRAILER: a leading whitespace run (an indented trailer matches too),
-# an optional list marker, a backtick on either side — the two positions are
-# independently optional, so a single unpaired backtick also matches — and
-# trailing whitespace. The two extra tolerances beyond the three shapes the
-# producer prose names fail safe, but they are enumerated here because this
-# comment is the surface a maintainer audits the boundary against.
+# BUT THE TRAILER: an optional list marker, a backtick on either side — the two
+# positions are independently optional, so a single unpaired backtick also
+# matches — and trailing whitespace.
+#
+# THE LEFT ANCHOR IS FLUSH, and that is load-bearing rather than an oversight.
+# An earlier cut of this relaxation also tolerated a leading whitespace run, on
+# the reasoning that an indented trailer still carries nothing but the trailer.
+# Measured, that does NOT fail safe: four leading spaces is a MARKDOWN CODE
+# BLOCK, so a PR body that merely DOCUMENTS the trailer format would release the
+# claim it documents. Reproduced against this pipeline — from a body holding
+#
+#     UberDev-Partial: #603
+#
+# indented inside such a block, the flush form harvests nothing and the
+# leading-whitespace form yields 603. Because /merge runs over EVERY PR, that
+# would strip `uberdev-active` and the assignee from a live issue and write a
+# merge-partial audit row asserting a legitimate release — silent on stderr and
+# actively misdescribed in the trail — after which a second fleet could cut a
+# competing branch while the first solver still holds the issue. All three
+# producer renderings are left-flush, so the tolerance bought nothing and cost
+# that. Do not re-add it.
 #
 # The list-marker class is `[-*+]` and deliberately NOT `[0-9]+\.` — an ordered
 # marker would put a stray digit in front of the issue number and the `[0-9]+`
@@ -1332,7 +1347,7 @@ CLOSED_ISSUES=($(printf '%s' "$PR_BODY_FOR_CLEANUP" \
 # refused: that is what keeps a drive-by sentence on any of the PRs /merge runs
 # over from releasing a claim a LIVE solver still holds (MZ3.h / MZ3.n).
 PARTIAL_ISSUES=($(printf '%s\n' "$PR_BODY_FOR_CLEANUP" | tr -d '\r' \
-  | grep -oE '^[[:space:]]*([-*+][[:space:]]+)?`?UberDev-Partial: #[0-9]+`?[[:space:]]*$' \
+  | grep -oE '^([-*+][[:space:]]+)?`?UberDev-Partial: #[0-9]+`?[[:space:]]*$' \
   | grep -oE '[0-9]+' \
   | awk -v c0=0 '!seen[$c0]++'))
 for CLEAR_ISSUE_NUM in "${CLOSED_ISSUES[@]}"; do

@@ -600,6 +600,21 @@ MZ3_PARTIAL_TRAILWS_BODY='UberDev-Partial: #68   '
 # alone) is the half that keeps this form from being emitted at all.
 MZ3_PARTIAL_TRAILPROSE_BODY='- `UberDev-Partial: #69` — chain stopped at task 3'
 
+# MZ3.o — the INDENTED form, and the reason the left anchor is flush. Four
+# leading spaces is a markdown CODE BLOCK, so this body DOCUMENTS the trailer
+# rather than emitting one. An earlier cut of the #603 relaxation tolerated a
+# leading whitespace run and harvested 70 from exactly this shape, which would
+# strip uberdev:active and the assignee from a live issue and write a
+# merge-partial audit row asserting a legitimate release — and /merge runs over
+# EVERY PR, so any body quoting the format would do it. The three producer
+# renderings k/l/m are all left-flush, so nothing legitimate needs the
+# tolerance; this row is what stops it being re-added.
+MZ3_PARTIAL_INDENTED_BODY='Mark a partial delivery like this:
+
+    UberDev-Partial: #70
+
+Nothing above releases anything.'
+
 mz3_run() {   # mz3_run <label> [NAME=VALUE ...]
   _m3_box="$SANDBOXES/mz3-$1"; shift
   rm -rf "$_m3_box"; mkdir -p "$_m3_box"
@@ -800,6 +815,18 @@ else
     pass "MZ3.n trailing-prose-negative — a trailer with commentary after it on the same line never reaches gh"
   else
     fail "MZ3.n trailing-prose-negative — rc=$LAST_RC calls=$MZ3N_N: $(tr '\n' ' ' < "$MZ3_GHLOG")"
+  fi
+
+  # -- MZ3.o indented-code-block negative (#603) -----------------------------
+  # The LEFT anchor's boundary, and the one k/l/m cannot imply: they all sit
+  # flush, so a relaxation that also tolerated leading whitespace would keep
+  # every one of them green while turning documentation into a claim release.
+  mz3_run o "BODY=$MZ3_PARTIAL_INDENTED_BODY" 'PR_JSON_RAW='
+  MZ3O_N="$(count_lines "$MZ3_GHLOG")"
+  if [ "$LAST_RC" -eq 0 ] && [ "$MZ3O_N" = "0" ]; then
+    pass "MZ3.o indented-code-block negative — a four-space-indented trailer is documentation and never reaches gh"
+  else
+    fail "MZ3.o indented-code-block negative — rc=$LAST_RC calls=$MZ3O_N: $(tr '\n' ' ' < "$MZ3_GHLOG")"
   fi
 fi
 
