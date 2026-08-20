@@ -239,9 +239,15 @@ function solverPairsFromResults(results) {
   const byIssue = {};
   (Array.isArray(results) ? results : []).forEach(function (r) {
     if (!r) return;
-    const issue = String(r.issue).trim();
-    const pr = String(r.prNumber).trim();
-    if (!/^[0-9]+$/.test(issue) || !/^[0-9]+$/.test(pr)) return;
+    // digitsOnly() is this file's ONE definition of "digit string" — the helper
+    // every other ingest here routes through. It trims each member and drops the
+    // non-digit ones while preserving order, so a two-member result says exactly
+    // what the inline pair of tests said: both halves are digit strings. Only the
+    // positive check stays local, and it is what excludes the `0` no-PR sentinel.
+    const pair = digitsOnly([r.issue, r.prNumber]);
+    if (pair.length !== 2) return;
+    const issue = pair[0];
+    const pr = pair[1];
     if (Number(issue) <= 0 || Number(pr) <= 0) return;
     byIssue[issue] = (byIssue[issue] === undefined || byIssue[issue] === pr) ? pr : "";
   });
@@ -916,8 +922,14 @@ async function runCycle() {
           // partial ledger stays empty for.
           const cyclePairs = solverPairsFromResults(out.results);
           cyclePairs.forEach(function (s) {
-            if (solverPrs.indexOf(s) < 0
-                && !solverPrs.some(function (k) { return k.split(":")[0] === s.split(":")[0]; })) {
+            // FIRST RECORD FOR AN ISSUE WINS, and that is the whole rule. A pair
+            // already in the accumulator necessarily shares its issue half with
+            // itself, so the issue-prefix test alone already rejects it — a
+            // separate membership scan could never change the outcome, only walk
+            // the run-lifetime accumulator a second time. The incoming pair's
+            // issue half is split once here rather than once per element.
+            const issueHalf = s.split(":")[0];
+            if (!solverPrs.some(function (k) { return k.split(":")[0] === issueHalf; })) {
               solverPrs.push(s);
             }
           });

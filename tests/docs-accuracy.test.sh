@@ -2474,17 +2474,36 @@ sf_doc_members() {   # <file> <anchor> <closer> [<opener>]
     }
   ' | sort -u
 }
-# Script side. `//` comments are stripped BEFORE the newlines collapse — the
-# taskRec literal carries four comment lines, and prose ending in a colon
-# ("… as the PR-claim pass below:") otherwise reads as a key. Collapsing to one
-# line is what lets one ERE span an authored wrap; `[^{}]*` keeps each match
-# inside a single brace-free literal, and these records nest nothing. Braces are
-# spelled `[{]`/`[}]` and never `\{`/`\}`: an escaped brace in an ERE is
-# undefined by POSIX and GNU grep 3.8+ warns on stray escapes, so the bracket
-# expression is the form that means the same thing to every grep CI resolves.
+# Script side, normalised ONCE. Every extraction below reads one of these three
+# forms instead of respawning the same four-command prefix over a ~3200-line
+# file at each site:
+#
+#   SF_JS_SRC    `//` comments and CRs stripped, LINES PRESERVED — what the
+#                depth-tracking reader below needs, since it is line-oriented.
+#   SF_JS_FLAT   the same text collapsed onto one line, which is what lets a
+#                single ERE span an authored wrap.
+#   SF_JS_GLUED  SF_JS_FLAT with the JS string-concatenation glue removed, for
+#                the prompt copies that are split across a wrap by `" + "`.
+#
+# `//` comments go BEFORE the newlines collapse — the taskRec literal carries
+# four comment lines, and prose ending in a colon ("… as the PR-claim pass
+# below:") otherwise reads as a key.
+#
+# Fed to the greps by HERESTRING, never by pipe: this file sets `-o pipefail`
+# and is inside epipe-guard.test.sh's scan set, which is the same reason
+# sf_member_count further down reads a herestring.
+SF_JS_SRC="$(sed 's|//.*||' "$SOLVE_FLEET_JS" | tr -d '\r')"
+SF_JS_FLAT="$(tr '\n' ' ' <<<"$SF_JS_SRC")"
+SF_JS_GLUED="$(sed 's/"[[:space:]]*+[[:space:]]*"//g' <<<"$SF_JS_FLAT")"
+
+# `[^{}]*` keeps each match inside a single brace-free literal, and these
+# records nest nothing. Braces are spelled `[{]`/`[}]` and never `\{`/`\}`: an
+# escaped brace in an ERE is undefined by POSIX and GNU grep 3.8+ warns on stray
+# escapes, so the bracket expression is the form that means the same thing to
+# every grep CI resolves.
 sf_js_keys() {       # <ERE matching the whole object literal>
-  sed 's|//.*||' "$SOLVE_FLEET_JS" | tr -d '\r' | tr '\n' ' ' \
-    | grep -oE "$1" | grep -oE '[A-Za-z_][A-Za-z0-9_]*:' | tr -d ':' | sort -u
+  grep -oE "$1" <<<"$SF_JS_FLAT" \
+    | grep -oE '[A-Za-z_][A-Za-z0-9_]*:' | tr -d ':' | sort -u
 }
 # Script side, DEPTH-TRACKING. sf_js_keys' `[^{}]*` window is a brace-free
 # literal by construction, and the objects joined below break it: finalize()'s
@@ -2508,7 +2527,7 @@ sf_js_keys() {       # <ERE matching the whole object literal>
 # ever sees them (warning about it on some builds), so a literal brace is
 # spelled `[{]` and a literal parenthesis is left out of the pattern altogether.
 sf_js_object_keys() {   # <arming ERE> <opening ERE>
-  sed 's|//.*||' "$SOLVE_FLEET_JS" | tr -d '\r' | awk -v arm="$1" -v opener="$2" '
+  awk -v arm="$1" -v opener="$2" '
     { if (fin) next
       if (!armed) { if ($0 ~ arm) armed = 1; next }
       if (!cap) { if ($0 !~ opener) next
@@ -2524,7 +2543,7 @@ sf_js_object_keys() {   # <arming ERE> <opening ERE>
       }
       if (fin) print buf
     }
-  ' | grep -oE '[A-Za-z_][A-Za-z0-9_]*:' | tr -d ':' | sort -u
+  ' <<<"$SF_JS_SRC" | grep -oE '[A-Za-z_][A-Za-z0-9_]*:' | tr -d ':' | sort -u
 }
 # Count and set-difference, factored: every comparison below reads them, and one
 # copy of this loop per comparison is the very class this section exists to
@@ -2896,10 +2915,8 @@ SF_DOC_CLAIMED="$(sf_doc_members "$SOLVE_FLEET_SKILL" 'terminal word' 'when it a
 # spelled differently from its key, silently comparing the wrong strings. The
 # bare `""` fallback on the `taskRec.claimedStatus =` assignment is a member in
 # its own right and is unioned in from that one site.
-SF_JS_TASK_STATUS_MAP="$(sed 's|//.*||' "$SOLVE_FLEET_JS" | tr -d '\r' | tr '\n' ' ' \
-  | grep -oE 'TASK_STATUS = Object\.freeze\([{][^{}]*[}]')"
-SF_JS_CLAIMABLE_REFS="$(sed 's|//.*||' "$SOLVE_FLEET_JS" | tr -d '\r' | tr '\n' ' ' \
-  | grep -oE 'TASK_CLAIMABLE = Object\.freeze\(\[[^][]*\]' \
+SF_JS_TASK_STATUS_MAP="$(grep -oE 'TASK_STATUS = Object\.freeze\([{][^{}]*[}]' <<<"$SF_JS_FLAT")"
+SF_JS_CLAIMABLE_REFS="$(grep -oE 'TASK_CLAIMABLE = Object\.freeze\(\[[^][]*\]' <<<"$SF_JS_FLAT" \
   | grep -oE 'TASK_STATUS\.[A-Za-z_][A-Za-z0-9_]*' | sed 's/^TASK_STATUS\.//' | sort -u)"
 SF_JS_CLAIMED="$({
   while IFS= read -r _sf_ref; do
@@ -2956,8 +2973,7 @@ fi
 # a word the schema rejects, the structured return is discarded, and the failure
 # surfaces as a null result that never names the word that caused it.
 SF_DOC_STATUS="$(sf_doc_members "$SOLVE_FLEET_SKILL" '`status` ∈' '`' '`')"
-SF_JS_STATUS_ENUM="$(sed 's|//.*||' "$SOLVE_FLEET_JS" | tr -d '\r' | tr '\n' ' ' \
-  | grep -oE 'status: [{] *type: "string", *enum: \[[^][]*\]' \
+SF_JS_STATUS_ENUM="$(grep -oE 'status: [{] *type: "string", *enum: \[[^][]*\]' <<<"$SF_JS_FLAT" \
   | grep -oE '"[A-Z][A-Z0-9_]*"' | tr -d '"' | sort -u)"
 # The prompt copies are JS string CONCATENATION split across an authored wrap,
 # so the glue is removed before the union is looked for — otherwise the union
@@ -2977,17 +2993,13 @@ SF_JS_STATUS_ENUM="$(sed 's|//.*||' "$SOLVE_FLEET_JS" | tr -d '\r' | tr '\n' ' '
 # `taskId (` return line out; its own status vocabulary is a different contract
 # and a looser anchor drags it in, poisoning the comparison with words the solve
 # schema was never meant to accept.
-SF_JS_STATUS_PROMPTS="$(sed 's|//.*||' "$SOLVE_FLEET_JS" | tr -d '\r' | tr '\n' ' ' \
-  | sed 's/"[[:space:]]*+[[:space:]]*"//g' \
-  | grep -oE 'StructuredOutput: issue \([^)]*\), status \([^)]*\)' \
+SF_JS_STATUS_PROMPTS="$(grep -oE 'StructuredOutput: issue \([^)]*\), status \([^)]*\)' <<<"$SF_JS_GLUED" \
   | sed 's/^.*, status (/status (/')"
 # Every per-issue return line, carrying a union or not. This is the DENOMINATOR
 # the copy count is measured against: re-anchoring keeps a DRIFTED union in the
 # set, but a copy that drops its union clause outright has no anchor left to
 # match and would still leave without a sound.
-SF_JS_STATUS_RETURNS="$(sed 's|//.*||' "$SOLVE_FLEET_JS" | tr -d '\r' | tr '\n' ' ' \
-  | sed 's/"[[:space:]]*+[[:space:]]*"//g' \
-  | grep -oE 'Return via StructuredOutput: issue \(')"
+SF_JS_STATUS_RETURNS="$(grep -oE 'Return via StructuredOutput: issue \(' <<<"$SF_JS_GLUED")"
 SF_JS_STATUS_PROMPT_SPELLINGS="$(sort -u <<<"$SF_JS_STATUS_PROMPTS")"
 SF_JS_STATUS_PROMPT_MEMBERS="$(grep -oE '[A-Z][A-Z0-9_]+' <<<"$SF_JS_STATUS_PROMPT_SPELLINGS" | sort -u)"
 SF_DOC_STATUS_N="$(sf_member_count "$SF_DOC_STATUS")"
@@ -4607,8 +4619,12 @@ backward = re.compile(count_re(ANY_NOUN) + r".{0,%d}?" % WINDOW + NAME, re.DOTAL
 owner_only = re.compile(count_re(ROSTER_NOUN), re.IGNORECASE)
 scanned = sorted(p for p in plugin_dir.rglob("*")
                  if p.is_file() and p.suffix in (".md", ".js", ".sh"))
-owners = set(p for p in scanned
-             if "review_pr.review." in p.read_text(encoding="utf-8", errors="replace"))
+# ONE read per file, reused by all three passes below (the owner derivation
+# here, the paragraph scan, and T20.6). Nothing between them mutates the tree, so
+# re-reading and re-decoding 161 files two to three times per CI run bought
+# nothing; every read used these exact arguments, so the cache is the same text.
+texts = {p: p.read_text(encoding="utf-8", errors="replace") for p in scanned}
+owners = set(p for p in scanned if "review_pr.review." in texts[p])
 claims = []
 for path in scanned:
     patterns = ([forward, backward] if path.suffix == ".md" else [])
@@ -4616,7 +4632,7 @@ for path in scanned:
         patterns = patterns + [owner_only]
     if not patterns:
         continue
-    lines = path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n").splitlines()
+    lines = texts[path].replace("\r\n", "\n").splitlines()
     start = 0
     for idx in range(len(lines) + 1):
         if idx == len(lines) or not lines[idx].strip():
@@ -4697,7 +4713,7 @@ attributed = 0
 for path in sorted(p for p in owners if p.suffix in (".js", ".sh")):
     flat = re.sub(r"\s+", " ",
                   re.sub(r"\n\s*(?://+|#+)\s*", " ",
-                         path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")))
+                         texts[path].replace("\r\n", "\n")))
     for quoted in re.finditer(r"[\"“]([^\"“”]{20,300})[\"”]", flat):
         if "post-impl-review/SKILL.md" not in flat[quoted.end():quoted.end() + 160]:
             continue

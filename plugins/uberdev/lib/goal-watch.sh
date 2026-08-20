@@ -146,8 +146,16 @@ case "$SOLVER_PRS" in
   *[!0-9,:]*|,*|*,,*|*,) _SOLVER_PRS_BAD=1 ;;
   *)
     while IFS= read -r _sp_pair; do
+      # Only the COLON-PLACEMENT faults are spelled out, because they are the
+      # only ones that can fire here. The whole-scalar arm above has already
+      # refused every character outside `[0-9,:]` and every empty-member shape
+      # (leading, doubled and trailing separator), so a member reaching this
+      # point is a non-empty run of digits and colons — an empty-member pattern
+      # and a stray-character pattern would both be decorative, and a reader
+      # would have to re-derive the outer guard to work that out. A colon-less
+      # member still falls to the catch-all arm below.
       case "$_sp_pair" in
-        ""|*[!0-9:]*|:*|*:|*:*:*) _SOLVER_PRS_BAD=1 ;;
+        :*|*:|*:*:*) _SOLVER_PRS_BAD=1 ;;
         *:*) ;;
         *) _SOLVER_PRS_BAD=1 ;;
       esac
