@@ -400,12 +400,16 @@ function claimPrompt(cycleNo) {
 // script the filesystem, so it can neither write a file that gate would read
 // nor reach into a running shell. argv is the whole channel.
 //
-// OMITTED, never emitted empty. `--partial-prs=` with no value is a
-// malformed-shape refusal (exit 2) in lib/goal-watch.sh, and both scripts take
-// a startup refusal as a bug in the caller that composed the command line
-// rather than as something to poll through — so an always-on flag would halt
-// every converging run at the first tick. On a clean cycle the two command
-// lines stay byte-identical to what they were before this issue.
+// OMITTED, never emitted empty — and the reason is NOT that an empty value is
+// refused. Measured against the shipped script: `--partial-prs=` with no value
+// exits 3 (the outer shape guard opens with a no-op `"") ;;` arm, so an empty
+// scalar passes it untouched and the run dies later, at run-state rehydration),
+// while a non-empty malformed value exits 2 as the guard's own message says.
+// The rule stands on its own terms instead: an empty flag carries no value to
+// act on, so emitting one buys nothing, and omitting it keeps the command line
+// byte-identical to a pre-issue cycle. Both scripts still take a startup
+// refusal as a bug in the caller that composed the command line rather than as
+// something to poll through.
 //
 // Both values are script-derived: they leave the ledger below having passed
 // digitsOnly(), so nothing but digits and commas can reach a command line, and
@@ -420,11 +424,13 @@ function partialPrsFlag() {
 function partialIssuesFlag() {
   return partialIssues.length ? " --partial-issues=" + partialIssues.join(",") : "";
 }
-// #603 — same OMITTED-never-empty discipline as the two above: `--solver-prs=`
-// with no value is a malformed-shape refusal (exit 2) in lib/goal-watch.sh, and
-// the driver composed the command line, so a startup refusal is a bug in the
-// caller rather than something to poll through. On a cycle with no attributable
-// pair the command line stays byte-identical to what it was before this issue.
+// #603 — same OMITTED-never-empty discipline as the two above, and on the same
+// true footing: `--solver-prs=` with no value is NOT refused. Measured, it
+// exits 3 through the guard's no-op empty arm, where a non-empty malformed
+// value exits 2. The rule holds because an empty flag carries no pair, so on a
+// cycle with no attributable pair the command line stays byte-identical to what
+// it was before this issue. A startup refusal is still a bug in the caller that
+// composed the command line rather than something to poll through.
 // Every member left this ledger having passed the digit test in
 // solverPairsFromResults, so nothing but digits, colons and commas can reach a
 // command line — and lib/goal-watch.sh re-refuses the shape at its own edge.
