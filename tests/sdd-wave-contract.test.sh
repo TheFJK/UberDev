@@ -220,15 +220,24 @@ done
 # §W3 — mutation anti-vacuity over the SAME corpus.
 #
 # Executed discrimination matrix (this is why the two backslash-stem pairs are
-# mandatory rather than decorative):
+# mandatory rather than decorative). The leading column is the 1-based CORPUS
+# index, so the pair sets §W3 binds below are readable straight off this table
+# instead of being taken on trust:
 #
-#   | a            | b          | live  | M1    | M2    |
-#   |--------------|------------|-------|-------|-------|
-#   | lib/x.sh     | lib/x.sh   | True  | False | True  |
-#   | lib\x.sh     | lib        | False | False | False |
-#   | lib\x.sh     | lib\       | False | False | False |
-#   | lib/x.sh     | lib\       | True  | True  | False |
-#   | lib/x.sh     | lib\\      | True  | True  | False |
+#   |  # | a            | b          | live  | M1    | M2    |
+#   |----|--------------|------------|-------|-------|-------|
+#   |  1 | lib/x.sh     | lib/x.sh   | True  | False | True  |
+#   |  2 | lib          | lib        | True  | False | True  |
+#   | 14 | lib\x.sh     | lib        | False | False | False |
+#   | 15 | lib\x.sh     | lib\       | False | False | False |
+#   | 16 | lib/x.sh     | lib\       | True  | True  | False |
+#   | 17 | lib/x.sh     | lib\\      | True  | True  | False |
+#
+# Pairs 1 and 2 are the only two that reach the `if a == b: return True` arm, so
+# they are the whole of M1's reach. Pairs 16 and 17 are the only two where the
+# two rstrip spellings part company, so they are the whole of M2's. Every other
+# corpus pair agrees under both mutants. The declared sets are therefore
+# M1 -> {1,2} and M2 -> {16,17}, and §W3 compares those SETS, not a count.
 #
 # With b = "lib\", live rstrip('/\\') yields stem `lib` and matches the
 # forward-slash child; M2's rstrip('/') leaves stem `lib\`, and `lib\` + '/'
@@ -344,16 +353,37 @@ done <"$TMP/w1.tsv"
   || fail "§W1 compared $w1_seen pairs but the corpus declares exactly 24 — a corpus that silently shrank proves nothing"
 row "§W1 pair count is exactly 24, its declared floor"
 
+# The matrix above, BOUND. A `-ge 1` floor would have gone on passing if a
+# future edit widened M2's reach from the two mandatory backslash-stem pairs to
+# six — the comment would keep claiming an exact discrimination that nothing
+# enforced, which is the "prose claims more than the predicate binds" class this
+# whole file exists to close. So the declared pair SET is what is compared.
+#
+# This buys the precision for free: §W1 already pins the corpus at exactly 24
+# pairs, so no legitimate corpus addition can reach here without first reding
+# that floor and forcing the matrix to be re-derived anyway. An exact set here
+# adds no new maintenance event, only a diagnosable one.
+w3_declared_pairs() {   # <mutant label> -> the corpus pairs the matrix declares
+  case "$1" in
+    M1) printf '%s' '1,2' ;;      # the two identity rows, the a == b arm's whole reach
+    M2) printf '%s' '16,17' ;;    # the two mandatory backslash-stem rows
+    *)  printf '%s' '' ;;
+  esac
+}
+
 w3_seen=0
 while IFS=$'\t' read -r w3_label w3_n w3_pairs; do
   [ -n "$w3_label" ] || continue
   case "$w3_label" in
     ERROR) fatal "§W3 could not build a mutant of the extracted SDD body: $w3_pairs" ;;
   esac
-  [ "$w3_n" -ge 1 ] \
-    || fail "§W3 mutant $w3_label agrees with the live turbox body on all 24 pairs — the corpus is too weak to discriminate it"
+  w3_want="$(w3_declared_pairs "$w3_label")"
+  [ -n "$w3_want" ] \
+    || fatal "§W3 mutant $w3_label has no declared pair set — add its row to the matrix above and to w3_declared_pairs. An undeclared mutant must never pass by default"
+  [ "$w3_pairs" = "$w3_want" ] \
+    || fail "§W3 mutant $w3_label flips pair(s) [$w3_pairs] against the live turbox body, the matrix declares exactly [$w3_want] — either the corpus stopped discriminating it or the mutation's reach changed. Re-derive the matrix and this set together; never relax this back to a count"
   w3_seen=$((w3_seen + 1))
-  row "§W3 mutant $w3_label disagrees with the live turbox body on $w3_n pair(s): $w3_pairs"
+  row "§W3 mutant $w3_label flips exactly its $w3_n declared pair(s) against the live turbox body: $w3_pairs"
 done <"$TMP/w3.tsv"
 
 [ "$w3_seen" -eq 2 ] || fail "§W3 ran $w3_seen mutants, expected exactly 2"
@@ -799,15 +829,41 @@ c_drift="$(report_rows DRIFT "$REPORT")"
   || fail "§C cap values have DRIFTED from the owner (sdd_loop_cap in $SDD_SKILL_REL):
 $c_drift"
 
+# The section each register site belongs to, in the spec's own vocabulary
+# (spec-r1.md §5, plan.md Step 11): C1 is the owner, C2 the turbox copy, C3 the
+# workflow.js copy, C4 the eleven bound-prose sites. The two frozen sites are
+# register members with no section of their own, so they stay a bare "§C".
+#
+# Printing the label is not cosmetic. skills/solve-fleet/workflow.js points a
+# reader at "the §C3 rows of tests/sdd-wave-contract.test.sh"; while every row
+# printed a bare "§C", that pointer named an enforcer that grep could not find —
+# real enforcement behind a label that does not resolve, which is this issue's
+# own defect class one level up. C4 is labelled on ALL eleven prose sites and
+# not just the solve-fleet one, because that is the span the plan gives it
+# ("the 11 bound prose sites ... all read by C4") — a label narrower than its
+# section would re-introduce the same mismatch it is here to remove.
+c_site_section() {   # <site id> <kind> -> the section that owns the row
+  case "$1" in
+    1) printf '%s' '§C1' ;;
+    2) printf '%s' '§C2' ;;
+    3) printf '%s' '§C3' ;;
+    *) case "$2" in
+         prose) printf '%s' '§C4' ;;
+         *)     printf '%s' '§C' ;;
+       esac ;;
+  esac
+}
+
 c_sites=0
 while IFS=$'\t' read -r c_kind c_id c_class c_path c_detail c_verdict; do
   [ "$c_kind" = "SITE" ] || continue
+  c_sec="$(c_site_section "$c_id" "$c_class")"
   case "$c_verdict" in
     ok|frozen) ;;
-    *) fail "§C site $c_id ($c_path) verdict=$c_verdict — $c_detail" ;;
+    *) fail "$c_sec site $c_id ($c_path) verdict=$c_verdict — $c_detail" ;;
   esac
   c_sites=$((c_sites + 1))
-  row "§C site $c_id [$c_class] $c_path — $c_detail ($c_verdict)"
+  row "$c_sec site $c_id [$c_class] $c_path — $c_detail ($c_verdict)"
 done <<<"$REPORT"
 
 [ "$c_sites" -eq 16 ] \

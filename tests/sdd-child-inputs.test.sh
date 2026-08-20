@@ -2227,7 +2227,11 @@ PY
 #      an empty batch. The driver reports a per-id LOG line count and a shell
 #      variable incremented in the loop body and read after it: the log survives a
 #      subshell, the variable does not, so `dispatched=0 lines=3` is exactly the
-#      shape a piped loop produces and exactly what these rows refuse.
+#      shape a piped loop produces and exactly what these rows refuse. Only the
+#      BASH row can witness that: zsh does not run the last stage of a pipeline
+#      in a subshell, so under zsh a piped loop body still mutates the parent's
+#      variables and arrays and the mutant reads as healthy. The executed
+#      per-shell matrix is recorded beside B-A / B-B below.
 #   4. The contract is written down where a reader of the skill body meets it,
 #      not only enforced in the fence — B-G, below the driver rows.
 #
@@ -2335,6 +2339,27 @@ batch_row() {
 
 # B-A / B-B — one dispatch per id, in BOTH shells. Equality on the whole line,
 # not a floor: `dispatched=3 lines=3` and nothing else is the contract.
+#
+# THE TWO ROWS ARE NOT REDUNDANT and neither may be retired in favour of the
+# other: each is the SOLE witness of one of the two mutants, and each mutant
+# SURVIVES in the other shell. Executed, against the shipped fence:
+#
+#   * the `done <<< "$sdd_batch_ids"` redirect replaced by a pipe — the fence's
+#     own "Fed by REDIRECT, never a pipe" rule:
+#       B-A bash → `rc=0 dispatched=0 lines=3`  REDS
+#       B-B zsh  → `rc=0 dispatched=3 lines=3`  green, the mutant survives
+#   * the normalisation replaced by the original `for task_id in
+#     $SDD_BATCH_TASK_IDS` — the unquoted-scalar defect this fixture was cut for:
+#       B-A bash → `rc=0 dispatched=3 lines=3`  green, the mutant survives
+#       B-B zsh  → `rc=2 dispatched=0 lines=0`  REDS
+#
+# Reading down the columns: B-A is the ONLY falsifier of the redirect rule,
+# because zsh does not subshell the last stage of a pipeline — under zsh the
+# piped loop body goes on mutating the caller's `SDD_PREPARED_*` arrays and the
+# batch looks healthy. B-B is the ONLY falsifier of the scalar-split defect,
+# because bash word-splits the unquoted expansion and the merged token never
+# reaches the real `sdd_validate_positive_decimal`. Delete either row and the
+# claim it alone carries goes quietly vacuous while the file still reads green.
 batch_row B-A bash set '41 42 43' 'rc=0 dispatched=3 lines=3'
 batch_row B-B zsh  set '41 42 43' 'rc=0 dispatched=3 lines=3'
 
