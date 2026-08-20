@@ -493,7 +493,16 @@ lowercased with every non-alphanumeric run collapsed to `-` (e.g.
 Every bound child is told to write `result.md.partial` and then publish it with
 a **same-directory `mv -f`** — the shell spelling of the atomic rename
 `os.replace` performs — and to do the same for `status.json`. Without that, the
-controller can capture a torn half-written file and digest it as final. It is
+controller can capture a torn half-written file and digest it as final.
+
+**The result is published BEFORE the status, and that order is load-bearing**
+(#645). The status is the completion signal, so `capture-bound-child` refuses a
+result whose mtime is strictly newer than the status attesting to it
+(`child_result_rewritten_after_status`). That is what stops a RE-DISPATCH of one
+iteration — which inherits the same nonce and, because `childDirAbs()` keys on
+`reviewIteration` alone, the same directory — from leaving a dead attempt's
+report underneath a completed attempt's status. Reversing the two publishes in
+the prompt would red every healthy child instead. It is
 spelled with `mv` rather than a Python one-liner because the T1
 self-contained-script grep bans the module-load keyword *anywhere* in the
 script, including inside a prompt string (the same constraint

@@ -741,7 +741,8 @@ captured bytes. Failed attempts remain isolated under their unique attempt
 identity; retries create a fresh identity and never unlink or remove a
 pathname after a separate identity check. Evidence failures emit only the stable class
 `ledger-absent`, `incomplete-roster`, `malformed-ledger`, `roster-mismatch`,
-`unsafe-artifact`, `duplicate-artifact`, or `digest-mismatch` plus the bounded
+`unsafe-artifact`, `duplicate-artifact`, `digest-mismatch`, or
+`result-rewritten-after-status` plus the bounded
 edge/index (never a path or reviewer content). The first three are deliberately
 distinct because they demand different investigations: `ledger-absent` means the
 validated ledger was never written at all, `incomplete-roster` means every line
@@ -751,6 +752,18 @@ row that violated the closed schema. Reporting a short ledger as
 `malformed-ledger` made the ordinary cause — a reviewer child that failed, timed
 out, or was unwound — indistinguishable from ledger corruption, and trained
 readers to re-run instead of investigate (#365).
+
+`result-rewritten-after-status` is the same distinction applied to a different
+failure (#645). One nonce is minted per review ITERATION and every re-dispatch
+of that iteration inherits it, writing the same `children/<slug>-iter<NN>/`
+directory, so a retry that published its `result.md` and then died leaves the
+COMPLETED attempt's `status.json` attesting to the DEAD attempt's report — with
+every digest equality passing, because both digests are computed from the same
+substituted bytes. The bound-child protocol publishes the result before the
+status, so `capture-bound-child` refuses a result that is strictly newer than
+the status attesting to it. Reported under its own class because the
+investigation is "this child's result was rewritten after it completed", not the
+`roster-mismatch` reading of "this child never bound itself".
 
 `incomplete-roster` is a statement about row count, not about intactness: a
 ledger truncated at a line boundary presents as short too, and the ledger's own

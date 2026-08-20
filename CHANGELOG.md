@@ -4,6 +4,58 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.51.6] — 2026-08-20
+
+### Fixed - a retried reviewer that died mid-run could overwrite a completed one's result
+
+`review_fleet_bind_roster` runs in a controller fence the orchestrator executes
+ONCE PER ITERATION, while the `Workflow` dispatch that consumes its binding is a
+SEPARATE call that may be REPEATED after a transient agent failure. The
+per-child `run_nonce` is therefore identical across every re-dispatch of one
+iteration, and `childDirAbs()` keys on the iteration alone — so a retry writes
+into the SAME `children/<slug>-iter<NN>/` directory. A retry that published its
+`result.md` and then died before publishing its status left the COMPLETED
+attempt's `status.json` sitting on top of the DEAD attempt's report.
+
+Every equality in `capture_bound_child` still passed, because the status
+document carries nothing that names which result bytes it attests to and the
+nonce cannot supply it — it is the same nonce by construction. Both digests are
+computed by the contract from the SAME substituted bytes, so the re-read in
+`lib/review-aggregate.sh` agreed with itself. Observed live on PR #641 (run
+`20260820-084203-72187372fac35d0d`, iteration 2): `tests-iter02`'s status was
+written at 04:20:25 by an attempt that returned `COMPLETE`, its `result.md` at
+04:32:01 by an attempt the runtime marked `BLOCKED / "agent returned null"`. The
+substitution flipped that lens's verdict `REVISIONS_REQUIRED` → `APPROVE` and
+turned a **blocker** into a suggestion. Driving the 4w.2 capture fence against
+that exact state reported refusals only for two unrelated children that wrote no
+artifacts at all, and passed the substituted one.
+
+`capture_bound_child` now refuses a result whose mtime is STRICTLY NEWER than
+the status attesting to it, under its own token
+`child_result_rewritten_after_status`. The ordering is not folklore: the
+bound-child protocol (`skills/review-fleet/workflow.js` `boundChildProtocol`)
+publishes the result in steps 1-2 and the status in step 3, making the status
+the completion signal. Re-measured over every child of that run — 41 healthy
+children have `status >= result` (tightest margin +0.005s), and the one
+corrupted child is the sole exception at -696.5s. Equality passes on purpose: a
+coarse filesystem clock can stamp an honest pair identically, and truncation is
+monotone, so a same-tick write can never present as strictly newer.
+
+`lib/review-aggregate.sh` reports it under its own class,
+`result-rewritten-after-status`, rather than folding it into the generic
+`roster-mismatch`: the operator needs to learn "this child's result was
+rewritten after it completed", which is a different investigation from "this
+child never bound itself".
+
+**Declared boundary.** mtime is coarse and a LIVE child can forge it, so this
+binds an honest-but-retried child rather than a lying one, and two OVERLAPPING
+dispatches could still interleave their writes into a passing order. Pinning the
+result digest into `status.json` at completion would close both and composes
+with this rule — but that digest is child-written too, it must stay optional for
+the harness-written statuses of the detached backends, and an optional digest is
+exactly what a dead predecessor omits. That is a protocol migration across every
+fleet, not a local repair of this verb.
+
 ## [0.51.5] — 2026-08-20
 
 ### Fixed - a resolved merge conflict made the code-fixer refuse its own index

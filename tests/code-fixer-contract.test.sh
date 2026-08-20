@@ -4601,6 +4601,77 @@ expect_contract_reason(
     "launch_binding_invalid",
 )
 
+# --- #645: the captured result must be the one that status ATTESTS TO --------
+#
+# `review_fleet_bind_roster` runs in a controller fence the orchestrator
+# executes ONCE PER ITERATION, while the `Workflow` dispatch that consumes its
+# binding is a SEPARATE call that may be REPEATED (a resume after a transient
+# agent failure). The per-child nonce is therefore identical across every
+# re-dispatch of one iteration, and `childDirAbs()` keys on the iteration alone,
+# so a retry writes into the SAME `children/<slug>-iter<NN>/` directory. A retry
+# that published its `result.md` and then died before publishing its status
+# leaves the COMPLETED attempt's `status.json` sitting on top of the DEAD
+# attempt's result -- and every equality above still passes, because the status
+# document carries nothing that names which result bytes it attests to.
+#
+# Observed live on PR #641 (run 20260820-084203-72187372fac35d0d, iteration 2):
+# the `tests` lens's verdict flipped REVISIONS_REQUIRED -> APPROVE and a blocker
+# became a suggestion, with the capture reporting no refusal at all.
+#
+# The discriminator is the WRITE ORDER the bound-child protocol mandates:
+# skills/review-fleet/workflow.js `boundChildProtocol` steps 1-2 publish the
+# result, step 3 publishes the status. A result strictly NEWER than the status
+# attesting to it cannot come from one honest attempt. Re-measured over all 42
+# children of that run: 41 healthy children have status >= result (tightest
+# margin +0.005s), and the one corrupted child is the sole exception at -696.5s.
+write_bound_status()
+bc_status_mtime = os.stat(BC_STATUS).st_mtime_ns
+BC_SUBSTITUTED_BYTES = b"## Findings\n\nAPPROVE -- no blockers\n"
+with open(BC_RESULT, "wb") as handle:
+    handle.write(BC_SUBSTITUTED_BYTES)
+os.utime(BC_RESULT, ns=(bc_status_mtime + 696_000_000_000,) * 2)
+expect_contract_reason(
+    lambda: module.capture_bound_child(
+        launch_binding=module._canonical_json(bc_binding), edge_id=BC_EDGE),
+    "child_result_rewritten_after_status",
+)
+# The refusal is its OWN token, not a reused `child_status_invalid`: the
+# operator has to learn "this child's result was rewritten after it completed",
+# which is a different investigation from "this child never bound itself".
+assert (
+    "child_result_rewritten_after_status"
+    in inspect.getsource(module.capture_bound_child)
+), "the ordering refusal must be raised inside capture_bound_child itself"
+
+# Same-tick writes are NOT a refusal. A coarse filesystem clock can stamp both
+# files identically, so the rule is "strictly newer", never "not older" -- and a
+# rule that red healthy runs would be worse than the hole it closes.
+os.utime(BC_RESULT, ns=(bc_status_mtime,) * 2)
+assert module.capture_bound_child(
+    launch_binding=module._canonical_json(bc_binding), edge_id=BC_EDGE
+)["result_sha256"] == hashlib.sha256(BC_SUBSTITUTED_BYTES).hexdigest()
+# ...and an OLDER result is the ordinary healthy case, which the 41 measured
+# children all present.
+os.utime(BC_RESULT, ns=(bc_status_mtime - 8_000_000_000,) * 2)
+assert module.capture_bound_child(
+    launch_binding=module._canonical_json(bc_binding), edge_id=BC_EDGE
+)["result_sha256"] == hashlib.sha256(BC_SUBSTITUTED_BYTES).hexdigest()
+
+# An honest re-run republishes BOTH files in protocol order and captures
+# cleanly: the refusal is a statement about ORDERING, not a poisoned directory.
+with open(BC_RESULT, "wb") as handle:
+    handle.write(BC_RESULT_BYTES)
+bc_status_bytes = write_bound_status()
+assert module.capture_bound_child(
+    launch_binding=module._canonical_json(bc_binding), edge_id=BC_EDGE) == {
+    "edge_id": BC_EDGE,
+    "instance_id": "correctness-iter01",
+    "status_path": bc_binding["status_path"],
+    "status_sha256": hashlib.sha256(bc_status_bytes).hexdigest(),
+    "result_path": bc_binding["result_path"],
+    "result_sha256": hashlib.sha256(BC_RESULT_BYTES).hexdigest(),
+}
+
 # 3. Both verbs must be REACHABLE from the CLI. A function with no subparser is
 #    exactly the dead code #381 found the first time.
 cli = module._parser()

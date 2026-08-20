@@ -53,6 +53,21 @@ def fail(reason,row=None):
 # and requires the digests to agree.
 CONTRACT=os.path.join(plugin_root,'lib','code_fixer_contract.py')
 BOUND_CHILD_KEYS={'edge_id','instance_id','status_path','status_sha256','result_path','result_sha256'}
+# Contract refusal tokens this builder reports under a class of their OWN,
+# instead of folding them into the generic `roster-mismatch`. Only refusals that
+# demand a DIFFERENT investigation belong here (#645): a result rewritten after
+# the status that attests to it is a SUBSTITUTED reviewer opinion -- a retry of
+# one iteration wrote over a completed attempt's report -- and an operator told
+# `roster-mismatch` goes looking for a child that never bound itself, which is
+# not what happened and not where the evidence is.
+BOUND_CHILD_REFUSAL_CLASSES={'child_result_rewritten_after_status':'result-rewritten-after-status'}
+def contract_refusal(stderr):
+ # The verb writes ONE ascii token to stderr and exits 74 (_write_cli_diagnostic).
+ # Anything else -- an interpreter traceback, non-ascii bytes, empty output --
+ # is not a token this builder recognises and falls through to the generic class.
+ try: lines=[line.strip() for line in stderr.decode('ascii').splitlines() if line.strip()]
+ except (AttributeError,UnicodeError): return ''
+ return lines[-1] if lines else ''
 def capture_bound_child(binding,edge_id,row=None):
  if not isinstance(binding,str) or not binding or len(binding)>65536: fail('roster-mismatch',row)
  try:
@@ -60,7 +75,8 @@ def capture_bound_child(binding,edge_id,row=None):
                             '--edge-id',edge_id,'--launch-binding-json',binding],
                            stdin=subprocess.DEVNULL,capture_output=True,timeout=120)
  except (OSError,ValueError,subprocess.SubprocessError): fail('unsafe-artifact',row)
- if completed.returncode!=0: fail('roster-mismatch',row)
+ if completed.returncode!=0:
+  fail(BOUND_CHILD_REFUSAL_CLASSES.get(contract_refusal(completed.stderr),'roster-mismatch'),row)
  try: value=json.loads(completed.stdout.decode('utf-8'))
  except (UnicodeError,ValueError): fail('roster-mismatch',row)
  if (not isinstance(value,dict) or set(value)!=BOUND_CHILD_KEYS

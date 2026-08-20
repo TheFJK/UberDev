@@ -776,6 +776,17 @@ const S = {
 //      ABSENT. A workflow child owns no pid; a synthesised one would make every
 //      downstream equality look verified while proving nothing
 //      (lib/code_fixer_contract.py:6997-7004).
+//
+// The ORDER of those two publishes is load-bearing, not stylistic (#645). The
+// status is the completion signal, so capture_bound_child REFUSES a result whose
+// mtime is strictly newer than the status attesting to it
+// (`child_result_rewritten_after_status`). That refusal is what stops a
+// RE-DISPATCH of one iteration -- which inherits the same nonce and the same
+// childDirAbs() directory -- from leaving a dead attempt's report underneath a
+// completed attempt's status, the substitution that flipped a lens verdict and
+// demoted a blocker on PR #641. A prompt that told the child to publish the
+// status FIRST would red every healthy child instead, so the numbered steps
+// below must stay in this order and the child must be told the order matters.
 function boundChildProtocol(slug, nonce) {
   var result = childResultPath(slug);
   var status = childStatusPath(slug);
@@ -802,6 +813,11 @@ function boundChildProtocol(slug, nonce) {
     '      "worktree":"' + worktreeAbs + '",',
     '      "branch":"' + branchName + '",',
     '      "result":"' + result + '"}',
+    "",
+    "   Publish the result BEFORE the status, in exactly that order. The status is",
+    "   the completion signal, and the controller REFUSES a result whose timestamp",
+    "   is newer than the status attesting to it — that is how a re-dispatch that",
+    "   died mid-run is stopped from overwriting a completed attempt's report.",
     "",
     "4. Do NOT add pid, process_identity or lease_generation keys, and do not add",
     "   any key not listed above. This child is awaited in-session, so it owns no",

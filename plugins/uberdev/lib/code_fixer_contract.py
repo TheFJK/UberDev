@@ -8268,6 +8268,9 @@ def capture_bound_child(*, launch_binding: bytes, edge_id: str) -> dict[str, Any
 
     The status file is captured and validated BEFORE the result file is read, so
     a child that never bound itself costs a refusal rather than a capture.
+
+    The status also has to attest to THESE result bytes, which is a separate
+    claim from "the status is bound" -- see the ordering rule below (#645).
     """
     # Enforce the contract this docstring states. bind_workflow_launch mints
     # bindings for the fixer edges too, so without this a fixer child could be
@@ -8297,6 +8300,44 @@ def capture_bound_child(*, launch_binding: bytes, edge_id: str) -> dict[str, Any
     # equality below while carrying a single set of bytes.
     if status_identity == result_identity:
         fail("child_status_invalid")
+    # THE STATUS MUST ATTEST TO THESE RESULT BYTES (#645).
+    #
+    # Everything above proves the STATUS is bound. Nothing above says WHICH
+    # result the status attests to, and the nonce cannot supply it: the
+    # controller mints one nonce per ITERATION (review_fleet_bind_roster runs in
+    # a fence the orchestrator executes once per iteration) while the Workflow
+    # dispatch that consumes it may be REPEATED, and childDirAbs() keys on the
+    # iteration alone. Every re-dispatch therefore writes the same directory
+    # under the same nonce. A retry that published its result and then died
+    # before publishing its status leaves the COMPLETED attempt's status.json on
+    # top of the DEAD attempt's result.md, and every equality above still
+    # passes. Live on PR #641: a blocker became a suggestion and that lens's
+    # verdict flipped REVISIONS_REQUIRED -> APPROVE, with no refusal at all.
+    #
+    # The discriminator is the write ORDER the bound-child protocol mandates:
+    # skills/review-fleet/workflow.js `boundChildProtocol` publishes the result
+    # (steps 1-2) and only then the status (step 3), so the status is the
+    # completion signal and a result STRICTLY NEWER than it cannot come from one
+    # honest attempt. Measured over every child of the run that produced #645:
+    # 41 healthy children have status >= result (tightest margin +0.005s) and
+    # the single corrupted child is the sole exception, at -696.5s.
+    #
+    # Strictly newer, never "not older": a coarse filesystem clock can stamp an
+    # honest pair identically, and truncation is monotone, so equality is the
+    # same-tick case and must pass. A rule that red healthy runs would be worse
+    # than the hole it closes.
+    #
+    # WHAT THIS DOES NOT PROVE, stated plainly. mtime is coarse and a LIVE child
+    # can forge it, so this binds an honest-but-retried child, not a lying one;
+    # and two OVERLAPPING dispatches could still interleave their writes into
+    # this ordering. Pinning the result digest into status.json at completion
+    # would close both, and composes with this rule rather than replacing it --
+    # but that digest is written by the child too, it has to stay optional for
+    # the harness-written statuses of the detached backends, and an optional
+    # digest is exactly what a dead predecessor omits. So it is a protocol
+    # migration across every fleet, not a local repair of this verb.
+    if result_identity.mtime_ns > status_identity.mtime_ns:
+        fail("child_result_rewritten_after_status")
     return {
         "edge_id": binding["edge_id"],
         "instance_id": binding["instance_id"],
