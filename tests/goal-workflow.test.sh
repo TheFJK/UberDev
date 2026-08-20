@@ -1009,6 +1009,55 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   out.t8Cycle2Carried = promptFor(recT8, "goal-watch:c2:t1").indexOf(" --partial-prs=901") >= 0
     && promptFor(recT8, "goal-collect:c2").indexOf(" --partial-issues=11") >= 0;
 
+  // Run T8b — #603 the one-issue-per-PR rule at RUN-LIFETIME scope, which is the
+  // scope the data actually lives at. solverPairsFromResults enforces both halves
+  // of the relation, but only inside ONE fleet return; the accumulator spans
+  // cycles, so a per-cycle-only check loses the second half exactly where two
+  // cycles can disagree. Cycle 1 reports 11:901 and cycle 2 reports 12:901 — a
+  // DIFFERENT issue naming the SAME PR. Both are individually well-formed and
+  // each passes its own cycle's collision pass alone, so nothing below the
+  // accumulator can catch this.
+  //
+  // Left unguarded, both pairs ride the cycle-2 watch flag into the shell ledger
+  // and lib/goal-state.sh corroborates PR 901 onto issues 11 AND 12, ranking that
+  // above the head-ref guess — the mis-attribution #603 exists to remove, now
+  // carrying MORE authority than the guess it replaced.
+  let t8bFleetCalls = 0;
+  const T8B_FLEET = {};
+  T8B_FLEET[FLEET_PATH] = function () {
+    t8bFleetCalls += 1;
+    return (t8bFleetCalls === 1)
+      ? { prsOpened: [901], prsPartial: [],
+          results: [{ issue: 11, status: "PR_OPENED", prNumber: 901, prProof: "CONFIRMED",
+            chainComplete: true }] }
+      : { prsOpened: [901], prsPartial: [],
+          results: [{ issue: 12, status: "PR_OPENED", prNumber: 901, prProof: "CONFIRMED",
+            chainComplete: true }] };
+  };
+  const recT8b = await run(buildArgs(), {
+    agentReturns: {
+      "goal-claim:c1": claim(),
+      "goal-watch:c1:t1": { rc: 0, note: "drained" },
+      "goal-verdicts:c1": VERDICTS,
+      "goal-collect:c1": collect({ rc: 42, decision: "loop", candidates: 1, queued: 1, queue: "12" }),
+      "goal-claim:c2": claim({ dispatch: "12", armed: "12" }),
+      "goal-watch:c2:t1": { rc: 0, note: "drained" },
+      "goal-verdicts:c2": VERDICTS,
+      "goal-collect:c2": collect(),
+    },
+    workflowReturns: T8B_FLEET,
+  });
+  const resT8b = resultOf(recT8b);
+  // The run-lifetime ledger keeps the FIRST claimant and nothing else. Asserted as
+  // the whole joined value, not a substring: "11:901" is a prefix of any longer
+  // list, so a containment test would pass with the collided pair sitting beside it.
+  out.t8bLedger = resT8b ? (resT8b.solverPrs || []).join("|") : null;
+  // ...and the cycle-2 command line carries only that pair — the ledger is the
+  // model, argv is what the shell finder actually reads, and a rule that fixed one
+  // without the other would still mis-attribute.
+  out.t8bCycle2Flag = promptFor(recT8b, "goal-watch:c2:t1").indexOf(" --solver-prs=11:901") >= 0
+    && promptFor(recT8b, "goal-watch:c2:t1").indexOf("12:901") < 0;
+
   // Runs U/V (#564) — the per-cycle SPEND accumulator, observed as a VALUE.
   //
   // Every run above asserts what the driver DID. None asserted what it CHARGED:
@@ -1507,6 +1556,8 @@ else
   check t4bSolverLedger '"24:804"'        "B99h #603 both COLLISION branches drop: one issue named twice with two PR numbers disagrees with itself, and two issues claiming one PR number disagree about who owns it — neither is resolved by picking one, because a corroborated pair outranks the head-ref guess and a coin-flip would bind an issue to a PR nobody opened for it with MORE authority than the guess it replaced"
   check t4bNoCollided true                "B99i ...and the survivor is the ledger's ONLY member — the collided issues contribute nothing at all rather than falling through to a partial or arbitrary pair"
   check t4bSolverFlag true                "B99j ...and the same set is what reaches the watch relay's command line, which is the only channel the shell finder reads it from"
+  check t8bLedger '"11:901"'              "B99k #603 the one-issue-per-PR rule holds at RUN-LIFETIME scope too: cycle 2 naming a DIFFERENT issue against a PR cycle 1 already bound is refused, because a per-cycle-only check loses that half of the relation exactly where two cycles can disagree and the finder would then corroborate one PR onto two issues"
+  check t8bCycle2Flag true                "B99l ...and the collided pair reaches no command line either — the ledger is the model, argv is what lib/goal-state.sh actually reads, and fixing one without the other still mis-attributes"
   check t2WatchFlag true                  "B98e the watch relay's COMMAND LINE carries --partial-prs=901 — argv is the only channel from the JS ledger to the shell merge gate, and this is the assertion no grep over either file can make"
   check t2CollectFlag true                "B98f the collect relay's command line carries --partial-issues=11, which is what makes the convergence gate refuse"
   check t3Issues '[]'                     "B98g a fleet return whose every chain finished leaves the ledger empty"

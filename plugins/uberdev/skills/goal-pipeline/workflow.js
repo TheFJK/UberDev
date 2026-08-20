@@ -639,7 +639,7 @@ function budgetExhausted() {
 // file shipped exactly that (a literal in the projection, a derivation in the
 // accumulator) until #590.
 //
-// The term is the fleet's per-design-issue cost: its own intake relay, the nine
+// The term is the fleet's per-design-issue cost: the issue's OWN SOLVER, the nine
 // research/design agents a medium-tier issue costs, and up to
 // IMPLEMENT_AGENT_BUDGET implement-phase agents for the per-task
 // implementer -> reviewer -> fix chain (#508). The fleet writes it as
@@ -928,14 +928,34 @@ async function runCycle() {
           // partial ledger stays empty for.
           const cyclePairs = solverPairsFromResults(out.results);
           cyclePairs.forEach(function (s) {
-            // FIRST RECORD FOR AN ISSUE WINS, and that is the whole rule. A pair
-            // already in the accumulator necessarily shares its issue half with
-            // itself, so the issue-prefix test alone already rejects it — a
-            // separate membership scan could never change the outcome, only walk
-            // the run-lifetime accumulator a second time. The incoming pair's
-            // issue half is split once here rather than once per element.
-            const issueHalf = s.split(":")[0];
-            if (!solverPrs.some(function (k) { return k.split(":")[0] === issueHalf; })) {
+            // FIRST RECORD WINS — and BOTH halves of the relation are enforced.
+            // solverPairsFromResults establishes one-PR-per-issue AND
+            // one-issue-per-PR, but only within a single fleet return. Scanning
+            // the issue half alone silently loses the second rule the moment the
+            // accumulator spans cycles: cycle 1's `11:901` and cycle 2's `12:901`
+            // would BOTH survive, both ride the watch flag into the shell ledger,
+            // and lib/goal-state.sh would corroborate ONE PR onto TWO issues —
+            // ranked ABOVE the head-ref guess, which is the exact mis-attribution
+            // this ledger exists to remove.
+            //
+            // ASYMMETRIC WITH THE PER-CYCLE RULE, deliberately. Inside one return
+            // a PR collision drops BOTH pairs: neither has been published and
+            // there is nothing to prefer between them. Across cycles the earlier
+            // pair has already reached a watch relay and cannot be recalled, so
+            // refusing the newcomer is the only rule that is actually reachable
+            // here — and it degrades that issue to the head-ref guess, which is
+            // the safe direction (a finder answering "no PR" fails the issue on
+            // the first tick).
+            //
+            // Both halves are split once here rather than once per element.
+            const half = s.split(":");
+            const issueHalf = half[0];
+            const prHalf = half[1];
+            const collides = solverPrs.some(function (k) {
+              const q = k.split(":");
+              return q[0] === issueHalf || q[1] === prHalf;
+            });
+            if (!collides) {
               solverPrs.push(s);
             }
           });
