@@ -181,6 +181,7 @@ jobs:
           run_one bash tests/brainstorm-child-inputs.test.sh
           run_one bash tests/orchestrator-child-inputs.test.sh
           run_one bash tests/sdd-child-inputs.test.sh
+          run_one bash tests/sdd-wave-contract.test.sh
           run_one bash tests/review-child-inputs.test.sh
           run_one bash tests/routed-provider-bypass.test.sh
           run_one bash tests/run-tree-callsite-contract.test.sh
@@ -480,6 +481,12 @@ jobs:
 #                                         uberscan-report. Its SHAPE twin,
 #                                         turbox-fleet.test.sh, is pure
 #                                         grep-and-assert and runs on BOTH jobs)
+#   - sdd-wave-contract.test.sh           (#650: hands python3 mktemp -d paths
+#                                         on argv, copies scratch trees under
+#                                         mktemp -d, and sources an extracted
+#                                         SKILL.md bash fence — the Git-Bash
+#                                         path-translation class, same reason as
+#                                         turbox-fleet-runtime.test.sh)
 # === END ci-wiring windows-skip-list ===
         # review-child-handoff and run-manifest use bounded native-Windows
         # modes for carrier/path serialization and captured publication retry;
