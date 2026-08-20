@@ -4,6 +4,74 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.51.3] — 2026-08-19
+
+### Added - the four remaining published solve-fleet contracts are compared against the script
+
+`tests/docs-accuracy.test.sh` T16 already joined the per-task record, the
+`reviewVerdict` union, `partialDelivery` and the enclosing per-issue record
+between `skills/solve-fleet/SKILL.md` and `skills/solve-fleet/workflow.js`. Four
+more shapes the same two files publish had **no comparator at all**, so a drift
+in any of them was invisible to every fixture in the repo (#588):
+
+- the per-task `claimedStatus` roster - documented sentence against
+  `TASK_CLAIMABLE`, resolved through `TASK_STATUS` because the roster is spelled
+  as references rather than literals, unioned with the empty-string fallback the
+  assignment writes. Read from `TASK_CLAIMABLE` and never from `TASK_STATUS`,
+  and a row asserts that outcome: the two differ by `SKIPPED`, which no
+  implementer can claim.
+- the per-issue `status` union, in **all three** of its copies - the documented
+  union, the solve schema's `enum`, and the solver prompt that tells an agent
+  which words it may answer with. The prompt copies are compared to each other
+  as well as to the schema, because a merged set hides a member lost from
+  exactly one of them. Each copy is anchored on the return line it rides on and
+  never on a member of the union: an anchor taken from the vocabulary under
+  comparison is dissolved by the drift it exists to catch, so the copy leaves
+  the set silently instead of failing. The extracted copies are then required to
+  equal the per-issue return lines in the script, which catches the one shape
+  re-anchoring cannot - a return line that drops its union outright.
+- the `prProof` union - the documented table cell against the classification
+  assignment sites, anchored strictly on assignment rather than on the symbol,
+  which this script also uses as a relay-schema property name.
+- the **top-level return object**, plus nested `counts` and `verification` as
+  their own pairs.
+
+Every pair runs in both directions behind its own anti-vacuity floor, and each
+floor sits well under the live member count so it stays a vacuity guard instead
+of becoming a size ratchet.
+
+Measured before these rows existed, one realistic drift per contract - a member
+dropped from the `claimedStatus` sentence, a member added to the solve `enum`
+and documented nowhere, a member dropped from one solver-prompt copy, a member
+dropped from the `prProof` cell, a key dropped from the Return value fence, a
+`counts` bucket renamed there, and a `verification` member invented there. Every
+one of them left both this suite and `tests/solve-fleet-workflow.test.sh` at
+their clean totals, rc 0. Each now reds the row that owns it.
+
+Three further drifts were measured against one solver-prompt copy, each leaving
+the other copy untouched: renaming its leading member, reordering the union so a
+different member leads, and deleting its union clause. All three passed both
+suites at their clean totals before the copies were re-anchored, the rename
+being a live defect - the agent is told to answer a word the schema `enum`
+rejects, so its structured return is discarded and the run reports a null result
+that names nothing. All three now red.
+
+Two helpers carry the new reads: `sf_js_object_keys` (depth-tracking script-side
+key extraction, because `finalize()`'s return nests objects that `sf_js_keys`'
+brace-free window cannot span) and an optional opener argument on
+`sf_doc_record_members`, for a fence that opens on a line below its anchor. The
+new helper joins the existing fail-open roster, so a rename aborts with rc 2
+rather than reporting a fabricated pass.
+
+### Changed - the hand-picked return-key grep in the solve-fleet suite is retired
+
+`tests/solve-fleet-workflow.test.sh` G30 checked one chosen key of the return
+object (`tasksApproved`) with a whole-file grep, which certified that key and
+nothing else. The key set is now joined in both directions, so the grep is
+deleted rather than left standing beside the stronger predicate, and G30's
+pass/fail text no longer claims to cover the return keys. Verified: dropping
+`tasksApproved` from the fence reds the new reverse row by name.
+
 ## [0.51.2] — 2026-08-19
 
 ### Fixed - `subagent-driven-dev`'s ruling contract had no producer
