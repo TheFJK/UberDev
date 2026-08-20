@@ -4508,10 +4508,42 @@ def _parse_raw_index(
         end = offset + size
         if end > content_limit or signature in extensions:
             fail("index_tree_unreadable")
-        if signature in {b"sdir", b"REUC"} or (
-            signature[:1].islower() and signature != b"link"
+        # Index-extension policy (#643). The rule is git's own, from
+        # `read_index_extension`: a signature whose first byte is 'A'..'Z' is
+        # OPTIONAL -- git prints "ignoring <SIG> extension" and reads on -- and
+        # any other first byte marks a MANDATORY extension git refuses outright
+        # ("index uses <sig> extension, which we do not understand"). Both
+        # directions are measured against the installed git in
+        # tests/code-fixer-contract.test.sh, so this is a pin rather than a
+        # transcription.
+        #
+        # Optional extensions do not change what the entries mean, so they are
+        # recorded and skipped. REUC is the one that used to be refused here:
+        # git writes resolve-undo into .git/index the moment ANY merge conflict
+        # is resolved, which made prepare-authority unusable on exactly the
+        # consolidated checkouts /review-pr Phase 0 produces. `git write-tree`
+        # returns the identical sha with and without it -- that is the test's
+        # measurement, not a claim. EOIE and IEOT (`index.threads`,
+        # `feature.manyFiles`) are the same class and must stay readable too.
+        #
+        # Mandatory extensions get the opposite default, because ignoring one
+        # means misreading the index:
+        #   link  the one mandatory extension this parser DOES implement, so
+        #         it is recorded: _split_index_stage_rows resolves the overlay
+        #         against the shared index, and _raw_index_stage_rows refuses a
+        #         `link` that arrives through the non-split path.
+        #   sdir  refused deliberately and permanently -- a sparse index lets a
+        #         single entry stand for a whole subtree, so the stage rows
+        #         derived below would no longer describe the same tree.
+        #   any other signature is unknown to this parser by definition.
+        #
+        # This refuses a WELL-FORMED extension by policy; the index itself
+        # parsed. It therefore does not share the parse-failure token, which
+        # sent the #643 operator hunting for corruption that was never there.
+        if signature == b"sdir" or (
+            not signature[:1].isupper() and signature != b"link"
         ):
-            fail("index_tree_unreadable")
+            fail("index_extension_refused")
         extensions[signature] = payload[offset:end]
         offset = end
     if offset != content_limit:

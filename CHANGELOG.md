@@ -4,6 +4,79 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.51.5] — 2026-08-20
+
+### Fixed - a resolved merge conflict made the code-fixer refuse its own index
+
+Resolving ANY git merge conflict makes git write a `REUC` (resolve-undo)
+extension into `.git/index`, and `_parse_raw_index` in
+`plugins/uberdev/lib/code_fixer_contract.py` refused that extension by name.
+Everything downstream of it exited 74: `prepare-authority` ->
+`_capture_repo_state` -> `_index_tree_sha` -> `_captured_index_stage_rows` ->
+`_raw_index_stage_rows` -> `_parse_raw_index`. The live consequence, observed on
+PR #641: `/review-pr` Phase 0 consolidation resolves conflicts, and Phase 1's
+fixer then cannot run at all — **the two phases of one command could not both
+run whenever the combine conflicted**, which, since every consolidated PR bumps
+the same six version surfaces, is the common case rather than a corner.
+
+Refusing resolve-undo was never protecting anything, and the fix ships the
+measurement rather than the claim. `tests/code-fixer-contract.test.sh` now
+builds a real conflict, resolves it, then strips the `REUC` extension out of the
+bytes git itself wrote and asserts `git write-tree` returns the identical sha
+both ways. Resolve-undo records the pre-resolution stages of a conflict that is
+already resolved; it says nothing about what is staged.
+
+The blanket clause behind the refusal is now git's own rule rather than an
+approximation of it, and it is pinned by EXECUTING the installed git rather than
+transcribing its documentation:
+
+- a signature whose first byte is `A`..`Z` is OPTIONAL — git prints
+  `ignoring <SIG> extension` and reads on, exit 0. Those are recorded and
+  skipped. `TREE`, `REUC`, `UNTR`, `FSMN` and the `EOIE` / `IEOT` pair that
+  `index.threads` and `feature.manyFiles` put on an ordinary checkout are all
+  this class, so the blanket refusal would have recurred on a differently
+  configured checkout under the same misleading token.
+- any other first byte marks a MANDATORY extension — git refuses the whole index
+  (`index uses <sig> extension, which we do not understand`) and exits non-zero.
+  Those stay refused here too, with two named carve-outs: `link` is the one this
+  parser implements (`_split_index_stage_rows` resolves the overlay against the
+  shared index), and `sdir` stays refused deliberately, because a sparse index
+  lets one entry stand for a whole subtree and the stage rows derived here would
+  no longer describe the same tree.
+
+The old predicate was wrong in BOTH directions, not just the REUC one: keyed on
+`islower()`, it also ACCEPTED a digit-leading mandatory signature that git itself
+rejects, while refusing every optional signature it did not already know.
+
+### Fixed - `index_tree_unreadable` named the wrong failure for a policy refusal
+
+The extension refusal reported `index_tree_unreadable`, which says the index
+could not be read. It was read perfectly — #643 reports 455 entries parsed,
+every mode in the allowlist, no zero OIDs, no assume-valid flags, a valid SHA-1
+trailer. What actually happened is that a well-formed, git-written extension was
+rejected BY POLICY, so an operator who trusts the token goes hunting for index
+corruption that is not there, which is what #643 records happening.
+
+The extension-policy arm now raises its own token, `index_extension_refused`.
+The other `index_tree_unreadable` sites in `_parse_raw_index` are a different
+class — truncation, bad trailer, unrepresentable mode, out-of-order entries — and
+keep the token that describes them. Nothing pinned the old token for this path:
+the only two suites that name it (`tests/code-fixer-contract.test.sh` and the
+Windows twin `tests/code-fixer-contract-windows.test.py`) pin parse-failure
+sites, which are unchanged.
+
+Both directions are asserted, so the fix is falsifiable rather than a one-way
+relaxation: a git-written `REUC` index must parse and reach git's own tree sha,
+an unknown OPTIONAL extension must be recorded and skipped, and `sdir` plus an
+unknown MANDATORY signature must still refuse — under the new token, through
+both `_parse_raw_index` and `_index_tree_sha`.
+
+Noted rather than hidden: the candidate index the fixer installs is serialized
+from stage rows by `_serialize_index_v2` and carries no extensions at all, so a
+fix run now drops resolve-undo along with the cache tree it already dropped.
+Git rebuilds both on demand, and that behaviour is unchanged for every index
+the fixer already rewrote — it is simply reachable on one more class of repo.
+
 ## [0.51.4] — 2026-08-19
 
 ### Fixed - the head-ref fallback bound an issue to any PR that happened to share its number
