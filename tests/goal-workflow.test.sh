@@ -886,6 +886,51 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   // guess — the over-tightening that turns a wrong-PR bug into a run halt.
   out.t4SolverFlag = promptFor(recT4, "goal-watch:c1:t1").indexOf(" --solver-prs=12:902,14:903") >= 0;
 
+  // Run T4b — #603 the two COLLISION branches, and the near-miss that must not
+  // be read as one. Every other fleet-return fixture in this file is one-to-one,
+  // so both drop rules ran on nothing: they could be inverted, or deleted
+  // outright, and T2/T3/T4 would all stay green. The consequence of a regression
+  // is not a lost pair but a WRONG one — a corroborated pair OUTRANKS the
+  // head-ref guess in lib/goal-state.sh, so a bad pair binds an issue to a PR
+  // nobody opened for it with MORE authority than the guess #603 exists to
+  // replace. Three shapes in one return, because the two rules interact through
+  // the resolved map and asserting them apart would not catch that:
+  //
+  //   21 -> 801 then 21 -> 802   one issue disagreeing with ITSELF (pass 1's ""
+  //                              conflict marker). No pair for 21.
+  //   22 -> 803 and 23 -> 803    two issues claiming ONE PR (pass 2's per-PR
+  //                              distinct-issue count). No pair for either.
+  //   24 -> 804 twice, verbatim  NOT a collision — the same record seen twice
+  //                              agrees with itself. Exactly one pair, 24:804.
+  //
+  // The third is the reason pass 2 counts over the RESOLVED map rather than the
+  // raw records: a verbatim repeat would read as a two-issue collision under a
+  // naive occurrence count and silently drop a pair in conflict with nothing.
+  const recT4b = await run(buildArgs(), {
+    agentReturns: partialReturns(),
+    workflowReturns: fleetReturn({
+      prsOpened: [801, 802, 803, 804],
+      results: [
+        { issue: 21, status: "PR_OPENED", prNumber: 801, prProof: "CONFIRMED", chainComplete: true },
+        { issue: 21, status: "PR_OPENED", prNumber: 802, prProof: "CONFIRMED", chainComplete: true },
+        { issue: 22, status: "PR_OPENED", prNumber: 803, prProof: "CONFIRMED", chainComplete: true },
+        { issue: 23, status: "PR_OPENED", prNumber: 803, prProof: "CONFIRMED", chainComplete: true },
+        { issue: 24, status: "PR_OPENED", prNumber: 804, prProof: "CONFIRMED", chainComplete: true },
+        { issue: 24, status: "PR_OPENED", prNumber: 804, prProof: "CONFIRMED", chainComplete: true },
+      ],
+    }),
+  });
+  const resT4b = resultOf(recT4b);
+  // Read the LEDGER, not just the flag: the flag proves what reached argv, the
+  // ledger proves the set itself, and a rule that dropped everything would
+  // satisfy an "absence" assertion on the two collisions while failing the run.
+  out.t4bSolverLedger = resT4b ? (resT4b.solverPrs || []).join("|") : null;
+  out.t4bSolverFlag = promptFor(recT4b, "goal-watch:c1:t1").indexOf(" --solver-prs=24:804") >= 0;
+  // The survivor is the ONLY member — spelled as its own assertion so a future
+  // widening that let a collided pair through reds here rather than passing a
+  // substring test that only ever looked for 24:804.
+  out.t4bNoCollided = out.t4bSolverLedger === "24:804";
+
   // Run T5 — halt legibility. lib/goal-phase3.sh's partial-chain refusal reuses
   // the closed-set breaker reason `solver_failed` with `phase=partial_chain` as
   // the discriminator, so the phase subfield is the ONLY thing that tells the
@@ -1459,6 +1504,9 @@ else
   check t2SolverLedger '"11:901|12:902"'  "B99b #603 the pairs are a run-lifetime ledger, not a per-cycle scalar: a cycle-1 PR must still be attributable on the pass that finally merges it"
   check t3SolverFlag true                 "B99c #603 ...and the flag is emitted on a CLEAN cycle too — corroboration is not conditional on partialness, and a row that only fired beside --partial-prs would leave every converging run guessing"
   check t4SolverFlag true                 "B99d #603 a FAILED record with no PR, and a PUSHED_NO_PR record whose prNumber is the 0 sentinel, are both excluded — pairing an issue with PR 0 would corroborate it with a number no PR can have"
+  check t4bSolverLedger '"24:804"'        "B99h #603 both COLLISION branches drop: one issue named twice with two PR numbers disagrees with itself, and two issues claiming one PR number disagree about who owns it — neither is resolved by picking one, because a corroborated pair outranks the head-ref guess and a coin-flip would bind an issue to a PR nobody opened for it with MORE authority than the guess it replaced"
+  check t4bNoCollided true                "B99i ...and the survivor is the ledger's ONLY member — the collided issues contribute nothing at all rather than falling through to a partial or arbitrary pair"
+  check t4bSolverFlag true                "B99j ...and the same set is what reaches the watch relay's command line, which is the only channel the shell finder reads it from"
   check t2WatchFlag true                  "B98e the watch relay's COMMAND LINE carries --partial-prs=901 — argv is the only channel from the JS ledger to the shell merge gate, and this is the assertion no grep over either file can make"
   check t2CollectFlag true                "B98f the collect relay's command line carries --partial-issues=11, which is what makes the convergence gate refuse"
   check t3Issues '[]'                     "B98g a fleet return whose every chain finished leaves the ledger empty"
@@ -1487,12 +1535,12 @@ else
   check xUnreadable '"match"'             "B95c a non-numeric implementBudget is charged the fleet default, not read as a budget of zero"
   check xAbsent '"match"'                 "B95d an envelope carrying no implementBudget at all is charged the fleet default"
 
-  check zRaised '"ok"'                    "B99 the PRE-CLAIM projection prices the per-issue term from the budget /goal was configured with: at the clamp ceiling CB1 trips one agent below the raised projection and not at it — the projection surface is a different input from the W/X spend surface (no fleet envelope exists that early), so no row above could see this"
-  check zRaisedBeatsDefault '"ok"'        "B99b the discriminator: with a raised budget relayed, a ceiling set to the DEFAULT-budget projection has ALREADY been blown — a frozen literal lands one agent short of that same ceiling and never trips, which is the whole defect (#590), and the halt still aborts BEFORE the claim pass"
-  check zFloor '"ok"'                     "B99c a relayed budget BELOW the fleet floor projects at the floor the fleet would clamp it to"
-  check zCeiling '"ok"'                   "B99d a relayed budget ABOVE the fleet ceiling projects at the ceiling, so reading the key cannot make CB1 halt a run that would have fitted"
-  check zUnreadable '"ok"'                "B99e a non-numeric implementBudget projects the fleet default, not a budget of zero"
-  check zAbsent '"ok"'                    "B99f an envelope carrying no implementBudget key at all — every pre-#590 envelope — still projects the fleet default"
+  check zRaised '"ok"'                    "BZ1 the PRE-CLAIM projection prices the per-issue term from the budget /goal was configured with: at the clamp ceiling CB1 trips one agent below the raised projection and not at it — the projection surface is a different input from the W/X spend surface (no fleet envelope exists that early), so no row above could see this"
+  check zRaisedBeatsDefault '"ok"'        "BZ2 the discriminator: with a raised budget relayed, a ceiling set to the DEFAULT-budget projection has ALREADY been blown — a frozen literal lands one agent short of that same ceiling and never trips, which is the whole defect (#590), and the halt still aborts BEFORE the claim pass"
+  check zFloor '"ok"'                     "BZ3 a relayed budget BELOW the fleet floor projects at the floor the fleet would clamp it to"
+  check zCeiling '"ok"'                   "BZ4 a relayed budget ABOVE the fleet ceiling projects at the ceiling, so reading the key cannot make CB1 halt a run that would have fitted"
+  check zUnreadable '"ok"'                "BZ5 a non-numeric implementBudget projects the fleet default, not a budget of zero"
+  check zAbsent '"ok"'                    "BZ6 an envelope carrying no implementBudget key at all — every pre-#590 envelope — still projects the fleet default"
 
   check yCeiling '"ok"'                   "B96 CB1 halts cycle 2 ONLY BECAUSE cycle 1 was charged — the spent half of the ceiling comparison, which every earlier CB1 row (M/M2/S) leaves at zero and so cannot exercise: the audit event publishes the cycle-1 spend AND the cycle-2 projection, and with the fleet charge removed the same ceiling never trips at all"
   check yHeadroom '"ok"'                  "B96b one more agent of headroom and the same run claims cycle 2 instead — the ceiling row cannot pass on a breaker that fired early, nor on a run that ended some other way"
