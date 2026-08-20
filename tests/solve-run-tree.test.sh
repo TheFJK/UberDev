@@ -422,6 +422,17 @@ grep -q 'review_pr.post_impl_review' "$ROOT/plugins/uberdev/commands/review-pr.m
 # the #370 shape ("one contract, N uncompared copies") on the shell-runtime side;
 # #510 closed the manifest side with tests/solve-run-tree-scope.test.sh.
 #
+# #607 then RETIRED the three edges that namespace held. All three
+# (`solve.lead.orchestrator`, `.brainstorm`, `.finish_branch`) were orphans --
+# `role: null`, `route: null`, dispatched by nothing -- so 51 of the manifest's
+# 54 edges resolved and exactly those three did not. Deleting them is not free,
+# and that is the whole reason E71 exists: L1 DERIVES its guarded prefixes from
+# the tree, those three were the SOLE source of `solve.lead.`, and with them gone
+# E4 flipped to rc 0 (measured) -- #536's own defect back through #536's own
+# guard. The prefix is therefore DECLARED retired in RETIRED_PREFIXES rather than
+# derived: still guarded, permanently unresolvable, and E71/E72 hold both
+# directions of that down.
+#
 # tests/launcher_edge_ids.py derives the accepted vocabulary FROM THE TREE (it
 # hardcodes no id) and refuses any token that is not a key of `edges`. Row E1
 # upgrades the presence grep above into a resolution check; the mutant rows are
@@ -586,12 +597,18 @@ edge_differential E3 "$EXPORT_ANCHOR" \
   "$(prepend_line 'UBERDEV_ROOT_EDGE_ID="solve.lead.medium"' "$EXPORT_ANCHOR")" 1
 
 # E4 -- the second emitter the issue never mentioned: the carrier-failure string.
-edge_differential E4 "$CARRIER_ANCHOR" 'error: failed to construct solve.lead.$TIER carrier' 1
+# The diagnostic is named because since #607 this row's red comes from the
+# DECLARED retired prefix and no longer from a tree-derived one; an rc alone
+# cannot tell those apart, and telling them apart is the point (see E71).
+edge_differential E4 "$CARRIER_ANCHOR" 'error: failed to construct solve.lead.$TIER carrier' 1 1 \
+  'namespace is declared retired'
 
 # E5 -- comments and strings are in scope. The fictional id survived review for
-# months inside comment prose, so prose is exactly what must be checked.
+# months inside comment prose, so prose is exactly what must be checked. Named
+# diagnostic for the reason E4 gives.
 edge_differential E5 "$EXPORT_ANCHOR" \
-  "$(prepend_line '# Root carrier lineage `solve.lead.<tier>` (legacy catalog alias).' "$EXPORT_ANCHOR")" 1
+  "$(prepend_line '# Root carrier lineage `solve.lead.<tier>` (legacy catalog alias).' "$EXPORT_ANCHOR")" 1 1 \
+  'namespace is declared retired'
 
 # E6 -- the guard forbids WRONG ids, not the variable. A root-edge pointer that
 # names a real edge is accepted, so this never blocks wiring one to a reader.
@@ -1393,14 +1410,100 @@ edge_differential E69 "$EXPORT_ANCHOR" \
   "$(prepend_line 'command -pp read -r UBERDEV_ROOT_EDGE_ID <<<"$V"' "$EXPORT_ANCHOR")" 1 1 \
   'bound by read'
 
+# E71 -- the RETIRED NAMESPACE, which is the ONLY thing keeping E4 and E5 alive
+# after #607 deleted the three orphan `solve.lead.*` edges. L1's guarded prefixes
+# are DERIVED from the tree, and those three orphans were the SOLE source of
+# `solve.lead.`, so deleting them alone took E4 from rc 1 to rc 0 -- measured on
+# this branch, `E4: mutant rc=0, want 1`, i.e. the #536 defect shipping green
+# again through the very guard #536 landed. tests/launcher_edge_ids.py therefore
+# DECLARES the prefix in RETIRED_PREFIXES instead: permanently guarded,
+# permanently unresolvable, an accidental coupling turned into a stated one.
+#
+# Half (a) -- the declaration exists, AND the manifest really is empty under it.
+# Without the second assert, E4/E5 could be passing by derivation again and this
+# row would be measuring nothing at all -- the vacuity E61's first half exists to
+# forbid, one mechanism over. The manifest check reads the SOURCE TEXT, so a
+# `solve.lead.` written into a `note` or a `reason` reds it too: an
+# over-approximation in the loud direction, the same trade the checker's own
+# scoping bullet makes, and the authoritative key check is in half (b)'s
+# mutation precondition anyway.
+grep -q 'RETIRED_PREFIXES' "$EDGE_CHECK" || {
+  echo "E71: tests/launcher_edge_ids.py no longer declares RETIRED_PREFIXES -- E4/E5 have nothing left to guard them" >&2; exit 1; }
+if grep -q '"solve\.lead\.' "$TREE"; then
+  echo "E71: the manifest carries a solve.lead.* edge again -- E4/E5 would be passing by DERIVATION, not by the retired declaration" >&2; exit 1
+fi
+
+# Half (b) -- the declaration and the manifest may never silently disagree. Put
+# one of the retired edges BACK and the checker must REFUSE (exit 2) rather than
+# render a verdict: with `solve.lead.` both declared retired and live in `edges`,
+# any answer about the launcher rests on a contradiction. This is the E10 shape
+# (a precondition error is not a verdict), pointed at the new declaration.
+TREE_MUT="$(python3 -I -B -c '
+import json, sys
+tree = json.loads(open(sys.argv[1], "rb").read().decode("utf-8"))
+edges = tree["edges"]
+live = sorted(k for k in edges if k.startswith("solve.lead."))
+if live:
+    raise SystemExit("mutation precondition failed: edges already carries %s" % live)
+edges["solve.lead.orchestrator"] = {
+    "kind": "skill",
+    "source": "plugins/uberdev/lib/solve-launcher.sh",
+    "role": None,
+    "route": None,
+    "phase": "handoff",
+    "cardinality": "zero_or_one",
+}
+sys.stdout.buffer.write(json.dumps(tree).encode("utf-8"))
+' "$TREE")" || { echo "FATAL: E71 tree mutation failed (see the message above)" >&2; exit 2; }
+edge_check "$TREE" "$LAUNCHER"
+[ "$EDGE_RC" -eq 0 ] || { echo "E71: the UNMUTATED tree is not clean (rc=$EDGE_RC): $EDGE_ERR" >&2; exit 1; }
+edge_check - "$LAUNCHER" <<<"$TREE_MUT"
+[ "$EDGE_RC" -eq 2 ] || {
+  echo "E71: re-adding a retired-prefix edge must be a precondition error (rc=2), got rc=$EDGE_RC: ${EDGE_ERR:-(no diagnostics)}" >&2; exit 1; }
+case "$EDGE_ERR" in
+  *"declared retired"*"solve.lead."*) : ;;
+  *) echo "E71: the drift diagnostic never named the retired prefix: ${EDGE_ERR:-(no diagnostics)}" >&2; exit 1 ;;
+esac
+EDGE_ROWS=$((EDGE_ROWS + 1))
+
+# E72 -- and the floor from the other side, want 0, for the reason E67 gives.
+# E71's refusal must be specific to the RETIRED namespace, not "any unfamiliar
+# `solve.<area>.` edge is fatal": a rule that refused on every new area would
+# pass E71 while making the manifest unextendable, and no other row here could
+# tell the two apart. Add an ordinary new area and the checker must go on
+# rendering a normal verdict -- clean, because the launcher names no token under
+# it.
+TREE_MUT="$(python3 -I -B -c '
+import json, sys
+tree = json.loads(open(sys.argv[1], "rb").read().decode("utf-8"))
+edges = tree["edges"]
+if "solve.wave.dispatch" in edges:
+    raise SystemExit("mutation precondition failed: edges already carries solve.wave.dispatch")
+edges["solve.wave.dispatch"] = {
+    "kind": "skill",
+    "source": "plugins/uberdev/lib/solve-launcher.sh",
+    "role": None,
+    "route": None,
+    "phase": "handoff",
+    "cardinality": "zero_or_one",
+}
+sys.stdout.buffer.write(json.dumps(tree).encode("utf-8"))
+' "$TREE")" || { echo "FATAL: E72 tree mutation failed (see the message above)" >&2; exit 2; }
+edge_check - "$LAUNCHER" <<<"$TREE_MUT"
+[ "$EDGE_RC" -eq 0 ] || {
+  echo "E72: adding a NON-retired solve.<area>. edge must stay a normal clean run (rc=0), got rc=$EDGE_RC: ${EDGE_ERR:-(no diagnostics)}" >&2; exit 1; }
+EDGE_ROWS=$((EDGE_ROWS + 1))
+
 # E70 -- row-count floor, mirroring the one in tests/solve-run-tree-scope.test.sh
 # (referenced by name, not by line: the number it used to carry had already
 # rotted). A row deleted or short-circuited out of the block must fail the file,
 # not shrink it -- so the predicate is `-eq`, never `-ge`. A `-ge` floor cannot
 # tell "a row was removed" from "a row was added", which is how E11-E69 could
-# have been landed while E2-E10 quietly stopped running.
-[ "$EDGE_ROWS" -eq 69 ] || {
-  echo "FATAL: $EDGE_ROWS edge-id row(s) ran, expected exactly 69 (E1-E69)" >&2; exit 2; }
+# have been landed while E2-E10 quietly stopped running. It stays LAST in the
+# file whatever its ordinal: E71 and E72 are appended above it, because a floor
+# that runs before the rows it counts counts nothing.
+[ "$EDGE_ROWS" -eq 71 ] || {
+  echo "FATAL: $EDGE_ROWS edge-id row(s) ran, expected exactly 71 (E1-E69, E71, E72)" >&2; exit 2; }
 
 # Provider invocations in Group-C command/skill sources must use the routed
 # adapter. Historical discussion may name the legacy tool, but executable

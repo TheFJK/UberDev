@@ -4,6 +4,65 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.51.1] — 2026-08-19
+
+### Changed - the three orphan `solve.lead.*` run-tree edges are retired behind a declared prefix
+
+`policy/solve-run-tree-v1.json` carried `solve.lead.orchestrator`,
+`solve.lead.brainstorm` and `solve.lead.finish_branch` — all `kind: "skill"`, all
+`role: null` / `route: null`, all sourced from `lib/solve-launcher.sh`, and all
+dispatched by nothing. Running the resolution predicate over the whole manifest:
+51 of 54 edges resolved and exactly those three did not. They are deleted (54 → 51).
+
+Deleting them is not free, and that is the substance of this release.
+`tests/launcher_edge_ids.py` DERIVES L1's guarded prefixes from the tree — every
+`edges` key with three or more dot-segments whose first segment is `solve`
+contributes `<seg0>.<seg1>.` — and those three orphans were the **sole** source of
+the `solve.lead.` prefix. With them gone and nothing put in their place, the
+`solve.lead.` namespace leaves the guard's vocabulary entirely and #536's own
+defect ships green again through #536's own guard: measured, `tests/solve-run-tree.test.sh`
+row E4 (a fictional `solve.lead.$TIER` in the carrier-failure string) went
+`rc 1 -> rc 0`. E5 (the same id in comment prose) is the same class.
+
+So the prefix is now **declared** rather than derived. `RETIRED_PREFIXES` in
+`tests/launcher_edge_ids.py` lists namespaces that stay GUARDED after their last
+edge is gone and are permanently UNRESOLVABLE — `edges` may hold no key under one,
+so every token under it is a finding by construction. An accidental coupling
+became a stated one.
+
+The two halves may never silently disagree: an `edges` key under a retired prefix
+is now a PRECONDITION ERROR (exit 2), not a verdict about the launcher, because at
+that point the namespace is both retired and live. A retired token is also reported
+as retired (`retired edge id '…' -- the 'solve.lead.' namespace is declared retired
+in RETIRED_PREFIXES …`) rather than as a plain unresolvable one: different cause,
+different fix.
+
+New pins in `tests/solve-run-tree.test.sh` (69 → 71 rows): **E71** asserts the
+declaration exists, asserts the manifest really is empty under it (without which
+E4/E5 could be passing by derivation again and would be measuring nothing), and
+re-adds `solve.lead.orchestrator` to the tree to prove the refusal is exit 2.
+**E72** is the want-0 floor from the other side — adding an ordinary new
+`solve.<area>.<name>` edge must stay a normal clean run, so the refusal cannot
+degrade into "any unfamiliar area is fatal". E4 and E5 now name the expected
+diagnostic, so they pin the retired attribution rather than a bare exit code.
+
+Verified against the issue's own blast-radius claims rather than trusting them:
+`tests/run_tree_edge_sources.py` does not exist and no `EXPECTED_EDGES = 54` ratchet
+exists anywhere in `tests/` or `tools/`; `tools/prkit/generate.sh` filters the
+projection to the `review_pr.` / `simplify.` prefixes, so the projected policy and
+its `published.json` sha256 pin are untouched (all five prkit suites green, no
+regenerate); and `tests/solve-run-tree-scope.test.sh:5`'s "54 edges" is a comment,
+refreshed to 51.
+
+Out of scope and deliberately not folded in: the 15 `cardinality` strings in this
+same manifest that still name the `large` rung #619 retired. No edge id names a
+tier, so there is no routing drift — filed as #634 and sequenced after this change.
+
+Closes #607. Closes #536 — already fixed on its own terms (`UBERDEV_ROOT_EDGE_ID`
+has zero hits under `plugins/`, and the assertion it asked for exists and executes
+at `tests/solve-run-tree.test.sh` row E1), and inseparable from #607 because the
+retire path edits the very guard #536 shipped.
+
 ## [0.51.0] — 2026-08-19
 
 ### Fixed - `/goal`'s CB1 ceiling hardcoded the per-issue fleet cost, so a raised implement budget under-projected it out of existence
