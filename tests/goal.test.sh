@@ -501,8 +501,8 @@ assert_no_grep "$GOAL_LIB" '\bbash -c'                                   "G19.no
 assert_grep "$GOAL_CMD" '--i-know-what-im-doing'                         "G19.r12-mentioned-once"
 
 echo
-echo "== G20: version bump locked (0.50.3) =="
-assert_version_bump "$REPO_ROOT" "0.50.3"
+echo "== G20: version bump locked (0.51.0) =="
+assert_version_bump "$REPO_ROOT" "0.51.0"
 assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.30\.0'               "G20.solve-claim-no-old-version"
 
 assert_grep "$GOAL_P0" 'uberdev_dispatch_resolve_env'     "G20b.phase0-wires-resolve-env (#175 SSOT anchor)"
@@ -4021,6 +4021,120 @@ assert_grep "$GOAL_P0" '--max-watch-ticks='                                     
 assert_grep "$GOAL_P0" 'goal\.max_watch_ticks UBERDEV_GOAL_MAX_WATCH_TICKS 1 500 40' "G53.phase0-resolves-via-the-standard-precedence-chain"
 assert_grep "$GOAL_P0" 'maxWatchTicks="\$MAX_WATCH_TICKS"'                           "G53.phase0-emits-it-in-the-envelope"
 assert_grep "$GOAL_CMD" '--max-watch-ticks=N'                                     "G53.cmd-documents-the-flag"
+
+echo
+echo "== G55: --implement-budget is a real knob, and CB1's per-issue projection is derived from it (issue #590) =="
+# The nested solver fleet's CB3 implement-phase cap is operator-set through
+# UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET, which lib/solve-launcher.sh reads when it
+# composes the fleet envelope. /goal's OWN CB1 ceiling used to price every
+# claimed issue at a literal frozen at that variable's DEFAULT, so a raised
+# budget under-projected by up to 72 agents per issue — and since CB1 is the only
+# NAMED halt, it did not merely mis-report: it stopped firing, and the run died
+# against the runtime's own lifetime cap with no halt reason and no audit row.
+# Phase 0 resolves the budget and publishes it; the driver projects against it
+# AND pins it back onto the launcher command line so the fleet is armed with the
+# same number. Shape first, then a live resolution probe.
+assert_grep "$GOAL_SKILL" '_UBERDEV_GOAL_DEFAULT_IMPLEMENT_BUDGET=24'                                  "G55.default-constant-in-the-fence"
+assert_grep "$GOAL_LIB"   '_UBERDEV_GOAL_DEFAULT_IMPLEMENT_BUDGET:=24'                                 "G55.runtime-ssot-mirror-in-goal-state"
+assert_grep "$GOAL_P0" 'uberdev_read_int_in_range goal\.implement_budget UBERDEV_GOAL_IMPLEMENT_BUDGET 4 96' "G55.range-helper-uses-the-fleet-clamp"
+assert_grep "$GOAL_P0" 'implement_budget_cli'                                                          "G55.cli-arg-var"
+assert_grep "$GOAL_P0" '--implement-budget=\*\)'                                                       "G55.cli-arg-case-arm"
+assert_grep "$GOAL_P0" 'UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET:-'                                        "G55.fleet-env-is-in-the-chain-as-a-tier-of-its-own"
+# The fold that put the AMBIENT fleet variable above the EXPLICIT config key:
+# tier 1 of uberdev_read_int_in_range is the env var it is handed, so nesting the
+# fleet variable inside that argument silently outranks goal.implement_budget.
+# The live rows below catch the behaviour; this catches the shape that causes it.
+assert_no_grep "$GOAL_P0" 'UBERDEV_GOAL_IMPLEMENT_BUDGET:-\$\{UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET'   "G55.fleet-env-is-not-folded-into-the-goal-env-tier"
+assert_grep "$GOAL_P0" 'implementBudget="\$IMPLEMENT_BUDGET"'                                          "G55.phase0-emits-it-in-the-envelope"
+assert_grep "$GOAL_WF" 'clampInt\(CFG\.implementBudget, 4, 96, 24\)'                                   "G55.driver-reads-and-clamps-the-relayed-key"
+assert_grep "$GOAL_WF" 'issueCount \* perIssueCostAtBudget\(implementBudget\)'                         "G55.projection-is-derived-not-literal"
+assert_no_grep "$GOAL_WF" 'issueCount \* 33'                                                           "G55.the-frozen-literal-is-gone"
+assert_grep "$GOAL_WF" 'UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET=" \+ implementBudget'                     "G55.claim-relay-arms-the-launcher-with-the-projected-budget"
+assert_grep "$GOAL_CMD" '\-\-implement-budget=N'                                                       "G55.cmd-documents-the-flag"
+
+# LIVE resolution probe. Every row above is a grep, and a grep cannot observe a
+# VALUE: the read call can be present with the wrong precedence, the wrong
+# clamp, or a default that never reaches it. This runs the EXTRACTED Phase-0
+# tunables region for real, once per entrance, and reads IMPLEMENT_BUDGET back
+# out of it.
+#
+# The probe runs from the scratch dir with UBERDEV_CONFIG_FILE cleared, because
+# tier 2 of the read is a project-config lookup: either channel would otherwise
+# let a real `goal.implement_budget` key answer instead of the fixture.
+_g55_tmp="$(mktemp -d 2>/dev/null || printf '/tmp/goal-g55-%s' "$$")"
+if extract_region tunables "$GOAL_P0" > "$_g55_tmp/tunables.sh" && [ -s "$_g55_tmp/tunables.sh" ]; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "G55.extract: located the Phase-0 tunables region"
+  {
+    echo 'set -u'
+    printf 'export UBERDEV_PLUGIN_ROOT=%s\n' "'$REPO_ROOT/plugins/uberdev'"
+    echo 'export CLAUDE_PLUGIN_ROOT="$UBERDEV_PLUGIN_ROOT"'
+    printf 'export UBERDEV_TMPDIR=%s\n' "'$_g55_tmp/tmp'"
+    echo 'mkdir -p "$UBERDEV_TMPDIR"'
+    echo '. "$UBERDEV_PLUGIN_ROOT/lib/goal-state.sh"'
+    echo 'max_cycles_cli=""; max_parallel_cli=""; barrier_timeout_cli=""; review_grace_cli=""'
+    echo 'watch_passes_cli=""; watch_budget_cli=""; max_watch_ticks_cli=""'
+    echo 'implement_budget_cli="${G55_CLI:-}"'
+    printf '. %s\n' "'$_g55_tmp/tunables.sh'"
+    echo 'printf "IB=%s\\n" "$IMPLEMENT_BUDGET"'
+  } > "$_g55_tmp/drv.sh"
+  # Every entrance is cleared first; the caller re-adds only the one under test,
+  # so a row can never pass on a variable it did not set.
+  _g55_read() {  # args: zero or more NAME=VALUE env assignments
+    ( cd "$_g55_tmp" && env -u UBERDEV_CONFIG_FILE -u G55_CLI \
+        -u UBERDEV_GOAL_IMPLEMENT_BUDGET -u UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET \
+        "$@" bash "$_g55_tmp/drv.sh" 2>/dev/null ) | sed -n 's/^IB=//p'
+  }
+  assert_eq "$(_g55_read)" "24" \
+    "G55.live-default: nothing set anywhere resolves the shipped default"
+  assert_eq "$(_g55_read G55_CLI=48)" "48" \
+    "G55.live-cli: the --implement-budget flag wins"
+  assert_eq "$(_g55_read UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET=96)" "96" \
+    "G55.live-fleet-env: the variable the LAUNCHER already reads is what /goal projects against — the whole point of the fix"
+  assert_eq "$(_g55_read G55_CLI=500)" "24" \
+    "G55.live-clamp: a value the fleet would refuse falls back to the default rather than being projected as typed"
+  assert_eq "$(_g55_read G55_CLI=7 UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET=96)" "7" \
+    "G55.live-precedence: the flag outranks the fleet env var, so the two entrances cannot disagree silently"
+
+  # Tier 1 vs tier 2 — the CONFIG KEY's rank against the fleet env var.
+  #
+  # Every row above runs with UBERDEV_CONFIG_FILE cleared, precisely so a real
+  # goal.implement_budget in the checkout cannot answer for the fixture. That
+  # also means none of them exercises tier 2 at all, so the rank the docs state
+  # — `goal.implement_budget` ABOVE `UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET` —
+  # had ZERO coverage, and the two drifted: the fleet variable was folded into
+  # the env argument of a reader whose tier 1 IS the env var, which put it above
+  # the config key rather than below it. An operator who capped /goal in project
+  # config while exporting the fleet-wide budget for /turbo got the fleet number
+  # silently, both projected AND armed onto the launcher command line.
+  #
+  # Four surfaces state the intended order and one of them is a decision record:
+  # commands/goal.md's flag docs, the SKILL.md Constants note, CHANGELOG 0.51.0,
+  # and RFC 0005 D590a — "one extra tier BELOW the config key". These rows are
+  # the only executable thing holding the code to it.
+  mkdir -p "$_g55_tmp/cfg"
+  printf 'goal:\n  implement_budget: 48\n' > "$_g55_tmp/cfg/uberdev.local.md"
+  _g55_cfg="$_g55_tmp/cfg/uberdev.local.md"
+  # Vacuity guard: without this row the discriminator below could pass on a
+  # fixture the reader never actually reached (wrong path, wrong key shape).
+  assert_eq "$(_g55_read UBERDEV_CONFIG_FILE="$_g55_cfg")" "48" \
+    "G55.live-config-key: goal.implement_budget resolves on its own, so the fixture is genuinely reachable"
+  assert_eq "$(_g55_read UBERDEV_CONFIG_FILE="$_g55_cfg" UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET=96)" "48" \
+    "G55.live-config-outranks-fleet-env: the config key sits ABOVE UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET (RFC 0005 D590a)"
+  assert_eq "$(_g55_read UBERDEV_CONFIG_FILE="$_g55_cfg" UBERDEV_GOAL_IMPLEMENT_BUDGET=12 UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET=96)" "12" \
+    "G55.live-goal-env-outranks-config: the goal-scoped env var still tops the config key"
+  # The fleet variable keeps its own tier: below the config key, above the
+  # default. With no config key present it must still answer, or the fix for
+  # #590 (project against the budget the fleet really runs with) is undone.
+  assert_eq "$(_g55_read UBERDEV_CONFIG_FILE="$_g55_tmp/cfg/absent.md" UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET=96)" "96" \
+    "G55.live-fleet-env-below-config: with no config key set the fleet variable still outranks the default"
+  # An out-of-range fleet value must be clamped by the SAME range as every other
+  # entrance, not passed through as an unvalidated default.
+  assert_eq "$(_g55_read UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET=500)" "24" \
+    "G55.live-fleet-env-clamp: a fleet value outside 4..96 falls back to the default rather than being projected as typed"
+else
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "G55.extract: could not extract the Phase-0 tunables region (marker moved?)" >&2
+fi
+rm -rf "$_g55_tmp"
 
 echo
 echo "== G54: partial-chain carrier (#592) =="

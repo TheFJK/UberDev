@@ -108,6 +108,18 @@ const goalId = /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(goalIdRaw) ? goalIdRaw : "";
 const maxCycles = clampInt(CFG.maxCycles, 1, 20, 5);
 const maxParallel = clampInt(CFG.maxParallel, 1, 10, 3);
 const maxAgents = clampInt(CFG.maxAgents, 1, 2000, 250);
+// The nested fleet's CB3 per-issue implement-phase budget, relayed here by
+// lib/goal-phase0.sh so the PRE-CLAIM projection can be priced against the
+// budget the fleet will actually run with (#590). Phase 0 resolves it through
+// the ordinary --implement-budget / UBERDEV_GOAL_IMPLEMENT_BUDGET /
+// goal.implement_budget chain, defaulting to whatever
+// UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET already says, and the claim relay pins
+// the resolved value back onto the launcher's own command line — so the number
+// projected here and the number the fleet spends are one number, not two.
+// Clamped with the FLEET's triple: a relayed value the fleet would refuse must
+// be projected as the fleet would run it, or reading the key trades an
+// under-projection for an over-projection.
+const implementBudget = clampInt(CFG.implementBudget, 4, 96, 24);
 // The watch stage is bounded by a COUNTER, never by a clock (DR-7). Each tick
 // is one lib/goal-watch.sh invocation, which itself honours the
 // watchPasses/watchBudgetS bound lib/goal-phase0.sh resolved.
@@ -281,12 +293,15 @@ function claimPrompt(cycleNo) {
     + "launcherRc 0, fleetArgsJson \"\", armed \"\", markRc 0.\n\n"
     + "STEP 2 — arm the solver fleet for exactly the claimed set (substitute <ISSUES> with the SPACE-separated "
     + "issue numbers from `dispatch`):\n\n"
-    + "  " + envPrefix() + "AUTO_MODE=1 " + bashCmd(launcherSh)
+    + "  " + envPrefix() + "AUTO_MODE=1 "
+    + "UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET=" + implementBudget + " " + bashCmd(launcherSh)
     + " --auto-mode=1 --turbo -- <ISSUES> --backend=workflow --force\n\n"
     + "`--backend=workflow` makes the launcher write its manifest and print an args envelope INSTEAD of "
     + "dispatching anything itself. `--force` is required and is not a shortcut: STEP 1 already took the "
     + "`uberdev:active` claim for these issues on this run's behalf, so the launcher's own claim pass would "
-    + "otherwise refuse them as a collision with us.\n\n"
+    + "otherwise refuse them as a collision with us. The UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET pin is the "
+    + "budget lib/goal-phase0.sh resolved for this run: /goal projected its agent ceiling against that number "
+    + "before claiming anything, so the fleet has to be armed with the same one (#590).\n\n"
     + "Record the launcher's exit status as launcherRc. Copy the JSON between the WORKFLOW_ARGS_BEGIN and "
     + "WORKFLOW_ARGS_END markers into fleetArgsJson VERBATIM — one line, byte for byte, no re-indentation, "
     + "no key reordering, nothing added or removed. If the markers are absent, set fleetArgsJson to \"\".\n\n"
@@ -516,65 +531,94 @@ function budgetExhausted() {
   return budget && budget.total && budget.remaining() <= 0;
 }
 
-// Projected agents for ONE cycle: the claim relay, up to maxWatchTicks watch
-// relays, the collect relay, the verdict relay — plus what the nested fleet
-// will spend per issue: its own intake relay, its PR-claim verification relay
-// (#515), the nine research/design agents a medium-tier issue costs, and up to
-// IMPLEMENT_AGENT_BUDGET implement-phase agents for the fleet's per-task
-// implementer -> reviewer -> fix chain (#508). Both fleet relays are BATCHED —
-// one each per fleet run, not per issue — so they are a flat +2, not part of
-// the per-issue term.
+// What ONE issue costs inside a nested fleet run, priced against a BUDGET
+// rather than against a source of one. This is the ONLY copy of that
+// arithmetic in this file, and it has two callers that read the budget from
+// two different places at two different moments — the pre-claim projection
+// from /goal's own relayed config, the spend accumulator from the fleet
+// envelope the claim relay hands back. Both need the same number; a second
+// typed copy is the #370 "one contract, N uncompared copies" shape, and this
+// file shipped exactly that (a literal in the projection, a derivation in the
+// accumulator) until #590.
 //
-// 24 IS A DEFAULT, NOT A CONSTANT, AND THIS PROJECTION TRACKS THE DEFAULT ONLY.
-// The fleet declares IMPLEMENT_AGENT_BUDGET as clampInt(CFG.implementBudget, 4,
-// 96, 24) and lib/solve-launcher.sh plumbs UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET
-// into the envelope this script relays verbatim, so an operator can move it
-// anywhere in 4..96. The fleet scales its OWN pre-dispatch ceiling by the
-// effective value; the per-issue term below is the arithmetic at the default and
-// does not. A raised budget therefore under-projects here — CB1 stops being the
-// breaker that binds, and the run dies against the runtime's own lifetime cap
-// with no named halt event instead. Read every number below as "at the default".
+// The term is the fleet's per-design-issue cost: its own intake relay, the nine
+// research/design agents a medium-tier issue costs, and up to
+// IMPLEMENT_AGENT_BUDGET implement-phase agents for the per-task
+// implementer -> reviewer -> fix chain (#508). The fleet writes it as
+// `designCount * (9 + IMPLEMENT_AGENT_BUDGET - 1)` and counts the issue's own
+// solver separately in `intakeIssues.length`; folded together that is
+// `9 + budget` per issue, which is why there is no `- 1` here.
 //
-// Consequence, stated out loud rather than buried in the arithmetic: at 33
-// agents per design-tier issue it is maxAgents that binds first, not the
-// runtime's own 1000-agent lifetime cap. CB1 halts once agentsSpent plus this
-// projection exceeds maxAgents, whose launcher default is 900
-// (lib/goal-phase0.sh), so a /goal run stops at roughly 26 design-tier issues
-// — sooner once the per-cycle relay overhead above is counted. That default
-// sits just under the runtime cap deliberately, so a long run ends on a named
-// CB1 audit event instead of dying against the runtime limit; only an operator
-// who raises maxAgents above 1000 (the clamp permits up to 2000), or who raises
-// the implement budget above its default, makes the runtime cap the binding one.
-// That is the honest price of a review gate per task; intra-issue agents queue
-// rather than accelerate on a busy host.
-function projectedAgentsForCycle(issueCount) {
+// The clamp bounds and default are the FLEET's — clampInt(CFG.implementBudget,
+// 4, 96, 24) at skills/solve-fleet/workflow.js — deliberately duplicated rather
+// than guessed, and tests/solve-fleet-workflow.test.sh G16 reads them back out
+// of the fleet constant and reds if the two drift. Clamping matters in both
+// directions: a relayed budget the fleet would refuse must be priced as the
+// fleet would RUN it, or reading the key merely swaps an under-count for an
+// over-count.
+function perIssueCostAtBudget(budget) {
   // SHARED COST: solve-fleet-per-issue-agent-cost
-  return 3 + maxWatchTicks + 2 + (issueCount * 33);
+  return 9 + clampInt(budget, 4, 96, 24);
 }
 
-// What ONE issue costs INSIDE a nested fleet run, measured against the budget
-// that fleet will actually run with rather than against the default.
+// What the fleet spends per RUN rather than per issue: its batched intake relay
+// and its batched PR-claim verification relay (#515), plus the run-shared repo
+// profile (#615 A) — one agent that derives the repo-invariant half of the
+// research lenses once, dispatched only when the run has a design-tier issue to
+// feed it. `skills/solve-fleet/workflow.js` charges it as
+// `repoProfileAgents = designCount > 0 ? 1 : 0` and really dispatches it; this
+// side has no manifest and so no tier breakdown, and prices every claimed issue
+// as design-tier, which makes `issueCount > 0` the same gate. Charging it flat
+// is why both callers below take their run-level term from here: a ceiling that
+// under-projects is not a ceiling, and a ledger that under-counts hands CB1 a
+// comparison it cannot make.
+function fleetRunCost(issueCount) {
+  return 2 + (issueCount > 0 ? 1 : 0);
+}
+
+// Projected agents for ONE cycle: the claim relay, up to maxWatchTicks watch
+// relays, the collect relay and the verdict relay, plus the whole nested fleet
+// run — its run-level term and its per-issue term.
 //
-// The projection above cannot do this — it is computed BEFORE the claim pass, so
-// no envelope exists yet and the default is the only honest number. The SPEND
-// accumulator can: by then the relayed envelope is parsed and carries the
-// operator's effective `implementBudget`. Reading it matters because the fleet
-// declares IMPLEMENT_AGENT_BUDGET as clampInt(CFG.implementBudget, 4, 96, 24)
-// and lib/solve-launcher.sh plumbs UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET into the
-// envelope this script relays verbatim, so a literal 33 understates a maxed-out
-// budget more than threefold. An accumulator that reads low is worse than no
-// accumulator at all: CB1 is the only NAMED halt, so it never fires and the run
-// dies against the runtime's own lifetime cap with no halt reason, no audit row
-// and no cycle record explaining the stop.
+// THE BUDGET IS AN INPUT, NOT A CONSTANT. The fleet declares
+// IMPLEMENT_AGENT_BUDGET as clampInt(CFG.implementBudget, 4, 96, 24), so an
+// operator can move the per-issue cost anywhere between base+4 and base+96 —
+// better than threefold at the top of the range. This projection used to freeze
+// the arithmetic at the default, which is the one number at which a literal and
+// a derivation agree, so a raised budget under-projected here by up to 72
+// agents per issue: CB1 stopped being the breaker that bound, and the run died
+// against the runtime's own lifetime cap with no named halt event (#590). It is
+// derived now, from the `implementBudget` key lib/goal-phase0.sh publishes in
+// /goal's args envelope and the claim relay pins back onto the launcher command
+// line, so the number projected here IS the number the fleet runs with.
 //
-// The clamp bounds and default are the fleet's, deliberately duplicated rather
-// than guessed — tests/solve-fleet-workflow.test.sh G16 reads them back out of
-// the fleet constant and reds if the two drift.
+// Consequence, stated out loud rather than buried in the arithmetic: at the
+// default budget a design-tier issue costs 33 agents, and it is maxAgents that
+// binds first, not the runtime's own 1000-agent lifetime cap. CB1 halts once
+// agentsSpent plus this projection exceeds maxAgents, whose launcher default is
+// 900 (lib/goal-phase0.sh), so a /goal run stops at roughly 26 design-tier
+// issues — sooner once the per-cycle relay overhead above is counted. That
+// default sits just under the runtime cap deliberately, so a long run ends on a
+// named CB1 audit event instead of dying against the runtime limit. Raising the
+// implement budget now moves this projection with it, so what makes the runtime
+// cap binding again is raising maxAgents above 1000 (the clamp permits up to
+// 2000) — and nothing else. That is the honest price of a review gate per task;
+// intra-issue agents queue rather than accelerate on a busy host.
+function projectedAgentsForCycle(issueCount) {
+  return 3 + maxWatchTicks + fleetRunCost(issueCount)
+    + (issueCount * perIssueCostAtBudget(implementBudget));
+}
+
+// The per-issue term for a fleet run whose ENVELOPE is already in hand. Same
+// arithmetic as the projection, different source: by the time the accumulator
+// runs, the claim relay has handed back the launcher's own envelope and it
+// carries the effective `implementBudget` verbatim. Read it rather than
+// re-reading /goal's config, so a launcher that resolved a different value than
+// Phase 0 published is charged as what it actually armed.
 function perIssueFleetCost(fleetArgs) {
   const cfg = (fleetArgs && typeof fleetArgs === "object" && fleetArgs.config
     && typeof fleetArgs.config === "object") ? fleetArgs.config : {};
-  // SHARED COST: solve-fleet-per-issue-agent-cost
-  return 9 + clampInt(cfg.implementBudget, 4, 96, 24);
+  return perIssueCostAtBudget(cfg.implementBudget);
 }
 
 // The fleet args envelope arrives as an agent-returned STRING. It is the only
@@ -721,11 +765,15 @@ async function runCycle() {
             : "The claimed issues are marked `solving` with no solver behind them; the watch pass below "
               + "runs with the settled-fleet marker, so it fails them and releases their claims this cycle."));
     } else {
-      // The fleet's two batched relays (intake + PR-claim verification, #515)
-      // plus its per-issue solver/design/implement-chain agents, priced off the
-      // budget in the envelope we are about to hand it. Computed BEFORE the call
-      // so the throw arm can charge the same number the clean arm charges.
-      const fleetCost = 2 + (rec.claimed.length * perIssueFleetCost(fleetArgs));
+      // The fleet's run-level term — its two batched relays (intake + PR-claim
+      // verification, #515) and the run-shared repo profile (#615 A) — plus its
+      // per-issue solver/design/implement-chain agents, priced off the budget in
+      // the envelope we are about to hand it. Both terms come from the same two
+      // helpers the projection uses, so the ceiling and the ledger cannot answer
+      // differently. Computed BEFORE the call so the throw arm can charge the
+      // same number the clean arm charges.
+      const fleetCost = fleetRunCost(rec.claimed.length)
+        + (rec.claimed.length * perIssueFleetCost(fleetArgs));
       // THE one nested call. One per cycle, for the whole cycle. See the header:
       // a nested call per issue would spend the single nesting level on the
       // wrong thing and the fleet's own agents could not run.

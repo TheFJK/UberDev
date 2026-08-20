@@ -147,6 +147,7 @@ _UBERDEV_GOAL_WORKTREE_PREFIXES=("" ".claude/worktrees/*/" ".worktrees/*/" "work
 # stuck_loop on iteration 1.
 : "${_UBERDEV_GOAL_DEFAULT_MAX_CYCLES:=5}"
 : "${_UBERDEV_GOAL_DEFAULT_MAX_PARALLEL:=3}"
+: "${_UBERDEV_GOAL_DEFAULT_IMPLEMENT_BUDGET:=24}"         # the nested fleet's CB3 per-issue implement-phase cap; /goal's CB1 projects against it (#590)
 : "${_UBERDEV_GOAL_DEFAULT_BARRIER_TIMEOUT_S:=14400}"     # 4h
 : "${_UBERDEV_GOAL_POLL_SECS:=60}"
 : "${_UBERDEV_GOAL_STUCK_SECS:=14400}"                    # 4h

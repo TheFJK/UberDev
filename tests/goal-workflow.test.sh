@@ -529,10 +529,16 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   // per-issue cost and so could not tell the arithmetic from the breaker. The
   // ceiling is pinned to the exact projection instead:
   //   projectedAgentsForCycle(min(queue=2, maxParallel=3))
-  //     = 3 (claim/collect/verdict relays) + maxWatchTicks(40) + 2 + 2 * 33
-  //     = 111,   where 33 = the fleet 9 design agents + IMPLEMENT_AGENT_BUDGET(24)
-  // so 110 must trip and 111 must not. Change the per-issue cost without
+  //     = 3 (claim/collect/verdict relays) + maxWatchTicks(40) + 2 + 1 + 2 * 33
+  //     = 112,   where 33 = the fleet 9 design agents + IMPLEMENT_AGENT_BUDGET(24)
+  // so 111 must trip and 112 must not. Change the per-issue cost without
   // changing this number and B52/B52b go red, which is the point.
+  //
+  // The lone +1 is the fleet's run-shared repo profile (#615 A) — one agent per
+  // fleet run that has any design-tier issue, which this side prices as any
+  // claimed issue at all because it has no manifest and so no tier breakdown.
+  // /goal charged a flat 2 for the fleet's run-level term and never counted it,
+  // under-projecting AND under-charging by exactly one agent every cycle (#590).
   //
   // 9, not 6, since #524: the design chain gained a BOUNDED spec-revision round
   // (item 1), a plan REVIEW gate (item 2) and a risk-gated security research
@@ -549,7 +555,7 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   // The flat term is 2, not 1 (#515): the fleet spends a batched PR-claim
   // verification relay alongside its intake relay, once per fleet run rather
   // than per issue.
-  const CYCLE_PROJECTION = 3 + 40 + 2 + (2 * 33);   // 111
+  const CYCLE_PROJECTION = 3 + 40 + 2 + 1 + (2 * 33);   // 112
   const recM = await run(buildArgs({ maxAgents: CYCLE_PROJECTION - 1 }), { agentReturns: {
     "goal-claim:c1": claim(),
     "goal-watch:c1:t1": { rc: 0, note: "drained" },
@@ -713,10 +719,10 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   // next reader trusts the message instead of re-deriving it.
   //
   // Default fixture: 2 queued issues, maxParallel 3, maxWatchTicks 40, so the
-  // projection is CYCLE_PROJECTION (111) and the pre-#515 one is 110. At a
-  // ceiling of 110, the current formula trips (111 > 110) and a formula whose
-  // flat term is reverted to 1 does not (110 > 110 is false), which is exactly
-  // the term this row exists to protect.
+  // projection is CYCLE_PROJECTION (112) and the pre-#515 one is 111. At a
+  // ceiling of 111, the current formula trips (112 > 111) and a formula whose
+  // batched-relay term is reverted to 1 does not (111 > 111 is false), which is
+  // exactly the term this row exists to protect.
   const recS = await run(buildArgs({ maxAgents: CYCLE_PROJECTION - 1 }), { agentReturns: {
     "goal-claim:c1": claim(),
     "goal-watch:c1:t1": { rc: 0, note: "drained" },
@@ -989,9 +995,19 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   function perIssueCost(budget) { return FLEET_DESIGN_AGENTS + budget; }
   const GOAL_PER_ISSUE_DEFAULT = perIssueCost(BUDGET_DEFAULT);  // the default arm: base + 24
   const FLEET_BATCHED_RELAYS = 2;
+  // The fleet's THIRD run-level agent: the run-shared repo profile (#615 A),
+  // dispatched once whenever the run has a design-tier issue to feed it. /goal
+  // has no manifest at either cost site, so it prices every claimed issue as
+  // design-tier and the gate reduces to "the cycle claimed anything". It was
+  // uncounted on both sides until #590 — `grep -n repoProfile` over the goal
+  // driver returned nothing at all — so every cycle with work in it was charged
+  // and projected exactly one agent short.
+  const FLEET_REPO_PROFILE = 1;
   const CYCLE_RELAYS = 4;
   const SPEND_CLAIMED = 2;                // the default fixture claims 11,12
-  function fleetCost(issues, perIssue) { return FLEET_BATCHED_RELAYS + (issues * perIssue); }
+  function fleetCost(issues, perIssue) {
+    return FLEET_BATCHED_RELAYS + (issues > 0 ? FLEET_REPO_PROFILE : 0) + (issues * perIssue);
+  }
   function cycleTotal(issues, perIssue) { return CYCLE_RELAYS + fleetCost(issues, perIssue); }
   const THROW_MSG = "runtime refused further agents";
   const THROWING_FLEET = {};
@@ -1017,7 +1033,8 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   // Only the TOTAL is pinned here. At the default budget the per-issue term the
   // driver derives from the relayed envelope and a hardcoded literal are the
   // same number, so this row cannot tell them apart — separating them needs a
-  // run whose envelope carries a raised implementBudget, which is its own row.
+  // run whose envelope carries a raised implementBudget (runs W/X for the
+  // accumulator, runs Z for the projection).
   const recU = await run(buildArgs(), { agentReturns: spendReturns() });
   const resU = resultOf(recU);
   out.uSpend = spendMatch(resU ? resU.agentsSpent : null,
@@ -1101,6 +1118,87 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   out.xUnreadable = await spendAtBudget({ implementBudget: "abc" }, GOAL_PER_ISSUE_DEFAULT);
   out.xAbsent = await spendAtBudget(undefined, GOAL_PER_ISSUE_DEFAULT);
 
+  // Runs Z (#590) — the PRE-CLAIM PROJECTION prices the same budget.
+  //
+  // Runs W/X above prove the SPEND term derives from the relayed envelope.
+  // The projection is a DIFFERENT surface with a different input: it runs
+  // BEFORE the claim pass, so no fleet envelope exists yet and the only budget
+  // in scope is the one lib/goal-phase0.sh published in /goal's OWN args
+  // envelope. That surface carried a frozen literal, and nothing in this repo
+  // could tell the two apart — every projection row above (M/M2/S) runs at the
+  // fleet default, where a literal and a derivation are the same number.
+  //
+  // At the clamp ceiling one design-tier issue costs base+96, not base+24, so a
+  // frozen literal under-projects a two-issue cycle by 144 agents. CB1 is the
+  // only NAMED halt: under-project and it stops binding at all, and the run
+  // dies against the runtime's own lifetime cap with no halt event.
+  //
+  // Each probe BRACKETS the breaker instead of asserting a boolean: one agent
+  // below the expected projection must trip, and exactly AT it must not. A row
+  // that only asserted the trip would pass on a projection that grew for any
+  // reason whatsoever, an over-projection included.
+  const PROJ_CYCLE_RELAYS = 3;      // the claim, verdict and collect relays
+  const PROJ_WATCH_TICKS = 40;      // this fixture's maxWatchTicks bound
+  const PROJ_REPO_PROFILE = 1;      // the fleet's run-shared repo profile (#615 A)
+  function projectionFor(issues, perIssue) {
+    return PROJ_CYCLE_RELAYS + PROJ_WATCH_TICKS + FLEET_BATCHED_RELAYS
+      + (issues > 0 ? PROJ_REPO_PROFILE : 0) + (issues * perIssue);
+  }
+  // `budget === undefined` relays NO implementBudget key at all, which is the
+  // shape every pre-#590 envelope has and must still price at the fleet default.
+  async function projectionAt(budget, expected) {
+    const cfg = (budget === undefined) ? {} : { implementBudget: budget };
+    const below = await run(buildArgs(Object.assign({}, cfg, { maxAgents: expected - 1 })),
+      { agentReturns: { "goal-claim:c1": claim(), "goal-watch:c1:t1": { rc: 0, note: "drained" } } });
+    const at = await run(buildArgs(Object.assign({}, cfg, { maxAgents: expected })),
+      { agentReturns: spendReturns() });
+    const rBelow = resultOf(below);
+    const rAt = resultOf(at);
+    if (!rBelow || !rAt) return "no result";
+    if (rBelow.cb1Tripped !== true) return "no trip at " + (expected - 1) + " — the projection is under " + expected;
+    if (rAt.cb1Tripped === true) return "tripped at " + expected + " — the projection is over it";
+    return "ok";
+  }
+
+  // Run Z — an operator who raised the budget to the top of the supported range.
+  out.zRaised = await projectionAt(BUDGET_CEILING,
+    projectionFor(SPEND_CLAIMED, perIssueCost(BUDGET_CEILING)));
+
+  // Run Z2 — THE DISCRIMINATOR, and the row this issue exists for. The ceiling
+  // is set to exactly what the projection would be at the DEFAULT budget, so a
+  // frozen literal lands one agent short of its own ceiling and never trips,
+  // while a derived projection has already blown past it. No other row in this
+  // file separates the two: they agree on every value except this one.
+  out.zRaisedBeatsDefault = await (async function () {
+    const rec = await run(buildArgs({ implementBudget: BUDGET_CEILING,
+      maxAgents: projectionFor(SPEND_CLAIMED, GOAL_PER_ISSUE_DEFAULT) }),
+      { agentReturns: { "goal-claim:c1": claim(), "goal-watch:c1:t1": { rc: 0, note: "drained" } } });
+    const res = resultOf(rec);
+    if (!res) return "no result";
+    if (res.cb1Tripped !== true) return "a raised budget projected no higher than the default";
+    // ...and the guarantee CB1 exists for still holds: nothing is claimed and
+    // then stranded by the halt.
+    if (labels(rec).some(function (l) { return /^goal-claim/.test(l || ""); })) return "claimed anyway";
+    return "ok";
+  })();
+
+  // Runs Z3 — the clamp is the FLEET's, applied identically on this side.
+  // Relaying a budget the fleet would refuse must project what the fleet would
+  // actually RUN with, in both directions; reading the key without clamping it
+  // would only trade an under-projection for an over-projection, and an early
+  // CB1 halt strands a queue just as surely as a late one never fires.
+  out.zFloor = await projectionAt(BUDGET_FLOOR - 1,
+    projectionFor(SPEND_CLAIMED, perIssueCost(BUDGET_FLOOR)));
+  out.zCeiling = await projectionAt(BUDGET_CEILING + 1,
+    projectionFor(SPEND_CLAIMED, perIssueCost(BUDGET_CEILING)));
+  // A value that cannot be read as a number is not a budget of zero, and an
+  // envelope with no key at all is the pre-#590 shape: both fall to the fleet
+  // default, exactly as the spend accumulator's X rows require.
+  out.zUnreadable = await projectionAt("abc",
+    projectionFor(SPEND_CLAIMED, GOAL_PER_ISSUE_DEFAULT));
+  out.zAbsent = await projectionAt(undefined,
+    projectionFor(SPEND_CLAIMED, GOAL_PER_ISSUE_DEFAULT));
+
   // Runs Y (#564) — CB1 halts a LATER cycle because an EARLIER one was charged.
   //
   // Runs M/M2/S all trip CB1 on cycle 1, where agentsSpent is still zero. They
@@ -1123,16 +1221,17 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   const CYCLE1_TOTAL = cycleTotal(SPEND_CLAIMED, GOAL_PER_ISSUE_DEFAULT);
   // READ-ONLY MIRROR of projectedAgentsForCycle for the ONE issue cycle 2
   // claims: the three per-cycle relays it counts, the maxWatchTicks bound this
-  // fixture runs at, the two batched fleet relays, and the per-issue term. Runs
-  // M/M2/S own that surface; CYCLE_PROJECTION above stays untouched.
+  // fixture runs at, the two batched fleet relays, the run-shared repo profile,
+  // and the per-issue term. Runs M/M2/S own that surface; CYCLE_PROJECTION
+  // above stays untouched.
   //
-  // That per-issue term is a flat LITERAL in the projection — it does NOT track
-  // the relayed budget the spend term derives, which the workflow header states
-  // outright and which is tracked as its own gap. At the fleet default the two
-  // are the same number, so the named default is reused here rather than typed
-  // a fourth time; if the fleet default ever moves, the projection stops
-  // following it and this row reds naming which half moved.
-  const CYCLE2_PROJECTION = 3 + 40 + 2 + (1 * GOAL_PER_ISSUE_DEFAULT);
+  // Since #590 the per-issue term is DERIVED on the projection side too, from
+  // the implementBudget key lib/goal-phase0.sh publishes in /goal's own args
+  // envelope — it is no longer a literal frozen at the fleet default, and runs
+  // Z below are what separate the two. This run relays no budget anywhere, so
+  // the named default is the right expectation here and is reused rather than
+  // typed a fourth time.
+  const CYCLE2_PROJECTION = 3 + 40 + 2 + 1 + (1 * GOAL_PER_ISSUE_DEFAULT);
   function twoCycleReturns() {
     return {
       "goal-claim:c1": claim(),
@@ -1364,6 +1463,13 @@ else
   check xCeiling '"match"'                "B95b a relayed budget ABOVE the fleet ceiling is charged at the ceiling, so reading the envelope cannot make the ledger overcount either"
   check xUnreadable '"match"'             "B95c a non-numeric implementBudget is charged the fleet default, not read as a budget of zero"
   check xAbsent '"match"'                 "B95d an envelope carrying no implementBudget at all is charged the fleet default"
+
+  check zRaised '"ok"'                    "B99 the PRE-CLAIM projection prices the per-issue term from the budget /goal was configured with: at the clamp ceiling CB1 trips one agent below the raised projection and not at it — the projection surface is a different input from the W/X spend surface (no fleet envelope exists that early), so no row above could see this"
+  check zRaisedBeatsDefault '"ok"'        "B99b the discriminator: with a raised budget relayed, a ceiling set to the DEFAULT-budget projection has ALREADY been blown — a frozen literal lands one agent short of that same ceiling and never trips, which is the whole defect (#590), and the halt still aborts BEFORE the claim pass"
+  check zFloor '"ok"'                     "B99c a relayed budget BELOW the fleet floor projects at the floor the fleet would clamp it to"
+  check zCeiling '"ok"'                   "B99d a relayed budget ABOVE the fleet ceiling projects at the ceiling, so reading the key cannot make CB1 halt a run that would have fitted"
+  check zUnreadable '"ok"'                "B99e a non-numeric implementBudget projects the fleet default, not a budget of zero"
+  check zAbsent '"ok"'                    "B99f an envelope carrying no implementBudget key at all — every pre-#590 envelope — still projects the fleet default"
 
   check yCeiling '"ok"'                   "B96 CB1 halts cycle 2 ONLY BECAUSE cycle 1 was charged — the spent half of the ceiling comparison, which every earlier CB1 row (M/M2/S) leaves at zero and so cannot exercise: the audit event publishes the cycle-1 spend AND the cycle-2 projection, and with the fleet charge removed the same ceiling never trips at all"
   check yHeadroom '"ok"'                  "B96b one more agent of headroom and the same run claims cycle 2 instead — the ceiling row cannot pass on a breaker that fired early, nor on a run that ended some other way"
