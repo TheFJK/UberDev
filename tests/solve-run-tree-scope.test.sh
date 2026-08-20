@@ -131,6 +131,14 @@ var srcBase = fs.readFileSync(WORKFLOW, "utf8");
 var tree = JSON.parse(fs.readFileSync(MANIFEST, "utf8"));
 var launcherBase = fs.readFileSync(LAUNCHER, "utf8");
 
+// Lane sources OTHER than solve_fleet, keyed by LANES member id. Empty today by
+// construction: LANES carries a single member and the ternary in the derivation
+// loop below therefore never takes this branch. It exists so the loop is already
+// written for a multi-lane table and does not have to be touched when the other
+// fleet lanes land. solve_fleet is deliberately NOT a member here — its source
+// is srcBase, which the Z9 differential mutates in memory.
+var laneSrc = {};
+
 var ANCHOR = "plugins/uberdev/";
 function relOf(p, what) {
   var slashed = p.split("\\").join("/");
@@ -265,18 +273,71 @@ function agentReturns() {
     "solve:#12 (trivial)": solvedRec(12, 902)
   };
 }
-function runFixture(source) {
+// One execution of one lane run. budgetTotal is threaded through rather than
+// hardcoded because hasOwnProperty is how the harness decides between an
+// explicit budget and its falsy default, and a loop-driven lane truncated by
+// that default would have its kind set measured short. A dry-run budget is a
+// hang detector, never a stopwatch, so a lane that needs one sets it high.
+function runFixture(lane, source, run) {
   var meta = h.extractMeta(source).meta;
   var pre = h.preprocess(source);
   var record = h.makeRecord();
-  var sb = h.makeSandbox({ args: buildArgs(), agentReturns: agentReturns() }, meta, record).sandbox;
-  var pending = vm.runInNewContext(pre.wrapped, sb, { filename: "solve-fleet-scope", timeout: 8000 });
+  var fixture = { args: run.args, agentReturns: run.agentReturns };
+  if (Object.prototype.hasOwnProperty.call(run, "budgetTotal")) {
+    fixture.budgetTotal = run.budgetTotal;
+  }
+  var sb = h.makeSandbox(fixture, meta, record).sandbox;
+  var pending = vm.runInNewContext(pre.wrapped, sb, { filename: lane.id + "-scope", timeout: 8000 });
   return Promise.resolve(pending).then(function () { return record; });
 }
-function liveKinds(record) {
+
+// A fleet whose real dispatch is a NESTED workflow() call is invisible to
+// record.agentCalls: an agentCalls-keyed derivation would certify such a lane
+// at the width of its relay agents while the fleet it actually launches went
+// unrecorded. Union both call logs so the derivation sees the whole surface.
+// The nesting chase is bounded at ONE level by the runtime itself, so this
+// namespace is complete by construction rather than by a depth guess.
+function skillOfScriptPath(p) {
+  var slashed = String(p).split("\\").join("/");
+  var m = slashed.match(/skills\/([^/]+)\/workflow\.js$/);
+  return m ? m[1].split("-").join("_") : "";
+}
+function liveKinds(record, lane) {
   var seen = {};
-  record.agentCalls.forEach(function (c) { seen[kindOf(c.label)] = 1; });
+  record.agentCalls.forEach(function (c) { seen[lane.normalize(c.label)] = 1; });
+  (record.workflowCalls || []).forEach(function (w) {
+    var name = skillOfScriptPath(w && w.ref ? w.ref.scriptPath : "");
+    if (name) { seen["workflow." + name] = 1; }
+  });
   return Object.keys(seen).sort();
+}
+
+// The UNION of every run is the lane live set, because a lane whose stages are
+// selected by its args cannot be driven to its full surface in one invocation.
+// Runs execute in SERIES on purpose: one record per run, so two stage arms can
+// never interleave into a single record and be read as one execution.
+function liveOf(lane, source) {
+  var seen = {};
+  var chain = Promise.resolve();
+  lane.runs.forEach(function (run) {
+    chain = chain.then(function () {
+      return runFixture(lane, source, run).then(function (rec) {
+        liveKinds(rec, lane).forEach(function (k) { seen[k] = 1; });
+      });
+    });
+  });
+  return chain.then(function () { return Object.keys(seen).sort(); });
+}
+
+// A differential re-executes ONLY the mutated lane and reuses the cached live
+// sets for the rest. Without this, every differential row below would re-run
+// every lane and the file would grow from one script execution per row to one
+// per lane per row.
+function withLane(base, id, live) {
+  var out = {};
+  Object.keys(base).forEach(function (k) { out[k] = base[k]; });
+  out[id] = live;
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -501,39 +562,46 @@ function rC6(t) {
   return e;
 }
 
-function rC1(t, live) {
-  var E = entryFor(t, SRC_REL);
-  if (!E) return ["no scope.does_not_govern entry declares source " + SRC_REL];
+// C1-C5 are LANE-PARAMETERISED. Each takes the lane record rather than closing
+// over the solve-fleet globals, and each prefixes its violations with the lane
+// id: with more than one lane in the table an unprefixed "dispatched but
+// undeclared" names a drift without naming where it drifted.
+function rC1(t, lane, live) {
+  var E = entryFor(t, lane.source);
+  if (!E) return ["lane " + lane.id + ": no scope.does_not_govern entry declares source " + lane.source];
   var declared = Array.isArray(E.agent_kinds) ? E.agent_kinds : [];
   var union = {};
   declared.concat(edgeCovered(t, E)).forEach(function (k) { union[k] = 1; });
   var e = [];
   var missing = live.filter(function (k) { return !union[k]; });
   var extra = Object.keys(union).filter(function (k) { return live.indexOf(k) < 0; }).sort();
-  if (missing.length) e.push("dispatched but undeclared: " + missing.join(","));
-  if (extra.length) e.push("declared but never dispatched: " + extra.join(","));
+  if (missing.length) e.push("lane " + lane.id + ": dispatched but undeclared: " + missing.join(","));
+  if (extra.length) e.push("lane " + lane.id + ": declared but never dispatched: " + extra.join(","));
   return e;
 }
 
-function rC2(t) {
-  var E = entryFor(t, SRC_REL);
-  if (!E) return ["no scope.does_not_govern entry declares source " + SRC_REL];
+function rC2(t, lane) {
+  var E = entryFor(t, lane.source);
+  if (!E) return ["lane " + lane.id + ": no scope.does_not_govern entry declares source " + lane.source];
   var declared = Array.isArray(E.agent_kinds) ? E.agent_kinds : [];
   var covered = edgeCovered(t, E);
   var both = declared.filter(function (k) { return covered.indexOf(k) >= 0; }).sort();
-  return both.length ? ["kinds are BOTH ungoverned and edge-covered: " + both.join(",")] : [];
+  return both.length
+    ? ["lane " + lane.id + ": kinds are BOTH ungoverned and edge-covered: " + both.join(",")]
+    : [];
 }
 
-function rC3(t) {
-  var E = entryFor(t, SRC_REL);
-  if (!E) return ["no scope.does_not_govern entry declares source " + SRC_REL];
+function rC3(t, lane) {
+  var E = entryFor(t, lane.source);
+  if (!E) return ["lane " + lane.id + ": no scope.does_not_govern entry declares source " + lane.source];
   var edges = isObj(t) && isObj(t.edges) ? t.edges : {};
   var bad = Object.keys(edges).filter(function (id) {
     var row2 = edges[id];
     return isObj(row2) && row2.source === E.source && id.indexOf(E.reserved_edge_prefix) !== 0;
   }).sort();
   return bad.length
-    ? ["edges sourced from " + E.source + " sit outside the reserved prefix: " + bad.join(",")]
+    ? ["lane " + lane.id + ": edges sourced from " + E.source
+       + " sit outside the reserved prefix: " + bad.join(",")]
     : [];
 }
 
@@ -547,19 +615,54 @@ function rC3(t) {
 // list was measured against a fleet that actually ran.
 var EXECUTED_KIND_FLOOR = 16;
 
-function rC4(live) {
-  return live.length >= EXECUTED_KIND_FLOOR
+// ---------------------------------------------------------------------------
+// THE LANES TABLE (#654). The rule layer stops being single-substrate: the five
+// rules below take a lane record instead of closing over SRC_REL, so widening the
+// file to another fleet is adding a member here rather than forking a rule.
+// solve_fleet keeps its normalizer, its floor, its fixture and its
+// argv-supplied site count byte for byte, so rows Z0-Z17 are unchanged in
+// label, order and semantics.
+//
+// runs IS REQUIRED AND NON-EMPTY FOR EVERY MEMBER, and it is a LIST because a
+// lane whose stage is selected by its args cannot be driven to its full
+// surface in one invocation. A member without runs is a FATAL, never a skip: a
+// rule that silently skips a lane is a permanently green hole of exactly the
+// class this file exists to close. The check is at the top of the comparator.
+//
+// IT SITS HERE, BELOW EXECUTED_KIND_FLOOR, ON PURPOSE. The table is a var
+// INITIALIZER, not a hoisted function declaration, so it is evaluated in source
+// order. Read kindFloor from a constant declared further down the file and the
+// field lands undefined, every comparison against it is false, and the lane
+// reds for a reason that looks nothing like its cause. Keep any new member
+// below every constant it interpolates.
+// ---------------------------------------------------------------------------
+var LANES = [
+  {
+    id: "solve_fleet",
+    source: SRC_REL,
+    normalize: kindOf,
+    kindFloor: EXECUTED_KIND_FLOOR,
+    sites: SITES,
+    runs: [ { args: buildArgs(), agentReturns: agentReturns() } ]
+  }
+];
+var SOLVE_LANE = LANES[0];
+
+function rC4(lane, live) {
+  return live.length >= lane.kindFloor
     ? []
-    : ["the executed kind set has only " + live.length + " member(s), below the floor of "
-       + EXECUTED_KIND_FLOOR + " — the fixture is not reaching every rung of the fleet"];
+    : ["lane " + lane.id + ": the executed kind set has only " + live.length
+       + " member(s), below the floor of " + lane.kindFloor
+       + " — the fixture is not reaching every rung of the fleet"];
 }
 
-function rC5(t, sites) {
-  var E = entryFor(t, SRC_REL);
-  if (!E) return ["no scope.does_not_govern entry declares source " + SRC_REL];
-  return E.dispatch_sites === sites
+function rC5(t, lane) {
+  var E = entryFor(t, lane.source);
+  if (!E) return ["lane " + lane.id + ": no scope.does_not_govern entry declares source " + lane.source];
+  return E.dispatch_sites === lane.sites
     ? []
-    : ["dispatch_sites=" + JSON.stringify(E.dispatch_sites) + " but the source has " + sites + " dispatch site(s)"];
+    : ["lane " + lane.id + ": dispatch_sites=" + JSON.stringify(E.dispatch_sites)
+       + " but the source has " + lane.sites + " dispatch site(s)"];
 }
 
 // C8 — COMPLETENESS. The only rule here whose universe is not the manifest.
@@ -618,18 +721,51 @@ function rC9(t, lsrc) {
   return e;
 }
 
-function check(t, live, sites, lsrc) {
-  return [].concat(
-    rGoverns(t), rEntryShape(t), rC6(t),
-    rC1(t, live), rC2(t), rC3(t), rC4(live), rC5(t, sites),
-    rC8(t, lsrc), rC9(t, lsrc)
-  );
+// The rule ORDER is preserved deliberately — the manifest-wide rules first, the
+// per-lane block in the middle, the enumeration rules last — so the failure text
+// the existing rows emit is unchanged by the widening.
+//
+// A MISSING LIVE SET THROWS rather than being treated as an empty one. An empty
+// array would sail through rC1 as "nothing dispatched, nothing declared" and
+// certify the lane by silence, which is the failure mode this table exists to
+// remove.
+function check(t, liveByLane, lsrc) {
+  var e = [].concat(rGoverns(t), rEntryShape(t), rC6(t));
+  LANES.forEach(function (lane) {
+    var live = liveByLane[lane.id];
+    if (!Array.isArray(live)) {
+      throw new Error("no live kind set for lane " + lane.id + " — a lane is never skipped");
+    }
+    e = e.concat(rC1(t, lane, live), rC2(t, lane), rC3(t, lane), rC4(lane, live), rC5(t, lane));
+  });
+  return e.concat(rC8(t, lsrc), rC9(t, lsrc));
 }
 
 function copyTree() { return JSON.parse(JSON.stringify(tree)); }
 
 (async function () {
-  var recBase = await runFixture(srcBase);
+  // A lane carrying no runs cannot be derived, and a derivation that cannot run
+  // must not degrade into a skip: a skipped lane is declared-only again, which
+  // is the single-substrate blindness the table replaces. FATAL before any row
+  // is emitted — the catch below writes the stack and exits non-zero, and the
+  // bash wrapper turns that into exit 2.
+  LANES.forEach(function (lane) {
+    if (!Array.isArray(lane.runs) || lane.runs.length === 0) {
+      throw new Error("LANES member " + lane.id + " carries no runs — a lane is a FATAL, never a skip (#654)");
+    }
+  });
+
+  // One live kind set per lane, derived by EXECUTING that lane. The loop is
+  // indexed rather than a forEach because await inside a forEach callback does
+  // not suspend the loop, so the runs would race instead of running in series.
+  var LIVE_BY_LANE = {};
+  for (var lx = 0; lx < LANES.length; lx++) {
+    var L = LANES[lx];
+    var srcL = (L.id === "solve_fleet") ? srcBase : laneSrc[L.id];
+    LIVE_BY_LANE[L.id] = await liveOf(L, srcL);
+  }
+
+  var recBase = await runFixture(SOLVE_LANE, srcBase, SOLVE_LANE.runs[0]);
 
   var z0 = [];
   if (recBase.violations.length) z0.push("harness violations: " + recBase.violations.join(" | "));
@@ -638,7 +774,9 @@ function copyTree() { return JSON.parse(JSON.stringify(tree)); }
   if (unlabelled > 0) z0.push(unlabelled + " dispatch(es) carry no opts.label, so their kind would normalize to the empty string");
   row(z0.length === 0, "Z0 the fleet fixture runs clean and every dispatch carries a label" + tail(z0));
 
-  var LIVE = liveKinds(recBase);
+  // The solve-fleet live set, read out of the per-lane map so the Z4/Z5 row
+  // label expressions below are untouched by the widening.
+  var LIVE = LIVE_BY_LANE.solve_fleet;
 
   var e1 = rGoverns(tree);
   row(e1.length === 0, "Z1 scope.governs names the substrate, its adapter, a note and the agent-kind rule" + tail(e1));
@@ -649,20 +787,20 @@ function copyTree() { return JSON.parse(JSON.stringify(tree)); }
   var e3 = rC6(tree);
   row(e3.length === 0, "Z3 C6: each declared source is a real file under plugins/uberdev/ with a non-colliding prefix" + tail(e3));
 
-  var e4 = rC4(LIVE);
+  var e4 = rC4(SOLVE_LANE, LIVE);
   row(e4.length === 0, "Z4 C4: the executed fleet yields at least " + EXECUTED_KIND_FLOOR
       + " agent kinds (" + LIVE.join(",") + ")" + tail(e4));
 
-  var e5 = rC1(tree, LIVE);
+  var e5 = rC1(tree, SOLVE_LANE, LIVE);
   row(e5.length === 0, "Z5 C1: declared kinds UNION edge-covered kinds equals the EXECUTED kinds" + tail(e5));
 
-  var e6 = rC2(tree);
+  var e6 = rC2(tree, SOLVE_LANE);
   row(e6.length === 0, "Z6 C2: no kind is both ungoverned and edge-covered" + tail(e6));
 
-  var e7 = rC3(tree);
+  var e7 = rC3(tree, SOLVE_LANE);
   row(e7.length === 0, "Z7 C3: every edge sourced from the fleet script sits under its reserved prefix" + tail(e7));
 
-  var e8 = rC5(tree, SITES);
+  var e8 = rC5(tree, SOLVE_LANE);
   row(e8.length === 0, "Z8 C5: dispatch_sites matches the " + SITES + " static dispatch site(s) in the fleet script" + tail(e8));
 
   // ------------------------------------------------------------------------
@@ -671,7 +809,7 @@ function copyTree() { return JSON.parse(JSON.stringify(tree)); }
   // passes vacuously on a manifest that fails for everything — which is exactly
   // the shape this issue is about.
   // ------------------------------------------------------------------------
-  var baseErrs = check(tree, LIVE, SITES, launcherBase);
+  var baseErrs = check(tree, LIVE_BY_LANE, launcherBase);
 
   function differential(label, applied, notApplied, mutErrs) {
     var why = [];
@@ -688,8 +826,10 @@ function copyTree() { return JSON.parse(JSON.stringify(tree)); }
   var mutSrc = srcBase.split(LIT).join("\"spec-revue:#\"");
   var errs9 = [];
   if (mutSrc !== srcBase) {
-    var recMut = await runFixture(mutSrc);
-    errs9 = check(tree, liveKinds(recMut), SITES, launcherBase);
+    // Only the mutated lane is re-executed; every other lane keeps its cached
+    // live set, so a differential costs one script run rather than one per lane.
+    var live9 = await liveOf(SOLVE_LANE, mutSrc);
+    errs9 = check(tree, withLane(LIVE_BY_LANE, SOLVE_LANE.id, live9), launcherBase);
   }
   differential("Z9 renaming a label in the EXECUTED script reds the comparator",
     mutSrc !== srcBase,
@@ -702,7 +842,7 @@ function copyTree() { return JSON.parse(JSON.stringify(tree)); }
   if (applied10) E10.agent_kinds.splice(0, 1);
   differential("Z10 deleting a declared agent kind reds the comparator",
     applied10, "there is no declaration to shrink",
-    applied10 ? check(t10, LIVE, SITES, launcherBase) : []);
+    applied10 ? check(t10, LIVE_BY_LANE, launcherBase) : []);
 
   var t11 = copyTree();
   var E11 = entryFor(t11, SRC_REL);
@@ -710,7 +850,7 @@ function copyTree() { return JSON.parse(JSON.stringify(tree)); }
   if (applied11) E11.agent_kinds.push("invented_kind");
   differential("Z11 declaring a kind the fleet never dispatches reds the comparator",
     applied11, "there is no declaration to extend",
-    applied11 ? check(t11, LIVE, SITES, launcherBase) : []);
+    applied11 ? check(t11, LIVE_BY_LANE, launcherBase) : []);
 
   var t12 = copyTree();
   var E12 = entryFor(t12, SRC_REL);
@@ -718,7 +858,7 @@ function copyTree() { return JSON.parse(JSON.stringify(tree)); }
   if (applied12) E12.dispatch_sites = SITES + 1;
   differential("Z12 drifting the dispatch_sites backstop reds the comparator",
     applied12, "there is no entry to drift",
-    applied12 ? check(t12, LIVE, SITES, launcherBase) : []);
+    applied12 ? check(t12, LIVE_BY_LANE, launcherBase) : []);
 
   var FOUND = enumerateSubstrates(launcherBase, edgeSourceSet(tree));
   var e13 = rC8(tree, launcherBase);
@@ -757,7 +897,7 @@ function copyTree() { return JSON.parse(JSON.stringify(tree)); }
   differential("Z16 a dispatch substrate the launcher reaches and nobody declares reds C8",
     applied16,
     "the fixture substrate " + FIXTURE_REL + " is missing from disk, already enumerated, or already declared, so splicing it in would prove nothing",
-    applied16 ? check(tree, LIVE, SITES, lsrcMut) : []);
+    applied16 ? check(tree, LIVE_BY_LANE, lsrcMut) : []);
 
   var t17 = copyTree();
   var TURBOX_REL = ANCHOR + "skills/turbox-fleet/SKILL.md";
@@ -770,7 +910,7 @@ function copyTree() { return JSON.parse(JSON.stringify(tree)); }
   if (applied17) { d17.splice(idx17, 1); }
   differential("Z17 deleting the /turbox declaration reds C8",
     applied17, "does_not_govern[] carries no entry sourced from " + TURBOX_REL,
-    applied17 ? check(t17, LIVE, SITES, launcherBase) : []);
+    applied17 ? check(t17, LIVE_BY_LANE, launcherBase) : []);
 
   process.stdout.write(rows.join("\n") + "\n");
 })().catch(function (e) {
