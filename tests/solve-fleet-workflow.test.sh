@@ -825,14 +825,21 @@ grep -Fq 'no // === SHARED:<name> === block here' "$WORKFLOW" \
 # the return-value block are the three places an operator reads to predict what
 # a run costs and returns; a per-task review gate that none of them mention is
 # an undocumented change of both.
+#
+# The `tasksApproved` grep that used to ride in this block is GONE (#588). A
+# grep for one hand-picked key of the return object certifies that key and
+# nothing else — every other key could leave the fence with this row still
+# green — and the whole object is now joined against finalize() in BOTH
+# directions by docs-accuracy T16.24-T16.26. Leaving the weaker predicate
+# standing beside the stronger one is how a reader learns the wrong thing about
+# what is covered, so it is deleted rather than parked here.
 G30_OK=1
 grep -q 'review gate' "$SKILL" || G30_OK=0
 grep -q 'FIX_ROUNDS' "$SKILL" || G30_OK=0
-grep -q 'tasksApproved' "$SKILL" || G30_OK=0
 grep -q 'implementBudget' "$SKILL" || G30_OK=0
 [ "$G30_OK" = "1" ] \
-  && pass "G30 SKILL.md documents the per-task review gate, its FIX_ROUNDS cap, the implementBudget key and the tasks* return keys" \
-  || fail "G30 SKILL.md does not document the per-task review gate / cap / envelope key / return keys"
+  && pass "G30 SKILL.md documents the per-task review gate, its FIX_ROUNDS cap and the implementBudget envelope key" \
+  || fail "G30 SKILL.md does not document the per-task review gate / cap / envelope key"
 
 # G19 — the return contract has to be DOCUMENTED and RENDERED, or it is the
 # dead-contract class this repo has been filing issues about: a key nothing
@@ -979,10 +986,15 @@ fi
 
 # G40.4 — the two per-record fields and the counter have to be declared where an
 # operator actually reads the record shape: the Return value fence. MEASURED as a
-# real hole before this row existed — deleting `escalatedTier, escalationReason`
-# from that fence reds nothing else in this file, in docs-accuracy, or in the
-# schema guard, because T16's joins cover the per-task record, the reviewVerdict
-# union and partialDelivery, and none of them reach the results member list.
+# real hole WHEN THIS ROW WAS WRITTEN — deleting `escalatedTier,
+# escalationReason` from that fence then reds nothing else in this file, in
+# docs-accuracy, or in the schema guard, because T16's joins at that point
+# reached the per-task record, the reviewVerdict union and partialDelivery and
+# stopped there. They no longer stop there: T16 now joins the results member
+# list (#558) and the top-level fence (#588), so those two deletions and the
+# `tierEscalations` one red over there as well. This row is kept because it
+# names the three symbols an escalation is READ by in one place and reds with a
+# diagnostic about escalation rather than about a set difference.
 # Anti-vacuity first: an empty extraction would make the greps below meaningless.
 SF_RETURN_FENCE="$(awk '/^## Return value/{seen=1; next} seen && /^```/{n++; next} seen && n==1' "$SKILL")"
 if [ -z "$SF_RETURN_FENCE" ]; then
