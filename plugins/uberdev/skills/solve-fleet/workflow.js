@@ -125,6 +125,10 @@ const solveTimeoutS = clampInt(CFG.solveTimeoutS, 1, 86400, 3600);
 // that function's argument vocabulary, and this script inherits them rather
 // than re-minting them. The helper name is greppable and byte-stable; a line
 // range into a file this PR class keeps growing is not.
+// Enforced now, not merely asserted: the §C3 rows of
+// tests/sdd-wave-contract.test.sh read this constant numerically and compare
+// it against the `fix_rounds` arm executed out of the owner, so a drift on
+// either side reds.
 const FIX_ROUNDS = 3;
 // How many reviser dispatches a non-APPROVE spec may cost before planning
 // proceeds regardless (#524) — the bound the revision loop in solveOne actually

@@ -30,9 +30,15 @@ TURBOX_SELF="${0##*/}"
 _tbx_die() { echo "uberdev turbox: $1" >&2; exit "${2:-2}"; }
 
 # --- Loop caps (RFC 0020 §3.7 TB4) -----------------------------------------
-# Inherited names and defaults from subagent-driven-dev's `## Loop caps`. The
-# numbers live HERE, once; the skill quotes them and tests read them back from
-# this function, so prose can never be the source of a cap.
+# A DERIVED COPY. The canonical owner is `sdd_loop_cap` in
+# skills/subagent-driven-dev/SKILL.md — RFC 0020 TB4 records that this lane
+# "inherited names and defaults from subagent-driven-dev", and workflow.js
+# says the same of its own copy. These constants restate the owner's values so
+# this executable never has to source a markdown fence; they are NOT the
+# source. Agreement is asserted numerically by tests/sdd-wave-contract.test.sh
+# §C, which executes `loop-cap <name>` here and the owner's helper there and
+# compares the integers. A comment is not a producer (RFC 0016:60) — the
+# promise now lives in that test, not in this block.
 TURBOX_FIX_ROUNDS=3
 TURBOX_RETEST_ROUNDS=2
 TURBOX_CONTEXT_ROUNDS=2
@@ -60,7 +66,11 @@ _tbx_require_int() {
 
 # ---------------------------------------------------------------------------
 # loop-cap <name>
-#   Print the numeric cap. The single source; never restate a cap in prose.
+#   Print the numeric cap for <name>, as DERIVED from the owner helper in
+#   skills/subagent-driven-dev/SKILL.md. The never-restate-in-prose rule
+#   stands, now with teeth: never restate a cap without adding a register
+#   entry to tests/sdd-wave-contract.test.sh §C. Its completeness sweep reds
+#   on any unregistered restatement, on the commit that adds it.
 # ---------------------------------------------------------------------------
 _tbx_cmd_loop_cap() {
   [ "$#" -eq 1 ] || _tbx_die "usage: $TURBOX_SELF loop-cap <fix_rounds|retest_rounds|context_rounds|issue_cap>" 2
@@ -345,7 +355,10 @@ PY
 #   sibling owning `lib/x.sh` race exactly as if they shared a path, and a
 #   plain set intersection calls them disjoint. The containment predicate is
 #   deliberately the same one sdd_assert_wave_disjoint uses — two
-#   implementations of "do these paths collide" is one too many.
+#   implementations of "do these paths collide" is one too many, and until it
+#   is one, tests/sdd-wave-contract.test.sh §W feeds ONE corpus to BOTH and
+#   requires byte-equal verdicts. Six lane divergences are declared and locked
+#   there; the promise is executed in that file, not made here.
 # ---------------------------------------------------------------------------
 _tbx_cmd_wave_disjoint() {
   local tasks="" wave="" root=""

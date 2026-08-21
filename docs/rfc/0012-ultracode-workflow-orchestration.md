@@ -5,7 +5,7 @@
 | **Status**     | Draft |
 | **Author**     | TheFJK |
 | **Created**    | 2026-06-11 |
-| **Targets**    | new `skills/<name>/workflow.js` scripts (review-pr, merge ×2, goal, solve-design, sdd-waves, scan-fleet, uberthink, testers, cluster-analyze, simplify-pass); thin rewrites of 9 pipeline `SKILL.md` bodies + `commands/review-pr.md`; new `lib/solve-launcher.sh`, `lib/goal-phase{0,1,3}.sh`, `lib/goal-watch.sh`, `lib/bump-version.sh`; `lib/config-read.sh` (args helper); `tests/workflow-scripts.test.sh` + `tests/_workflow_harness.js`; `hooks/session-start` + `skills/using-uberdev` (diet); docs surfaces: README.md mechanics sections, `plugins/uberdev/docs/testing.md`, `skills/writing-skills/SKILL.md`, status annotations on RFC 0005–0010 (§9 docs strategy) |
+| **Targets**    | new `skills/<name>/workflow.js` scripts (review-pr, merge ×2, goal, solve-design, sdd-waves (RETRACTED — §3.6), scan-fleet, uberthink, testers, cluster-analyze, simplify-pass); thin rewrites of 9 pipeline `SKILL.md` bodies + `commands/review-pr.md`; new `lib/solve-launcher.sh`, `lib/goal-phase{0,1,3}.sh`, `lib/goal-watch.sh`, `lib/bump-version.sh`; `lib/config-read.sh` (args helper); `tests/workflow-scripts.test.sh` + `tests/_workflow_harness.js`; `hooks/session-start` + `skills/using-uberdev` (diet); docs surfaces: README.md mechanics sections, `plugins/uberdev/docs/testing.md`, `skills/writing-skills/SKILL.md`, status annotations on RFC 0005–0010 (§9 docs strategy) |
 | **Supersedes** | — (replaces the directive-emitter *substrate* of RFC 0005/0006/0007/0008/0009/0010; their state machines, scoring contracts and trust trails are preserved byte-stable) |
 | **Tracking**   | #301–#310 dispositions in §8; new issues per §9 |
 | **Tier**       | Large (multi-release migration program; contract-affecting across every pipeline) |
@@ -96,7 +96,7 @@ Claude Code now ships the **Workflow tool ("ultracode")**: a deterministic backg
 | DR-6 | **Absolute-path discipline**: all artifact paths in args and prompts are absolute (artifact path-leak class); agent-returned paths are realpath-prefix-checked under the expected run dir before any read (§4.5 C-7). |
 | DR-7 | **Timestamps via args, frozen at preflight**: `run_id`, `now_epoch`, `now_iso` arrive in args (Date.now throws). Any wall-clock gate evaluated MID-run (CI settle, grace windows, stuck timers) takes live time from agent-side `date`, never from args. |
 | DR-8 | **Budget + halt discipline**: loop guards check `budget.total && budget.remaining()`; every loop body / `agent()` chain is wrapped in try/catch routing to a `finalize(reason)` path that persists state and emits the breaker audit row — a budget throw must never skip cleanup. |
-| DR-9 | **`resumeFromRunId` is forbidden for side-effecting loops** (the goal driver, merge-resolve, sdd-waves): prefix-cache replay returns stale world-state for dispatch/merge results. Allowed where designed in (solve-design's interactive two-burst seam; read-only fleets). |
+| DR-9 | **`resumeFromRunId` is forbidden for side-effecting loops** (the goal driver, merge-resolve, sdd-waves): prefix-cache replay returns stale world-state for dispatch/merge results. Allowed where designed in (solve-design's interactive two-burst seam; read-only fleets). (sdd-waves RETRACTED — §3.6; the rule stands unchanged for the goal driver and merge-resolve.) |
 | DR-10 | **Feature-detect fallback** (§4.2): every migrated SKILL.md carries a `## No-Workflow fallback` section gated on the model's own tool list — Gemini/Copilot/pre-Workflow Claude Code degrade to a retained compact directive recipe instead of breaking. |
 
 ## 3. Per-pipeline verdicts and migration designs
@@ -109,7 +109,7 @@ Claude Code now ships the **Workflow tool ("ultracode")**: a deterministic backg
 | `/merge` | **hybrid** (merge-plan.js + merge-resolve.js; landing loop + Phase 4 stay foreground) | 133 KB → ~25–30 KB; N sequential trust turns → 1 burst; enforced retry ladders | L |
 | `/goal` | **hybrid** (`skills/goal-pipeline/workflow.js` driver over extracted bash; workers are nested solve-fleet Workflow agents — RFC 0015 supersedes "workers stay claude-bg") | ~27 ticks/cycle × 5 cycles of full-context turns → 0; #288/#301 classes structurally dead | L |
 | orchestrator (/solve //turbo design) | **hybrid, staged** (solve-design.js; gated on headless probe) | child 75–90 KB → 12–15 KB; prose retries/timeouts → enforced code | L |
-| subagent-driven-dev | **hybrid** (sdd-waves.js) | 3 unbounded loops capped; −150–280 KB/run; per-task pipeline removes the wave-wide barrier | L |
+| subagent-driven-dev | **hybrid** (sdd-waves.js — RETRACTED, §3.6) | 3 unbounded loops capped; −150–280 KB/run; per-task pipeline removes the wave-wide barrier | L |
 | /solve //turbo launcher | **hybrid — shell preflight + solve-fleet workflow** (`lib/solve-launcher.sh` Step 5w → `skills/solve-fleet/workflow.js`; RFC 0015 supersedes the original "keep shell" verdict) | kills 3 live renderer/fence bugs at root; −66 KB dispatcher; per-issue solvers move off detached `claude-bg` into `parallel()` waves with structured returns | M |
 | /uberscan + /ubersimplify | **full** (shared scan-fleet.js, mode arg) | zsh wave loops + fence vars + dead breakers deleted; −70–80% static; explicit `--resume=<run_id>` | L |
 | /uberthink | **full** (uberthink workflow.js) | ~95% main-session cut; inert ceiling + masked crashes → real code; agent bytes −45% via lens diet | L |
@@ -479,6 +479,16 @@ The child-session design pipeline (6-agent research fanout → Q&A → spec writ
 **Design kept as assessed:** `parallel()` for the 6-topic research fanout (BARRIER justified — spec-writer consumes ALL six; research-codebase BLOCKED/null aborts); sequential awaits for the spec/plan chain (single item, each stage needs the prior — `pipeline()` would be wrong) with real reviser counters (`while (cycles < 2)`); `envelope()` wrapping issue-body interpolation at **all** sites including spec-writer/spec-reviewer (:488/:513) plus the `cached-research-issue-<N>` source tag for reused artifacts (:307) — centralizing the per-site prose convention into one enforced helper. Return `{spec_path, plan_path, questions_path, verdicts, decisions, risks}`. Phase 5 (SDD) and Phase 6 (finish-branch) stay in-session: §3.6's script is invoked **directly** by the child main loop, not via `workflow()`, preserving the single nesting level. Child main-session context: ~75–90 KB → ~12–15 KB (the issue body stops being interpolated ×8 into main context). **Brainstorm stays directive** (conversation-shaped: one-question-at-a-time loop, visual companion, single pass into write-plan; its 2–3-agent step-2 fanout is below the payoff threshold); it may later reuse `solve-design.js mode:'research'` with ad-hoc topics — never a bespoke workflow. Preflight residue worth taking: orchestrator/SKILL.md is Skill-rendered with `$ARGUMENTS` substitution exactly like the launcher (the live #222/#225 defences at :92/:101/:221-222/:247/:301 prove the exposure) and its preflight spans multiple fences — hoist it into an executable `lib/orchestrator-preflight.sh` emitting the args JSON in ONE Bash call, leaving the SKILL.md as triage prose + the Workflow invocation.
 
 ### 3.6 subagent-driven-dev — hybrid (`sdd-waves.js`); finish-branch stays main-loop
+
+> **RETRACTED IN PART by #650 / RFC 0020 §1 (2026-08).** `sdd-waves.js` will
+> not be built. RFC 0020 §1 settles that wave-parallel implementation is a
+> property of the **session** lane: a Workflow agent has no `Agent`/`Task` tool
+> and cannot fan out, so a Workflow script cannot host the wave shape this
+> section proposed. The wave contract stands where it already runs —
+> in-session, in `skills/subagent-driven-dev/SKILL.md`
+> (`sdd_assert_wave_disjoint`) and in `lib/turbox-fleet.sh` (`wave-disjoint`)
+> — and the caps stand where `sdd_loop_cap` declares them. Everything below is
+> retained as history.
 
 > **AMENDED by #508 (solve-fleet, 2026-08).** The fleet's inlined implementation
 > is **sequential per task** — implementer → reviewer → bounded fix ladder, one
@@ -872,7 +882,7 @@ Each phase = 1–3 PR-sized landings, **sequential releases** (the version-colli
 | **3 — read-only fleets** (0.38.x) | scan-fleet.js (+ 5-surface alias sweep, U-test rewrites) → uberthink workflow + lens diet + U-test re-points → cluster-analyze.js (+ C6 lockstep) → simplify-pass.js last (copy-paste reuse from scan-fleet) | Phase 2 green; each its own release |
 | **4 — flagship** (0.39.0) | review-pr workflow.js + post-impl-review absorb-and-tombstone + S15→`classifyBuckets()` upgrade + stale-prose/lock pairs (turbo.md:15 ↔ turbo-flow:443 fixed together) | review-R1 landed; trust artifacts byte-stable per the §3.3 contract table (joint /goal + /merge acceptance criteria) |
 | **5 — merge** (0.39.x) | merge-plan.js + merge-resolve.js + thin SKILL + the ~153 grep re-points in one PR series | merge-R1 landed; Phase 4 landed (the trust-stage parses review-pr's verdict JSON — re-run the trust-stage schema check after #302's fixes change its inputs) |
-| **6 — solve chain** (0.40.x) | solve-design.js Stages 1–2 (shape per the Stage-0 probe outcome) → sdd-waves.js + the two new agent files + sdd-R6 test moves | Phase 1 probe + Phase 0 contracts; sdd-waves never calls workflow() (nesting reserved) |
+| **6 — solve chain** (0.40.x) | solve-design.js Stages 1–2 (shape per the Stage-0 probe outcome) → sdd-waves.js + the two new agent files + sdd-R6 test moves | Phase 1 probe + Phase 0 contracts; sdd-waves.js RETRACTED (§3.6); the nesting level is spent by §3.3, not reserved |
 | **7 — goal** (0.41.x) | goal-R2 four-script extraction (incl. phase0) + goal-R5 test re-points → `skills/goal-pipeline/workflow.js` + the `lib/goal-abort.sh` entry + feature-detect fallback | Phases 4–5 landed (goal consumes their artifacts per §3.3); the Phase-1 empirical cancel-semantics answer |
 | **8 — closeout** | tombstone re-points (~12 doc cross-refs to post-impl-review — the count INCLUDES README:315's shipped-skill row and README:345's "5 advisory reviewers dispatched in one message" description, neither pinned by any test), dispatching-parallel-agents Workflow paragraph, drop #309's uberthink line item, the goal-state shim audit (separate cross-consumer decision incl. goal-state-zsh.test.sh's parity-contract retirement), memory updates | — |
 

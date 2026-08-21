@@ -584,5 +584,8 @@ committed. A missing or unparseable block is a blocker, never a prompt to guess.
 | **TB4** | `round-permitted` rc 3 (`fix_rounds` 3, `retest_rounds` 2, `context_rounds` 2) | stop the loop, mark BLOCKED, keep committed work |
 | — | a per-issue chain that throws | catch it, record that issue `FAILED`, keep the batch running |
 
-Caps are read from `bash "$LIB" loop-cap <name>` — the numbers live in the lib,
-once. Never restate a cap from memory.
+Caps are read from `bash "$LIB" loop-cap <name>`. The lib's constants are
+themselves a derived copy of `sdd_loop_cap` in
+`skills/subagent-driven-dev/SKILL.md` — the canonical owner;
+`tests/sdd-wave-contract.test.sh` §C asserts that chain numerically.
+Never restate a cap from memory.
