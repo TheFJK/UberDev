@@ -776,6 +776,44 @@ REVIEW_FLEET_VERIFY_TOTAL_CAP=40
 REVIEW_FLEET_POSTFIX_LENS_COUNT=1
 REVIEW_FLEET_POSTFIX_TOTAL_CAP=2
 
+# _review_fleet_write_dispatch_decision TARGET 0|1
+# _review_fleet_read_dispatch_decision  LABEL TARGET -> `0` | `1`
+#
+# ONE body behind the four public dispatch-decision names below. The verify pair
+# and the post-fix pair were byte-identical apart from the noun inside two
+# diagnostic strings, so the noun is a parameter and everything else is stated
+# once; the four public names stay as thin wrappers, which keeps every call
+# site, every return code and every emitted message exactly as it was.
+_review_fleet_write_dispatch_decision() {
+  [ "$#" -eq 2 ] || return 2
+  # `target`, never `path` -- see review_fleet_write_ci_state: zsh ties the
+  # lowercase `path` array to $PATH, and these fences run under /bin/zsh.
+  local target="$1" dispatched="$2"
+  case "$dispatched" in
+    0 | 1) ;;
+    *) return 2 ;;
+  esac
+  ( umask 077 && printf '%s\n' "$dispatched" >"$target" ) || return 2
+}
+
+_review_fleet_read_dispatch_decision() {
+  [ "$#" -eq 2 ] || return 2
+  local label="$1" target="$2" recorded
+  [ -r "$target" ] || {
+    echo "error: review-fleet $label dispatch decision missing: $target" >&2
+    return 2
+  }
+  IFS= read -r recorded <"$target" || return 2
+  case "$recorded" in
+    0 | 1) ;;
+    *)
+      echo "error: review-fleet $label dispatch decision is not 0 or 1: ${recorded:-<empty>}" >&2
+      return 2
+      ;;
+  esac
+  printf '%s' "$recorded"
+}
+
 # review_fleet_write_verify_dispatch TARGET 0|1
 # review_fleet_read_verify_dispatch  TARGET -> `0` | `1`
 #
@@ -797,32 +835,11 @@ REVIEW_FLEET_POSTFIX_TOTAL_CAP=2
 # dispatched nothing" are different answers and only one of them means the
 # sidecar is already published.
 review_fleet_write_verify_dispatch() {
-  [ "$#" -eq 2 ] || return 2
-  # `target`, never `path` -- see review_fleet_write_ci_state: zsh ties the
-  # lowercase `path` array to $PATH, and these fences run under /bin/zsh.
-  local target="$1" dispatched="$2"
-  case "$dispatched" in
-    0 | 1) ;;
-    *) return 2 ;;
-  esac
-  ( umask 077 && printf '%s\n' "$dispatched" >"$target" ) || return 2
+  _review_fleet_write_dispatch_decision "$@"
 }
 
 review_fleet_read_verify_dispatch() {
-  [ -r "${1:-}" ] || {
-    echo "error: review-fleet verification dispatch decision missing: ${1:-}" >&2
-    return 2
-  }
-  local recorded
-  IFS= read -r recorded <"$1" || return 2
-  case "$recorded" in
-    0 | 1) ;;
-    *)
-      echo "error: review-fleet verification dispatch decision is not 0 or 1: ${recorded:-<empty>}" >&2
-      return 2
-      ;;
-  esac
-  printf '%s' "$recorded"
+  _review_fleet_read_dispatch_decision verification "${1:-}"
 }
 
 # review_fleet_write_postfix_dispatch TARGET 0|1
@@ -842,32 +859,11 @@ review_fleet_read_verify_dispatch() {
 # nothing" are different answers, and only one of them means the sidecar for
 # this phase has already been published.
 review_fleet_write_postfix_dispatch() {
-  [ "$#" -eq 2 ] || return 2
-  # `target`, never `path` -- see review_fleet_write_ci_state: zsh ties the
-  # lowercase `path` array to $PATH, and these fences run under /bin/zsh.
-  local target="$1" dispatched="$2"
-  case "$dispatched" in
-    0 | 1) ;;
-    *) return 2 ;;
-  esac
-  ( umask 077 && printf '%s\n' "$dispatched" >"$target" ) || return 2
+  _review_fleet_write_dispatch_decision "$@"
 }
 
 review_fleet_read_postfix_dispatch() {
-  [ -r "${1:-}" ] || {
-    echo "error: review-fleet post-fix dispatch decision missing: ${1:-}" >&2
-    return 2
-  }
-  local recorded
-  IFS= read -r recorded <"$1" || return 2
-  case "$recorded" in
-    0 | 1) ;;
-    *)
-      echo "error: review-fleet post-fix dispatch decision is not 0 or 1: ${recorded:-<empty>}" >&2
-      return 2
-      ;;
-  esac
-  printf '%s' "$recorded"
+  _review_fleet_read_dispatch_decision post-fix "${1:-}"
 }
 
 # _review_fleet_range_sha_ok SHA -> rc 0 iff SHA is 40 LOWERCASE hex.
@@ -980,14 +976,16 @@ review_fleet_read_fixer_range() {
 # and dispatch no child, so an unusable phase, run directory, worktree, contract
 # or sidecar path is refused while the CSPRNG has not been touched.
 #
-# The lens name comes from review_fleet_roster, never from a literal here: the
-# roster is the one place a slug and its edge are stated together, and a second
-# spelling of the slug is a second thing to keep in step with the script.
+# The lens name AND the edge both come from review_fleet_roster, never from a
+# literal here: the roster is the one place a slug and its edge are stated
+# together, and a second spelling of either is a second thing to keep in step
+# with the script. The row is already being read for its first column, so
+# taking the second costs nothing and makes a roster edit unable to leave this
+# binder pointing at an edge the roster no longer names.
 review_fleet_bind_postfix() {
   [ "$#" -eq 6 ] || return 2
   local run_dir="$1" iter="$2" postfix_phase="$3" worktree="$4" contract="$5" sidecar="$6"
-  local edge=review_pr.postfix.correctness
-  local roster base slug dir instance nonce binding
+  local roster base edge slug dir instance nonce binding
   case "$postfix_phase" in
     phase1 | phase2) ;;
     *)
@@ -1007,7 +1005,9 @@ review_fleet_bind_postfix() {
   # is the EPIPE class tests/epipe-guard.test.sh exists to keep out, and awk
   # consumes its whole input.
   base="$(printf '%s\n' "$roster" | awk -F'\t' 'NR==1 { print $1 }')" || return 2
+  edge="$(printf '%s\n' "$roster" | awk -F'\t' 'NR==1 { print $2 }')" || return 2
   [ -n "$base" ] || return 2
+  [ -n "$edge" ] || return 2
   slug="$(review_fleet_postfix_slug "$base" "$postfix_phase")" || return 2
   dir="$(review_fleet_child_dir "$run_dir" "$iter" "$slug")" || return 2
   instance="${dir##*/}"

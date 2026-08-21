@@ -933,9 +933,26 @@ def replace_private(destination,payload):
     finally:
         try: os.unlink(tmp)
         except FileNotFoundError: pass
+# The raw diff buffers are dead once the envelope above is built, and dropping
+# them here rather than at exit stops them overlapping the read-back below.
+del diff_buffer,diff
 replace_private(target,wrapped_diff)
+# VERIFIED WITHOUT MATERIALISING THE ARTIFACT A SECOND TIME. Near the 8-MiB raw
+# and 16-MiB wrapped ceilings a whole-file read-back doubled peak memory to
+# answer a yes-or-no question. Block by block gives the identical verdict -- a
+# short file, a differing file and an over-long file all still raise
+# SystemExit(2) -- at constant extra cost. The trailing one-byte read is what
+# preserves the over-length half of that verdict, which the old read of one
+# byte past the payload provided.
+VERIFY_BLOCK=65536
 with open(target,'rb') as stream:
-    if stream.read(len(wrapped_diff)+1)!=wrapped_diff: raise SystemExit(2)
+    verified=0
+    while verified<len(wrapped_diff):
+        block=stream.read(VERIFY_BLOCK)
+        if not block: raise SystemExit(2)
+        if block!=wrapped_diff[verified:verified+len(block)]: raise SystemExit(2)
+        verified+=len(block)
+    if stream.read(1): raise SystemExit(2)
 print('true' if summarized else 'false',end='')
 PY
 )" || return 74
