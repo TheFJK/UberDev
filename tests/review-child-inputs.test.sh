@@ -617,8 +617,18 @@ review_fixer_child_bound() {
   review_fixture_bind_child "$5"
 }
 
+# FOUR positionals since #655. The trailing `phase` names WHICH fixer produced
+# this outcome, and the real fence forwards it to
+# review_track_validated_fixer_head so the commit-range carrier that arm writes
+# carries the phase in its name. This stub asserts the same closed contract the
+# real one enforces -- `-eq 4`, and a phase inside `phase1 | phase2` -- and
+# returns its truth value into the production fence chain, so a call site that
+# forgot the argument fails HERE, loudly, instead of writing a carrier under a
+# name the post-fix fences never look for.
 review_promote_validated_fixer_outcome() {
-  [ "$#" -eq 3 ]
+  [ "$#" -eq 4 ] || return 1
+  case "$4" in phase1 | phase2) return 0 ;; esac
+  return 1
 }
 
 # Keep every production layer through child-dispatch. Only the immediate final

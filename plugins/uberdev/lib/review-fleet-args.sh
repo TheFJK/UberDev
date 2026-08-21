@@ -67,6 +67,15 @@ review_fleet_roster() {
         quality     review_pr.simplify.quality \
         efficiency  review_pr.simplify.efficiency
       ;;
+    # ONE row, and it is deliberately not a lens family (#655). The post-fix
+    # pass reviews the bytes a validated fixer just wrote, so a second reviewer
+    # would be a second opinion on the same one-commit diff rather than a second
+    # angle on it -- and the whole point of this stage is that it is cheap. The
+    # `review` roster above is untouched: its seven rows are a wire format.
+    postfix)
+      printf '%s\t%s\n' \
+        postfix-correctness  review_pr.postfix.correctness
+      ;;
     *)
       echo "error: review_fleet_roster: unknown fanout stage '${1:-}'" >&2
       return 2
@@ -222,6 +231,31 @@ review_fleet_ci_slug() {
   case "${2:-}" in '' | *[!0-9]*) return 2 ;; esac
   [ -n "${1:-}" ] || return 2
   printf '%s-ci%02d' "$1" "$((10#$2))"
+}
+
+# review_fleet_postfix_slug BASE PHASE -> the post-fix child's slug (#655).
+#
+# EXACTLY THE review_fleet_ci_slug PROBLEM, one stage over. Both post-fix
+# children -- the Phase 1 one and the Phase 2 one -- run inside ONE
+# reviewIteration, so iterSuffix() cannot separate them: review_fleet_child_dir
+# would hand both `<run>/children/postfix-correctness-iter01`, the second child
+# would land in the first one's directory, and the pre-dispatch "directory
+# already exists" gate would refuse the Phase 2 pass over the Phase 1 pass's
+# residue. The phase keys the SLUG instead, which leaves review_fleet_child_dir
+# and its script-side mirror byte-identical.
+#
+# The script must derive the same slug from its own `postfixPhase` argument.
+# That mirroring is the same contract ciSlug() carries, and it is spelled out
+# here because a slug the two sides compute differently binds the child to a
+# directory the controller never minted a nonce for.
+review_fleet_postfix_slug() {
+  [ "$#" -eq 2 ] || return 2
+  [ -n "${1:-}" ] || return 2
+  case "${2:-}" in
+    phase1 | phase2) ;;
+    *) return 2 ;;
+  esac
+  printf '%s-%s' "$1" "$2"
 }
 
 # review_fleet_edge_slug EDGE -> the script's fixer/defer slug rule: lowercased,
@@ -722,6 +756,87 @@ review_fleet_bind_verify() {
 # tests/review-pr-workflow.test.sh.
 REVIEW_FLEET_VERIFY_TOTAL_CAP=40
 
+# The post-fix pass's cost bound (#655), and it is TWO NUMBERS ON PURPOSE.
+#
+#   REVIEW_FLEET_POSTFIX_LENS_COUNT   the WAVE size: how many children one
+#                                     post-fix dispatch may contain.
+#   REVIEW_FLEET_POSTFIX_TOTAL_CAP    the per-review-iteration CEILING: Phase 1
+#                                     and Phase 2 each get one wave, so two.
+#
+# Collapsing them into one knob is not a simplification, it is the shipped bug
+# this file already records once: forwarding the per-wave number as the total
+# made an 11-conflict PR refuse with ZERO resolvers dispatched. The script
+# re-checks the ceiling itself and refuses `bad_postfix_count` BEFORE the nonce
+# gate, so a wiring regression burns no nonce and dispatches no child.
+#
+# "Cheap" here is scope x lens count x agent count, decided before dispatch --
+# not a cheaper model route. RFC 0012 §5 reserves `opts.model: haiku` for
+# mechanical relays and mandates `inherit` for anything that interprets, and a
+# reviewer interprets, so the postfix `agent()` call omits `model` entirely.
+REVIEW_FLEET_POSTFIX_LENS_COUNT=1
+REVIEW_FLEET_POSTFIX_TOTAL_CAP=2
+
+# _review_fleet_write_dispatch_decision TARGET 0|1
+# _review_fleet_read_dispatch_decision  LABEL TARGET -> `0` | `1`
+#
+# ONE body behind the four public dispatch-decision names below. The verify pair
+# and the post-fix pair were byte-identical apart from the noun inside two
+# diagnostic strings, so the noun is a parameter and everything else is stated
+# once, and the four public names stay as thin wrappers over it.
+#
+# What the wrappers PRESERVE: the four public names and their arities, so no
+# call site moved; the `0`/`1` domain, closed on both sides; and the answer for
+# every record the writer can produce -- it always newline-terminates, so a
+# well-formed record still reads back rc 0 with the same byte on stdout.
+#
+# What the shared reader deliberately CHANGED, in both directions: it no longer
+# returns on the `read` builtin's status; it judges the recorded CONTENT. So a
+# zero-byte file now NAMES itself on stderr where the old body returned a bare
+# rc 2, and a final line missing its newline but carrying a valid `0`/`1` is now
+# ACCEPTED rc 0 where the old body refused it -- also in silence. Those were one
+# silent-failure bug with two faces. The `read` line below carries the reasoning
+# and the cost, and is the ONLY place either is stated; do not restate it here.
+_review_fleet_write_dispatch_decision() {
+  [ "$#" -eq 2 ] || return 2
+  # `target`, never `path` -- see review_fleet_write_ci_state: zsh ties the
+  # lowercase `path` array to $PATH, and these fences run under /bin/zsh.
+  local target="$1" dispatched="$2"
+  case "$dispatched" in
+    0 | 1) ;;
+    *) return 2 ;;
+  esac
+  ( umask 077 && printf '%s\n' "$dispatched" >"$target" ) || return 2
+}
+
+_review_fleet_read_dispatch_decision() {
+  [ "$#" -eq 2 ] || return 2
+  # `recorded` is seeded EMPTY, not left unset: the read below no longer returns
+  # on its own status, so nothing else guarantees it is bound before the `case`.
+  local label="$1" target="$2" recorded=""
+  [ -r "$target" ] || {
+    echo "error: review-fleet $label dispatch decision missing: $target" >&2
+    return 2
+  }
+  # NOT `|| return 2` -- the same rule review_fleet_read_fixer_range states
+  # below, and for the same reason: `read` reports failure for BOTH a zero-byte
+  # file and an unterminated final line, so returning on its status makes
+  # exactly those two corruption modes fail in silence -- rc 2 with nothing on
+  # stderr, which review_postfix_publish_sidecar then maps straight to 74. The
+  # operator is left with a bare exit code, no line naming the file, and an
+  # absent `phases.postfix` member the legacy-absence policy tells
+  # trust-trail-evaluator to read as `unknown`. Judge the CONTENT below instead,
+  # so every rejection names itself.
+  IFS= read -r recorded <"$target" || :
+  case "$recorded" in
+    0 | 1) ;;
+    *)
+      echo "error: review-fleet $label dispatch decision is not 0 or 1: ${recorded:-<empty>}" >&2
+      return 2
+      ;;
+  esac
+  printf '%s' "$recorded"
+}
+
 # review_fleet_write_verify_dispatch TARGET 0|1
 # review_fleet_read_verify_dispatch  TARGET -> `0` | `1`
 #
@@ -743,32 +858,184 @@ REVIEW_FLEET_VERIFY_TOTAL_CAP=40
 # dispatched nothing" are different answers and only one of them means the
 # sidecar is already published.
 review_fleet_write_verify_dispatch() {
-  [ "$#" -eq 2 ] || return 2
-  # `target`, never `path` -- see review_fleet_write_ci_state: zsh ties the
-  # lowercase `path` array to $PATH, and these fences run under /bin/zsh.
-  local target="$1" dispatched="$2"
-  case "$dispatched" in
-    0 | 1) ;;
-    *) return 2 ;;
-  esac
-  ( umask 077 && printf '%s\n' "$dispatched" >"$target" ) || return 2
+  _review_fleet_write_dispatch_decision "$@"
 }
 
 review_fleet_read_verify_dispatch() {
+  _review_fleet_read_dispatch_decision verification "${1:-}"
+}
+
+# review_fleet_write_postfix_dispatch TARGET 0|1
+# review_fleet_read_postfix_dispatch  TARGET -> `0` | `1`
+#
+# The verify pair above, for the post-fix pass, and here for the same reason:
+# the fence that decides whether a post-fix child was dispatched and the fence
+# that renders that decision in the Step 7 table are different processes, and
+# the scalar died at the closing fence marker (#427).
+#
+# Keyed per phase AND per iteration by the caller, because both move: Phase 1
+# and Phase 2 each make their own decision, and a Phase 3 CI-fix loop re-enters
+# Phase 1, so iteration 1's answer must not be able to speak for iteration 2.
+#
+# CLOSED to `0`/`1` on both sides. An absent or malformed record is rc 2 and NOT
+# a default -- "the fence cannot say what it did" and "the fence dispatched
+# nothing" are different answers, and only one of them means the sidecar for
+# this phase has already been published.
+review_fleet_write_postfix_dispatch() {
+  _review_fleet_write_dispatch_decision "$@"
+}
+
+review_fleet_read_postfix_dispatch() {
+  _review_fleet_read_dispatch_decision post-fix "${1:-}"
+}
+
+# _review_fleet_range_sha_ok SHA -> rc 0 iff SHA is 40 LOWERCASE hex.
+#
+# `case`, not `[[ =~ ]]`: this file is sourced by command and skill `bash`
+# fences that run under /bin/zsh, and the pattern-match arms are the shape the
+# rest of this file already uses for a 40-hex gate.
+#
+# THE CLASS IS ENUMERATED, NOT A RANGE. Under bash 3.2 (stock /bin/bash on
+# macOS) a bracket RANGE is resolved by the locale collation sequence, so under
+# a UTF-8 locale `*[!0-9a-f]*` ACCEPTED a 40-character all-uppercase string as a
+# valid SHA while bash 5 and zsh REJECTED the same bytes. A gate that accepts a
+# SHA it says it rejects is worse than no gate, because the carrier reader is
+# what stands between a corrupt range file and a post-fix pass that reviews the
+# wrong commits. Enumerating the sixteen members removes the collation from the
+# question entirely; it needs no LC_ALL and cannot be undone by the caller.
+_review_fleet_range_sha_ok() {
+  case "${1:-}" in
+    '' | *[!0123456789abcdef]*) return 2 ;;
+  esac
+  [ "${#1}" -eq 40 ] || return 2
+}
+
+# review_fleet_write_fixer_range TARGET BEFORE AFTER
+# review_fleet_read_fixer_range  PATH -> "<40-hex>..<40-hex>"
+#
+# The commit range one validated fixer produced, in the format the post-fix
+# scope builder consumes: `<before>..<after>` and a trailing newline, nothing
+# else. Written ONLY by review_track_validated_fixer_head's APPLIED arm, at the
+# one point where both heads have already been proven.
+#
+# THE ABSENCE OF THIS FILE IS A LOAD-BEARING FACT, which is why the writer fails
+# closed and the reader refuses rather than defaults. A no-op fixer
+# (NO_FIXES_NEEDED, REFUSED, or an APPLIED whose heads did not move) writes
+# nothing, and the post-fix fences read that absence as "no applied commit" and
+# dispatch nobody. That reading is only true while a FAILED write can never
+# masquerade as a skipped one -- so a write that does not land is rc non-zero at
+# the writer, and a file that exists but does not parse is rc 2 at the reader
+# and a halt at the caller, never a quiet skip.
+#
+# Deliberately the opposite reading from RFC 0002 §3.6.4's "do NOT silently
+# treat absence as blocker_count == 0". The difference is the writer: there,
+# absence meant a schema that predated a gate; here, absence is produced by a
+# fail-closed writer and means exactly one thing.
+review_fleet_write_fixer_range() {
+  [ "$#" -eq 3 ] || return 2
+  # `target`, never `path` -- see review_fleet_write_ci_state.
+  local target="$1" before="$2" after="$3"
+  _review_fleet_range_sha_ok "$before" || return 2
+  _review_fleet_range_sha_ok "$after" || return 2
+  # An equal pair is not a range. The APPLIED arm has already refused it, and
+  # refusing it again here keeps this writer honest on its own terms rather than
+  # on its caller's.
+  [ "$before" != "$after" ] || return 2
+  ( umask 077 && printf '%s..%s\n' "$before" "$after" >"$target" ) || return 2
+}
+
+review_fleet_read_fixer_range() {
   [ -r "${1:-}" ] || {
-    echo "error: review-fleet verification dispatch decision missing: ${1:-}" >&2
+    echo "error: review-fleet fixer commit range missing: ${1:-}" >&2
     return 2
   }
-  local recorded
-  IFS= read -r recorded <"$1" || return 2
+  local recorded="" range_before range_after
+  # NOT `|| return 2` -- see review_fleet_read_reviewed_head: `read` reports
+  # failure for both a zero-byte file and an unterminated final line, and
+  # returning on its status makes exactly those two corruption modes fail in
+  # silence. Judge the CONTENT below instead, so every rejection names itself.
+  IFS= read -r recorded <"$1" || :
   case "$recorded" in
-    0 | 1) ;;
+    *..*) ;;
     *)
-      echo "error: review-fleet verification dispatch decision is not 0 or 1: ${recorded:-<empty>}" >&2
+      echo "error: review-fleet fixer commit range is not <40-hex>..<40-hex>: ${recorded:-<empty>}" >&2
       return 2
       ;;
   esac
-  printf '%s' "$recorded"
+  range_before="${recorded%%..*}"
+  range_after="${recorded#*..}"
+  _review_fleet_range_sha_ok "$range_before" || {
+    echo "error: review-fleet fixer commit range start is not a 40-hex SHA: ${range_before:-<empty>}" >&2
+    return 2
+  }
+  _review_fleet_range_sha_ok "$range_after" || {
+    echo "error: review-fleet fixer commit range end is not a 40-hex SHA: ${range_after:-<empty>}" >&2
+    return 2
+  }
+  [ "$range_before" != "$range_after" ] || {
+    echo "error: review-fleet fixer commit range names one commit twice: $recorded" >&2
+    return 2
+  }
+  printf '%s..%s' "$range_before" "$range_after"
+}
+
+# review_fleet_bind_postfix RUN_DIR ITER PHASE WORKTREE CONTRACT SIDECAR
+#
+# The post-fix pass's single-child binding, modelled on review_fleet_bind_verify
+# for the mint and on review_fleet_bind_ci for the single-child bookkeeping. On
+# success it sets REVIEW_FLEET_NONCE_POOL, REVIEW_FLEET_CHILD_DIR and
+# REVIEW_FLEET_INSTANCE, and records the binding in SIDECAR so the fence AFTER
+# the Workflow call -- a different shell -- can still prove what it launched.
+#
+# EVERY PATH GATE RUNS BEFORE THE MINT. A wiring regression must burn no nonce
+# and dispatch no child, so an unusable phase, run directory, worktree, contract
+# or sidecar path is refused while the CSPRNG has not been touched.
+#
+# The lens name AND the edge both come from review_fleet_roster, never from a
+# literal here: the roster is the one place a slug and its edge are stated
+# together, and a second spelling of either is a second thing to keep in step
+# with the script. The row is already being read for its first column, so
+# taking the second costs nothing and makes a roster edit unable to leave this
+# binder pointing at an edge the roster no longer names.
+review_fleet_bind_postfix() {
+  [ "$#" -eq 6 ] || return 2
+  local run_dir="$1" iter="$2" postfix_phase="$3" worktree="$4" contract="$5" sidecar="$6"
+  local roster base edge slug dir instance nonce binding
+  case "$postfix_phase" in
+    phase1 | phase2) ;;
+    *)
+      echo "error: review_fleet_bind_postfix: phase must be phase1 or phase2, got '${postfix_phase:-<empty>}'" >&2
+      return 2
+      ;;
+  esac
+  case "$run_dir" in /*) ;; *) return 2 ;; esac
+  case "$worktree" in /*) ;; *) return 2 ;; esac
+  case "$contract" in /*) ;; *) return 2 ;; esac
+  case "$sidecar" in /*) ;; *) return 2 ;; esac
+  [ -d "$run_dir" ] || return 2
+  [ -d "$worktree" ] || return 2
+  [ -r "$contract" ] || return 2
+  roster="$(review_fleet_roster postfix)" || return 2
+  # `awk`, never `cut ... | head`: an early-exiting reader on the end of a pipe
+  # is the EPIPE class tests/epipe-guard.test.sh exists to keep out, and awk
+  # consumes its whole input.
+  base="$(printf '%s\n' "$roster" | awk -F'\t' 'NR==1 { print $1 }')" || return 2
+  edge="$(printf '%s\n' "$roster" | awk -F'\t' 'NR==1 { print $2 }')" || return 2
+  [ -n "$base" ] || return 2
+  [ -n "$edge" ] || return 2
+  slug="$(review_fleet_postfix_slug "$base" "$postfix_phase")" || return 2
+  dir="$(review_fleet_child_dir "$run_dir" "$iter" "$slug")" || return 2
+  instance="${dir##*/}"
+  mkdir -p "$dir" || return 2
+  nonce="$(review_fleet_mint_nonce)" || return 2
+  binding="$(python3 -I -B "$contract" bind-workflow-launch \
+    --edge-id "$edge" --instance-id "$instance" --run-nonce "$nonce" \
+    --result-path "$dir/result.md" --status-path "$dir/status.json" \
+    --working-dir "$worktree")" || return 2
+  review_fleet_write_sidecar "$sidecar" "$binding" "$dir" "$instance" || return 2
+  REVIEW_FLEET_NONCE_POOL="$nonce"
+  REVIEW_FLEET_CHILD_DIR="$dir"
+  REVIEW_FLEET_INSTANCE="$instance"
 }
 
 # review_fleet_audit_append RUN_ROOT JSON_LINE

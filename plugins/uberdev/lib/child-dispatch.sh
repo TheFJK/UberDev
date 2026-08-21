@@ -1728,8 +1728,54 @@ try:
      or raw_descriptor_state(final)!=raw_descriptor_state(opened)
      or artifact_identity(current)!=artifact_identity(final)): raise ValueError()
  raw=raw_bytes.decode('utf-8')
- # Whole-file fullmatch: no preamble, no trailer, exactly one fence.
- match=re.fullmatch(r'\s*```yaml[ \t]*\r?\n(.*?)\r?\n```[ \t]*\s*',raw,re.S)
+ # Whole-file fullmatch: no preamble, no trailer, exactly one fence. The fence
+ # itself is still mandatory -- an unfenced body is refused, as the contract
+ # says -- but its INFO STRING is optional here, and deliberately so. This is
+ # the ONE child edge in the system whose fence tag was never declared
+ # anywhere: shared/finding-verifier-output-v1.md says "one fenced YAML
+ # document" and prints its canonical example behind a BARE ``` fence, the
+ # agent card restates the same words, and review-fleet's verifyOutputContract()
+ # says "one fenced YAML document" where its fixer and Phase 1 siblings both
+ # say "one bare ```yaml fence" and name the tag. So a child that copied the
+ # contract's own worked example emitted a bare fence and had its opinion
+ # refused by a requirement no document it was given ever stated. Observed
+ # live on PR #670: a well-formed `score: 93 / reason: reproduced-from-diff`
+ # was thrown away here.
+ #
+ # A refusal at this boundary is NOT neutral, which is what makes the strict
+ # tag the wrong default. The controller records `verifier-unavailable` -- the
+ # same row a child that never ran, was blocked, or timed out produces -- so a
+ # real opinion is both discarded AND misattributed in the audit trail, and no
+ # downstream reader can tell the two apart. Accepting the tag the contract
+ # actually shows costs nothing: the body grammar below is untouched and stays
+ # exactly as strict (two keys, fixed order, bare integer, closed reason
+ # vocabulary, no `verdict`).
+ #
+ # The widening is bounded to the two forms that are actually attested -- a
+ # bare fence (the contract's example, and the live child's bytes) and ```yaml
+ # (what this parser has always taken, and what the sibling edges' prompts
+ # demand). Any other info string is still refused; this is a tolerant reader,
+ # not an open one.
+ #
+ # This regex therefore differs ON PURPOSE from the byte-identical copies at
+ # the Phase 1 twin above and in lib/review-aggregate.sh / lib/review-fences.sh.
+ # Those edges DO name `yaml` in the prompt that binds their child, so their
+ # strictness is documented and must stay. Do not "restore consistency" by
+ # re-narrowing this one -- that would re-open #670's discarded-opinion bug.
+ #
+ # THE CONTRACT OWNS THE RULE; this comment does not restate it.
+ # shared/finding-verifier-output-v1.md states the accepted opener set in its own
+ # words -- the two it admits, the six spellings it refuses, and this boundary by
+ # name -- and it is the document a child is actually given. Writing the set down
+ # a second time here would be one rule in two uncompared copies, which is the
+ # class #673 tracks; read it there.
+ #
+ # What is left is the READER-SIDE invariant, which is this parser's alone: it
+ # must never be NARROWER than that prose. Every shape the contract describes is
+ # accepted here, so a gap between the two can only ever forgive a child, never
+ # surprise one -- which is what makes a widening of the prose safe to land
+ # before this regex catches up, and a narrowing of this regex never safe.
+ match=re.fullmatch(r'\s*```(?:yaml)?[ \t]*\r?\n(.*?)\r?\n```[ \t]*\s*',raw,re.S)
  if not match: raise ValueError()
  # Exactly two lines, in this order. `score` is a bare non-negative integer
  # with no leading zero (a quoted "80" is a string, not a score).

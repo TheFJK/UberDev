@@ -4,6 +4,299 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.52.0] — 2026-08-21
+
+Lands the seven-PR stack #651, #652, #657, #658, #659, #660 and #661 in one
+integration commit, closing #646, #649, #650, #653, #654, #655 and #656. None of
+those PRs carried a version surface of its own: under the fleet lane in
+`AGENTS.md` the bump belongs to the commit that lands the stack, once, and this
+is it. MINOR rather than PATCH because the stack ships features — a new shipped
+agent card, a new `/review-pr` phase, and a collapsed `/turbox` design path.
+
+### Added - `/review-pr` reviews each code-fixer's own commits before the phase moves on (#655)
+
+The code a `code-fixer` child wrote was the only code on the branch nobody read
+before the trust signal was emitted. Phase 1 reviews the diff as it arrived, the
+fixer then rewrites parts of it, and Phase 2 simplifies from there; the Phase 2
+fixer then applies its own commit and Phase 2.5 files against a tree no reviewer
+re-read. Both fixers are agents editing code, and their output reached the trust
+trail on the strength of the finding they were handed rather than of any review
+of what they wrote in response to it.
+
+A tenth `review-fleet` stage, `postfix`, now dispatches ONE
+`uberdev:code-reviewer` over each validated fixer's own commit range
+(`BEFORE..AFTER`), on the new `review_pr.postfix.correctness` edge, as new steps
+**5p** (after the Phase 1 fixer) and **6p** (after the Phase 2 fixer). The two
+steps sit deliberately outside the `a`/`b`/`c` series: `6b` already names three
+different things in `commands/review-pr.md` — the Phase 2 fixer dispatch, the
+Phase 2.5 sub-phase, and (as `6b.0`) the Phase 1 verification gate — so a fourth
+`6b` would have been uncitable.
+
+- **Cheap by scope, lens count and agent count — never by a cheaper model.** The
+  roster is ONE row, not a lens family: a second reviewer over a one-commit diff
+  is a second opinion on the same bytes rather than a second angle on them.
+  `REVIEW_FLEET_POSTFIX_LENS_COUNT` (1) and `REVIEW_FLEET_POSTFIX_TOTAL_CAP` (2)
+  are projected and refused BY NAME (`bad_postfix_count`) in
+  `skills/review-fleet/workflow.js` before a nonce is minted, so an out-of-range
+  fanout costs zero dispatches. Worst case is +2 agents per run; the common case
+  — neither fixer applied anything — is +0. Model tiering is NOT how the cost is
+  bounded and cannot be: RFC 0017 §9 records it *Unreachable*
+  (`route_unenforceable` since #381) and RFC 0012 §5 binds every workflow
+  `agent()` call to omit `model`, so the postfix dispatch omits it too.
+- **Wired at all four promote call sites.**
+  `review_promote_validated_fixer_outcome` takes `phase` as a MANDATORY fourth
+  positional — Phase 1 routed, Phase 1 Workflow, Phase 2 routed, Phase 2
+  Workflow — and the hard arity equality turns a transport left un-updated into
+  a loud refusal instead of a silent no-op under
+  `UBERDEV_CARRIER_BACKEND=workflow`.
+- **Advisory only: no new halt path, no fixer re-entry.** A post-fix finding is
+  transcribed into a `postfix-aggregate` envelope — the eighth member of
+  `findings-to-issues`' closed source set — and joins the SAME single Phase 2.5
+  dispatch as every other deferred row, carrying `disposition: "DEFERRED"`
+  inline. There is no `postfix-disposition.json`: a postfix row is in neither
+  phase's aggregate, and binding a neighbouring phase's disposition to it would
+  be binding by proximity. The child's severity vocabulary is
+  `{blocker, suggestion}` — the only pair `shared/phase1-reviewer-output-v1.md`
+  admits — and a `suggestion` files nothing, exactly as every Phase 1
+  `suggestion` row already does.
+- **Off-switch `--no-post-fix-review`**, recorded to
+  `post-fix-review-phase.txt` in the run directory and RE-READ by steps 5p/6p,
+  because each fence is a fresh shell and the variable is not the decision. An
+  unreadable record halts `post_fix_review_phase_unreadable` rather than
+  defaulting the pass ON: a fence that cannot tell what the operator asked for
+  must not answer for them.
+
+### Changed - the trust-trail predicate is UNCHANGED, and that is a decision (#655)
+
+**This is explicitly NOT the BREAKING trust-trail contract change RFC 0002
+describes, and it owes no BREAKING callout.** The GREEN / YELLOW / RED formula
+gains no term. A post-fix blocker is filed by the same single Phase 2.5
+`findings-to-issues` dispatch as every other deferred blocker, so it raises
+`by_severity.blocker`, and GREEN and YELLOW both already require
+`by_severity.blocker == 0`; if that filing halts the sub-phase, the independent
+`halted == false` conjunct fails as well. Two independent paths to RED that
+already ship — a new conjunct would be a second spelling of a gate that already
+fires. No existing schema field changes shape, and `trust-trail-evaluator` needs
+no change.
+
+The audit JSON gains one ADDITIVE, non-predicate block, `phases.postfix`, whose
+`phase1` and `phase2` members are the sidecars steps 5p/6p published, copied
+verbatim rather than recomputed, so the audit and the run directory cannot
+disagree about what the pass did. Its legacy-absence policy is deliberately the
+INVERSE of `phases.phase2_5`'s: because no predicate reads it, an absent block is
+**`unknown`** — never `STALE`, and never zero. Reading absence as zero would let
+a later change that does wire it into a predicate report every pre-#655 trail as
+"the fixer commits were reviewed and were clean".
+
+**Two residuals, recorded rather than softened.** (1) No predicate reads
+`phases.postfix`, so a `status: "blocked"` pass — an unavailable or malformed
+child, which is an rc-0 continuation — emits the IDENTICAL GREEN as a pass that
+ran and found nothing: the predicate cannot tell silence from cleanliness. That
+is not a regression (before #655 nobody reviewed those commits at all, and a
+GREEN was emitted over them unconditionally), and it is NOT excused by RFC
+0017's *"fail toward keeping"* — that rule preserves a finding that already
+exists when its verifier is unavailable, and an unavailable post-fix reviewer
+produces no finding to preserve. What ships instead is visibility in four
+places: the sidecar's `status`/`reason`, the `phases.postfix` block, the Step 7
+row, and a `REVIEW_POSTFIX_BLOCKED=<phase>` line on stderr. (2) No test in this
+change proves a post-fix reviewer finds a real fixer-introduced defect. Every
+assertion against `commands/review-pr.md` is a text assertion — green CI proves
+the wiring, not the efficacy.
+
+### Added - `/turbox` collapses the design path to `design-planner` plus `plan-reviewer` (#656)
+
+The `/turbox` standard-mode design path ran a five-rung ladder — an always-on
+research fan-out, then `spec-writer`, `spec-reviewer`, `plan-writer`,
+`plan-reviewer` — to produce a plan. The research lenses and the intermediate
+design spec were both cost with no reader: nothing downstream of `plan.md` read
+`spec-r1.md`, and the design rung can read the worktree itself.
+
+A new shipped agent card, `plugins/uberdev/agents/design-planner.md`, is now the
+whole design pass. One leaf reads the issue-body file, explores the issue's
+worktree, decides the design and writes a wave-decomposed `plan.md` straight to
+disk. There is no intermediate design spec on this lane — `plan.md` is the single
+design artifact and carries its own `## Design` and `## Security check` blocks —
+and the controller never reads the plan body, only the structured return block,
+forwarding the plan **path** to the rungs that need it.
+
+- **Two rungs, not five.** `uberdev:design-planner` then `uberdev:plan-reviewer`
+  (always on, and the plan is never rewritten). `spec-writer` and
+  `spec-reviewer` are no longer dispatched on this lane, and
+  `skills/turbox-fleet/SKILL.md` says so at the rung — *"Neither card is
+  dispatched on this lane"* — so a controller that restores a design-document
+  rung is contradicting the skill rather than filling a gap. The three always-on
+  research lenses (codebase, constraints, test coverage) are gone; only the
+  risk-gated **security** lens survives, as Phase 2, writing
+  `<runDirAbs>/issue-<N>/research/security.md`.
+- **`TURBOX_DESIGN_RUNGS` retargeted to the rungs the lane actually runs**
+  (`plugins/uberdev/lib/turbox-fleet.sh:144`), so the projected-agent budget
+  stops charging for rungs that were deleted.
+- **Untrusted issue text cannot reach workers as task instructions.**
+  `issue_path` is a **path**, never inline text. The card mandates an
+  *attributed* `<external-untrusted-input source="issue-body-<N>">` envelope and
+  requires every `</external-untrusted-input>` occurring in the payload to be
+  neutralised first — pasted in unchanged it closes the envelope early and
+  everything after it reads as the agent's own words rather than as quoted data.
+- **Registered, not just written.** `design-planner` is added to
+  `policy/model-routing-v1.json` and `vendor.json`, RFC 0019's count moves with
+  it, and RFC 0020 plus the three README surfaces are amended. The command
+  surface stops advertising the deleted research fan-out.
+- **`plan-reviewer` forks by lane**: its `REVISIONS_REQUIRED` audience differs on
+  the `/turbox` lane, its AC-source disclosure is routed onto `findings[]` rather
+  than into prose, and the shared reviewer cards fork the `spec_path` contract by
+  lane — a lane with no spec must not be handed a spec path.
+- **Two turbox guards de-vacuumed**: the design-rung `plan.md` row is scoped to
+  Phase 3 so it cannot pass against an unrelated mention, and the roster guard
+  reads both dispatch spellings so it cannot go green by matching neither.
+
+### Added - the five ungoverned fleet dispatch lanes are declared and machine-checked (#654)
+
+`solve-run-tree-v1.json`'s completeness checks C1-C7 all start from a DECLARED
+entry, so their universe is the declared set — the #370/#371 class, a
+completeness guard whose predicate is disjoint from the drift it exists to find.
+Five Workflow fleets dispatched agents outside it entirely.
+
+`review_fleet`, `scan_fleet`, `goal_pipeline`, `testers_pipeline` and
+`uberthink_pipeline` are now declared, each with its source, its reserved edge
+prefix, its `agent_kinds` and `dispatch_sites`, and its own `agent_kind_rule`
+explaining why the shared normalizer does not apply. Every one of those
+derivations is produced **by execution** under `tests/_workflow_harness.js`, not
+by grep.
+
+**Declaring a lane does not close its gap; it makes the gap machine-visible so a
+silent widening reds.** A Workflow script has no filesystem (RFC 0012 §2.2
+constraint 6), so it cannot read the manifest and no edge there can constrain it.
+What the entries pin is the size and shape of each blind spot — `scan_fleet` is a
+*writing* workflow whose apply arm commits and opens PRs; `testers_pipeline`
+dispatches 32 agents across 7 sites on a bare default run, one of which creates
+GitHub issues; `uberthink_pipeline` is the largest producer in the plugin at 21
+dispatch sites and 76 agents on a default two-island run.
+
+`goal_pipeline` is the sharpest of the five: its real fleet dispatch is not an
+`agent()` call at all but a nested `await workflow(...)`, which the harness
+records in `workflowCalls` and never in `agentCalls` — so a derivation keyed on
+agent labels alone would certify four shell relays as the lane's entire dispatch
+surface while the run it exists to perform went unrecorded. `dispatch_sites`
+therefore counts 4 agent sites plus 1 workflow site.
+
+Alongside: the scope guard rules are lane-parameterised (solve-fleet only) rather
+than applied to lanes they were never written for; corpus, root-liveness and
+kind-rule provenance guards are added; and the residual ledger is corrected so
+the rule prose that no test executes is disclosed as prose instead of reading as
+an enforced rule.
+
+### Fixed - `plan-tasks` could not read the `Owns` form `plan-writer` actually emits (#653)
+
+`plan-tasks` matched `^\*\*Owns[^*]*\*\*\s*:?\s*(.*)$` and split the capture on
+`[,\n]` — the remainder of the LABEL LINE, and nothing else. `uberdev:plan-writer`
+emits the allowlist as a markdown bullet list on the lines BELOW the label, so the
+capture group was empty and the bullets were never read: **every task in every
+medium-tier plan came back `owns: []`**. Measured on the #650 plan of a live
+`/turbox 646 649 650` run at 3654f0fb — ids, titles and waves all parsed, only
+`owns` was empty, for all four tasks.
+
+That is not a formatting nit. `skills/turbox-fleet/SKILL.md` Phase 4 requires a
+non-empty `unowned` to be treated as `plan_unusable`, so every medium-tier issue
+silently dropped to the single-solver path — and wave-parallel implementation over
+disjoint `Owns` sets is the only reason `/turbox` exists over `/turbo`. It failed
+in the safe direction (the run still produced a PR), which is why it shipped
+unnoticed.
+
+`plan-tasks` now reads both forms. A label with an inline value keeps its existing
+meaning; a label with nothing after it reads the bullet list that follows,
+stopping at the first non-bullet line so the `**Files:**` block and the `- [ ]
+**Step N**` checkboxes under every task header are never harvested as ownership.
+A label with neither an inline value nor a list still yields `unowned` — widening
+the parser is not accepting everything.
+
+The root cause is the same two-surfaces-no-comparator class: the parser was
+written against `agents/plan-writer.md`, the writer emitted something else, and
+nothing ever ran one against the other. The card now enumerates both forms and
+names `lib/turbox-fleet.sh` as the single source for what parses, and
+`tests/turbox-fleet-runtime.test.sh` R6c extracts the card's OWN task blocks and
+feeds them through the real `plan-tasks` — run against the pre-fix parser that row
+reports `unowned:[3]`, so it reds on drift in either direction rather than being a
+transcribed copy of what the parser already liked.
+
+### Fixed - `/turbox` was an undeclared dispatch substrate (#649)
+
+`solve-run-tree-v1.json` carved out exactly one ungoverned substrate. `/turbox`
+(RFC 0020) is a second: the calling session dispatches its whole fleet through the
+Task tool, never sources `lib/child-dispatch.sh`, and so mints no instance id,
+creates no handoff, and produces no run-tree edge or receipt. RFC 0020 §1 positions
+that lane as the one that CAN run the parallel-wave implementation phase, making it
+a candidate default — and a default lane with zero run-tree governance and no
+declaration of that fact would let the manifest read as full coverage.
+
+C8 now builds its universe from `lib/solve-launcher.sh` bytes plus the filesystem —
+the run tree's own `root_edge` source, cross-checked against
+`edges[root_edge_id].source` — and consults the manifest only to ask whether each
+surface it found is *declared*. The path pattern matches whatever literal the
+launcher wrote, so an extension-less surface enumerates like a `.sh` one; a `*.sh`
+filter would have gone quietly green. Two self-checks run first, because a blind
+completeness rule reports perfect coverage: a floor ratchet, and a known-positive
+requiring the enumeration to see a fleet script the manifest already declares.
+
+Z16 is the anti-vacuity half — a real undeclared substrate spliced into a copy of
+the launcher source must red C8 — and it earned its keep immediately, first failing
+with "the mutant still validates" because `RE_ROUTED` matches a bare filename and
+all three of its hits in this repo are comments, so a Workflow fleet was ruled
+governed for MENTIONING an adapter it never uses. Executable evidence now outranks
+prose. C9 derives the turbox entry's `agent_kinds` and `dispatch_sites` from its
+source on every run (13 kinds, 14 sites), and the row-count floor moves from
+`-ge 13` to `-eq 18`, because a `-ge` floor cannot tell a deleted row from an
+added one.
+
+### Fixed - `/merge`'s partial-trailer harvest released a live claim from a documenting PR body (#646)
+
+The harvest tolerated a leading list marker and surrounding backticks, because the
+producer is a free-text agent that demonstrably decorated the line. But a bullet
+whose entire content is the trailer is byte-for-byte identical whether a solver
+emitted it or a human wrote it while *documenting the format* — and `/merge` runs
+over every PR. So a documenting body released a claim a live solver still held,
+stripped the assignee, and wrote a `merge-partial` audit row asserting the release
+was legitimate.
+
+The fix hardens the producer rather than loosening the reader. `prLinkLine()` now
+SHOWS the mandated line flush and undecorated on a line of its own instead of
+quoting it inside a sentence and inside a code span — which is where the
+decorations writers copied came from — names indentation among the forbidden
+shapes, and has the writer read the body file back before opening the PR. With the
+emission pinned, the harvest drops the decoration tolerance and keeps only trailing
+whitespace, which is invisible and so can never turn an emission into
+documentation.
+
+`tests/solve-fleet-workflow.test.sh` P1-P6 extract `prLinkLine` from the shipped
+script, CALL it, and feed its rendered line to the harvest expression read live out
+of `merge-pipeline/SKILL.md`, so the two ends cannot drift apart; P6 is the
+negative control over the shapes a human writes.
+`tests/merge-pipeline-zsh.test.sh` MZ3.k/l invert to refusals, MZ3.p covers the
+undecorated bullet the issue names, and MZ3.m keeps the whitespace tolerance.
+
+### Fixed - the SDD wave/loop-cap contract had uncompared copies across both lanes (#650)
+
+The wave contract existed as prose in two lanes with nothing executing one against
+the other, and the skill prose still described a pre-RFC-0020 world. A new
+`tests/sdd-wave-contract.test.sh` binds **both** wave predicates and **16** cap
+sites with one executing comparator, and is added to the CI run list in
+`.github/workflows/test.yml` — a single comparator rather than a second
+transcription, which is the only shape that can catch the two copies disagreeing.
+
+`skills/subagent-driven-dev/SKILL.md` narrows the parallel claim to the session
+lane — the Workflow lane's leaf agents cannot spawn, so a blanket parallel claim
+was false there — and fails closed on `SDD_BATCH_TASK_IDS`. That variable is a
+**controller-supplied input**, not something the fence derives, so unset, empty or
+whitespace-only is a caller error rather than an empty batch: the fence returns 2
+and dispatches nothing. Its expansion is quoted, an unquoted `$SDD_BATCH_TASK_IDS`
+being the defect the guard exists to prevent. `tests/sdd-child-inputs.test.sh`
+covers the child-input contract.
+
+Two documentation retractions ship with it: RFC 0012 §3.6's `sdd-waves.js` roadmap
+is retracted rather than left describing work that is not happening, and three
+cap-ownership claims in the `/turbox` docs are retracted into pointers at the test
+that actually enforces the cap — a claim about a number, stated where no test
+reads it, is a second copy waiting to drift.
+
 ## [0.51.6] — 2026-08-20
 
 ### Fixed - a retried reviewer that died mid-run could overwrite a completed one's result

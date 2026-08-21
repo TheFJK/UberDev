@@ -338,6 +338,26 @@ CONTRACTS: dict[str, list[str]] = {
         "lib/goal-state.sh",
         "skills/goal-pipeline/SKILL.md",
     ],
+    # NOT in #370's register — found by applying this convention to #655's tenth
+    # stage.  The `stage` scalar has no default anywhere: skills/review-fleet's
+    # script aborts `unknown_stage` on a value it does not serve, and its
+    # SKILL.md enum row is what a controller author reads before emitting one.
+    # Two copies, one in each language, and until now nothing compared them — so
+    # a stage added to the script and forgotten in the table (or the reverse)
+    # advertised a vocabulary the other side refuses.
+    #
+    # WHY BOTH SITES HAD TO CHANGE SHAPE TO BE MARKABLE, recorded so the next
+    # editor does not "tidy" either one back: the extractor takes the single
+    # zero-reject span with the most members and hard-fails on a region carrying
+    # two competing vocabularies.  The script's abort message therefore spells
+    # the list as ONE string with the sentence around it in its own strings, and
+    # the SKILL.md row spells it as ONE backticked alternation with the prose
+    # outside the backticks.  Weaving either list back into its sentence makes
+    # the English words members of the contract.
+    "review-fleet-stage": [
+        "skills/review-fleet/SKILL.md",
+        "skills/review-fleet/workflow.js",
+    ],
     # rank 4 — the closed set of risk-signal names (11).  Textually comparable,
     # so it belongs to this mechanism even though #370 files it under Half B;
     # the Half B guard it still needs is a round-trip of solve_triage's
@@ -464,6 +484,23 @@ TWIN_ALLOWLIST: dict[str, list[tuple[str, str, str]]] = {
     ],
     "goal-circuit-breaker-reason": [
         ("plugins/uberdev/skills/goal-pipeline/SKILL.md", "halt reasons emitted by Phase", _PROSE),
+    ],
+    "review-fleet-stage": [
+        (
+            "plugins/uberdev/skills/review-fleet/workflow.js",
+            "ONE script, one `mode` branch",
+            "the script's `meta.description` — an English sentence that names "
+            "each stage and says what it dispatches, inside a JSON literal the "
+            "workflow harness parses for its own shape. It is documentation "
+            "ABOUT the vocabulary, not a producer or a validator of it: nothing "
+            "reads this string to decide whether a stage is served. Extracting "
+            "a member set from it needs a regex over the member NAMES, which "
+            "RFC 0016 section 2.2 forbids as vacuous — the same exemption "
+            "skills/goal-pipeline/workflow.js already carries. A marker here "
+            "would also fail the path-multiset ratchet, since the registry "
+            "lists workflow.js once (the `unknown_stage` abort) and this is the "
+            "same file. " + _PROSE,
+        ),
     ],
     "trust-signal": [
         # Adjacent, UNRELATED enums in the same constants block share tokens

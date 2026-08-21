@@ -249,6 +249,10 @@ edge_semantics={
     'review_pr.fix.phase2':('provider','code-fixer',('review-pr','solve','turbo'),fixer_contract),
     'review_pr.defer.findings':('provider','findings-to-issues',('review-pr','simplify','solve','turbo'),None),
     'review_pr.verify.finding':('provider','finding-verifier',('review-pr',),verify_contract),
+    # #655 — post-fix reviewer edge. Same reviewer output contract as the seven
+    # lenses, different scope binding (commit range, not changed_paths); see
+    # review_scope_inputs below.
+    'review_pr.postfix.correctness':('provider','code-reviewer',('review-pr',),review_contract),
     'review_pr.ci.classify':('provider','ci-failure-classifier',('review-pr','solve','turbo'),None),
     'review_pr.ci.fix_code':('provider','ci-code-fixer',('review-pr','solve','turbo'),None),
     'review_pr.ci.rebase':('provider','ci-rebase-handler',('review-pr','solve','turbo'),None),
@@ -257,6 +261,16 @@ edge_semantics={
     'simplify.fix.phase2':('provider','code-fixer',('simplify',),fixer_contract),
 }
 expected_edges=set(edge_semantics)
+# Every phase1-reviewer-v1 edge must bind its review to an explicit scope input,
+# so a projected reviewer can never be dispatched over an unbounded tree. The
+# seven lenses bind by changed_paths; #655's post-fix edge binds by the fixer's
+# own commit range plus the rendered diff. Keyed per edge rather than relaxed to
+# "any scope input", because a disjunction here goes vacuous the moment a third
+# shape appears.
+default_review_scope_inputs={'changed_paths':'repo_path_array'}
+review_scope_inputs={
+    'review_pr.postfix.correctness':{'commit_range_path':'path','diff_path':'path'},
+}
 review_fixer_inputs={
     'authority_path':'path','authority_sha256':'string',
     'commit_range_path':'path','commit_range_sha256':'string',
@@ -357,7 +371,9 @@ def validate(plugin):
     for edge in (edge_id for edge_id,semantics in edge_semantics.items() if semantics[3]==review_contract):
         row=edges[edge]
         assert row.get('output_contract')=='phase1-reviewer-v1'
-        assert row['required_inputs'].get('changed_paths')=='repo_path_array'
+        expected_scope=review_scope_inputs.get(edge,default_review_scope_inputs)
+        for scope_input,scope_type in expected_scope.items():
+            assert row['required_inputs'].get(scope_input)==scope_type,(edge,scope_input)
     return raw,(plugin/contract_rel).read_text()
 claude_policy,claude_contract=validate(root/'plugins/prkit')
 PY

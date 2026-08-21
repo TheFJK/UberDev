@@ -41,6 +41,158 @@
           524,
           615
         ]
+      },
+      {
+        "substrate": "session-task-fanout-turbox-fleet",
+        "source": "plugins/uberdev/skills/turbox-fleet/SKILL.md",
+        "reason": "RFC 0020 added /turbox as a SECOND lane off the same launcher: `--standard` pins the resolved backend to `workflow` and then emits a turbox plan instead of a Workflow args envelope, so the calling SESSION becomes the fleet orchestrator and dispatches every agent through the Task tool. It never sources lib/child-dispatch.sh, so it mints no instance id, creates no handoff, and produces no run-tree edge or receipt — it is neither the governed routed-child substrate nor the Workflow-native one above. RFC 0020 §1 positions this lane as the one that CAN run the parallel-wave implementation phase, so it is a candidate default; a default lane with zero run-tree governance and no declaration of that fact would let this manifest read as full coverage. Recorded here so the gap is visible and machine-checked (#649).",
+        "reserved_edge_prefix": "turbox_fleet.",
+        "dispatch_sites": 8,
+        "agent_kinds": [
+          "code_reviewer",
+          "design_planner",
+          "general_purpose",
+          "implementation_worker",
+          "plan_reviewer",
+          "research_security",
+          "spec_compliance_reviewer"
+        ],
+        "agent_kind_rule": "The rule in scope.agent_kind_rule normalizes a Workflow opts.label and cannot apply here: this lane runs no script, so there is no label to normalize and nothing to execute under the test harness. A kind is instead an agent identifier the source names — `uberdev:<stem>` where plugins/uberdev/agents/<stem>.md exists (which is what excludes the label `uberdev:active`, the command `uberdev:turbox` and the skill `uberdev:orchestrator`), plus the host built-in `general-purpose`, with `-` mapped to `_`. dispatch_sites is the number of such mentions rather than the number of distinct kinds: every one of them is a dispatch instruction, and `implementation-worker` is named at two of them (the Phase 4b wave implementer and the Phase 5 fix round). The Phase 6 delivery rung names no agent type at all, so it contributes no site. Derived from the source by C9 in tests/solve-run-tree-scope.test.sh, never by hand.",
+        "tracking_issues": [
+          649
+        ]
+      },
+      {
+        "substrate": "workflow-native-review-fleet",
+        "source": "plugins/uberdev/skills/review-fleet/workflow.js",
+        "reason": "A Workflow script has no filesystem (RFC 0012 §2.2 constraint 6, enforced by tests/workflow-scripts.test.sh T1, which forbids fs./process.), so it cannot read this manifest and no edge here can constrain it. What makes THIS lane's gap real: skills/review-fleet/workflow.js is the DEFAULT engine for BOTH /uberdev:review-pr and /uberdev:simplify — lib/dispatch.sh:610 resolves the `review-pr|simplify` case arm straight to it — and since #383 all four Phase-3 CI stages route through it as well, so nothing in the review arc reaches the routed-child adapter this manifest governs. Two of the six sites dispatch children that MUTATE the caller's checkout with no worktree isolation (uberdev:code-fixer at :1882, which commits on the PR branch, and uberdev:ci-rebase-handler at :2092, whose rebase precedes the single leased force-push), and neither mints an instance id, creates a handoff, or produces a run-tree receipt. The reserved prefix is the LANE id and not an edge id the lane emits: its own edge ids are `review_pr.*` and `simplify.*`, both already claimed by governed routed-child edges here, and C6 rejects those two prefixes as prkit-projected namespace collisions. Declaring the lane does not close that gap; it makes the gap machine-visible and pins its six sites and twelve kinds so a silent widening reds (#654).",
+        "reserved_edge_prefix": "review_fleet.",
+        "dispatch_sites": 6,
+        "agent_kinds": [
+          "ci_classify_ciN",
+          "ci_defer_ciN",
+          "ci_fix_code_ciN",
+          "comments",
+          "convention",
+          "correctness",
+          "findings_to_issues",
+          "fixer_review_pr_fix_phase1",
+          "general",
+          "silent_failures",
+          "tests",
+          "types"
+        ],
+        "agent_kind_rule": "A review_fleet agent kind is a Workflow agent's opts.label with the Phase-3 loop index `-ci<n>` collapsed to `-ciN`, then `:` mapped to `.` and `-` mapped to `_`. `-ci<n>` is the ONLY index these labels carry — ciSlug() appends it as base plus `-ci` plus pad2(ciLoopIter), and ciLoopIter is clamped to 1..3 — so it says which Phase-3 iteration ran, not what ran; left in, one rung is three kinds and the kind space grows with the loop counter. Everything else in a review_fleet label is semantic and is left alone: the seven REVIEW_ROSTER slugs and the three LENS_ROSTER slugs are fixed lens names, edgeSlug(fixerEdgeId) ranges over three fixed edge ids, and ci-fix-code versus ci-rebase come from the fixed two-entry CI_FIX_ARMS route table, so collapsing any of them would merge distinct dispatch edges into one kind and satisfy C1 trivially. Derived by execution in tests/solve-run-tree-scope.test.sh under tests/_workflow_harness.js, one run per stage arm that carries its own agent( site, never by grep. FIXED-CLAUSE MARKER: everything from this marker to the end of this rule is the FIXED-CLAUSE REGION, and its last two sentences are mirrored byte-for-byte in tests/solve-run-tree-scope.test.sh (the KOFN and PROSE literals there) and compared verbatim by C12 conjuncts 4 and 5, so edit them in both places or in neither. Three things are unusable inside the region. A DOUBLE QUOTE: it terminates the JSON string on this side and the JS string literal on the test side, so it can survive only as an escape, and an escape written right on one side and wrong on the other is a silent mismatch rather than a syntax error. An APOSTROPHE: no quoting stops one any more — the test-side copy moved into a quoted heredoc written to a scratch .js file, where it sits in a double-quoted JS literal and an apostrophe is inert rather than a shell syntax error — which is exactly why the ban is now carried by an EXECUTED row: put one on either side alone and the two copies merely stop matching, so C12 reds with an omits-the-fixed-clause message that says nothing about apostrophes, and C13 in that same file therefore scans BOTH copies for the character and reds naming it. A COUNT: a quantity here would be a second copy of dispatch_sites for this manifest to drift against. Apostrophes before this marker are unconstrained. agent_kinds is the kind set the fixture reached, not proof that every dispatch_sites site ran. This rule text is PROSE that no test executes: the grammar that actually runs is the lane normalizer in tests/solve-run-tree-scope.test.sh, and C12 compares this text against the index tokens listed beside that normalizer, never against a label.",
+        "tracking_issues": [
+          654
+        ]
+      },
+      {
+        "substrate": "workflow-native-scan-fleet",
+        "source": "plugins/uberdev/skills/scan-fleet/workflow.js",
+        "reason": "A Workflow script has no filesystem (RFC 0012 §2.2 constraint 6, enforced by tests/workflow-scripts.test.sh T1, which forbids fs./process.), so it cannot read this manifest and no edge here can constrain it. What makes THIS lane's gap real rather than nominal: it is the shared fixed-fleet engine behind TWO commands — /uberscan at mode=scan and /ubersimplify at mode=simplify — and unlike the read-only fleets it is a WRITING workflow: the apply arm dispatches one uberdev:code-fixer per area sequentially onto a shared branch, each committing, and the pr arm opens a PR. An ungoverned lane here mutates the repository and opens PRs, not just files issues. It also scales past any fixed edge list: numAreas clamps to 1..24 and each area costs a reviewer plus (in simplify) a fixer and a fixer-aggregate, with maxAgents clamping to 2000, so one run can dispatch far more agents than the twelve sites suggest. Because two commands enter one script, a name-based reading of coverage is doubly wrong — neither `uberscan.` nor `ubersimplify.` names the substrate — which is why the entry is keyed `scan_fleet.`, after the script rather than after either command, and recorded here so the gap is visible and machine-checked rather than inferred from a name (#654).",
+        "reserved_edge_prefix": "scan_fleet.",
+        "dispatch_sites": 12,
+        "agent_kinds": [
+          "apply_setup",
+          "area_pack",
+          "branch_cleanup",
+          "findings_to_issues",
+          "fixer_NNN",
+          "fixer_agg_NNN",
+          "global_pass",
+          "open_pr",
+          "scan_aggregate",
+          "scan_area_NNN",
+          "simplify_area_NNN",
+          "simplify_issues_agg"
+        ],
+        "agent_kind_rule": "The rule in scope.agent_kind_rule collapses only the colon-prefixed `:t<n>` and `:r<n>` indices and cannot apply to scan_fleet: no label in this lane contains a colon at all. Its instance index is instead the trailing zero-padded area id `-<nnn>` appended by pad() at skills/scan-fleet/workflow.js:125 — `(00 + String(id)).slice(-3)` — which exactly three of the twelve label expressions carry: `labelPrefix + pad(areaId)` (:588), `fixer-agg- + pad(areaId)` (:672) and `fixer- + pad(areaId)` (:710); the remaining nine are fixed string literals with no index. A scan_fleet kind is therefore an opts.label with that trailing `-<nnn>` collapsed to NNN and `-` mapped to `_`, and nothing else collapsed: scan_area_NNN stays distinct from simplify_area_NNN because labelPrefix branches on mode onto a different agentType, and fixer_agg_NNN stays distinct from fixer_NNN because an aggregator relay is not a code-fixer. The area index is collapsed because it says which AREA of a rung ran, not what the rung is: left in, the kind space grows with the --areas config (1..24) and no finite enumeration below could satisfy C1 for a run that actually happens. Derived by execution under tests/_workflow_harness.js against the lane's own bytes, never by grep. dispatch_sites counts agent( call sites rather than distinct kinds, and for this lane the two quantities coincide at 12 only by cancellation: site :587 emits two kinds because labelPrefix branches on mode, while sites :655 and :772 are two separate sites emitting the one shared label findings-to-issues. FIXED-CLAUSE MARKER: everything from this marker to the end of this rule is the FIXED-CLAUSE REGION, and its last two sentences are mirrored byte-for-byte in tests/solve-run-tree-scope.test.sh (the KOFN and PROSE literals there) and compared verbatim by C12 conjuncts 4 and 5, so edit them in both places or in neither. Three things are unusable inside the region. A DOUBLE QUOTE: it terminates the JSON string on this side and the JS string literal on the test side, so it can survive only as an escape, and an escape written right on one side and wrong on the other is a silent mismatch rather than a syntax error. An APOSTROPHE: no quoting stops one any more — the test-side copy moved into a quoted heredoc written to a scratch .js file, where it sits in a double-quoted JS literal and an apostrophe is inert rather than a shell syntax error — which is exactly why the ban is now carried by an EXECUTED row: put one on either side alone and the two copies merely stop matching, so C12 reds with an omits-the-fixed-clause message that says nothing about apostrophes, and C13 in that same file therefore scans BOTH copies for the character and reds naming it. A COUNT: a quantity here would be a second copy of dispatch_sites for this manifest to drift against. Apostrophes before this marker are unconstrained. agent_kinds is the kind set the fixture reached, not proof that every dispatch_sites site ran. This rule text is PROSE that no test executes: the grammar that actually runs is the lane normalizer in tests/solve-run-tree-scope.test.sh, and C12 compares this text against the index tokens listed beside that normalizer, never against a label.",
+        "tracking_issues": [
+          654
+        ]
+      },
+      {
+        "substrate": "workflow-native-goal-pipeline",
+        "source": "plugins/uberdev/skills/goal-pipeline/workflow.js",
+        "reason": "RFC 0015 §5 made /goal a Workflow-native driver: lib/goal-phase0.sh emits the args envelope and skills/goal-pipeline/workflow.js owns the cycle loop that used to live in five SKILL.md bash fences the orchestrating model was merely trusted to re-run in order. A Workflow script has no filesystem (RFC 0012 §2.2 constraint 6, enforced by tests/workflow-scripts.test.sh T1, which forbids fs./process.), so it cannot read this manifest and no edge here can constrain it. This lane's gap is the sharpest of the five, because its real fleet dispatch is not an agent() call at all: the four agent() sites are shell relays (claim, watch, verdicts, collect) and the run that actually solves a cycle is a nested `await workflow({ scriptPath: solveFleetJs }, fleetArgs)` at :884, built from the literal at :170. The test harness records that in record.workflowCalls and never in record.agentCalls, so a derivation keyed on agent labels alone certifies four shell relays as this lane's entire dispatch surface while the fleet run it exists to perform goes unrecorded — a manifest that reads as complete exactly where it is blind. That is why dispatch_sites counts 4 agent sites plus 1 workflow site, and why agent_kinds carries workflow.solve_fleet. RFC 0012 §2.2 constraint 7 bounds the nesting chase at one level, so the nested namespace is complete by construction rather than open-ended. Recorded here so the gap is visible and machine-checked (#654).",
+        "reserved_edge_prefix": "goal_pipeline.",
+        "dispatch_sites": 5,
+        "agent_kinds": [
+          "goal_claim.cN",
+          "goal_collect.cN",
+          "goal_verdicts.cN",
+          "goal_watch.cN.tN",
+          "workflow.solve_fleet"
+        ],
+        "agent_kind_rule": "The rule in scope.agent_kind_rule normalizes a Workflow opts.label but is not sufficient for goal_pipeline, which indexes on TWO instance dimensions: a cycle index `:c<n>` and, inside the watch loop, a tick index `:t<n>`. The shipped rule collapses `:t<n>` and `:r<n>` only, so the cycle index survives it — measured over a two-cycle run, 9 labels yield 8 kinds under the shipped grammar and the count grows with maxCycles, which is the unbounded kind space no enumeration can satisfy. A kind here is therefore the label with both `:c<n>` and `:t<n>` collapsed to `:cN` and `:tN`, then `:` mapped to `.` and `-` mapped to `_`. This lane also has a dispatch edge that no label describes: its per-cycle fleet run is a nested `await workflow({ scriptPath }, ...)` at skills/goal-pipeline/workflow.js:884, which the harness records in workflowCalls and never in agentCalls, so the kind `workflow.solve_fleet` is contributed by that call log rather than by the label normalizer and dispatch_sites counts that site alongside the four agent() relays. Derived by execution in tests/solve-run-tree-scope.test.sh, never by grep. FIXED-CLAUSE MARKER: everything from this marker to the end of this rule is the FIXED-CLAUSE REGION, and its last two sentences are mirrored byte-for-byte in tests/solve-run-tree-scope.test.sh (the KOFN and PROSE literals there) and compared verbatim by C12 conjuncts 4 and 5, so edit them in both places or in neither. Three things are unusable inside the region. A DOUBLE QUOTE: it terminates the JSON string on this side and the JS string literal on the test side, so it can survive only as an escape, and an escape written right on one side and wrong on the other is a silent mismatch rather than a syntax error. An APOSTROPHE: no quoting stops one any more — the test-side copy moved into a quoted heredoc written to a scratch .js file, where it sits in a double-quoted JS literal and an apostrophe is inert rather than a shell syntax error — which is exactly why the ban is now carried by an EXECUTED row: put one on either side alone and the two copies merely stop matching, so C12 reds with an omits-the-fixed-clause message that says nothing about apostrophes, and C13 in that same file therefore scans BOTH copies for the character and reds naming it. A COUNT: a quantity here would be a second copy of dispatch_sites for this manifest to drift against. Apostrophes before this marker are unconstrained. agent_kinds is the kind set the fixture reached, not proof that every dispatch_sites site ran. This rule text is PROSE that no test executes: the grammar that actually runs is the lane normalizer in tests/solve-run-tree-scope.test.sh, and C12 compares this text against the index tokens listed beside that normalizer, never against a label.",
+        "tracking_issues": [
+          654
+        ]
+      },
+      {
+        "substrate": "workflow-native-testers-pipeline",
+        "source": "plugins/uberdev/skills/testers-pipeline/workflow.js",
+        "reason": "A Workflow script has no filesystem (RFC 0012 §2.2 constraint 6, enforced by tests/workflow-scripts.test.sh T1, which forbids fs./process.), so it cannot read this manifest and no edge here can constrain it. What makes THIS lane's gap real rather than theoretical: /uberdev:testers is a shipped, user-invocable command whose default route is this script — skills/testers-pipeline/SKILL.md:174 validates that it exists and :198 mandates the Workflow({scriptPath: ...}) call, and only --watch takes the inline fallback — and a bare default run dispatches 32 agents across 7 sites in 3 rounds: six persona agents probing an untrusted external target, two monitors, four aggregate/report relays, and a uberdev:findings-to-issues agent that CREATES GitHub issues, a real write-side effect. None of that sources lib/child-dispatch.sh, so it mints no instance id, writes no handoff, and produces no run-tree edge or receipt: the run is entirely invisible to the governed substrate. Recorded here so the gap is visible and machine-checked rather than inferred from the absence of an entry (#654).",
+        "reserved_edge_prefix": "testers_pipeline.",
+        "dispatch_sites": 7,
+        "agent_kinds": [
+          "aggregate_A_rN",
+          "aggregate_B_rN",
+          "findings_to_issues",
+          "monitor_da_rN",
+          "monitor_primary_rN",
+          "persona_NAME_rN",
+          "report_runner"
+        ],
+        "agent_kind_rule": "An agent kind in the testers_pipeline lane is a Workflow agent's opts.label with its two INSTANCE indices collapsed and `-` then mapped to `_`. The round index `-r<n>` — the counter of the `for (let r = 1; r <= rounds; r++)` wave loop — collapses to `-rN`, and the persona index `persona-<name>-` — the loop variable of the `personas.map(...)` fan-out at the single `agent(` site that dispatches personas — collapses to `persona-NAME-`. Both say which INSTANCE of a rung ran, not what it is: left in, the kind space grows with `rounds` (caller-supplied, clamped to [1,10]) and with the caller-supplied persona roster, so no enumeration could satisfy C1 for a chain that actually runs. `scope.agent_kind_rule` cannot be reused here because its normalizer collapses only COLON-prefixed `:t<n>`/`:r<n>` and this lane hyphenates its round index. Nothing semantic is collapsed: `aggregate-A`, `aggregate-B`, `monitor-primary`, `monitor-da`, `report-runner` and `findings-to-issues` are six distinct `agent(` sites and stay six distinct kinds. Derived by execution under `tests/_workflow_harness.js`, never by grep. FIXED-CLAUSE MARKER: everything from this marker to the end of this rule is the FIXED-CLAUSE REGION, and its last two sentences are mirrored byte-for-byte in tests/solve-run-tree-scope.test.sh (the KOFN and PROSE literals there) and compared verbatim by C12 conjuncts 4 and 5, so edit them in both places or in neither. Three things are unusable inside the region. A DOUBLE QUOTE: it terminates the JSON string on this side and the JS string literal on the test side, so it can survive only as an escape, and an escape written right on one side and wrong on the other is a silent mismatch rather than a syntax error. An APOSTROPHE: no quoting stops one any more — the test-side copy moved into a quoted heredoc written to a scratch .js file, where it sits in a double-quoted JS literal and an apostrophe is inert rather than a shell syntax error — which is exactly why the ban is now carried by an EXECUTED row: put one on either side alone and the two copies merely stop matching, so C12 reds with an omits-the-fixed-clause message that says nothing about apostrophes, and C13 in that same file therefore scans BOTH copies for the character and reds naming it. A COUNT: a quantity here would be a second copy of dispatch_sites for this manifest to drift against. Apostrophes before this marker are unconstrained. agent_kinds is the kind set the fixture reached, not proof that every dispatch_sites site ran. This rule text is PROSE that no test executes: the grammar that actually runs is the lane normalizer in tests/solve-run-tree-scope.test.sh, and C12 compares this text against the index tokens listed beside that normalizer, never against a label.",
+        "tracking_issues": [
+          654
+        ]
+      },
+      {
+        "substrate": "workflow-native-uberthink-pipeline",
+        "source": "plugins/uberdev/skills/uberthink-pipeline/workflow.js",
+        "reason": "A Workflow script has no filesystem (RFC 0012 §2.2 constraint 6, enforced by tests/workflow-scripts.test.sh T1, which forbids fs./process.), so it cannot read this manifest and no edge here can constrain it. This lane is the largest agent producer in the plugin — 21 dispatch sites against solve-fleet's 14 — and its fanout is combinatorial rather than fixed: islands x donors/generators, islands x synthesizer lenses x genetic rounds, islands x shortlist rows x falsifier lenses x rounds. One default two-island run dispatches 76 agents, and the whole of it is invisible to the routed-child adapter this manifest governs. Left undeclared, the manifest's silence about the biggest fanout in the repo reads as \"nothing here dispatches\", which is the false negative this entry exists to close. The gap is real and tracked; it is recorded here so it is visible and machine-checked rather than inferred from a name (#654).",
+        "reserved_edge_prefix": "uberthink_pipeline.",
+        "dispatch_sites": 21,
+        "agent_kinds": [
+          "aggregate",
+          "arbiter",
+          "cross_pollinate",
+          "dossier",
+          "falsify_kN_cN_physics_rN",
+          "falsify_kN_cN_premortem_rN",
+          "falsify_kN_cN_redteam_rN",
+          "falsify_kN_cN_steelman_rN",
+          "findings_to_issues",
+          "floor_survivors",
+          "frame_constraints",
+          "frame_prior_art",
+          "frame_teardown",
+          "gen_kN_bridge",
+          "gen_kN_donor",
+          "gen_kN_morphological",
+          "gen_kN_provocateur",
+          "gen_kN_triz",
+          "handoff_seed",
+          "moderator_kN",
+          "partial_report",
+          "passthrough",
+          "personas",
+          "refusal_report",
+          "regen_kN_gap",
+          "resume_scan",
+          "scope_gate",
+          "shortlist_kN_rN",
+          "synth_kN_crossover_rN",
+          "synth_kN_mutate_rN",
+          "synth_kN_weave_rN"
+        ],
+        "agent_kind_rule": "An agent kind in uberthink_pipeline is a Workflow agent's opts.label with every INSTANCE index collapsed and every script-declared literal kept, then `-` mapped to `_`. Five things collapse: the island index k becomes kN, the three-digit `pad(c + 1)` shortlist-row index becomes cN, the genetic round suffix `-r<n>` becomes rN, the scope gate's donor slug in `gen-<k>-<x>` becomes donor, and the moderator's gap id in `regen-<k>-<id>` becomes gap. Everything else is kept because it is a literal in the script's own bytes rather than an instance of one: the site prefixes gen- regen- moderator- synth- shortlist- falsify- frame-, the FRAME_LENSES / SYNTH_LENSES / FALSIFY_LENSES lens names, the four OPERATORS names, and the thirteen fixed labels. The indices are collapsed because they say which INSTANCE of a rung ran, not what it is: left in, island 2's second composite under the redteam lens in round 1 is its own kind, the kind space grows with --islands and with whatever donor catalog the scope gate returns, and no enumeration below could satisfy C1 for a run that actually happens. This lane is NOT the testers_pipeline grammar with a different id: it carries an island index and a pad() candidate index that lane has no notion of, which is why a rule copied across the two reds C12 on a missing index token. Derived by execution under tests/_workflow_harness.js, never by grep. FIXED-CLAUSE MARKER: everything from this marker to the end of this rule is the FIXED-CLAUSE REGION, and its last two sentences are mirrored byte-for-byte in tests/solve-run-tree-scope.test.sh (the KOFN and PROSE literals there) and compared verbatim by C12 conjuncts 4 and 5, so edit them in both places or in neither. Three things are unusable inside the region. A DOUBLE QUOTE: it terminates the JSON string on this side and the JS string literal on the test side, so it can survive only as an escape, and an escape written right on one side and wrong on the other is a silent mismatch rather than a syntax error. An APOSTROPHE: no quoting stops one any more — the test-side copy moved into a quoted heredoc written to a scratch .js file, where it sits in a double-quoted JS literal and an apostrophe is inert rather than a shell syntax error — which is exactly why the ban is now carried by an EXECUTED row: put one on either side alone and the two copies merely stop matching, so C12 reds with an omits-the-fixed-clause message that says nothing about apostrophes, and C13 in that same file therefore scans BOTH copies for the character and reds naming it. A COUNT: a quantity here would be a second copy of dispatch_sites for this manifest to drift against. Apostrophes before this marker are unconstrained. agent_kinds is the kind set the fixture reached, not proof that every dispatch_sites site ran. This rule text is PROSE that no test executes: the grammar that actually runs is the lane normalizer in tests/solve-run-tree-scope.test.sh, and C12 compares this text against the index tokens listed beside that normalizer, never against a label.",
+        "tracking_issues": [
+          654
+        ]
       }
     ]
   },
@@ -1075,7 +1227,9 @@
         "pr_number": "integer"
       },
       "optional_inputs": {
-        "verification_path": "optional_path"
+        "verification_path": "optional_path",
+        "postfix_phase1_path": "optional_path",
+        "postfix_phase2_path": "optional_path"
       }
     },
     "review_pr.ci.classify": {
@@ -1215,6 +1369,33 @@
         "claude_md_paths": "optional_path_array",
         "format_retry": "boolean",
         "format_example_path": "path"
+      }
+    },
+    "review_pr.postfix.correctness": {
+      "kind": "provider",
+      "source": "plugins/uberdev/commands/review-pr.md",
+      "role": "code-reviewer",
+      "phase": "postfix_correctness",
+      "cardinality": "one_per_applied_fixer_phase_per_review_iteration",
+      "required": false,
+      "risk_scope": "subtask",
+      "output_contract": "phase1-reviewer-v1",
+      "retry": {
+        "format": 1
+      },
+      "allowed_workflows": [
+        "review-pr"
+      ],
+      "required_inputs": {
+        "commit_range_path": "path",
+        "diff_path": "path",
+        "phase": "bounded_text",
+        "working_dir": "directory"
+      },
+      "optional_inputs": {
+        "claude_md_paths": "optional_path_array",
+        "format_example_path": "path",
+        "format_retry": "boolean"
       }
     }
   }

@@ -125,7 +125,7 @@
       "kind": "policy-divergence",
       "scope": "skills/subagent-driven-dev",
       "file": "SKILL.md",
-      "note": "Upstream's subagent-driven-development/SKILL.md states an explicit prohibition: never dispatch multiple implementation subagents in parallel, because they conflict. UberDev's fork inverts it, and does so as its stated core principle \u2014 implementers within one wave dispatch in parallel into a single shared feature-branch worktree, over a strictly disjoint per-task file partition, with the controller as the only process that runs git. Adjudicated DELIBERATE in #509, not drift. What makes the inversion safe is a produced-and-checked precondition rather than a promise: agents/plan-writer.md emits the partition as each task's 'Owns (file allowlist)' field plus the plan's '## Execution Waves' summary; agents/plan-reviewer.md Check 2 reviews it (same-wave Owns lists must be strictly disjoint, and any file in two of them is a critical finding); and sdd_assert_wave_disjoint refuses the wave at dispatch time \u2014 sdd_launch_prepared_batch calls it before it launches anything, so an overlapping or ownership-less wave dispatches zero children (rc 3 overlap, rc 2 missing) instead of being caught after the fact. Today's solve-fleet route never reaches a parallel wave at all: skills/solve-fleet/workflow.js dispatches exactly one worktree-isolated implementer per issue, so the wave shape is exercised by the in-session SDD controller only. That is a description of current behaviour, not a promise about it. Never reconciled.",
+      "note": "Upstream's subagent-driven-development/SKILL.md states an explicit prohibition: never dispatch multiple implementation subagents in parallel, because they conflict. UberDev's fork inverts it, and does so as its stated core principle \u2014 implementers within one wave dispatch in parallel into a single shared feature-branch worktree, over a strictly disjoint per-task file partition, with the controller as the only process that runs git. Adjudicated DELIBERATE in #509, not drift. What makes the inversion safe is a produced-and-checked precondition rather than a promise: agents/plan-writer.md emits the partition as each task's 'Owns (file allowlist)' field plus the plan's '## Execution Waves' summary; agents/plan-reviewer.md Check 2 reviews it (same-wave Owns lists must be strictly disjoint, and any file in two of them is a critical finding); and sdd_assert_wave_disjoint refuses the wave at dispatch time \u2014 sdd_launch_prepared_batch calls it before it launches anything, so an overlapping or ownership-less wave dispatches zero children (rc 3 overlap, rc 2 missing) instead of being caught after the fact. As of #656 a second producer exists \u2014 agents/design-planner.md emits the same partition on the /turbox lane. Today's solve-fleet route never reaches a parallel wave at all: skills/solve-fleet/workflow.js dispatches exactly one worktree-isolated implementer per issue, so the wave shape is exercised by the in-session SDD controller only. That is a description of current behaviour, not a promise about it. Never reconciled.",
       "permanent": true
     },
     {
@@ -483,7 +483,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "f81952cb4ac9a0e642b083ae28490d750c9400f1f15a54aeb63b945760dee745"
+          "sha256": "def7c5047cb2d64ffe5a375ab5ac18dd91c6682bd1b9a322f17dc4210abd3391"
         },
         {
           "path": "code-quality-reviewer-prompt.md",
@@ -1002,6 +1002,11 @@
     {
       "id": "agents/convention-compliance.md",
       "path": "agents/convention-compliance.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/design-planner.md",
+      "path": "agents/design-planner.md",
       "origin": "uberdev"
     },
     {

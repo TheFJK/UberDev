@@ -168,17 +168,29 @@ for agent_path in sorted((ROOT / "plugins/uberdev/agents").glob("*.md")):
             role = line.split(": ", 1)[1].strip()
             break
     source_roles.add(role or agent_path.stem)
-check(len(source_roles) == 46, f"expected 46 canonical roles, got {len(source_roles)}")
+check(len(source_roles) == 47, f"expected 47 canonical roles, got {len(source_roles)}")
 check(set(policy["roles"]) == source_roles, "policy/source role inventory mismatch")
 expected_route_groups = {
     "economy": {"triage-scout", "ci-failure-classifier", "merge-strategy-decider", "testers-monitor-primary", "testers-monitor-devils-advocate"},
     "standard": {"codebase-scout", "research-codebase", "research-constraints", "research-patterns", "research-prior-art", "research-test-coverage", "issue-similarity-analyzer", "comment-analyzer", "testers-a11y-critic", "testers-chaos-engineer", "testers-mobile-thumb", "testers-panicked-grandma", "testers-power-user"},
     "quality": {"code-simplifier", "implementation-worker", "spec-reviser", "uberthink-frame", "uberthink-generator", "uberthink-moderator"},
-    "deep": {"ci-code-fixer", "ci-rebase-handler", "code-fixer", "code-reviewer", "conflict-resolver", "convention-compliance", "finding-verifier", "findings-to-issues", "plan-reviewer", "plan-writer", "pr-test-analyzer", "research-security", "silent-failure-hunter", "spec-compliance-reviewer", "spec-reviewer", "spec-writer", "testers-adversarial-security", "type-design-analyzer", "uberthink-falsifier", "uberthink-synthesizer"},
+    "deep": {"ci-code-fixer", "ci-rebase-handler", "code-fixer", "code-reviewer", "conflict-resolver", "convention-compliance", "design-planner", "finding-verifier", "findings-to-issues", "plan-reviewer", "plan-writer", "pr-test-analyzer", "research-security", "silent-failure-hunter", "spec-compliance-reviewer", "spec-reviewer", "spec-writer", "testers-adversarial-security", "type-design-analyzer", "uberthink-falsifier", "uberthink-synthesizer"},
     "frontier": {"trust-trail-evaluator", "uberthink-arbiter"},
 }
-workspace_write_roles = {"ci-code-fixer", "ci-rebase-handler", "code-fixer", "conflict-resolver", "implementation-worker", "plan-writer", "spec-reviser", "spec-writer"}
+workspace_write_roles = {"ci-code-fixer", "ci-rebase-handler", "code-fixer", "conflict-resolver", "design-planner", "implementation-worker", "plan-writer", "spec-reviser", "spec-writer"}
 expected_floor = {"economy": "economy", "standard": "economy", "quality": "standard", "deep": "deep", "frontier": "deep"}
+# The buckets must PARTITION the inventory, not merely sample it (#656). The
+# loop below iterates expected_route_groups, so a role missing from every
+# bucket is not a failure -- its route / floor / sandbox / leaf checks simply
+# never run, and the suite stays green at a lower check count. That makes every
+# per-role assertion opt-in, which is the same vacuous green as no assertion.
+# `check` counts are not a backstop either: nothing pins the total.
+routed_roles = set().union(*expected_route_groups.values())
+check(sum(len(roles) for roles in expected_route_groups.values()) == len(routed_roles),
+      "a role appears in more than one route bucket")
+check(routed_roles == source_roles,
+      "route buckets do not partition the role inventory: "
+      f"unrouted={sorted(source_roles - routed_roles)!r} unknown={sorted(routed_roles - source_roles)!r}")
 for route, roles in expected_route_groups.items():
     for role in roles:
         row = policy["roles"][role]

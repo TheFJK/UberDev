@@ -125,6 +125,10 @@ const solveTimeoutS = clampInt(CFG.solveTimeoutS, 1, 86400, 3600);
 // that function's argument vocabulary, and this script inherits them rather
 // than re-minting them. The helper name is greppable and byte-stable; a line
 // range into a file this PR class keeps growing is not.
+// Enforced now, not merely asserted: the §C3 rows of
+// tests/sdd-wave-contract.test.sh read this constant numerically and compare
+// it against the `fix_rounds` arm executed out of the owner, so a drift on
+// either side reds.
 const FIX_ROUNDS = 3;
 // How many reviser dispatches a non-APPROVE spec may cost before planning
 // proceeds regardless (#524) — the bound the revision loop in solveOne actually
@@ -1219,38 +1223,55 @@ function houseRules() {
 // something /merge's anchored harvest finds nothing in — and an unharvested body
 // is indistinguishable from a body that carried no trailer, so the
 // `uberdev:active` claim strands on a still-OPEN issue with no error anywhere.
-// The mandate below is therefore explicit about the SHAPE, not just the text.
 // /merge's consumer was relaxed in the same change to tolerate the decorations
-// a writer reaches for anyway. The tolerated set is OWNED by
+// a writer reaches for anyway.
+//
+// #646 — that relaxation had a mirror-image cost, and this builder is where it
+// was paid off. A bullet whose entire content is the trailer is the same bytes
+// whether a solver EMITTED it or a human WROTE it while documenting the format,
+// so the tolerant consumer released claims off documenting PR bodies — and
+// /merge runs over every PR. The fix belongs on the producing end, because this
+// is the end that can render an unambiguous shape: the mandate below now SHOWS
+// the line, flush and undecorated on a line of its own, instead of quoting it
+// inside a sentence and inside a code span — which is where the code span the
+// writers copied came from. With the emission pinned, /merge's harvest dropped
+// the decoration tolerance (tests/solve-fleet-workflow.test.sh P1-P6 feed this
+// builder's own rendered line to that live expression, so neither end can move
+// without the other).
+//
+// What remains tolerated on the consumer end is OWNED by
 // skills/merge-pipeline/SKILL.md Step 3.4, next to the expression that defines
 // it, and is deliberately NOT enumerated or counted here — a restated count is
 // how one contract acquires several uncompared copies that drift the moment the
-// expression moves. This end of the contract still asks for the bare line,
-// because the producer is the end that can give it and belt-and-braces is the
-// point.
+// expression moves.
 //
 // The prohibition is deliberately phrased WITHOUT rendering the closing form.
 // A sentence such as "must not contain `Closes #N`" would put those exact bytes
 // in the prompt, which makes an absence assertion over the rendered text
 // vacuous — and an absence assertion a forbidding sentence can satisfy is no
 // assertion at all. The shared prefix is written ONCE for the same reason a
-// two-branch copy is not: the two arms must be impossible to drift apart.
+// two-branch copy is not: the two arms must be impossible to drift apart, and
+// the shape they render is the whole point of this builder.
 function prLinkLine(issue, complete) {
-  return "The body MUST contain the line `"
-    + (complete ? "Closes #" + issue : "UberDev-Partial: #" + issue) + "` "
+  return "The body MUST contain this line, copied byte for byte, on a line of its OWN — flush "
+    + "against the left margin, with nothing before it and nothing after it on that line:\n\n"
+    + (complete ? "Closes #" + issue : "UberDev-Partial: #" + issue) + "\n\n"
     + (complete
-      ? "so the merge auto-closes the issue."
-      : "— the non-closing linkage trailer this fleet uses for an unfinished chain. That trailer "
-        + "MUST STAND ALONE on its own line, with nothing before it and nothing after it on that "
-        + "line: no list marker or bullet, no backticks or other formatting around it, no leading "
-        + "or trailing prose, and no trailing punctuation. /merge harvests it with a line-anchored "
-        + "match, so a trailer buried in a sentence or decorated is harvested as nothing at all, "
-        + "and the issue's `uberdev:active` claim is then stranded on a still-open issue that no "
-        + "later run can pick up. The body MUST ALSO NOT carry any GitHub closing keyword (close, "
-        + "closes, closed, fix, fixes, fixed, resolve, resolves, resolved, in any letter case) "
-        + "standing directly in front of a reference to issue " + issue + ", in any form. A pull "
-        + "request must not close an issue it did not finish: the tasks this chain never reached "
-        + "still need an open issue to come back to.");
+      ? "That linkage is what makes the merge auto-close the issue."
+      : "That trailer is the non-closing linkage this fleet uses for an unfinished chain, and the "
+        + "line above is the whole of it: it MUST STAND ALONE on its own line — no list marker or "
+        + "bullet, no backticks or other formatting around it, no indentation, no leading or "
+        + "trailing prose, and no trailing punctuation. Before you run `gh pr create`, read the "
+        + "body file back and check that line against the one above, character for character; if "
+        + "it differs in any way, fix the file and check again. /merge harvests it with a flush, "
+        + "line-anchored match that accepts no decoration, so a trailer that is bulleted, "
+        + "backticked, indented or buried in a sentence is harvested as nothing at all, and the "
+        + "issue's `uberdev:active` claim is then stranded on a still-open issue that no later run "
+        + "can pick up. The body MUST ALSO NOT carry any GitHub closing keyword (close, closes, "
+        + "closed, fix, fixes, fixed, resolve, resolves, resolved, in any letter case) standing "
+        + "directly in front of a reference to issue " + issue + ", in any form. A pull request "
+        + "must not close an issue it did not finish: the tasks this chain never reached still "
+        + "need an open issue to come back to.");
 }
 
 // The half a PR-body rule cannot cover, and the reason this is a separate

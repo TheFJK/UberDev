@@ -243,6 +243,7 @@ optimisation — it is the deletion of a proof.**
 |---|---|---|
 | `review` | the 7 Phase-1 reviewers | per-child `capture` verbs → trusted ledger → `post_review_capture_aggregation_inputs` → `post_review_write_aggregate_v2` → `digest` → `prepare-authority` |
 | `fix` | ONE `code-fixer` child | `review_fixer_terminal_outcome` → (`capture-review-terminal` → `validate-review-outcome` \| `publish-unapplied-terminal`) → `validate-residue` → `review_track_validated_fixer_head` → `review_refresh_phase1_scope` |
+| `postfix` | ONE `code-reviewer` child over one validated fixer's own commit range | `capture-bound-child` → the child's own result bytes re-read and validated → `review_write_postfix_aggregate` (fails closed, rc 74 — a finding that reached no sink is a swallowed error) → the per-phase sidecar, published on the zero-dispatch paths too |
 | `simplify` | the 3 `code-simplifier` lenses | canonical aggregate → `code_fixer_contract.py encode-aggregate --phase phase2` (the byte-shape oracle, `commands/simplify.md`) → `digest` → `prepare-authority` |
 | `defer` | ONE `findings-to-issues` child | halt handling (`AskUserQuestion`), then the GREEN/YELLOW/RED predicate |
 | `ci-classify` | ONE `ci-failure-classifier` child | `capture-ci-terminal` → `validate-ci-classification` (closed class enum, class/anchor pairing, anchor names a REAL repository file) → the routing scalar the mutating arm keys on |
@@ -323,10 +324,17 @@ are re-split and re-validated in-script.
 
 ### Every stage
 
+<!-- A marker line inside the table would split it in two, so the #370 contract
+     marker sits above it and resolves forward via @anchor. The whole stage
+     vocabulary is ONE backticked alternation for the same mechanism's sake: a
+     cell that mixes the members with prose carries two competing spans, and the
+     extractor refuses to choose between them. See
+     docs/rfc/0016-contract-markers.md. -->
+<!-- CONTRACT: review-fleet-stage @"| `stage` |" -->
 | Key | Meaning |
 |---|---|
 | `mode` | `review-pr` \| `simplify`. Unrecognised values default-close to `simplify`, the smaller authority surface. |
-| `stage` | `review` \| `verify` \| `fix` \| `simplify` \| `defer` \| `ci-classify` \| `ci-fix` \| `ci-conflicts` \| `ci-defer`. **No default** — an unrecognised stage aborts, because guessing one means guessing which proofs already exist. |
+| `stage` | `review \| verify \| postfix \| fix \| simplify \| defer \| ci-classify \| ci-fix \| ci-conflicts \| ci-defer` — **no default**. An unrecognised stage aborts `unknown_stage`, because guessing one means guessing which proofs already exist. |
 | `runId`, `runDirAbs` | the reserved run id and `.uberdev/research/<RUN_ID>` |
 | `pluginRootAbs`, `repoRootAbs`, `workingDirAbs` | script-derived prompt inputs |
 | `prNumber`, `repoSlug` | bound once by the preflight's single multi-field `gh pr view` |
@@ -381,12 +389,53 @@ the pairing is checked, and a mismatch aborts before dispatch),
 |---|---|
 | `fixerContractPathAbs` | absolute path to the code-fixer output contract, resolved by the controller from `policy/solve-run-tree-v1.json` `output_contracts["code-fixer-v1"]` (`lib/review-fleet-args.sh review_fleet_contract_path`), same one-declaration rule as `phase1ContractPathAbs`. Absent, relative or traversal-bearing ⇒ `abort("bad_contract_path")` with **zero** dispatches. **Required by ALL THREE emitters** — this arm is shared by both modes and is deliberately *not* mode-scoped the way the `review` arm is, so `commands/simplify.md`'s `simplify.fix.phase2` fence owes the key exactly as the two `commands/review-pr.md` fences do (#474). |
 
+### `postfix` stage (#655)
+
+ONE bounded correctness review of a validated fixer's OWN commits, dispatched
+once per applied fixer phase per review iteration. Its whole cost argument is
+scope × lens count × agent count: the roster is one child, the diff is the
+narrowest in the run, and the `agent()` call omits `model` because a reviewer
+interprets — cheap here means less work, never a cheaper route through the same
+work.
+
+| Key | Meaning |
+|---|---|
+| `postfixCount` | integer — the size of THIS dispatch's roster, `REVIEW_FLEET_POSTFIX_LENS_COUNT` on the controller's side. Outside `1..postfixCap`, or unequal to the fixed roster length, it aborts `bad_postfix_count` up-front, never `agent_ceiling` after acceptance. `0` is a wiring bug: a phase with no applied fixer commit is short-circuited by the CONTROLLER, which never calls the script at all. |
+| `postfixCap` | the per-review-iteration TOTAL ceiling (`REVIEW_FLEET_POSTFIX_TOTAL_CAP`), clamped by `maxAgents`. It spans BOTH passes — Phase 1 and Phase 2 each dispatch this stage once — so it is a different number from `postfixCount` and forwarding one as the other is the zero-dispatch bug the `ci-conflicts` cap comment records. |
+| `postfixDiffPathAbs` | the **already-enveloped** diff of the fixer's own commits, written atomically in Bash by `review_build_postfix_scope` before the call. Read by path; never re-wrapped. |
+| `postfixRangePathAbs` | the `<40hex>..<40hex>` commit-range carrier the controller wrote on the validated-`APPLIED` arm. Passed by path; the child re-derives nothing from it. |
+| `postfixContractPathAbs` | the `phase1-reviewer-v1` output contract, manifest-resolved by the controller. The post-fix child is a `code-reviewer` emitting the Phase 1 reviewer document, so it binds to the SAME declaration the fanout binds to — one declaration, two stages, no second copy to drift. |
+| `postfixPhase` | `phase1` or `phase2`, and nothing else. Gated rather than defaulted: it names which fixer's commits these are, and the controller keys the aggregate and the sidecar on it, so a guessed value files one phase's findings under the other. |
+
+The three path keys above and `workingDirAbs` are all gated **before** the nonce
+gate: a wiring regression must burn no nonce and dispatch no child. Absent,
+relative or traversal-bearing ⇒ `abort("bad_postfix_diff_path" |
+"bad_postfix_range_path" | "bad_postfix_contract_path" | "bad_working_dir")`
+with **zero** dispatches.
+
 ### `defer` stage
 
 `phase1PathAbs`, `phase2PathAbs`, `phase1DispositionPathAbs`,
 `phase2DispositionPathAbs`, `maxNew`. `phase1PathAbs` is empty for `/simplify`
 because no Phase 1 ran (`commands/simplify.md:547`) — that is a declared value,
 not a missing one, and the script only enforces its presence in `review-pr` mode.
+
+Three OPTIONAL keys ride the same single dispatch: `verificationPathAbs` (the
+Phase 1 verification sidecar, #431) and `postfixPhase1PathAbs` /
+`postfixPhase2PathAbs` (the two post-fix aggregates, #655). Each is rendered
+into the child's input list only when non-empty; an omitted line means that
+artifact does not exist for this run, and `findings-to-issues` then behaves
+exactly as it did before the producing gate existed. A non-empty postfix path
+that is not a safe absolute path aborts `bad_postfix_aggregate_path` — the same
+gate the disposition pair takes, for the same reason: an ungated relative value
+renders into the prompt and leaves the agent to improvise a location.
+
+**Both transports owe these keys.** `review_pr.defer.findings` is dispatched
+over the routed composer *and* over this script, and the script reads each input
+by NAME off an args object with no unknown-key rejection. A key emitted for one
+transport and unread by the other is discarded in silence: no abort, no `bad_*`
+refusal, no failing test — the findings simply never reach the child. Add the
+reader and the emitter in the same change.
 
 ### Phase 3 CI stages (#383)
 
@@ -467,6 +516,7 @@ child.
 | `simplify` | 0 `review_pr.simplify.reuse` · 1 `review_pr.simplify.quality` · 2 `review_pr.simplify.efficiency` |
 | `fix` | 0 — the single fixer child |
 | `verify` | 0..N-1 — one `review_pr.verify.finding` child per ELIGIBLE Phase 1 finding (`severity: blocker` AND disposition != `APPLIED`), in the order `project-verification-claims` wrote the claim cards |
+| `postfix` | 0 — the single `review_pr.postfix.correctness` child. Its slug is the roster base keyed by phase (`postfix-correctness-phase1` / `postfix-correctness-phase2`), the `ci-*` rule one stage over: both passes run inside ONE `reviewIteration`, so the iteration suffix cannot separate them and the phase keys the slug instead. `review_fleet_postfix_slug` and the script's `postfixSlug()` are the two halves of that formula and must stay byte-identical. |
 | `defer` | 0 — the single `review_pr.defer.findings` child |
 | `ci-classify` | 0 — the single `review_pr.ci.classify` child |
 | `ci-fix` | 0 — the single `review_pr.ci.fix_code` **or** `review_pr.ci.rebase` child |
@@ -486,9 +536,12 @@ script disagree about the roster.
 
 `<NN>` is `reviewIteration` zero-padded to two digits. Slugs are the roster
 `slug` values (`correctness`, `silent-failures`, `types`, `comments`, `tests`,
-`general`, `reuse`, `quality`, `efficiency`) and, for the fixer, the edge id
+`general`, `reuse`, `quality`, `efficiency`); for the fixer, the edge id
 lowercased with every non-alphanumeric run collapsed to `-` (e.g.
-`review-pr-fix-phase1`). No extra envelope scalars, no round-trip.
+`review-pr-fix-phase1`); and for the post-fix pass, the roster base keyed by
+phase (`postfix-correctness-phase1`), because both of its passes run inside one
+`reviewIteration` and `<NN>` cannot separate them. No extra envelope scalars, no
+round-trip.
 
 Every bound child is told to write `result.md.partial` and then publish it with
 a **same-directory `mv -f`** — the shell spelling of the atomic rename
@@ -619,6 +672,7 @@ the point of the seam.
 | nonce-pool gate | size or grammar mismatch aborts the stage before dispatch |
 | Phase 1 output contract | `review` only. An absent, relative or traversal-bearing `phase1ContractPathAbs` aborts `bad_contract_path` **before** the nonce gate, so no nonce is burned. Seven reviewers dispatched without a stated serialization all fail `uberdev_child_validate_phase1_review_result` and the whole aggregate is suppressed — a full fanout spent to learn a wiring bug (#403) |
 | fixer output contract | `fix`, in **both** modes — the arm is shared, so this governs `simplify.fix.phase2` too. An absent, relative or traversal-bearing `fixerContractPathAbs` aborts `bad_contract_path` **before** the nonce gate. Stricter than the reviewer twin in consequence, not in mechanism: a fixer has already COMMITTED by the time its result is parsed, so an unbound format strands unattributable history and escalates the run to `MUTATED_BLOCKED` (#474) |
+| post-fix scope, count and phase | `postfix` only. The range diff, the commit-range carrier, the reviewer contract and `workingDirAbs` are all gated **before** the nonce gate, so a wiring regression burns no nonce and dispatches no child. A `postfixCount` outside `1..postfixCap`, or unequal to the one-child roster, aborts `bad_postfix_count` BY NAME up-front rather than `agent_ceiling` after acceptance. A `postfixPhase` that is neither `phase1` nor `phase2` aborts `bad_postfix_phase` rather than defaulting: the controller keys the aggregate and the sidecar on it, so a guess files one phase's findings under the other (#655) |
 | commit-type / edge pairing | `phase1`⇒`fix:`, `phase2`⇒`refactor:`; a mismatch aborts |
 | runtime `budget` | checked between waves with `budget && budget.total && budget.remaining() <= 0` — `parallel()` never rejects, so a budget throw would otherwise arrive as a silent `null` |
 
@@ -709,28 +763,37 @@ fences carry the same prologue.
    and never worktree-isolated: it commits onto the caller's checkout on the PR
    branch, git forbids two worktrees on one branch, and an isolated child's
    disposition artifact would vanish with its throwaway worktree.
-4. **`simplify`** — dispatch the three `uberdev:code-simplifier` lenses in ONE
+4. **`postfix`** — dispatch ONE `uberdev:code-reviewer` over the validated
+   fixer's own commit range, reading the enveloped range diff and the
+   `<40hex>..<40hex>` carrier BY PATH and bound to the same
+   `phase1-reviewer-v1` output contract the Phase 1 fanout uses. Dispatch it
+   only when that carrier EXISTS: its absence is the zero-dispatch
+   short-circuit, and the writer that creates it fails closed, so "no file" can
+   only mean "no applied commit". Publish the per-phase sidecar on the
+   zero-dispatch paths too — a run that recorded nothing must not read
+   downstream like a run that found nothing.
+5. **`simplify`** — dispatch the three `uberdev:code-simplifier` lenses in ONE
    message, `## Lens emphasis` and `## Additional Focus` kept OUTSIDE the
    envelope.
-5. **`defer`** — dispatch ONE `uberdev:findings-to-issues` with both aggregate
+6. **`defer`** — dispatch ONE `uberdev:findings-to-issues` with both aggregate
    paths and both disposition paths; the agent owns `max_new`, dedupe and halt.
-6. **`ci-classify`** — dispatch ONE `uberdev:ci-failure-classifier` reading its
+7. **`ci-classify`** — dispatch ONE `uberdev:ci-failure-classifier` reading its
    pinned input document by path, writing `result.md` + `status.json` at the
    layout above. Its slug carries the CI loop counter (`ci-classify-ciNN`), so
    the directory is `<runDir>/children/ci-classify-ciNN-iterMM`.
-7. **`ci-fix`** — dispatch ONE `uberdev:ci-code-fixer` (for `code_bug` /
+8. **`ci-fix`** — dispatch ONE `uberdev:ci-code-fixer` (for `code_bug` /
    `env_drift`) or ONE `uberdev:ci-rebase-handler` (for `stale_base`), chosen by
    the controller-supplied `ciFixerEdgeId`. Never worktree-isolated: both commit
    onto the caller's checkout on the PR branch. **The rebase child must not be
    given a push tool** — the controller holds the lease and pushes.
-8. **`ci-conflicts`** — dispatch one `uberdev:conflict-resolver` per conflicted
+9. **`ci-conflicts`** — dispatch one `uberdev:conflict-resolver` per conflicted
    path in ONE message, each reading only its own input document. The path list
    comes from the controller's own unmerged-path enumeration
    (`code_fixer_contract.py list-ci-unmerged-paths`), never from the rebase
    child's return.
-9. **`ci-defer`** — dispatch ONE `uberdev:findings-to-issues` against the one-row
-   `ci-refused-synthetic` aggregate, with the three other aggregate/disposition
-   inputs declared empty.
+10. **`ci-defer`** — dispatch ONE `uberdev:findings-to-issues` against the
+    one-row `ci-refused-synthetic` aggregate, with the three other
+    aggregate/disposition inputs declared empty.
 
 Between every pair of stages, run the same calling-session Bash the staged table
 above lists. Do not skip a proof because the fanout came from `Task` — the

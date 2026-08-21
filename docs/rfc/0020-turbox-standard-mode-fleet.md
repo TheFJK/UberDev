@@ -105,13 +105,31 @@ inherit the calling session's tier** (RFC 0015 §6 R-1b). The launcher emits a
 
 ## 3. The execution model
 
+> **AMENDED 2026-08-20 (issue #656) — the design path collapses to two rungs.**
+> The three always-on research lenses and the three spec rungs are no longer
+> dispatched on this lane. `uberdev:design-planner` fills the design rung and
+> emits `plan.md` directly — in the same `## Execution Waves` / `Owns (file
+> allowlist)` shape `plan-writer` emits, so §3.5, §3.6 and Phase 4 are
+> unchanged — gated by the always-on `uberdev:plan-reviewer`. Phase 2 keeps
+> exactly one lens, the risk-gated `uberdev:research-security`. This **forks the
+> two lanes' fidelity** relative to RFC 0015 §R-2, which argued the always-on
+> writer/reviewer pairs into existence: on this lane a wrong design is now
+> caught at plan review, rather than before a plan is built on it. §3.1, §3.4
+> and §3.7 below are amended to match; §3.2, §3.3, §3.5 and §3.6 are unchanged.
+> The **Status** row of the header table above is deliberately left
+> **byte-identical** — the `RFC status is Accepted` row (TX13) in
+> `tests/turbox-fleet.test.sh` matches that row's exact text, and appending an
+> amendment marker to it would red that row. Reproducing the row verbatim here
+> would also put a second copy of a byte-locked string into prose, which is the
+> drift class RFC 0016 exists to close.
+
 ### 3.1 The controller is this session; every agent is a leaf
 
 ```
 session (controller)
 ├─ Phase 1  worktrees        one per issue, cut by the controller (paths are KNOWN)
-├─ Phase 2  research         ALL issues × ALL lenses in ONE message
-├─ Phase 3  design           spec-writer×N → spec-reviewer×N → [reviser] → plan-writer×N → plan-reviewer×N
+├─ Phase 2  research         the risk-gated security lens only, ALL such issues in ONE message
+├─ Phase 3  design           design-planner×N → plan-reviewer×N
 ├─ Phase 4  implement        wave k of EVERY issue in ONE message; controller stages + commits
 ├─ Phase 5  gate             per-task reviewers in parallel; bounded fix ladder
 └─ Phase 6  deliver          suite → push → PR, per issue in parallel
@@ -125,8 +143,9 @@ to doing the whole issue solo, which looks like a slow success. A design whose
 failure mode is indistinguishable from its success mode is not a design.
 
 Flattening has a second, non-obvious win: **cross-issue parallelism at every
-phase**. Three issues' research lenses are one message of ten agents, not three
-sequential fan-outs of three.
+phase**. Three issues' design rungs are one message of three `design-planner`
+agents, and their first implementation waves are one message holding every task
+those waves carry — not three sequential per-issue fan-outs in either case.
 
 ### 3.2 Phase-synchronised, not issue-synchronised
 
@@ -165,7 +184,7 @@ longer than the cap split into `ceil(N / 3)` sequential waves, same as `/turbo`.
 | Tier | What runs |
 | --- | --- |
 | `trivial`, `small` | ONE solver agent per issue in the controller-cut worktree. It runs its own git, its own push, its own PR — it is alone in that checkout, so there is no race for the controller to serialise. Identical in spirit to the Workflow lane's single-solver path. |
-| `medium` | The full Phase 2–6 pipeline: research fan-out → spec → plan → **wave-parallel** implementation → per-task gate → delivery. |
+| `medium` | The full Phase 2–6 pipeline: risk-gated security research → plan → **wave-parallel** implementation → per-task gate → delivery. |
 | any tier with no usable plan | falls back to the single solver. No plan means no tasks, no waves, and no `Owns` sets to prove disjoint. |
 
 ### 3.5 The safety boundary: who may run git
@@ -209,7 +228,7 @@ collide" is one implementation too many.
 
 | ID | Guard |
 | --- | --- |
-| **TB1** | projected agents over `maxAgents` (default 600) → abort **before** any dispatch. Projection: `smallIssues + (9 + implementBudget) × designIssues`, where 9 = 4 research lenses + spec-writer + spec-reviewer + spec-reviser + plan-writer + plan-reviewer. Pessimistic on the two conditional rungs (the revision round and the risk-gated security lens) for the same reason the Workflow lane is: neither is knowable at projection time. |
+| **TB1** | projected agents over `maxAgents` (default 600) → abort **before** any dispatch. Projection: `smallIssues + (3 + implementBudget) × designIssues`, where 3 = the risk-gated security lens + design-planner + plan-reviewer (#656). Pessimistic on the one conditional rung (the risk-gated security lens) for the same reason the Workflow lane is: it is not knowable at projection time. |
 | **TB2** | a **live** per-issue counter of implementation-phase agents against `implementBudget` (default 24, clamped 4..96). On exhaustion the remaining tasks are recorded `SKIPPED`, `implement_budget_exhausted` is audited, and **delivery still runs** on what is already committed — reviewed commits must never strand in a worktree. |
 | **TB3** | wave disjointness (§3.6). Refuses the wave, not the run. |
 | **TB4** | loop caps: `fix_rounds` = 3 per task per review stage, `retest_rounds` = 2 per wave, `context_rounds` = 2 per task. Inherited names and defaults from `subagent-driven-dev`. |
@@ -246,13 +265,17 @@ message.
 | --- | --- |
 | `manifestPathAbs` | the per-issue manifest (`issue`, `tier`, `prompt_file`, `risk_signals`, `context_file`, `context_sha256`) — the same record shape the Workflow lane's fleet reads |
 | `issues`, `issueCount` | comma-joined issue numbers, and the declared count |
-| `riskIssueCount` | how many issues carry non-blank triage `risk_signals` (gates the 4th research lens) |
+| `riskIssueCount` | how many issues carry non-blank triage `risk_signals` (gates the security research lens) |
 | `concurrency` | parallel-issue wave size, 1..3 (§3.3) |
 | `runDirAbs` | prompts, contexts, per-issue design artifacts, fix ledgers, rulings |
 | `worktreeRootAbs` | `<runDirAbs>/worktrees`; issue *N* gets `<worktreeRootAbs>/issue-<N>` |
 | `repoRootAbs`, `pluginRootAbs`, `repoSlug`, `baseBranch`, `branchPrefix` | controller-derived inputs |
 | `maxAgents`, `implementBudget`, `fixRounds` | TB1 / TB2 / TB4 ceilings |
 | `autoMode` | always true — `/turbox` is unattended by construction |
+
+> **AMENDED 2026-08-20 (issue #656).** `riskIssueCount` now gates the lane's
+> *only* Phase-2 lens rather than the fourth of four (§3). The envelope's keys,
+> shape and marker pair are otherwise unchanged.
 
 ### 4.3 Untrusted input
 
@@ -314,10 +337,17 @@ being true.
 | 3 | `turbox-fleet-runtime.test.sh` R3 | default, honoured values, clamp above, floor below |
 | 4 | `turbox-fleet-runtime.test.sh` R7 | equality, containment **both directions**, the shared-prefix negative control (`lib/a.sh` vs `lib/ab.sh` must NOT collide), cross-wave, missing, malformed |
 | 5 | `turbox-fleet-runtime.test.sh` R8 | every refusal, plus the positive control: an untracked sibling in the same tree must not land in the commit |
-| 6 | `turbox-fleet-runtime.test.sh` R4 (TB1) and R5 (TB2) | TB2's "still deliver" half is a **skill directive**, not an executed predicate — see the boundary below |
+| 6 | `turbox-fleet-runtime.test.sh` R4 (TB1) and R5 (TB2) | R4 executes the projection over both arms: 1 small + 2 design at `implementBudget` 24 is **55** agents and fits the 600 ceiling; 30 design issues is **810** and is refused with rc 3. TB2's "still deliver" half is a **skill directive**, not an executed predicate — see the boundary below |
 | 7 | `turbox-fleet.test.sh` TX1, TX2 | the `allowed-tools` line is grepped for the absence of `Workflow` |
 | 8 | `tests/ci-wiring.test.sh` W4, W9 | wiring and the Unix-only refusal |
 | — | `turbox-fleet-runtime.test.sh` R12 | the plan envelope, composed by the python program **extracted verbatim from the launcher** rather than a hand-copied twin |
+
+> **AMENDED 2026-08-20 (issue #656).** The AC-6 row's R4 numbers moved with the
+> design-rung count (9 → 3, §3.7): the projection is now
+> `small + (3 + implementBudget) × design`, so R4's fitting arm reads 55 where
+> it read 67 and its refusing arm 810 where it read 990. The refusal case is
+> preserved — 810 still exceeds the 600 ceiling — so R4 keeps proving both
+> halves of TB1 rather than only the one that fits.
 
 **Declared boundary.** The lane's *safety* guards are executable and asserted by
 exit code: the disjointness refusal, the staging refusals, the loop caps, the

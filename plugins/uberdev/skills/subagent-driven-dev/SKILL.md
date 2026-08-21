@@ -16,6 +16,8 @@ Execute plan **wave-by-wave**. Within each wave, dispatch all implementer subage
 
 **Core principle:** Parallel-by-default within a wave + disjoint file sets + controller-only git = maximum throughput, zero races.
 
+**Which lane this is.** Everything above describes the **session lane** — a session holds the `Agent` tool and can fan out, so waves of parallel implementers over strictly disjoint file sets are its contract. The **Workflow lane** (`skills/solve-fleet/workflow.js`) is **sequential** per task instead: a Workflow agent has no `Agent`/`Task` tool and cannot fan out (RFC 0020 §1, resting on RFC 0015 §4.1), so it runs implementer → reviewer → bounded fix ladder one task at a time (#508). Parallel-by-default is this skill's core principle — the session lane's — not a universal truth, and the three sentences above are narrowed by this clause rather than retracted by it.
+
 ## Inputs
 
 When invoked from `orchestrator/SKILL.md` Phase 5, this skill accepts:
@@ -29,7 +31,7 @@ Inputs other than `plan_path` are additive and backward-compatible: pre-#92 manu
 
 ## Loop caps
 
-Every retry loop in this skill is bounded. The caps are named constants — the future `sdd-waves` workflow inherits these exact names and defaults rather than re-inventing them, and this capped directive loop is retained permanently as the non-Workflow fallback path (Gemini / Copilot / pre-Workflow harnesses execute it directly):
+Every retry loop in this skill is bounded. The caps are named constants, and this skill is their canonical owner: `lib/turbox-fleet.sh`, `skills/turbox-fleet/SKILL.md`, `skills/solve-fleet/workflow.js` and `skills/solve-fleet/SKILL.md` all carry derived copies, bound numerically to `sdd_loop_cap` by `tests/sdd-wave-contract.test.sh` §C. (The `sdd-waves` workflow this sentence once forward-referenced will not be built — RFC 0020 §1; the retraction is recorded in RFC 0012 §3.6.) This capped directive loop is retained permanently as the non-Workflow fallback path (Gemini / Copilot / pre-Workflow harnesses execute it directly):
 
 - **`fix_rounds` = 3** — per task, per review stage (spec compliance OR code quality): at most 3 review → fix → re-review iterations. On exhaustion, treat the task as BLOCKED (see "Handling Implementer Status") — never keep looping.
 - **`retest_rounds` = 2** — per wave: at most 2 regression-attribution re-dispatches of a suspected implementer after a red full-suite run. On exhaustion, halt the wave with committed work intact and escalate.
@@ -166,9 +168,11 @@ sdd_validate_positive_decimal() {
   esac
 }
 
-# The single numeric source for the "## Loop caps" section. The cap NAMES are
-# this function's argument vocabulary, so the future sdd-waves script inherits
-# them verbatim instead of re-inventing them.
+# The single numeric source for the "## Loop caps" section — and the only one.
+# The cap NAMES are this function's argument vocabulary; every other surface
+# in the repo carries a derived copy, and tests/sdd-wave-contract.test.sh §C
+# asserts each of them numerically against this function rather than trusting
+# a comment. A comment is not a producer (RFC 0016:60); that test is.
 sdd_loop_cap() {
   [ "$#" -ge 1 ] || return 2
   case "${@:1:1}" in
@@ -595,20 +599,39 @@ sdd_inputs_for_task() {
 }
 ```
 
+`SDD_BATCH_TASK_IDS` is a **controller-supplied input**, not something this fence derives: it holds the task ids of the wave/batch about to be dispatched, whitespace-separated, read by the controller out of the plan's `## Execution Waves` summary for the current wave. It is per-batch, so it has no run-once assignment site — the setup fence cannot own it. Unset, empty or whitespace-only is a caller error, not an empty batch: the fence returns 2 and dispatches nothing.
+
 Executable batch shape (substitute the edge/role/stage from the table):
 
 ```bash
+# SDD_BATCH_TASK_IDS is a controller-supplied input (see above). Normalise it
+# through a QUOTED expansion — an unquoted $SDD_BATCH_TASK_IDS is the defect
+# itself: zsh does not word-split it, so the loop ran once with the whole
+# string and sdd_validate_positive_decimal refused the merged token.
+sdd_batch_ids="$(printf '%s' "${SDD_BATCH_TASK_IDS:-}" | tr -s ' \t\n' '\n')"
+# Fail closed. Unset, empty or whitespace-only collapses to the empty string
+# above; without this guard the loop iterates zero times, the prepared set
+# stays empty, sdd_assert_wave_disjoint returns 0 from its
+# `[ "${#SDD_PREPARED_IMPLEMENT_PATHS[@]}" -gt 0 ] || return 0` arm, and the
+# batch "succeeds" having dispatched nothing.
+[ -n "$sdd_batch_ids" ] || return 2
 # Dispatch the complete batch first.
 sdd_begin_batch || return $?
 plan_scope="$(sdd_plan_scope "$plan_path")" || return 2
-for task_id in $SDD_BATCH_TASK_IDS; do
+# Fed by REDIRECT, never a pipe. The loop body calls sdd_dispatch_prepared,
+# which mutates the SDD_PREPARED_* arrays that sdd_launch_prepared_batch reads
+# AFTER the loop. bash runs the right-hand side of a pipeline in a subshell,
+# so `printf ... | while read` would discard every prepared entry and launch
+# an empty batch — a worse silent failure than the one being fixed.
+while IFS= read -r task_id; do
+  [ -n "$task_id" ] || continue
   sdd_validate_instance_dimensions "$wave" "$task_id" "$stage" "$attempt" "$plan_scope" || return 2
   instance_id="$(uberdev_child_instance_id "sdd-p${plan_scope}-w${wave}-t${task_id}-${stage}-a${attempt}")" || return 2
   task_inputs_json="$(sdd_inputs_for_task "$edge_id" "$task_id")" || return 2
   task_inputs_json="$(sdd_canonicalize_owned_paths "$task_inputs_json")" || return 2
   task_inputs_json="$(uberdev_child_inputs_validate "$edge_id" "$task_inputs_json")" || return 2
   sdd_dispatch_prepared "$edge_id" "$instance_id" "$task_inputs_json" "$SDD_RISK_JSON" || return $?
-done
+done <<< "$sdd_batch_ids"
 sdd_launch_prepared_batch || return $?
 # Keep the per-instance result paths; the wait below resets the prepared arrays.
 sdd_snapshot_batch_results || return $?

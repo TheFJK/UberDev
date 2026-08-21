@@ -34,7 +34,7 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `LOCK_STALE_FLOOR_SEC` | `900` (hard floor; lock staleness threshold = max(`command_timeouts.merge`, `LOCK_STALE_FLOOR_SEC`) seconds of heartbeat age — NEVER `started_at` age, which mis-classifies live long runs as stale) | Step 1.1 (contention vs stale classification) |
 | `AUDIT_LOG_DIR_PATTERN` | `.uberdev/` (repo-root; docs-reality reconciliation #303 — every live writer appends to the root `.uberdev/audit.jsonl` and `/goal`'s reader globs the root; the former `runs/<run-id>/` claim documented a path no writer ever used. Note: `review-pr-verdict.json` is a DIFFERENT artifact and legitimately lives under `.uberdev/runs/<run-id>/`) | D15 |
 | `AUDIT_LOG_FILENAME` | `audit.jsonl` | D15 |
-| `AUDIT_EVENT_ENUM` | `gate_pass`, `gate_fail`, `order_proposed`, `order_confirmed`, `strategy_chosen`, `probe_clean`, `probe_conflict`, `agent_dispatched`, `agent_returned`, `patch_applied`, `test_pass`, `test_fail`, `push_resolution`, `merge_executed`, `local_sync`, `branch_deleted`, `worktree_removed`, `admin_bypass`, `waiver_recorded`, `error`, `pr_parked`, `stale_branch_rebase_decision`, `deprecated_flag_used`, `agent_strategy_switch`, `test_fail_agent_decision`, `trust_trail_agent_decision`, `merge_strategy_agent_decision`, `merge_strategy_fanout_wave_started`, `discovery_gh_failed`, `ci_probe_started`, `ci_probe_skipped_no_checks`, `ci_probe_unreachable`, `ci_monitor_green`, `ci_monitor_red`, `ci_monitor_timeout`, `ci_classify_dispatched`, `ci_classify_returned`, `ci_classify_ambiguous_routing_as_flaky`, `ci_fix_dispatched`, `ci_fix_dispatch_unknown_class`, `ci_fix_pushed`, `ci_flaky_rerun_queued`, `ci_flaky_rerun_failed`, `ci_loop_cap_reached`, `ci_phase_outcome`, `auto_review_dispatched`, `auto_review_returned`, `audit_json_phase2_5_parse_failure`, `halt_tool_unavailable`, `uberdev_active_label_cleared` | See the `AUDIT_EVENT_ENUM` event semantics subsection below the Constants table for field-level extensions and the member-addition history. |
+| `AUDIT_EVENT_ENUM` | `gate_pass`, `gate_fail`, `order_proposed`, `order_confirmed`, `strategy_chosen`, `probe_clean`, `probe_conflict`, `agent_dispatched`, `agent_returned`, `patch_applied`, `test_pass`, `test_fail`, `push_resolution`, `merge_executed`, `local_sync`, `branch_deleted`, `worktree_removed`, `admin_bypass`, `waiver_recorded`, `error`, `pr_parked`, `stale_branch_rebase_decision`, `deprecated_flag_used`, `agent_strategy_switch`, `test_fail_agent_decision`, `trust_trail_agent_decision`, `merge_strategy_agent_decision`, `merge_strategy_fanout_wave_started`, `discovery_gh_failed`, `ci_probe_started`, `ci_probe_skipped_no_checks`, `ci_probe_unreachable`, `ci_monitor_green`, `ci_monitor_red`, `ci_monitor_timeout`, `ci_classify_dispatched`, `ci_classify_returned`, `ci_classify_ambiguous_routing_as_flaky`, `ci_fix_dispatched`, `ci_fix_dispatch_unknown_class`, `ci_fix_pushed`, `ci_flaky_rerun_queued`, `ci_flaky_rerun_failed`, `ci_loop_cap_reached`, `ci_phase_outcome`, `auto_review_dispatched`, `auto_review_returned`, `audit_json_phase2_5_parse_failure`, `halt_tool_unavailable`, `uberdev_active_label_cleared`, `merge_partial_unharvested` | See the `AUDIT_EVENT_ENUM` event semantics subsection below the Constants table for field-level extensions and the member-addition history. |
 | `SCRATCH_WORKTREE_PATTERN` | `.claude/worktrees/merge-<run-id>/` | D10 |
 | `BRANCH_NAME_REGEX` | `^[A-Za-z0-9._/-]{1,255}$` | D8 (validation before shell argv use) |
 | `MERGE_STRATEGY_LABEL_PREFIX` | `merge-strategy:` | D-LABEL |
@@ -112,6 +112,9 @@ Plus 2 phase2_5-observability members (#116): `audit_json_phase2_5_parse_failure
 And `halt_tool_unavailable` (`data.tool: string`) — fires from `commands/review-pr.md` Step 6b.1 when `ToolSearch` fails to load the named tool (e.g. `AskUserQuestion`); `/review-pr` aborts (exit 1) rather than silently auto-pick a Phase 2.5 halt-choice.
 
 **+1 issue-claim-cleanup member (#TBD v0.28.0):** `uberdev_active_label_cleared` (`data.issue: int`, `data.pr: int`, `data.reason: string ∈ {"merge", "merge-partial"}`) — fires from Step 3.4 once per linked issue after a successful `gh pr merge`. The two reasons name two different end states, and collapsing them would hide the one an operator has to act on: `merge` is a claim released **because the issue closed** (a closing keyword linked it, GitHub auto-closed it on merge, the work is done); `merge-partial` is a claim released off the non-closing `UberDev-Partial: #N` trailer, where the PR landed real work but the issue is **still OPEN and re-solvable** (#554). The Step 3.4 cleanup performs a **single combined `gh issue edit --remove-label "uberdev:active" --remove-assignee "@me"`** mutation (label and assignee removed in one round-trip; gh fails atomically on partial error) — symmetric with the Phase B dispatch-failure rollback in `solve-pipeline/SKILL.md` (which also clears both label and assignee). Without the assignee removal here, the dispatcher's "Assigned to me" GitHub filter would accumulate closed-and-merged issues over time. The audit event gates on the combined rc: success emits, failure stays silent. Pairs the cleanup-half of the small-team issue-claim protocol set in `solve-pipeline/SKILL.md` Step 4.5 (the dispatch-half emits `claim_acquired`). Fail-soft: a combined-call failure does NOT emit the event (the issue may already be closed by GitHub's auto-close, the label may have been removed by hand, or the assignee may differ from @me — none of these are conditions the operator wants to see surface as an audit-noisy failure on a UI-cleanup pass).
+
+**+1 unharvested-trailer member:** `merge_partial_unharvested` (`data.pr: int`, `data.mentions: int`, `data.released: int`) — fires from Step 3.4 at most once per PR, when the body mentions the `UberDev-Partial: #N` trailer on more lines than the strict flush-and-undecorated harvest released. It records **nothing was done**, which is exactly why it exists: the release predicate is deliberately strict (#646), so a decorated, indented or prose-wrapped trailer harvests as nothing, and without this row that outcome is byte-for-byte indistinguishable in the audit trail from a PR that carried no trailer at all — while the claim stays set on a **still-OPEN** issue and blocks every later `/solve`, `/turbo` and `/goal` dispatch for it. It is not `uberdev_active_label_cleared` under a third reason, because no label was cleared and no issue number is known; conflating the two would let a reader count a strand as a release. Advisory only: it never mutates, never gates the merge, and a body that both documents the trailer and emits one will emit it — a false warning costs a glance, a silent strand costs every future dispatch for that issue. The dispatch-time stale-claim sweeper does not cover this case: it prunes only CLOSED issues.
+
 ## Inputs
 
 Argument parsing:
@@ -1255,7 +1258,11 @@ After a successful `gh pr merge` (Step 3.2 clean-merge path or Step 3.3vii confl
 
 **Form 2 — `UberDev-Partial: #N`** (#554). A solve-fleet PR whose task chain stopped early lands real work without finishing the issue, so it deliberately carries **no** closing keyword — it must not close what it did not finish. Form 1 therefore finds nothing, and without a second form the claim would strand on a still-OPEN issue and block every later `/solve`, `/turbo` and `/goal` Phase 1. The trailer is **standalone-line, case-sensitive and namespaced**, parsed in the same spirit as the `Blocks: #N` trailer `lib/goal-state.sh` already reads (`BLOCKS_LINE_REGEX`), and it has exactly one producer: `skills/solve-fleet/workflow.js`. Namespacing is what makes releasing on it safe at all: `/merge` runs on **every** PR, so a bare `Refs #N` was rejected outright — a drive-by `Refs #42` would release a claim a **live** solver still holds. The issue stays OPEN and re-solvable; only the claim is released (audit reason `merge-partial`).
 
-**Standalone, not bare** (#603). The harvest tolerates a leading list marker (`-`/`*`/`+`), surrounding backticks and trailing whitespace, because the producer is a free-text agent told to emit "the line" and those are the decorations it reaches for when it renders that line into a markdown body — each of which the original bare `^…$` anchor harvested as *nothing*, stranding the very claim this form exists to release, and silently: an unharvested body is indistinguishable from one that carried no trailer. What the anchor still refuses is anything that makes the line more than the trailer — prose before it (`see UberDev-Partial: #50 for context`) or after it (`` - `UberDev-Partial: #50` — already handled ``) — for the same reason `Refs #N` was refused: a sentence that merely discusses a claim must never release it. `prLinkLine()` was tightened in the same change to mandate the bare form, so the tolerated decorations are a safety net on the consumer end, not a licence on the producer end. `tests/merge-pipeline-zsh.test.sh` MZ3.k/l/m pin the tolerance and MZ3.h/MZ3.n pin the boundary.
+**Flush and undecorated** (#646, tightening #603). The harvest accepts the trailer only as the entire content of its own line, flush against the left margin, with nothing but optional trailing whitespace after it. #603 had also tolerated a leading list marker (`-`/`*`/`+`) and surrounding backticks, because the producer was a free-text agent told to "contain the line" — quoted inside a sentence and inside a code span — and those were the decorations it copied; under the original bare anchor each of them harvested *nothing*, stranding the very claim this form exists to release, and silently, since an unharvested body is indistinguishable from one that carried no trailer.
+
+That tolerance had a mirror-image cost, and #646 paid it off from the producing end rather than by re-widening or re-narrowing the parse alone. A bullet whose entire content is the trailer is byte-for-byte identical whether a solver emitted it or a human wrote it while *documenting* the format, so a documenting PR body released a claim a live solver still held — stripping `uberdev:active` and the assignee and writing a `merge-partial` audit row that asserts a legitimate release. `prLinkLine()` in `skills/solve-fleet/workflow.js` now renders the mandated line flush and undecorated on a line of its own — the shape a writer copies — and `tests/solve-fleet-workflow.test.sh` P1–P6 feed that builder's own rendered line to *this* expression, read live out of the fence, so the two ends cannot drift apart. With the emission pinned, the decoration tolerance is no longer load-bearing and the ambiguity it bought is refused.
+
+Trailing whitespace is the one residue kept: it is invisible, so it can never be what makes a line documentation rather than an emission, while a writer ending the line with a markdown hard break is a real way to strand a claim. Everything visible is refused — a list marker, a backtick on either side, an indent (a four-space indent is a code block, i.e. documentation), prose before the trailer (`see UberDev-Partial: #50 for context`) or after it — for the same reason `Refs #N` was refused: a sentence that merely discusses a claim must never release it. `tests/merge-pipeline-zsh.test.sh` MZ3.k/l/p pin the decoration refusals, MZ3.m pins the whitespace tolerance, and MZ3.h/MZ3.n/MZ3.o pin the prose and indent boundaries.
 
 **The release stays at merge time, never at PR-open.** While a partial PR is open the issue must remain claimed, or a second fleet would cut a competing branch against work already in flight.
 
@@ -1265,10 +1272,10 @@ The cleanup loop calls TWO `gh issue edit` mutations per linked issue: `--remove
 
 Failure-soft semantics: a PR carrying neither linkage form is a no-op (drive-by PR, manual issue close). A `gh issue edit --remove-label` failure is silently ignored (issue may already be closed by GitHub's auto-close or the label may have been removed by hand). The `--remove-assignee "@me"` call is independently fail-soft for the same reason (issue may already be unassigned, or assignee may differ from @me if a teammate triaged the issue before /solve ran). The dispatch-time stale-claim sweeper in `solve-pipeline/SKILL.md` Step 4 (state==CLOSED + label present → auto-prune) is the safety net for any cleanup the merge step misses.
 
-The cleanup fence is delimited by `# BEGIN merge-issue-cleanup-fence-v3` / `# END merge-issue-cleanup-fence-v3` (bumped from `-v2` by #603, which changed what the partial harvest accepts). Those markers are a CONTRACT, not a comment: `tests/merge-pipeline-zsh.test.sh` extracts everything between them and EXECUTES it under `zsh -f` against a recording `gh` stub. Keep the block self-contained (it may assume only `PR`, `PR_JSON`, a `gh` on `PATH` and an `_uberdev_audit_emit` emitter), and bump the marker version if the contract changes.
+The cleanup fence is delimited by `# BEGIN merge-issue-cleanup-fence-v4` / `# END merge-issue-cleanup-fence-v4` (bumped from `-v2` by #603 and from `-v3` by #646, each of which changed what the partial harvest accepts). Those markers are a CONTRACT, not a comment: `tests/merge-pipeline-zsh.test.sh` extracts everything between them and EXECUTES it under `zsh -f` against a recording `gh` stub. Keep the block self-contained (it may assume only `PR`, `PR_JSON`, a `gh` on `PATH` and an `_uberdev_audit_emit` emitter), and bump the marker version if the contract changes.
 
 ```bash
-# BEGIN merge-issue-cleanup-fence-v3
+# BEGIN merge-issue-cleanup-fence-v4
 # --- Step 3.4: post-merge issue cleanup (NEW v0.28.0) ---
 # $PR (the merged PR number) and $PR_JSON (cached projection with .body field)
 # are in scope per the Phase 3 per-PR loop convention. Parse closing keywords
@@ -1303,11 +1310,11 @@ CLOSED_ISSUES=($(printf '%s' "$PR_BODY_FOR_CLEANUP" \
 # OPEN issue, which then blocks every later /solve, /turbo and /goal Phase 1.
 # Standalone-line, case-sensitive and namespaced — the same namespaced-trailer
 # convention as the `Blocks: #N` line lib/goal-state.sh parses
-# (BLOCKS_LINE_REGEX), though NOT the same regex: that one is whole-line and
-# admits no decoration, while this one tolerates the bounded set the STANDALONE
-# block below enumerates. The exact shape is that block's to state; do not
-# re-describe it here, or this fence carries two descriptions of one regex and a
-# reader meets the stale copy first. A bare `Refs #N`
+# (BLOCKS_LINE_REGEX), and since #646 the same whole-line strictness: the only
+# residue the FLUSH AND UNDECORATED block below tolerates is invisible. The
+# exact shape is that block's to state; do not re-describe it here, or this
+# fence carries two descriptions of one regex and a reader meets the stale copy
+# first. A bare `Refs #N`
 # was rejected deliberately: /merge runs on EVERY PR, so a drive-by reference
 # would release a claim a LIVE solver still holds. The trailer has exactly one
 # producer (skills/solve-fleet/workflow.js), which is what makes it safe.
@@ -1316,45 +1323,78 @@ CLOSED_ISSUES=($(printf '%s' "$PR_BODY_FOR_CLEANUP" \
 # very claim this arm exists to release. The keyword harvest above needs no
 # strip; its ERE has no right anchor, so a trailing CR cannot break it.
 #
-# STANDALONE, not bare (#603). The producer is a free-text agent told to emit
-# "the line", and when it renders that line into a markdown body it writes
-# `- ` in front of it, wraps it in backticks, or leaves a trailing space. Every
-# one of those was harvested as NOTHING by the bare `^UberDev-Partial: #N$`
-# form, and the miss is silent by construction: an unmatched body produces an
-# empty array, the loop runs zero times, rc stays 0, and the stranded claim is
-# indistinguishable from a PR that carried no trailer. So the anchors STAY, and
-# what is tolerated between them is only what leaves the line carrying NOTHING
-# BUT THE TRAILER: an optional list marker, a backtick on either side — the two
-# positions are independently optional, so a single unpaired backtick also
-# matches — and trailing whitespace.
+# FLUSH AND UNDECORATED (#646), which is a TIGHTENING of the #603 form and only
+# safe because the producer moved first. #603 tolerated a leading list marker
+# and surrounding backticks here, because the producer was a free-text agent
+# told to "contain the line" — inside a sentence, inside a code span — and those
+# were the decorations it copied. Every one of them had been harvested as
+# NOTHING, silently: an unmatched body produces an empty array, the loop runs
+# zero times, rc stays 0, and the stranded claim is indistinguishable from a PR
+# that carried no trailer.
 #
-# THE LEFT ANCHOR IS FLUSH, and that is load-bearing rather than an oversight.
-# An earlier cut of this relaxation also tolerated a leading whitespace run, on
-# the reasoning that an indented trailer still carries nothing but the trailer.
-# Measured, that does NOT fail safe: four leading spaces is a MARKDOWN CODE
-# BLOCK, so a PR body that merely DOCUMENTS the trailer format would release the
-# claim it documents. Reproduced against this pipeline — from a body holding
+# The cost was the mirror image. A bullet whose entire content is the trailer is
+# byte-for-byte identical whether a solver emitted it or a human wrote it while
+# DOCUMENTING the format, and /merge runs over EVERY PR — so a documenting body
+# stripped `uberdev:active` and the assignee from an issue a live solver still
+# held, and wrote a `merge-partial` audit row asserting the release was
+# legitimate. Both directions are silent, so neither was safer on visibility
+# grounds; what settled it was fixing the EMISSION. `prLinkLine()` in
+# skills/solve-fleet/workflow.js now renders the mandated line flush and
+# undecorated on a line of its own — the shape a writer copies — and
+# tests/solve-fleet-workflow.test.sh P1-P6 feed that builder's own rendered line
+# to THIS expression, read live out of this fence. With the producer pinned to
+# what the harvest accepts, the decoration tolerance stopped being load-bearing
+# and the ambiguity it bought is refused instead.
 #
-#     UberDev-Partial: #603
+# WHAT IS STILL TOLERATED IS TRAILING WHITESPACE, and only that. Whitespace is
+# invisible: a reader cannot tell `#N` from `#N   `, so it can never be the
+# thing that makes a line documentation rather than an emission, while a writer
+# ending the line with a markdown hard break is a real way to strand a claim.
+# Every VISIBLE decoration is refused — a list marker, a backtick on either
+# side, an indent, prose before or after (MZ3.h / MZ3.k / MZ3.l / MZ3.n /
+# MZ3.o / MZ3.p in tests/merge-pipeline-zsh.test.sh, with MZ3.m pinning the
+# whitespace tolerance that stays).
 #
-# indented inside such a block, the flush form harvests nothing and the
-# leading-whitespace form yields 603. Because /merge runs over EVERY PR, that
-# would strip `uberdev-active` and the assignee from a live issue and write a
-# merge-partial audit row asserting a legitimate release — silent on stderr and
-# actively misdescribed in the trail — after which a second fleet could cut a
-# competing branch while the first solver still holds the issue. All three
-# producer renderings are left-flush, so the tolerance bought nothing and cost
-# that. Do not re-add it.
-#
-# The list-marker class is `[-*+]` and deliberately NOT `[0-9]+\.` — an ordered
-# marker would put a stray digit in front of the issue number and the `[0-9]+`
-# extraction below would harvest `1` as an issue. Prose on either side is still
-# refused: that is what keeps a drive-by sentence on any of the PRs /merge runs
-# over from releasing a claim a LIVE solver still holds (MZ3.h / MZ3.n).
+# THE LEFT ANCHOR IS FLUSH, and that was load-bearing even under the tolerant
+# form. An earlier cut of #603's relaxation also tolerated a leading whitespace
+# run, on the reasoning that an indented trailer still carries nothing but the
+# trailer. Measured, that does NOT fail safe: four leading spaces is a MARKDOWN
+# CODE BLOCK, so a PR body that merely DOCUMENTS the trailer format would
+# release the claim it documents. Reproduced against this pipeline — from a body
+# holding that trailer indented inside such a block, the flush form harvests
+# nothing and the leading-whitespace form yields the issue number. Do not re-add
+# it, and do not re-add the list marker or the backticks either: each one hands
+# a documenting body a way to release a claim a LIVE solver still holds.
 PARTIAL_ISSUES=($(printf '%s\n' "$PR_BODY_FOR_CLEANUP" | tr -d '\r' \
-  | grep -oE '^([-*+][[:space:]]+)?`?UberDev-Partial: #[0-9]+`?[[:space:]]*$' \
+  | grep -oE '^UberDev-Partial: #[0-9]+[[:space:]]*$' \
   | grep -oE '[0-9]+' \
   | awk -v c0=0 '!seen[$c0]++'))
+# LOOSE DETECTION, ADVISORY ONLY. It releases nothing and can release nothing:
+# the strict predicate above stays exactly as strict, for every reason the
+# FLUSH AND UNDECORATED block gives. What it buys is the one thing that block
+# does not — the ability to LEARN the harvest came back empty. A body whose
+# trailer carries a list marker, a backtick, an indent or surrounding prose
+# yields no match, the loop below runs zero times, rc stays 0, and nothing on
+# stderr or in the audit stream distinguishes that from a PR that never carried
+# a trailer at all. The miss does not heal: the claim label and the assignee
+# stay on a still-OPEN issue, and the Phase A collision check in
+# lib/solve-launcher.sh then refuses every later /solve, /turbo and /goal
+# dispatch for that issue until a human passes the force flag. The
+# dispatch-time stale-claim sweeper is NOT the safety net here — it prunes only
+# CLOSED issues, so it never reaches this case. So count the trailer token in
+# ANY position and, when more lines mention it than the strict harvest yielded,
+# say so on stderr and in the audit stream under a reason of its own, carrying
+# the PR number an operator needs in order to go and look. A body that both
+# documents the trailer and emits one warns too; a false warning costs a glance,
+# a silent strand costs every future dispatch for that issue.
+PARTIAL_MENTIONS=$(printf '%s\n' "$PR_BODY_FOR_CLEANUP" | tr -d '\r' \
+  | grep -cE 'UberDev-Partial:[[:space:]]*#[0-9]+') || PARTIAL_MENTIONS=0
+case "${PARTIAL_MENTIONS:-}" in '' | *[!0-9]*) PARTIAL_MENTIONS=0 ;; esac
+if [ "$PARTIAL_MENTIONS" -gt "${#PARTIAL_ISSUES[@]}" ]; then
+  echo "warn: /uberdev:merge — PR #$PR carries $PARTIAL_MENTIONS UberDev-Partial mention(s) but the strict harvest released ${#PARTIAL_ISSUES[@]}; a decorated or indented trailer leaves the claim set on a still-OPEN issue. Release it by hand." >&2
+  _uberdev_audit_emit merge_partial_unharvested \
+    "{\"pr\":$PR,\"mentions\":$PARTIAL_MENTIONS,\"released\":${#PARTIAL_ISSUES[@]}}" || true
+fi
 for CLEAR_ISSUE_NUM in "${CLOSED_ISSUES[@]}"; do
   # Combined cleanup: label + assignee in one gh round-trip. gh fails atomically
   # on partial error so the previous split-call form (with assignee removal as
@@ -1391,7 +1431,7 @@ for CLEAR_ISSUE_NUM in "${PARTIAL_ISSUES[@]}"; do
       "{\"issue\":$CLEAR_ISSUE_NUM,\"pr\":$PR,\"reason\":\"merge-partial\"}" || true
   fi
 done
-# END merge-issue-cleanup-fence-v3
+# END merge-issue-cleanup-fence-v4
 ```
 
 ### Step 3.5 — Failure-mode summary

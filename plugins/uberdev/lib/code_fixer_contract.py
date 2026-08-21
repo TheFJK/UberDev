@@ -7371,8 +7371,20 @@ WORKFLOW_REVIEWER_EDGE_IDS = frozenset(
 # contributor every _validate_aggregate call then demands a verdict from.
 WORKFLOW_VERIFIER_EDGE_IDS = frozenset(("review_pr.verify.finding",))
 
+# Post-fix reviewer children (#655): the ONE code-reviewer dispatched over a
+# validated fixer's own commit range. Its OWN frozenset rather than a member of
+# WORKFLOW_REVIEWER_EDGE_IDS, for the reason its neighbour above records --
+# that set is DERIVED from PHASE_CONTRIBUTORS, so folding this edge in would
+# silently make the post-fix child a contributor that every _validate_aggregate
+# call then demands a verdict from. The post-fix child is verifier-shaped: one
+# result, one status, and no aggregate contribution.
+WORKFLOW_POSTFIX_EDGE_IDS = frozenset(("review_pr.postfix.correctness",))
+
 WORKFLOW_BOUND_EDGE_IDS = (
-    WORKFLOW_REVIEWER_EDGE_IDS | WORKFLOW_FIXER_EDGE_IDS | WORKFLOW_VERIFIER_EDGE_IDS
+    WORKFLOW_REVIEWER_EDGE_IDS
+    | WORKFLOW_FIXER_EDGE_IDS
+    | WORKFLOW_VERIFIER_EDGE_IDS
+    | WORKFLOW_POSTFIX_EDGE_IDS
 )
 
 # The defer stage's own edge. Kept out of WORKFLOW_BOUND_EDGE_IDS on purpose:
@@ -8283,7 +8295,15 @@ def capture_bound_child(*, launch_binding: bytes, edge_id: str) -> dict[str, Any
     # a pinned log/aggregate authority this verb has no slot for, so freezing a
     # CI child here would prove strictly less while looking complete. See
     # WORKFLOW_CI_EDGE_IDS and capture_ci_terminal (#383).
-    if edge_id not in (WORKFLOW_REVIEWER_EDGE_IDS | WORKFLOW_VERIFIER_EDGE_IDS):
+    # WORKFLOW_POSTFIX_EDGE_IDS is admitted HERE as well as at the mint
+    # (WORKFLOW_BOUND_EDGE_IDS) because the two gates are separate: widening
+    # only the mint side would produce a binding this verb then refuses --
+    # after the nonce has already been burnt.
+    if edge_id not in (
+        WORKFLOW_REVIEWER_EDGE_IDS
+        | WORKFLOW_VERIFIER_EDGE_IDS
+        | WORKFLOW_POSTFIX_EDGE_IDS
+    ):
         fail("bound_child_edge_unsupported")
     binding = _load_launch_binding(launch_binding, edge_id)
     if binding.get("backend") != "workflow":

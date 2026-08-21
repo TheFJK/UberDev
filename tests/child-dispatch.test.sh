@@ -1363,6 +1363,35 @@ AFTER="$(find "$TMP/installed-package" -type f -exec shasum -a 256 {} + | sort)"
 # does not own), different document grammar: exactly two scalar keys.
 VERIFY_DIR="$TMP/verify"; mkdir -p "$VERIFY_DIR"
 verifier_result() { printf '```yaml\nscore: %s\nreason: %s\n```\n' "$1" "$2" >"$VERIFY_DIR/result.md"; }
+# The SECOND accepted opener (#670). Every fixture above is built behind a
+# ```yaml fence, so on its own the helper above cannot tell a tolerant reader
+# from the strict one it replaced — this one is what makes the difference
+# observable. See shared/finding-verifier-output-v1.md, which now states the
+# accepted opener set in its own words.
+verifier_result_bare() { printf '```\nscore: %s\nreason: %s\n```\n' "$1" "$2" >"$VERIFY_DIR/result.md"; }
+# Assert the boundary REFUSES a document. Every refusal row below goes through
+# this, and none of them may go back to `! uberdev_child_validate_…`.
+#
+# `!` LOOKS like an assertion and is not one. Bash exempts a `!`-inverted
+# command from `set -e` AND from the ERR trap ("the shell does not exit if …
+# the command's return value is being inverted with !"), so a `! cmd` line that
+# should have failed simply runs on to the next line. MEASURED, not theoretical:
+# with the fence regex over-widened to accept ANY info string, a whole block of
+# `! uberdev_child_validate_finding_verifier_result …` rows left this file at
+# exit 0 — ```yml, ```json and a four-backtick fence all newly accepted, nothing
+# red. A bare call to a function that RETURNS non-zero is a real assertion, and
+# it names the fixture that got through instead of failing anonymously.
+verifier_refuses() {
+  # `target`, never `path`: zsh ties `path` to `PATH`, so a `local path=` inside
+  # a function empties the command search path for the rest of it —
+  # tests/crossplatform-shell-wrappers.test.sh reds on the declaration.
+  local label="$1" target="${2:-$VERIFY_DIR/result.md}"
+  if uberdev_child_validate_finding_verifier_result "$target" >/dev/null 2>&1; then
+    printf 'child-dispatch: verifier boundary ACCEPTED what must be refused: %s\n' \
+      "$label" >&2
+    return 1
+  fi
+}
 
 # Accepts a well-formed document and emits both fields.
 verifier_result 93 reproduced-from-diff
@@ -1382,49 +1411,148 @@ done
 # Out-of-range, non-integer, quoted, and leading-zero scores are refused.
 for bad_score in 101 -1 1000 abc '"80"' 007 80.0 ''; do
   verifier_result "$bad_score" reproduced-from-diff
-  ! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md" >/dev/null 2>&1
+  verifier_refuses "score: $bad_score"
 done
 # An unknown reason token is refused — the vocabulary is closed.
 for bad_reason in probably-fine REPRODUCED-FROM-DIFF '"pre-existing"' 'reproduced from diff' ''; do
   verifier_result 90 "$bad_reason"
-  ! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md" >/dev/null 2>&1
+  verifier_refuses "reason: $bad_reason"
 done
 # A verdict is the controller's to assign; a child that emits one is malformed.
 printf '```yaml\nscore: 93\nreason: reproduced-from-diff\nverdict: SURVIVES\n```\n' >"$VERIFY_DIR/result.md"
-! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md" >/dev/null 2>&1
+verifier_refuses 'child-emitted verdict key'
 # A missing key, a duplicate key, and a reversed key order are all malformed.
 printf '```yaml\nscore: 93\n```\n' >"$VERIFY_DIR/result.md"
-! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md" >/dev/null 2>&1
+verifier_refuses 'reason key missing'
 printf '```yaml\nreason: pre-existing\n```\n' >"$VERIFY_DIR/result.md"
-! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md" >/dev/null 2>&1
+verifier_refuses 'score key missing'
 printf '```yaml\nscore: 93\nscore: 12\nreason: pre-existing\n```\n' >"$VERIFY_DIR/result.md"
-! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md" >/dev/null 2>&1
+verifier_refuses 'duplicate score key'
 printf '```yaml\nreason: pre-existing\nscore: 93\n```\n' >"$VERIFY_DIR/result.md"
-! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md" >/dev/null 2>&1
+verifier_refuses 'reversed key order'
 # The boundary is a whole-file fullmatch, not a search for the last fence.
 printf 'Here is my answer:\n```yaml\nscore: 93\nreason: pre-existing\n```\n' >"$VERIFY_DIR/result.md"
-! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md" >/dev/null 2>&1
+verifier_refuses 'preamble before the fence'
 printf '```yaml\nscore: 93\nreason: pre-existing\n```\nHope that helps!\n' >"$VERIFY_DIR/result.md"
-! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md" >/dev/null 2>&1
+verifier_refuses 'trailer after the fence'
 printf '```yaml\nscore: 1\nreason: pre-existing\n```\n```yaml\nscore: 99\nreason: pre-existing\n```\n' >"$VERIFY_DIR/result.md"
-! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md" >/dev/null 2>&1
+verifier_refuses 'two fenced documents'
 # An unfenced document is malformed.
 printf 'score: 93\nreason: pre-existing\n' >"$VERIFY_DIR/result.md"
-! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md" >/dev/null 2>&1
+verifier_refuses 'unfenced body'
+# Anti-vacuity for the row above: the SAME two lines behind a bare fence
+# validate, so that refusal is about the missing fence and not about the body.
+verifier_result_bare 93 pre-existing
+[ "$(uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md")" = "93 pre-existing" ]
+
+# ---------------------------------------------------------------------------
+# The opening fence's INFO STRING (#670)
+# ---------------------------------------------------------------------------
+# The accepted opener set is exactly two — a bare ``` fence and ```yaml — and
+# shared/finding-verifier-output-v1.md now says so in its own words. These rows
+# are what holds the reader to that sentence in BOTH directions: they red if the
+# tolerance is narrowed back, and they red if it is widened further.
+#
+# Narrowing is the regression that already happened. The boundary used to match
+# ```yaml literally while this contract printed its canonical example behind a
+# BARE fence, so a verifier child that copied the worked example it was given
+# had a well-formed answer refused. A refusal here is not neutral: the
+# controller records `verifier-unavailable`, the same row a child that never ran
+# produces, so the opinion is discarded AND misattributed with nothing
+# downstream able to tell the two apart.
+
+# The live bytes observed on PR #670, verbatim — accepted, and the score
+# survives. An acceptance that dropped the number would be no better.
+verifier_result_bare 93 reproduced-from-diff
+[ "$(uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md")" = "93 reproduced-from-diff" ]
+# Both score endpoints, and a controller-assigned reason, behind a bare fence.
+verifier_result_bare 0 contradicted-by-diff
+[ "$(uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md")" = "0 contradicted-by-diff" ]
+verifier_result_bare 100 out-of-scope-line
+[ "$(uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md")" = "100 out-of-scope-line" ]
+verifier_result_bare 50 over-cap-unverified
+[ "$(uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md")" = "50 over-cap-unverified" ]
+# A bare fence with no trailing newline, with trailing spaces on both fence
+# lines, and with CRLF endings (a Git-Bash checkout writes the child's result
+# that way) are all the same document.
+printf '```\nscore: 93\nreason: reproduced-from-diff\n```' >"$VERIFY_DIR/result.md"
+[ "$(uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md")" = "93 reproduced-from-diff" ]
+printf '```   \nscore: 93\nreason: reproduced-from-diff\n```   \n' >"$VERIFY_DIR/result.md"
+[ "$(uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md")" = "93 reproduced-from-diff" ]
+printf '```\r\nscore: 93\r\nreason: reproduced-from-diff\r\n```\r\n' >"$VERIFY_DIR/result.md"
+[ "$(uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md")" = "93 reproduced-from-diff" ]
+
+# Tolerant about the info string, NOT open. Every other opener the contract
+# names as malformed is still refused — including the near-misses a "just make
+# it lenient" edit would let through: a different tag, a differently-cased tag,
+# a tag behind a space, and a tag with anything appended. Each pair closes with
+# its own matching fence so the refusal is attributable to the OPENER and not to
+# a mismatched closing line.
+for verifier_fence_pair in \
+  '```yml|```' '```YAML|```' '```json|```' '```markdown|```' \
+  '``` yaml|```' '```yaml wrapped|```' '````|````' '~~~|~~~'; do
+  verifier_fence_open="${verifier_fence_pair%%|*}"
+  verifier_fence_close="${verifier_fence_pair##*|}"
+  printf '%s\nscore: 93\nreason: reproduced-from-diff\n%s\n' \
+    "$verifier_fence_open" "$verifier_fence_close" >"$VERIFY_DIR/result.md"
+  verifier_refuses "opener $verifier_fence_open"
+done
+
+# The widening is scoped to the opener and to whitespace around the document.
+# Behind a BARE fence the body grammar and the full-file match are exactly as
+# strict as behind ```yaml: a verdict key, a quoted score, an unknown reason and
+# a reversed key order are still malformed, and so are a preamble, a trailer and
+# a second fenced document.
+printf '```\nscore: 93\nreason: reproduced-from-diff\nverdict: SURVIVES\n```\n' >"$VERIFY_DIR/result.md"
+verifier_refuses 'bare fence + verdict key'
+printf '```\nscore: "93"\nreason: reproduced-from-diff\n```\n' >"$VERIFY_DIR/result.md"
+verifier_refuses 'bare fence + quoted score'
+printf '```\nscore: 93\nreason: probably-fine\n```\n' >"$VERIFY_DIR/result.md"
+verifier_refuses 'bare fence + unknown reason'
+printf '```\nreason: pre-existing\nscore: 93\n```\n' >"$VERIFY_DIR/result.md"
+verifier_refuses 'bare fence + reversed key order'
+printf 'Here is my answer:\n```\nscore: 93\nreason: pre-existing\n```\n' >"$VERIFY_DIR/result.md"
+verifier_refuses 'bare fence + preamble'
+printf '```\nscore: 93\nreason: pre-existing\n```\nHope that helps!\n' >"$VERIFY_DIR/result.md"
+verifier_refuses 'bare fence + trailer'
+printf '```\nscore: 1\nreason: pre-existing\n```\n```\nscore: 99\nreason: pre-existing\n```\n' >"$VERIFY_DIR/result.md"
+verifier_refuses 'two bare-fenced documents'
+# A bare opener closed by a ```yaml line is not "one fence with a tag" — it is a
+# mismatched pair, and it is refused.
+printf '```\nscore: 93\nreason: reproduced-from-diff\n```yaml\n' >"$VERIFY_DIR/result.md"
+verifier_refuses 'bare opener closed by a ```yaml line'
+
+# The contract's OWN worked example, extracted from the shipped file rather than
+# retyped here, validates. This is the row that would have caught #670: the
+# example a child is shown and the document the boundary accepts are the same
+# thing, and no transcription of the fence into this file can drift them apart.
+VERIFY_CONTRACT="$ROOT/plugins/uberdev/shared/finding-verifier-output-v1.md"
+[ -r "$VERIFY_CONTRACT" ]
+python3 -I -B - "$VERIFY_CONTRACT" "$VERIFY_DIR/result.md" <<'PY'
+import re,sys
+text=open(sys.argv[1],encoding='utf-8').read()
+block=re.search(r'^(```[^\n]*)\nscore: [^\n]*\nreason: [^\n]*\n(```)[ \t]*$',text,re.M)
+if not block: raise SystemExit('contract has no score/reason worked example')
+# Substitute concrete values for the <angle-bracket> placeholders; the FENCE
+# LINES are copied byte-for-byte, which is the whole point of this row.
+open(sys.argv[2],'w',encoding='utf-8').write(
+ '%s\nscore: 93\nreason: reproduced-from-diff\n%s\n'%(block.group(1),block.group(2)))
+PY
+[ "$(uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md")" = "93 reproduced-from-diff" ]
 
 # File identity: a symlinked result and a hard-linked result are both refused
 # even when their CONTENT is perfectly well-formed.
 verifier_result 93 reproduced-from-diff
 ln -s "$VERIFY_DIR/result.md" "$VERIFY_DIR/symlinked.md"
-! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/symlinked.md" >/dev/null 2>&1
+verifier_refuses 'symlinked result path' "$VERIFY_DIR/symlinked.md"
 ln "$VERIFY_DIR/result.md" "$VERIFY_DIR/hardlinked.md"
-! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/hardlinked.md" >/dev/null 2>&1
+verifier_refuses 'hard-linked result path' "$VERIFY_DIR/hardlinked.md"
 # Anti-vacuity: with the extra link gone the SAME bytes validate, so the two
 # refusals above are about identity and not about the content.
 rm -f "$VERIFY_DIR/hardlinked.md"
 [ "$(uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md")" = "93 reproduced-from-diff" ]
 # A missing result is a refusal, never an empty success.
-! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/absent.md" >/dev/null 2>&1
+verifier_refuses 'absent result file' "$VERIFY_DIR/absent.md"
 
 uberdev_test_exit_floor_reached
 echo 'child-dispatch: 110 checks passed (+ the finding-verifier result boundary)'

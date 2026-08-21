@@ -19,11 +19,17 @@
 #   R4  — project-agents (TB1): the projection, and rc 3 over the ceiling
 #   R5  — budget-spend (TB2): accumulates across calls, rc 3 at the limit
 #   R6  — plan-tasks: parses waves + Owns, and reports unwaved/unowned
+#   R6b — plan-tasks: the bullet-list Owns form the writer actually emits (#653)
+#   R6c — plan-tasks vs agents/plan-writer.md, compared by EXECUTION (#653)
+#   R6d — plan-tasks: a bare or absent Owns label is still `unowned` (#653)
 #   R7  — wave-disjoint (TB3): equality, CONTAINMENT, missing, cross-wave
 #   R8  — stage-commit: refuses every stage-everything form; commits explicitly
 #   R9  — worktree-add: cuts the checkout and is re-entrant
 #   R10 — audit: one JSONL line per event, malformed data preserved not dropped
 #   R11 — launcher --standard: refuses --backend flag AND env, before any claim
+#   R12 — the TURBOX_PLAN envelope, composed from the launcher's own bytes
+#   R13 — the issue-body writer: cap refusals and BYTE truncation
+#   R14 — the design-planner exemplar parses AND dispatches (parser + TB3)
 set -u; set -o pipefail
 # ci-wiring: declared Unix-only in the test.yml windows-skip-list.
 case "$(uname -s)" in
@@ -35,10 +41,13 @@ esac
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LIB="$REPO_ROOT/plugins/uberdev/lib/turbox-fleet.sh"
 LAUNCHER="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
+# R14's subject. Listed as REQUIRED, not optional: a lock that skips itself when
+# the card is absent is the same vacuous green as no lock at all.
+DESIGN_PLANNER="$REPO_ROOT/plugins/uberdev/agents/design-planner.md"
 
 . "$REPO_ROOT/tests/_lib_exit_floor.sh" || { echo "FATAL: _lib_exit_floor.sh missing/unreadable" >&2; exit 2; }
 
-for f in "$LIB" "$LAUNCHER"; do
+for f in "$LIB" "$LAUNCHER" "$DESIGN_PLANNER"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
 command -v git >/dev/null 2>&1 || { echo "FATAL: git is required by this fixture" >&2; exit 2; }
@@ -79,6 +88,17 @@ out_has() {
   esac
 }
 
+# The negative twin. A parser widened to read a second shape has to be held to
+# what it must still REFUSE to read, or "reads both forms" quietly becomes
+# "harvests every bullet on the page".
+out_lacks() {
+  local needle="$1" label="$2"
+  case "$LAST_OUT" in
+    *"$needle"*) bad "$label — '$needle' IS in '$(printf '%s' "$LAST_OUT" | tr '\n' '|')'" ;;
+    *) ok "$label" ;;
+  esac
+}
+
 echo "== R1: loop-cap is the single source for every cap =="
 rc_is 0 "loop-cap fix_rounds"     -- bash "$LIB" loop-cap fix_rounds;     out_is 3 "fix_rounds is 3"
 rc_is 0 "loop-cap retest_rounds"  -- bash "$LIB" loop-cap retest_rounds;  out_is 2 "retest_rounds is 2"
@@ -109,11 +129,11 @@ out_has "below 1" "a value below 1 is floored, and says so"
 
 echo "== R4: project-agents (TB1) =="
 rc_is 0 "1 small + 2 design fits" -- bash "$LIB" project-agents --small 1 --design 2 --implement-budget 24 --max 600
-out_is 67 "projection is small + (9 + budget) x design = 1 + 33*2 = 67"
+out_is 55 "projection is small + (3 + budget) x design = 1 + 27*2 = 55"
 rc_is 0 "all-small batch is cheap" -- bash "$LIB" project-agents --small 5 --design 0 --max 600
 out_is 5 "five single solvers project five agents"
 rc_is 3 "30 design issues REFUSED at 600" -- bash "$LIB" project-agents --small 0 --design 30 --implement-budget 24 --max 600
-out_has "TB1 projected_agents=990" "the refusal reports the projection it computed"
+out_has "TB1 projected_agents=810" "the refusal reports the projection it computed"
 rc_is 2 "missing --design is an error" -- bash "$LIB" project-agents --small 1
 
 echo "== R5: budget-spend (TB2) =="
@@ -170,6 +190,151 @@ PLAN
 rc_is 0 "parses a defective plan without throwing" -- bash "$LIB" plan-tasks --plan "$TMP/plan-bad.md"
 out_has '"unwaved":[1]'  "a task with no wave is REPORTED, never defaulted to wave 1"
 out_has '"unowned":[2]'  "a task with no Owns list is reported"
+
+# --- R6b: the shape the writer ACTUALLY emits (#653) ------------------------
+# Captured from a live `/turbox 646 649 650` run on 3654f0fb. uberdev:plan-writer
+# put the allowlist on the lines AFTER the label, as a markdown bullet list, and
+# every task in that plan came back `owns: []`. Phase 4 must treat a non-empty
+# `unowned` as `plan_unusable`, so every medium issue silently dropped to the
+# single-solver path — and wave-parallel implementation over disjoint Owns sets
+# is the entire reason /turbox exists over /turbo. It failed in the safe
+# direction, which is why it shipped.
+#
+# This block is the emission, kept verbatim. Rewriting it into the inline form
+# the parser already liked is exactly the transcribed copy that would have
+# stayed green straight through the bug.
+cat > "$TMP/plan-bullets.md" <<'PLAN'
+### Task 1: Cross-lane comparator + CI wiring
+
+**Depends on:** none
+**Wave:** wave-1
+**Owns (file allowlist):**
+- `tests/sdd-wave-contract.test.sh`
+- `.github/workflows/test.yml`
+
+**Files:**
+- Create: `tests/sdd-wave-contract.test.sh`
+- Modify: `.github/workflows/test.yml`
+
+- [ ] **Step 1: write the comparator**
+
+  Compare the two lanes.
+
+### Task 2: RFC 0012 §3.6 retraction
+
+**Depends on:** none
+**Wave:** wave-1
+**Owns (file allowlist):**
+
+- `docs/rfc/0012-ultracode-migration.md`
+
+- [ ] **Step 1: retract the claim**
+
+  Replace it with a pointer.
+PLAN
+rc_is 0 "parses the bullet-list Owns form" -- bash "$LIB" plan-tasks --plan "$TMP/plan-bullets.md"
+out_has '"unowned":[]' "a bullet-list allowlist IS ownership, not a plan defect"
+out_has 'tests/sdd-wave-contract.test.sh' "reads the first bullet under the label"
+out_has '.github/workflows/test.yml'      "reads the second bullet under the label"
+out_has 'docs/rfc/0012-ultracode-migration.md' "reads a list separated from its label by a blank line"
+out_lacks 'Create: '  "the **Files:** block below the list is NOT harvested as ownership"
+out_lacks 'Step 1'    "the checkbox step list is NOT harvested as ownership"
+
+# --- R6c: the card and the parser are ONE contract, compared by EXECUTION ----
+# #653, same class as #370/#371: a contract with two surfaces and no comparator.
+# The parser was written against agents/plan-writer.md; the writer emitted
+# something else; nothing ever ran one against the other. This row extracts
+# every task block the card teaches — substituting only its metavariables
+# (`Task N`, `wave-N`, and a `[bracketed placeholder]` value the card cannot
+# fill with real paths) — and feeds them through the REAL plan-tasks. A form the
+# card teaches that the parser cannot read reds here, in either direction.
+CARD="$REPO_ROOT/plugins/uberdev/agents/plan-writer.md"
+[ -r "$CARD" ] || { echo "FATAL: plan-writer card missing or unreadable: $CARD" >&2; exit 2; }
+cat > "$TMP/extract-card-tasks.py" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+card = Path(sys.argv[1]).read_text(encoding="utf-8")
+out = Path(sys.argv[2])
+
+FENCE_RE = re.compile(r"^```markdown\n(.*?)^```$", re.MULTILINE | re.DOTALL)
+TASK_HDR_RE = re.compile(r"^###\s+Task\s+\S+\s*:\s*(.*)$")
+OWNS_LABEL_RE = re.compile(r"^\*\*Owns\b[^*]*\*\*\s*(.*)$")
+# A metavariable, not a form: bracketed prose with no path in it. The card
+# cannot name real paths, so the test supplies them rather than pretending
+# the placeholder text is an allowlist.
+PLACEHOLDER_RE = re.compile(r"^\[[^/`\]]*\]$")
+SUBST = "`lib/from-card.sh`, `tests/from-card.test.sh`"
+
+blocks, inline, bullet, tasks = [], 0, 0, 0
+for fence in FENCE_RE.findall(card):
+    lines = fence.splitlines()
+    if not any(OWNS_LABEL_RE.match(l.strip()) for l in lines):
+        continue
+    start = next((i for i, l in enumerate(lines)
+                  if TASK_HDR_RE.match(l.strip())), None)
+    if start is None:
+        raise SystemExit("a fence teaches **Owns** but shows no `### Task` header")
+    kept = []
+    for line in lines[start:]:
+        stripped = line.strip()
+        hdr = TASK_HDR_RE.match(stripped)
+        if hdr:
+            tasks += 1
+            kept.append("### Task %d: %s" % (tasks, hdr.group(1).strip() or "from the card"))
+            continue
+        owns = OWNS_LABEL_RE.match(stripped)
+        if owns:
+            value = owns.group(1).strip()
+            if PLACEHOLDER_RE.match(value):
+                line = line.replace(value, SUBST)
+                value = SUBST
+            if value:
+                inline += 1
+            else:
+                bullet += 1
+        kept.append(line.replace("wave-N", "wave-1"))
+    blocks.append("\n".join(kept))
+
+if tasks < 2:
+    raise SystemExit("expected the card to show >= 2 task blocks, found %d" % tasks)
+if inline < 1 or bullet < 1:
+    raise SystemExit(
+        "the card must teach BOTH Owns forms, or this comparator is vacuous "
+        "(inline=%d bullet=%d)" % (inline, bullet))
+out.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
+print("tasks=%d inline=%d bullet=%d" % (tasks, inline, bullet))
+PY
+rc_is 0 "the card teaches both Owns forms and its task blocks extract" \
+  -- python3 "$TMP/extract-card-tasks.py" "$CARD" "$TMP/plan-from-card.md"
+rc_is 0 "the card's OWN task blocks parse" -- bash "$LIB" plan-tasks --plan "$TMP/plan-from-card.md"
+out_has '"unowned":[]' "every ownership form the card teaches is one plan-tasks reads"
+out_has '"unwaved":[]' "every wave form the card teaches is one plan-tasks reads"
+out_has 'lib/from-card.sh' "the card's inline template form yields real paths"
+
+# --- R6d: anti-vacuity — reading both forms is not accepting everything ------
+cat > "$TMP/plan-empty-owns.md" <<'PLAN'
+### Task 1: Writes the label and then declares nothing
+**Wave:** wave-1
+**Owns (file allowlist):**
+
+**Files:**
+- Create: `lib/a.sh`
+- Modify: `lib/b.sh`
+
+- [ ] **Step 1: do it**
+
+### Task 2: Never mentions ownership at all
+**Wave:** wave-1
+
+**Files:**
+- Create: `lib/c.sh`
+PLAN
+rc_is 0 "parses a plan with no real allowlist" -- bash "$LIB" plan-tasks --plan "$TMP/plan-empty-owns.md"
+out_has '"unowned":[1,2]' "a bare label declares NOTHING — an absent Owns block still fails the plan"
+out_lacks 'lib/a.sh' "the **Files:** block under a bare label is not mistaken for the allowlist"
+out_lacks 'lib/c.sh' "a task with no label at all harvests nothing"
 
 echo "== R7: wave-disjoint (TB3) =="
 rc_is 0 "wave 1 of the good plan is disjoint" -- bash "$LIB" wave-disjoint --tasks "$PLAN_JSON" --wave 1
@@ -387,6 +552,93 @@ if python3 -c "open('$WRITER_ROOT/ib-emoji.md','rb').read().decode('utf-8')" 2>/
 else
   bad "the truncation split a multi-byte character"
 fi
+
+echo "== R14: the design-planner exemplar is a DISPATCHABLE plan, not just prose =="
+# #656. The /turbox lane has no plan-writer rung any more: the fenced "Plan
+# document structure" template inside agents/design-planner.md IS what every
+# /turbox plan is emitted from. A template that reads well but parses to nothing
+# strands every task as unowned and routes the issue to the single-solver
+# fallback -- the whole wave decomposition silently discarded -- and no shape
+# grep in the corpus can see that. So this section runs the SHIPPED parser over
+# the SHIPPED template, then feeds the result to the SHIPPED chokepoint.
+#
+# Every value below is pinned EXACT on purpose. `task_count >= 0`, a `-ge 1`
+# floor or a prose grep would each pass against a gutted template, which is the
+# permanently-green shape this section exists to replace.
+#
+# Placement is load-bearing too: this section sits ABOVE the
+# `[ "$FAIL" -eq 0 ] || exit 1` gate below. bad() only increments a counter, so
+# a section appended after that gate could never fail the suite.
+cat > "$TMP/dp_fence.py" <<'PY'
+# Extracts the template the way tests/orchestrator-plan-flatten.test.sh F10 does
+# -- same anchor, same fence regex -- so the two guards cannot disagree about
+# which bytes are "the template".
+import re
+import sys
+from pathlib import Path
+
+card, out = Path(sys.argv[1]), Path(sys.argv[2])
+text = card.read_text(encoding="utf-8")
+anchor = re.search(r"^\*\*Plan document structure:\*\*$", text, re.MULTILINE)
+if not anchor:
+    raise SystemExit("design-planner.md: the '**Plan document structure:**' anchor is gone")
+fence = re.search(r"^```markdown\n(.*?)^```$", text[anchor.end():],
+                  re.MULTILINE | re.DOTALL)
+if not fence:
+    raise SystemExit("design-planner.md: no ```markdown fence follows the anchor")
+body = fence.group(1)
+if not body.strip():
+    raise SystemExit("design-planner.md: the plan fence is empty")
+out.write_text(body, encoding="utf-8")
+PY
+DP_FENCE="$TMP/design-planner-fence.md"
+rc_is 0 "extracts the plan template from agents/design-planner.md" -- \
+  python3 -I -B "$TMP/dp_fence.py" "$DESIGN_PLANNER" "$DP_FENCE"
+if [ -s "$DP_FENCE" ]; then
+  ok "the extracted template is non-empty"
+else
+  bad "extraction produced no template -- the anchor or the fence moved"
+fi
+
+rc_is 0 "the shipped parser parses the shipped template" -- bash "$LIB" plan-tasks --plan "$DP_FENCE"
+DP_JSON="$LAST_OUT"
+out_has '"task_count":3' "the exemplar carries exactly three tasks"
+out_has '"waves":[1,2]'  "the exemplar spans exactly wave 1 and wave 2"
+out_has '"unwaved":[]'   "every exemplar task declares its wave"
+out_has '"unowned":[]'   "every exemplar task declares a non-empty Owns allowlist"
+
+# The four counters above are the parser's own arithmetic over its own summary.
+# This reads the `tasks` array the controller actually dispatches from, so a
+# parse that summarised healthily over a broken task table still reds.
+cat > "$TMP/dp_shape.py" <<'PY'
+import json
+import sys
+
+try:
+    parsed = json.loads(sys.argv[1])
+except ValueError as exc:
+    # Reached when the parse above already failed. Report it in one line rather
+    # than a traceback, so the row that actually broke stays readable.
+    raise SystemExit("the parse handed here is not JSON: %s" % (exc,))
+tasks = parsed.get("tasks")
+if not isinstance(tasks, list):
+    raise SystemExit("the parse carries no tasks array")
+shape = [(t.get("id"), t.get("wave")) for t in tasks]
+if shape != [(1, 1), (2, 1), (3, 2)]:
+    raise SystemExit("task (id, wave) shape is %r, expected [(1, 1), (2, 1), (3, 2)]"
+                     % (shape,))
+empty = [t.get("id") for t in tasks if not t.get("owns")]
+if empty:
+    raise SystemExit("tasks with an empty Owns allowlist: %r" % (empty,))
+PY
+rc_is 0 "the tasks are (1,wave-1) (2,wave-1) (3,wave-2), each owning at least one path" -- \
+  python3 -I -B "$TMP/dp_shape.py" "$DP_JSON"
+
+# The chokepoint, not merely the parse. Wave 1 holds TWO tasks, so this is a
+# real disjointness decision: a template whose two parallel tasks named the same
+# file would refuse at dispatch time on every /turbox run that copied it.
+rc_is 0 "wave 1 of the exemplar clears TB3 wave-disjoint -- the plan is dispatchable" -- \
+  bash "$LIB" wave-disjoint --tasks "$DP_JSON" --wave 1
 
 echo
 echo "== Summary =="

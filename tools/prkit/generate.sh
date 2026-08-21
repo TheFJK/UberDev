@@ -355,6 +355,11 @@ edge_semantics = {
     'review_pr.fix.phase2': ('provider', 'code-fixer', ('review-pr', 'solve', 'turbo'), fixer_contract),
     'review_pr.defer.findings': ('provider', 'findings-to-issues', ('review-pr', 'simplify', 'solve', 'turbo'), None),
     'review_pr.verify.finding': ('provider', 'finding-verifier', ('review-pr',), verify_contract),
+    # #655 — the post-fix pass returns the reviewer contract but scopes by the
+    # fixer's own commit range rather than by changed_paths. The projection
+    # selects every `review_pr.*` edge by namespace, so an edge absent from this
+    # dict is not skipped: it is refused as `unexpected`.
+    'review_pr.postfix.correctness': ('provider', 'code-reviewer', ('review-pr',), review_contract),
     'review_pr.ci.classify': ('provider', 'ci-failure-classifier', ('review-pr', 'solve', 'turbo'), None),
     'review_pr.ci.fix_code': ('provider', 'ci-code-fixer', ('review-pr', 'solve', 'turbo'), None),
     'review_pr.ci.rebase': ('provider', 'ci-rebase-handler', ('review-pr', 'solve', 'turbo'), None),

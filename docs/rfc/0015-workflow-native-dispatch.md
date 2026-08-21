@@ -170,10 +170,10 @@ because linkage and completeness were one token and a chain that stopped at task
 2 of 5 still auto-closed its issue. A single solver, and a per-task chain whose
 `chainComplete` is `true`, carry `Closes #N` and close the issue on merge. A
 chain that fell short carries the non-closing standalone-line trailer
-`UberDev-Partial: #N` — the delivery brief mandates it stand alone on its own
-line, and `/merge`'s harvest tolerates a leading list marker, surrounding
-backticks and trailing whitespace but still refuses prose on either side
-(#603) — and no closing keyword anywhere — not in the body, not in
+`UberDev-Partial: #N` — the delivery brief renders it flush and undecorated on
+a line of its own and mandates that shape, and `/merge`'s harvest accepts only
+that shape, tolerating trailing whitespace and nothing else visible (#603,
+tightened by #646) — and no closing keyword anywhere — not in the body, not in
 a commit message, since GitHub honours them in both — so the issue survives the
 merge OPEN with the unreached tasks still on it. `/merge` Step 3.4 parses that
 trailer to release the `uberdev:active` claim regardless, so an unfinished issue

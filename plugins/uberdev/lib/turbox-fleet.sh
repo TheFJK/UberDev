@@ -30,9 +30,15 @@ TURBOX_SELF="${0##*/}"
 _tbx_die() { echo "uberdev turbox: $1" >&2; exit "${2:-2}"; }
 
 # --- Loop caps (RFC 0020 §3.7 TB4) -----------------------------------------
-# Inherited names and defaults from subagent-driven-dev's `## Loop caps`. The
-# numbers live HERE, once; the skill quotes them and tests read them back from
-# this function, so prose can never be the source of a cap.
+# A DERIVED COPY. The canonical owner is `sdd_loop_cap` in
+# skills/subagent-driven-dev/SKILL.md — RFC 0020 TB4 records that this lane
+# "inherited names and defaults from subagent-driven-dev", and workflow.js
+# says the same of its own copy. These constants restate the owner's values so
+# this executable never has to source a markdown fence; they are NOT the
+# source. Agreement is asserted numerically by tests/sdd-wave-contract.test.sh
+# §C, which executes `loop-cap <name>` here and the owner's helper there and
+# compares the integers. A comment is not a producer (RFC 0016:60) — the
+# promise now lives in that test, not in this block.
 TURBOX_FIX_ROUNDS=3
 TURBOX_RETEST_ROUNDS=2
 TURBOX_CONTEXT_ROUNDS=2
@@ -60,7 +66,11 @@ _tbx_require_int() {
 
 # ---------------------------------------------------------------------------
 # loop-cap <name>
-#   Print the numeric cap. The single source; never restate a cap in prose.
+#   Print the numeric cap for <name>, as DERIVED from the owner helper in
+#   skills/subagent-driven-dev/SKILL.md. The never-restate-in-prose rule
+#   stands, now with teeth: never restate a cap without adding a register
+#   entry to tests/sdd-wave-contract.test.sh §C. Its completeness sweep reds
+#   on any unregistered restatement, on the commit that adds it.
 # ---------------------------------------------------------------------------
 _tbx_cmd_loop_cap() {
   [ "$#" -eq 1 ] || _tbx_die "usage: $TURBOX_SELF loop-cap <fix_rounds|retest_rounds|context_rounds|issue_cap>" 2
@@ -125,14 +135,13 @@ _tbx_cmd_issue_concurrency() {
 #   TB1. Prints the projection; rc 3 when it exceeds --max, so the run aborts
 #   BEFORE any dispatch rather than discovering the ceiling mid-wave.
 #
-#   projected = small + (9 + implementBudget) x design
-#     9 = 4 research lenses + spec-writer + spec-reviewer + spec-reviser
-#         + plan-writer + plan-reviewer
-#   Pessimistic on the two conditional rungs (the revision round, the
-#   risk-gated security lens): neither is knowable at projection time, and a
-#   projection that guesses low is a ceiling that does not hold.
+#   projected = small + (3 + implementBudget) x design
+#     3 = risk-gated security lens + design-planner + plan-reviewer
+#   Pessimistic on the one conditional rung (the risk-gated security lens):
+#   it is not knowable at projection time, and a projection that guesses low
+#   is a ceiling that does not hold.
 # ---------------------------------------------------------------------------
-TURBOX_DESIGN_RUNGS=9
+TURBOX_DESIGN_RUNGS=3
 
 _tbx_cmd_project_agents() {
   local small="" design="" budget=24 max=600 projected
@@ -214,6 +223,22 @@ _tbx_cmd_budget_spend() {
 #     ### Task 3: Some component
 #     **Wave:** wave-2 — tasks in the same wave dispatch in parallel
 #     **Owns (file allowlist):** lib/a.sh, tests/a.test.sh
+#
+#   `Owns` has TWO emission forms and this is the single source for which ones
+#   parse — agents/plan-writer.md enumerates the same two, and
+#   tests/turbox-fleet-runtime.test.sh R6c runs the card's own blocks through
+#   here so the two surfaces cannot drift apart again (#653). The second form
+#   puts the allowlist on the lines that follow the label:
+#     **Owns (file allowlist):**
+#     - `lib/a.sh`
+#     - `tests/a.test.sh`
+#   A label with neither an inline value nor a following list declares nothing,
+#   and the task is reported `unowned` exactly as if the label were absent.
+#
+#   The list below the label is the fallback for a label that declared NOTHING
+#   -- never for one whose inline value the shape gate REFUSED. A refused
+#   declaration ends the task's ownership there: `unowned`, and the following
+#   lines are left to whatever they belong to (#670).
 # ---------------------------------------------------------------------------
 _tbx_cmd_plan_tasks() {
   local plan=""
@@ -233,6 +258,8 @@ text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
 TASK_RE = re.compile(r'^###\s+Task\s+(\d+)\s*:\s*(.*)$')
 WAVE_RE = re.compile(r'^\*\*Wave:?\*\*\s*:?\s*\[?\s*wave[-\s]?(\d+)', re.I)
 OWNS_RE = re.compile(r'^\*\*Owns[^*]*\*\*\s*:?\s*(.*)$', re.I)
+BULLET_RE = re.compile(r'^[-*+]\s+(.*)$')
+CHECKBOX_RE = re.compile(r'^\[[ xX]\]')
 
 tasks, current = [], None
 
@@ -242,28 +269,163 @@ def flush():
         tasks.append(current)
 
 
-for line in text.splitlines():
-    stripped = line.strip()
+# A repo-relative path and nothing else: no space, no annotation, no prose. The
+# consumer (wave-disjoint, TB3) compares entries by equality and by directory
+# containment, so an entry that carried a parenthetical or an em-dash note --
+# `lib/x.sh (new)` -- can never equal or contain the same file a sibling task
+# declares plainly, and a colliding wave is then certified DISJOINT and two
+# implementers are dispatched onto one file. A trailing `/` is deliberately
+# admitted: a task may own a directory, and containment is how that collides.
+PATH_SHAPE_RE = re.compile(r'^[A-Za-z0-9._][A-Za-z0-9._/-]*$')
+
+
+def path_traverses(entry):
+    # THE SHAPE GATE ALONE IS NOT CONFINEMENT. Its character class holds both the
+    # dot and the slash, so `../../lib/x.sh` and `a/./b.sh` match it while
+    # declaring something that is not repo-relative at all -- and nothing
+    # downstream on this lane refuses one: normpath preserves the segments, the
+    # wave-disjoint comparison without a --root argument compares entries exactly
+    # as declared, and the only confinement check is the opt-in root arm the
+    # shipped skill call site does not exercise. So a task could declare
+    # ownership resolving outside its own issue worktree. Refused here, at the
+    # one gate every entry already passes through.
+    #
+    # Only `.` and `..` are named. An EMPTY segment is left alone on purpose:
+    # a trailing slash is deliberately admitted above (a task may own a
+    # directory, and containment is how that collides), and splitting such an
+    # entry always ends in an empty segment.
+    return any(part in {".", ".."} for part in entry.split("/"))
+
+
+def split_paths(raw):
+    """Three outcomes, and the caller MUST be able to tell two of them apart.
+
+        [p, ...]  a declaration this gate ACCEPTS
+        []        the label carried no value at all -- ABSENCE
+        None      the label carried a value this gate REFUSED
+
+    Returning `[]` for both of the last two is what made the shape gate
+    fail-OPEN (#670). The caller's fall-through to the bullet list below the
+    label is correct for ABSENCE and catastrophic for REFUSAL: a task whose
+    inline declaration was refused silently ADOPTED whatever bullet list
+    happened to follow it -- an allowlist the plan never gave that task, with
+    its real declaration dropped, `unowned` empty, and nothing in the output
+    naming the substitution. When the adopted list did not collide with a
+    sibling, TB3 certified the wave DISJOINT (rc 0) and the wrong allowlist
+    reached an implementer unchallenged.
+    """
+    # The template shows the value in square brackets; a plan that keeps
+    # them is describing the same list, not a different one.
+    if raw.startswith("[") and raw.endswith("]"):
+        raw = raw[1:-1]
+    parts = [p.strip().strip('`"\'') for p in re.split(r'[,\n]', raw)]
+    kept = [p for p in parts if p and not p.startswith("#")]
+    # ALL OR NOTHING, never a silent narrowing. Dropping only the malformed
+    # entry would hand TB3 a SHORTER allowlist that still looks healthy, and the
+    # file the dropped entry named would quietly stop colliding with anything --
+    # the same fail-OPEN the shape gate exists to close, one step further in.
+    # Refusing the whole declaration leaves the task `unowned`, which the caller
+    # already routes to the sequential single-solver path: fail-safe, and
+    # visible in the counter a plan author is told to read. `None`, not `[]`, is
+    # what makes that sentence true rather than merely intended.
+    if any(not PATH_SHAPE_RE.match(p) or path_traverses(p) for p in kept):
+        return None
+    return kept
+
+
+def read_bullet_list(lines, j):
+    """Read the allowlist a plan puts BELOW its `Owns` label, not beside it.
+
+    Blank lines are allowed before the list opens; once it has opened, the
+    first line that is not a bullet closes it. That boundary is what keeps the
+    `**Files:**` block and the `- [ ] **Step N**` checkboxes that follow every
+    task header out of the allowlist — reading a second form must not become
+    harvesting every bullet on the page.
+    """
+    items = []
+    while j < len(lines):
+        stripped = lines[j].strip()
+        if not stripped:
+            if items:
+                break
+            j += 1
+            continue
+        bullet = BULLET_RE.match(stripped)
+        if not bullet:
+            break
+        body = bullet.group(1).strip()
+        if CHECKBOX_RE.match(body):
+            break
+        found = split_paths(body)
+        # One bullet inside the list that is not a bare path refuses the WHOLE
+        # list, for the reason split_paths states: a partially-read allowlist is
+        # indistinguishable from a correct short one, and TB3 would certify it.
+        # Both non-accepting outcomes refuse here -- `None` (the shape gate
+        # refused this bullet) and `[]` (a bullet carrying no value at all).
+        # Unlike the inline label, this caller has nothing to fall through TO,
+        # so collapsing them costs nothing and the returned `[]` still leaves
+        # the task `unowned`.
+        if found is None or not found:
+            return [], j
+        items.extend(found)
+        j += 1
+    return items, j
+
+
+lines = text.splitlines()
+i = 0
+# THE COLLISION IS REPORTED, NEVER APPLIED SILENTLY. A SECOND `**Wave:**` or
+# `**Owns …:**` line inside one task -- including one written into a step body
+# to show a worker the line it must emit -- overwrites the task's declared
+# value, and neither `unwaved` nor `unowned` can see it: the task DID end up
+# waved and owned, just not with the values the plan declared. The symptom
+# lands three rungs away as a wave-disjoint refusal at dispatch that launches
+# zero implementers, after plan review approved the allowlist the plan actually
+# wrote, with nothing naming the overwrite as the cause. So name the task here,
+# where the second label is seen.
+seen_labels = set()
+duplicate_labels = set()
+while i < len(lines):
+    stripped = lines[i].strip()
+    i += 1
     m = TASK_RE.match(stripped)
     if m:
         flush()
         current = {"id": int(m.group(1)), "title": m.group(2).strip(), "wave": 0, "owns": []}
+        seen_labels = set()
         continue
     if current is None:
         continue
     m = WAVE_RE.match(stripped)
     if m:
+        if "wave" in seen_labels:
+            duplicate_labels.add(current["id"])
+        seen_labels.add("wave")
         current["wave"] = int(m.group(1))
         continue
     m = OWNS_RE.match(stripped)
     if m:
-        raw = m.group(1).strip()
-        # The template shows the value in square brackets; a plan that keeps
-        # them is describing the same list, not a different one.
-        if raw.startswith("[") and raw.endswith("]"):
-            raw = raw[1:-1]
-        parts = [p.strip().strip('`"\'') for p in re.split(r'[,\n]', raw)]
-        current["owns"] = [p for p in parts if p and not p.startswith("#")]
+        # Counted on the LABEL, not on the value: a restated label that happens
+        # to declare nothing still tells the author the plan says the same thing
+        # twice, and the card forbids the restatement itself.
+        if "owns" in seen_labels:
+            duplicate_labels.add(current["id"])
+        seen_labels.add("owns")
+        owns = split_paths(m.group(1).strip())
+        if owns is None:
+            # REFUSED, not absent -- and the difference is the whole point.
+            # The lines below the label are NOT this task's fallback: the plan
+            # already said what this task owns, in a shape this gate will not
+            # certify. Reading on would hand the task a list it never claimed.
+            # So stop here: the task stays `unowned`, the caller routes it to
+            # the sequential single-solver path, and the counter a plan author
+            # is told to read actually names it.
+            continue
+        if not owns:
+            owns, i = read_bullet_list(lines, i)
+        # A label that declared nothing never clears one that did.
+        if owns:
+            current["owns"] = owns
 flush()
 
 # A task with no wave is not defaulted to wave 1: a plan that never said which
@@ -276,6 +438,7 @@ print(json.dumps({
     "waves": sorted({t["wave"] for t in tasks if t["wave"] >= 1}),
     "unwaved": unwaved,
     "unowned": unowned,
+    "duplicate_labels": sorted(duplicate_labels),
 }, sort_keys=True, separators=(",", ":")))
 PY
 }
@@ -293,7 +456,10 @@ PY
 #   sibling owning `lib/x.sh` race exactly as if they shared a path, and a
 #   plain set intersection calls them disjoint. The containment predicate is
 #   deliberately the same one sdd_assert_wave_disjoint uses — two
-#   implementations of "do these paths collide" is one too many.
+#   implementations of "do these paths collide" is one too many, and until it
+#   is one, tests/sdd-wave-contract.test.sh §W feeds ONE corpus to BOTH and
+#   requires byte-equal verdicts. Six lane divergences are declared and locked
+#   there; the promise is executed in that file, not made here.
 # ---------------------------------------------------------------------------
 _tbx_cmd_wave_disjoint() {
   local tasks="" wave="" root=""
