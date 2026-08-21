@@ -100,6 +100,25 @@
 #       which C12 narrows but does not close, and which conjunct 5 puts in front
 #       of a manifest reader instead of leaving it in this header alone.
 #
+# WHAT THE HEREDOC MOVE COST, AND C13. Moving the comparator out of
+# `node -e` into a quoted heredoc written to a scratch .js file fixed the Windows
+# argv cap, and it silently retired an invariant as a side effect. The two fixed
+# literals C12 conjuncts 4 and 5 mirror into five manifest strings must carry no
+# apostrophe, on EITHER side. That used to enforce itself on the test side — an
+# apostrophe closed the single-quoted program and the file died with a shell
+# syntax error — and under the heredoc the character is inert, so the ban became
+# unexecuted prose in five manifest strings that also went on describing the dead
+# mechanism as if it were live.
+#
+#   C13 THE APOSTROPHE GUARD ON THE FIXED-CLAUSE REGION. An invariant whose only
+#       enforcement was a side effect of quoting is enforced by nothing once the
+#       quoting changes, so row Z53 executes it in FOUR conjuncts: the real
+#       inputs are clean, an apostrophe spliced into either TEST-side literal is
+#       caught, one spliced into each lane MANIFEST-side region is caught, and
+#       one spliced immediately BEFORE that lane FIXED-CLAUSE MARKER is NOT —
+#       which is what proves the scan is a region slice rather than a whole-rule
+#       sweep over prose that uses apostrophes legitimately.
+#
 # The nested-workflow() namespace is derived rather than assumed: goal_pipeline
 # dispatches its per-cycle fleet through a nested workflow() call that the agent
 # call log never sees, so liveKinds() unions record.workflowCalls in, and Z20 is
@@ -169,11 +188,17 @@
 # enough for a per-process scratch file and the trap removes it.
 #
 # The program is a QUOTED heredoc, so `$`, backticks and backslashes stay literal
-# exactly as the single-quoted shell string used to keep them. It still contains
-# no single-quote character anywhere — the heredoc no longer forces that, but the
-# APOSTROPHE clause in the agent_kind_rule prose of
-# plugins/uberdev/policy/solve-run-tree-v1.json still tells an editor it does, so
-# leave it that way until both sides can be updated together.
+# exactly as the single-quoted shell string used to keep them. What the heredoc
+# does NOT do is forbid an apostrophe: the only thing that ends this program is a
+# line reading exactly UBERDEV_RUN_TREE_SCOPE_JS, so the blanket no-single-quote
+# rule the old single-quoted `node -e` form enforced by syntax died with it.
+# The program happens to carry none today, and that is a convention, not a
+# constraint. The constraint that survives is NARROWER and now EXECUTED: the two
+# fixed-clause literals KOFN and PROSE below, and the fixed-clause region of the
+# five agent_kind_rule strings in
+# plugins/uberdev/policy/solve-run-tree-v1.json they are mirrored into, must
+# carry no apostrophe — see C13 and row Z53, which is what enforces it now that
+# the shell no longer does.
 
 set -u
 set -o pipefail
@@ -1449,11 +1474,12 @@ function rC9(t, lsrc) {
 // two-sidedly on synthetic in-memory bytes.
 //
 // FENCE is built from char codes rather than written as a literal. Backticks
-// are inert inside the enclosing single-quoted shell string TODAY, but that
-// safety is a property of the quoting, not of this function; building the
-// marker from codes removes the hazard class entirely. Never reach for a
-// double-quoted heredoc to accommodate a backtick literal — the backticks would
-// become command substitution and this program would change meaning silently.
+// are inert inside the enclosing QUOTED heredoc TODAY, exactly as they were
+// inside the single-quoted shell program the heredoc replaced, but that safety
+// is a property of the quoting, not of this function; building the marker from
+// codes removes the hazard class entirely. Never UNQUOTE the heredoc delimiter
+// to accommodate a backtick literal — the backticks would become command
+// substitution and this program would change meaning silently.
 // ---------------------------------------------------------------------------
 var FENCE = String.fromCharCode(96, 96, 96);
 function executableLines(src, kind) {
@@ -1546,22 +1572,34 @@ function rC11(lane, src) {
 // the wrong index grammar and fails here.
 //
 // CONJUNCTS 4 AND 5 ARE FIXED LITERALS MIRRORED VERBATIM INTO FIVE MANIFEST
-// STRINGS. Both carry two constraints that are invisible at the point of edit:
+// STRINGS. Both carry three constraints that are invisible at the point of edit:
 //
 //   NO COUNTS. A quantity here would be a second copy of dispatch_sites, or of
 //   a kind total, for the manifest to drift against — the exact class this file
 //   exists to close. A rule NAME that happens to contain digits is not a count.
 //
-//   NO APOSTROPHE, and it is unusable from BOTH sides for two different
-//   reasons. Put one in THIS copy and it closes the enclosing single-quoted
-//   shell string at the SHELL level: the rest of the clause and everything
-//   after it stop being program text, the file dies with a shell syntax error
-//   rather than failing a row, and nothing points back at this line. Put one in
-//   the MANIFEST copy alone and the two copies simply stop matching, so C12
-//   reds with an omits-the-fixed-clause message that says nothing about
-//   apostrophes. The surrounding manifest prose uses them freely and may keep
-//   doing so; these two sentences may not. The manifest carries the same
-//   warning immediately before the clauses — keep the two in step.
+//   NO DOUBLE QUOTE. This is the one constraint the quoting still enforces on
+//   its own: the character terminates the JS string literal here and the JSON
+//   string there, so it can survive only as an escape — and an escape written
+//   right on one side and wrong on the other is a silent mismatch, not a syntax
+//   error, which is the failure mode these clauses exist to avoid.
+//
+//   NO APOSTROPHE — and READ THE MECHANISM, because it inverted. It used to be
+//   self-enforcing on THIS side: the program was the single-quoted argument of
+//   node -e, so an apostrophe here closed that string at the SHELL level and the
+//   file died with a syntax error instead of failing a row. The program now
+//   arrives through a QUOTED HEREDOC written to a scratch .js file, and these
+//   two literals are double-quoted JS strings, so an apostrophe here is inert:
+//   the loud failure is GONE and the only surviving symptom is the quiet one.
+//   That quiet one is unchanged and works in both directions — put an apostrophe
+//   in EITHER copy alone and the two simply stop matching, so C12 reds with an
+//   omits-the-fixed-clause message that says nothing about apostrophes.
+//   An invariant whose only enforcement was a side effect of quoting is not
+//   enforced at all, so C13 below executes it: it scans these two literals AND
+//   the manifest-side fixed-clause region and reds naming the character. The
+//   surrounding manifest prose before the FIXED-CLAUSE MARKER uses apostrophes
+//   freely and may keep doing so; the region from that marker on may not. The
+//   manifest carries the same warning inside the region — keep the two in step.
 //
 // Conjunct 4 puts the K-of-N residual (residual 1) in the artifact a manifest
 // reader actually consults. Conjunct 5 does the same for residual 3, the one
@@ -1588,6 +1626,84 @@ function rC12(t, lane) {
     e.push(lane.id + ".agent_kind_rule omits the fixed clause disclosing that the rule text is not executed");
   }
   return e;
+}
+
+// ---------------------------------------------------------------------------
+// C13 — THE APOSTROPHE GUARD ON THE FIXED-CLAUSE REGION.
+//
+// WHY IT EXISTS. Until the comparator moved out of node -e and into a quoted
+// heredoc, this invariant was enforced by an accident of shell quoting: an
+// apostrophe in the test-side copy closed the single-quoted program and the file
+// died with a syntax error. The move was correct and the enforcement was
+// collateral damage — the character became inert and the ban became prose in
+// five manifest strings that nothing enforces. An invariant enforced only by a
+// side effect of quoting is enforced by nothing once the quoting changes, so it
+// gets a row.
+//
+// WHAT IT SCANS, both copies, because the failure is two-sided:
+//   the TEST side — the KOFN and PROSE literals, which is where the loud
+//     failure used to be and where there is now none at all;
+//   the MANIFEST side — the FIXED-CLAUSE REGION of each rooted lane
+//     agent_kind_rule, which is the marker sentence through the end of the rule.
+// Either one alone is what breaks the byte-for-byte mirror, and C12 reports that
+// as an omits-the-fixed-clause message naming no character. C13 names it.
+//
+// THE REGION IS A SLICE, NOT THE WHOLE RULE, and that is load-bearing: the prose
+// BEFORE the marker uses apostrophes freely today — the uberthink_pipeline rule
+// carries several — so a whole-rule scan would red on the unmutated manifest.
+// Row Z53 proves the boundary in both directions rather than trusting it.
+//
+// A MISSING MARKER IS AN ERROR, NEVER AN EMPTY REGION. indexOf returning -1
+// would otherwise slice to the empty string, find no apostrophe in it and
+// certify the lane by blindness — the permanently-green shape this whole file
+// exists to close.
+// ---------------------------------------------------------------------------
+var APOS = String.fromCharCode(39);
+var FIXED_MARKER = "FIXED-CLAUSE MARKER:";
+var FIXED_LITERALS = [["KOFN", KOFN], ["PROSE", PROSE]];
+
+function fixedRegionOf(rule) {
+  if (!isStr(rule)) return null;
+  var i = rule.indexOf(FIXED_MARKER);
+  return i < 0 ? null : rule.slice(i);
+}
+
+// SPLIT IN TWO, and the split is what keeps row Z53 honest. Its conjuncts have
+// to mutate ONE side and ONE lane at a time; run through a single whole-tree
+// entry point they would cross-talk — a dirty review_fleet region would make
+// every per-lane conjunct report about review_fleet, and a dirty literal would
+// make a lane conjunct pass on the strength of an unrelated error. The row calls
+// the same two functions rC13 does, never a transcribed copy of them.
+function apostropheInLiterals(lits) {
+  var e = [];
+  lits.forEach(function (p) {
+    if (p[1].indexOf(APOS) >= 0) {
+      e.push("the test-side " + p[0] + " literal carries an apostrophe; the fixed clause must carry none on either side");
+    }
+  });
+  return e;
+}
+
+function apostropheInRegions(t, lanes) {
+  var e = [];
+  lanes.forEach(function (lane) {
+    var E = entryFor(t, lane.source);
+    if (!E) { e.push("no scope.does_not_govern entry declares source " + lane.source); return; }
+    var reg = fixedRegionOf(E.agent_kind_rule);
+    if (reg === null) {
+      e.push(lane.id + ".agent_kind_rule carries no " + FIXED_MARKER
+        + " so the fixed-clause region cannot be located");
+      return;
+    }
+    if (reg.indexOf(APOS) >= 0) {
+      e.push(lane.id + ".agent_kind_rule carries an apostrophe inside the fixed-clause region, which no longer breaks the shell and so reds nothing but the byte-for-byte mirror");
+    }
+  });
+  return e;
+}
+
+function rC13(t, lits) {
+  return apostropheInLiterals(lits).concat(apostropheInRegions(t, ROOTED));
 }
 
 // The rule ORDER is preserved deliberately — the manifest-wide rules first, the
@@ -1981,6 +2097,65 @@ function copyTree() { return JSON.parse(JSON.stringify(tree)); }
       appliedF ? check(tf, LIVE_BY_LANE, launcherBase) : []);
   }
 
+  // ------------------------------------------------------------------------
+  // Z53 — C13, THE APOSTROPHE GUARD. Appended after both per-lane loops so no
+  // existing label moves: a row label is a NAME, not an index.
+  //
+  // rC13 is deliberately NOT wired into check(). Every differential above
+  // reports through check(), and folding this rule in would turn one apostrophe
+  // into "the UNMUTATED inputs already fail" on thirty other rows while naming
+  // the character in none of them. One rule, one row, one message that says
+  // apostrophe.
+  //
+  // FOUR CONJUNCTS, because a one-sided "no apostrophe found" row is exactly the
+  // vacuous shape this file refuses to ship — it would pass on a rotted marker,
+  // on an empty region, and on a scanner that looks at nothing:
+  //   1. the REAL inputs are clean;
+  //   2. an apostrophe in either TEST-side literal is caught;
+  //   3. an apostrophe inside each lane MANIFEST-side region is caught;
+  //   4. an apostrophe immediately BEFORE that lane marker is NOT caught, which
+  //      is what proves the scan is a region slice rather than a whole-rule
+  //      sweep — and the pre-marker prose really does use them.
+  // Conjuncts 3 and 4 run per rooted lane, so a region that cannot be located in
+  // ONE lane reds instead of being averaged away by the other four.
+  // ------------------------------------------------------------------------
+  var e53 = rC13(tree, FIXED_LITERALS);
+  FIXED_LITERALS.forEach(function (p) {
+    if (apostropheInLiterals([[p[0], p[1] + APOS]]).length === 0) {
+      e53.push("an apostrophe spliced into the test-side " + p[0] + " literal was NOT detected");
+    }
+  });
+  ROOTED.forEach(function (laneA) {
+    var only = [laneA];
+    var tIn = copyTree();
+    var eIn = entryFor(tIn, laneA.source);
+    var rIn = eIn ? eIn.agent_kind_rule : null;
+    if (!isStr(rIn) || rIn.indexOf(FIXED_MARKER) < 0) {
+      e53.push(laneA.id + " has no locatable fixed-clause region to mutate, so the row would prove nothing");
+      return;
+    }
+    eIn.agent_kind_rule = rIn + APOS;
+    if (apostropheInRegions(tIn, only).length === 0) {
+      e53.push("an apostrophe spliced INSIDE the " + laneA.id + " fixed-clause region was NOT detected");
+    }
+    // Conjunct 4 is evaluated only where this lane region is ALREADY clean.
+    // On a lane that ships dirty, a pre-marker splice still finds the shipped
+    // apostrophe and the honest diagnosis is conjunct 1, which has already
+    // redded this row by name — reporting a boundary failure on top of it would
+    // point the reader at the wrong line. Nothing is skipped silently: the row
+    // is red either way, and only the second message is withheld.
+    if (apostropheInRegions(tree, only).length === 0) {
+      var tOut = copyTree();
+      var eOut = entryFor(tOut, laneA.source);
+      var k = eOut.agent_kind_rule.indexOf(FIXED_MARKER);
+      eOut.agent_kind_rule = eOut.agent_kind_rule.slice(0, k) + APOS + eOut.agent_kind_rule.slice(k);
+      if (apostropheInRegions(tOut, only).length !== 0) {
+        e53.push("an apostrophe spliced BEFORE the " + laneA.id + " marker was flagged, so the scan is not honouring the region boundary");
+      }
+    }
+  });
+  row(e53.length === 0, "Z53 C13: the fixed-clause region carries no apostrophe on either side, one spliced into either copy reds, and one before the marker does not" + tail(e53));
+
   process.stdout.write(rows.join("\n") + "\n");
 })().catch(function (e) {
   process.stderr.write("comparator threw: " + ((e && e.stack) ? e.stack : String(e)) + "\n");
@@ -2023,13 +2198,13 @@ done <<<"$ROWS"
 # was added", which is how Z13-Z17 could be landed while Z0-Z12 quietly stopped
 # running. Same predicate, same reason, as E70 in tests/solve-run-tree.test.sh.
 #
-# 53 = 18 (Z0-Z17, #510 and #649) + 5 global (#654: Z18-Z22) + 6 x 5 per-lane
-# (#654: Z23-Z52). The reserved gaps the previous change left are now filled in
-# place, so the labels run Z0-Z52 with none left over — and NOTHING was
+# 54 = 18 (Z0-Z17, #510 and #649) + 5 global (#654: Z18-Z22) + 6 x 5 per-lane
+# (#654: Z23-Z52) + 1 (C13: Z53). The reserved gaps an earlier change left are
+# filled in place, so the labels run Z0-Z53 with none left over — and NOTHING was
 # renumbered to get there, which is what keeps the byte-identity of Z0-Z17.
 # A label is a name, not an index.
-[ "$ROW_COUNT" -eq 53 ] || {
-  echo "FATAL: the comparator emitted $ROW_COUNT row(s), expected exactly 53 (Z0-Z52)" >&2
+[ "$ROW_COUNT" -eq 54 ] || {
+  echo "FATAL: the comparator emitted $ROW_COUNT row(s), expected exactly 54 (Z0-Z53)" >&2
   exit 2
 }
 
