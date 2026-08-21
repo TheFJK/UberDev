@@ -234,6 +234,11 @@ _tbx_cmd_budget_spend() {
 #     - `tests/a.test.sh`
 #   A label with neither an inline value nor a following list declares nothing,
 #   and the task is reported `unowned` exactly as if the label were absent.
+#
+#   The list below the label is the fallback for a label that declared NOTHING
+#   -- never for one whose inline value the shape gate REFUSED. A refused
+#   declaration ends the task's ownership there: `unowned`, and the following
+#   lines are left to whatever they belong to (#670).
 # ---------------------------------------------------------------------------
 _tbx_cmd_plan_tasks() {
   local plan=""
@@ -293,6 +298,22 @@ def path_traverses(entry):
 
 
 def split_paths(raw):
+    """Three outcomes, and the caller MUST be able to tell two of them apart.
+
+        [p, ...]  a declaration this gate ACCEPTS
+        []        the label carried no value at all -- ABSENCE
+        None      the label carried a value this gate REFUSED
+
+    Returning `[]` for both of the last two is what made the shape gate
+    fail-OPEN (#670). The caller's fall-through to the bullet list below the
+    label is correct for ABSENCE and catastrophic for REFUSAL: a task whose
+    inline declaration was refused silently ADOPTED whatever bullet list
+    happened to follow it -- an allowlist the plan never gave that task, with
+    its real declaration dropped, `unowned` empty, and nothing in the output
+    naming the substitution. When the adopted list did not collide with a
+    sibling, TB3 certified the wave DISJOINT (rc 0) and the wrong allowlist
+    reached an implementer unchallenged.
+    """
     # The template shows the value in square brackets; a plan that keeps
     # them is describing the same list, not a different one.
     if raw.startswith("[") and raw.endswith("]"):
@@ -305,9 +326,10 @@ def split_paths(raw):
     # the same fail-OPEN the shape gate exists to close, one step further in.
     # Refusing the whole declaration leaves the task `unowned`, which the caller
     # already routes to the sequential single-solver path: fail-safe, and
-    # visible in the counter a plan author is told to read.
+    # visible in the counter a plan author is told to read. `None`, not `[]`, is
+    # what makes that sentence true rather than merely intended.
     if any(not PATH_SHAPE_RE.match(p) or path_traverses(p) for p in kept):
-        return []
+        return None
     return kept
 
 
@@ -338,7 +360,12 @@ def read_bullet_list(lines, j):
         # One bullet inside the list that is not a bare path refuses the WHOLE
         # list, for the reason split_paths states: a partially-read allowlist is
         # indistinguishable from a correct short one, and TB3 would certify it.
-        if not found:
+        # Both non-accepting outcomes refuse here -- `None` (the shape gate
+        # refused this bullet) and `[]` (a bullet carrying no value at all).
+        # Unlike the inline label, this caller has nothing to fall through TO,
+        # so collapsing them costs nothing and the returned `[]` still leaves
+        # the task `unowned`.
+        if found is None or not found:
             return [], j
         items.extend(found)
         j += 1
@@ -385,6 +412,15 @@ while i < len(lines):
             duplicate_labels.add(current["id"])
         seen_labels.add("owns")
         owns = split_paths(m.group(1).strip())
+        if owns is None:
+            # REFUSED, not absent -- and the difference is the whole point.
+            # The lines below the label are NOT this task's fallback: the plan
+            # already said what this task owns, in a shape this gate will not
+            # certify. Reading on would hand the task a list it never claimed.
+            # So stop here: the task stays `unowned`, the caller routes it to
+            # the sequential single-solver path, and the counter a plan author
+            # is told to read actually names it.
+            continue
         if not owns:
             owns, i = read_bullet_list(lines, i)
         # A label that declared nothing never clears one that did.

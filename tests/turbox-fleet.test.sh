@@ -2,12 +2,19 @@
 # tests/turbox-fleet.test.sh — shape-check suite for the /turbox standard-mode
 # solver fleet (RFC 0020).
 #
-# This file asserts over SOURCE BYTES only: the command file, the pipeline
+# TX1..TX16 assert over SOURCE BYTES only: the command file, the pipeline
 # skill, the launcher's --standard seam, the lib's subcommand surface, and the
-# RFC. It is portable (grep/awk only — no mktemp, no git, no python) and runs
-# on both CI jobs. The lib's RUNTIME behaviour — the disjointness refusal, the
-# staging refusals, the caps — is tested by tests/turbox-fleet-runtime.test.sh,
-# which is declared Unix-only.
+# RFC. Those sections are portable (grep/awk only — no mktemp, no git, no
+# python) and run on both CI jobs. The lib's RUNTIME behaviour — the
+# disjointness refusal, the staging refusals, the caps — is tested by
+# tests/turbox-fleet-runtime.test.sh, which is declared Unix-only.
+#
+# TX17 is the one EXECUTED section here, and it is deliberate: the defect it
+# pins (#670) is invisible to a grep, because the broken and the fixed parser
+# carry the SAME words. It runs the real `plan-tasks` over real plans. It is
+# self-gated off Git Bash — loudly, never silently — for the reason test.yml's
+# windows-skip-list already records for the runtime twin; see the section
+# preamble. Keep new rows in TX1..TX16 grep-only.
 #
 # Sections:
 #   TX1  — command file structure + the no-Workflow invariant
@@ -26,6 +33,7 @@
 #   TX14 — the lib is invoked as an executable, never sourced (zsh trap)
 #   TX15 — the issue-body channel is locked end to end
 #   TX16 — the design path is two rungs, and no spec artifact survives (#656)
+#   TX17 — EXECUTED: a REFUSED Owns value never adopts the list below it (#670)
 set -u; set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -388,6 +396,166 @@ ck "spec_path is bound to the issue body at BOTH reviewer rungs" \
 # gone, which is why it cannot land before them.
 ck "no spec artifact is written or read on this lane" \
    "[ \$(grep -c 'spec.md' '$SKILL') -eq 0 ]"
+
+echo "== TX17: a REFUSED Owns value never adopts the list below it (#670) =="
+# `split_paths` used to return `[]` for TWO different facts: "the label carried
+# no value" and "the label carried a value this gate REFUSED". The caller's
+# `if not owns: owns, i = read_bullet_list(...)` could not tell them apart, so a
+# REFUSED inline declaration fell through and ADOPTED whatever bullet list
+# happened to follow it — an allowlist the plan never gave that task, its own
+# declaration dropped, `unowned` empty, and nothing in the output naming the
+# substitution. The shape gate's own comment calls that outcome "fail-safe"; it
+# was fail-OPEN, and vendor.json records the wave-disjoint guard as the
+# precondition that makes the parallel-implementer policy safe.
+#
+# These rows EXECUTE because source bytes cannot separate the two parsers: both
+# contain the same comment, the same regexes and the same fall-through line, and
+# every grep that passes on the fix passes on the defect. Only running a plan
+# through them tells them apart.
+#
+# NOT run on Git Bash, and the stand-down is PRINTED rather than silent:
+# lib/turbox-fleet.sh hands python3 the `--plan` path on argv, and test.yml's
+# windows-skip-list records that a mktemp -d `/tmp/...` argv path is precisely
+# what python.exe cannot translate on that runner — the same class that keeps
+# tests/turbox-fleet-runtime.test.sh off the Windows job. The ubuntu
+# shape-checks job runs this same file, so every row below is executed on every
+# CI set; only the second, redundant Windows execution stands down.
+TX17_SKIP=""
+if [ -n "${MSYSTEM:-}" ]; then
+  TX17_SKIP="Git Bash (MSYSTEM=$MSYSTEM) — python3 cannot open the /tmp argv path the lib passes"
+elif ! command -v python3 >/dev/null 2>&1; then
+  TX17_SKIP="no python3 on PATH, and lib/turbox-fleet.sh hardcodes python3"
+fi
+
+if [ -n "$TX17_SKIP" ]; then
+  echo "  SKIP  TX17 executed rows: $TX17_SKIP"
+  echo "        (the same rows run on the ubuntu shape-checks job, which runs this file)"
+else
+  TX17_DIR="$(mktemp -d)" || { echo "FATAL: TX17 could not mktemp -d" >&2; exit 2; }
+  trap 'rm -rf "$TX17_DIR"' EXIT
+
+  # rc is asserted by its own row for every parse. A parser that DIED would
+  # otherwise leave an empty JSON file and every grep row below would red with
+  # no explanation of which failure it was looking at.
+  tx17_rc_is() {
+    local want="$1" got
+    shift
+    "$@" >/dev/null 2>&1
+    got=$?
+    [ "$got" -eq "$want" ]
+  }
+
+  # --- Fixture A: the adoption, with the adopted list COLLIDING -------------
+  cat > "$TX17_DIR/adopt.md" <<'PLAN'
+### Task 1: annotated inline path, unrelated bullet list below
+**Wave:** wave 1
+**Owns:** lib/alpha.sh (the fast path)
+
+- lib/victim.sh
+- lib/other.sh
+
+### Task 2: plainly declares the victim
+**Wave:** wave 1
+**Owns:** lib/victim.sh
+PLAN
+  bash "$LIB" plan-tasks --plan "$TX17_DIR/adopt.md" > "$TX17_DIR/adopt.json" 2>/dev/null
+  ck "A: the adoption fixture parses (rc 0)" \
+     "tx17_rc_is 0 bash '$LIB' plan-tasks --plan '$TX17_DIR/adopt.md'"
+  # The row the blocker is about. Before the fix Task 1 came back owning
+  # ["lib/victim.sh","lib/other.sh"] — two files the plan never gave it.
+  ck "A: the refusal is VISIBLE in the counter (unowned names task 1)" \
+     "grep -qF '\"unowned\":[1]' '$TX17_DIR/adopt.json'"
+  ck "A: task 1 owns NOTHING, not the list below its label" \
+     "grep -qF '\"id\":1,\"owns\":[],' '$TX17_DIR/adopt.json'"
+  # Named separately from the array assert: `lib/other.sh` appears NOWHERE in
+  # the plan except that bullet list, so its absence from the whole output is
+  # the direct statement that no adoption happened.
+  ck "A: the bullet list below the label was never read" \
+     "! grep -qF 'lib/other.sh' '$TX17_DIR/adopt.json'"
+  ck "A: the refused value did not sneak through either" \
+     "! grep -qF 'lib/alpha.sh' '$TX17_DIR/adopt.json'"
+  # The positive control. Without it every row above would still pass on a
+  # parser that simply returned no ownership for anything.
+  ck "A: the sibling's plain declaration still parses" \
+     "grep -qF '\"id\":2,\"owns\":[\"lib/victim.sh\"]' '$TX17_DIR/adopt.json'"
+  # Downstream: TB3 now names the real fault (task 1 declared nothing this gate
+  # accepts) instead of an overlap on a path task 1 never wrote. rc 3 -> rc 2.
+  ck "A: TB3 reports missing ownership, not a fabricated overlap" \
+     "tx17_rc_is 2 bash '$LIB' wave-disjoint --tasks-file '$TX17_DIR/adopt.json' --wave 1"
+
+  # --- Fixture B: the legitimate bullet-list form, unchanged ----------------
+  # agents/plan-writer.md teaches exactly two emissions and this is the second.
+  # Making refusal distinguishable from absence must not cost the form that
+  # DEPENDS on absence falling through.
+  #
+  # The SECOND bullet block is in the fixture to keep the boundary row honest.
+  # `read_bullet_list` closes the list at the first blank line after it opens,
+  # and `lib/not-the-allowlist.sh` is a bare path — shaped exactly like a real
+  # allowlist entry — so nothing but that boundary keeps it out. A fixture whose
+  # later bullets were all annotated prose would be refused by the shape gate
+  # instead, and the row would pass with the boundary deleted.
+  cat > "$TX17_DIR/bullet.md" <<'PLAN'
+### Task 1: Bullet-list ownership
+**Depends on:** none
+**Wave:** wave-1
+**Owns (file allowlist):**
+- `lib/writer.sh`
+- `tests/writer.test.sh`
+
+- lib/not-the-allowlist.sh
+
+**Files:**
+- Create: `lib/writer.sh`
+
+- [ ] **Step 1: do it**
+PLAN
+  bash "$LIB" plan-tasks --plan "$TX17_DIR/bullet.md" > "$TX17_DIR/bullet.json" 2>/dev/null
+  ck "B: the bullet-list fixture parses (rc 0)" \
+     "tx17_rc_is 0 bash '$LIB' plan-tasks --plan '$TX17_DIR/bullet.md'"
+  ck "B: a BARE Owns label still reads the list below it" \
+     "grep -qF '\"id\":1,\"owns\":[\"lib/writer.sh\",\"tests/writer.test.sh\"]' '$TX17_DIR/bullet.json'"
+  ck "B: nothing is left unowned by the bullet-list form" \
+     "grep -qF '\"unowned\":[]' '$TX17_DIR/bullet.json'"
+  # The boundary row. Deliberately NOT a `! grep 'Create'` over the **Files:**
+  # block below: that needle cannot red under any mutation of this parser —
+  # delete BOTH list boundaries and `Create: \`lib/writer.sh\`` is still refused
+  # by the shape gate, so the string never reaches the output and the row is
+  # green by construction. `lib/not-the-allowlist.sh` is a bare path the gate
+  # WOULD accept, so only the blank-line close keeps it out.
+  ck "B: the list CLOSES at the blank line — later bullets are not harvested" \
+     "! grep -qF 'lib/not-the-allowlist.sh' '$TX17_DIR/bullet.json'"
+
+  # --- Fixture C: the SAME adoption, colliding with nothing -----------------
+  # Fixture A's refusal could be credited to TB3 catching the collision. This
+  # one cannot: before the fix the adopted allowlist collided with no sibling,
+  # TB3 returned rc 0, and an implementer received an allowlist the plan never
+  # wrote, unchallenged. That is the fail-OPEN in its pure form.
+  cat > "$TX17_DIR/nocollide.md" <<'PLAN'
+### Task 1: annotated inline path, adopted list collides with nothing
+**Wave:** wave 1
+**Owns:** lib/alpha.sh (the fast path)
+
+- lib/ghost.sh
+- lib/other.sh
+
+### Task 2: unrelated, collides with nothing
+**Wave:** wave 1
+**Owns:** lib/beta.sh
+PLAN
+  bash "$LIB" plan-tasks --plan "$TX17_DIR/nocollide.md" > "$TX17_DIR/nocollide.json" 2>/dev/null
+  ck "C: the non-colliding fixture parses (rc 0)" \
+     "tx17_rc_is 0 bash '$LIB' plan-tasks --plan '$TX17_DIR/nocollide.md'"
+  ck "C: refused WITHOUT leaning on a downstream collision" \
+     "grep -qF '\"unowned\":[1]' '$TX17_DIR/nocollide.json'"
+  ck "C: task 1 owns nothing here either" \
+     "grep -qF '\"id\":1,\"owns\":[],' '$TX17_DIR/nocollide.json'"
+  ck "C: the non-colliding bullet list was never adopted" \
+     "! grep -qF 'lib/ghost.sh' '$TX17_DIR/nocollide.json'"
+  # The row that proves fail-SAFE rather than fail-open: this exact input used
+  # to sail through TB3 with rc 0.
+  ck "C: TB3 REFUSES (rc 2) where it used to certify DISJOINT (rc 0)" \
+     "tx17_rc_is 2 bash '$LIB' wave-disjoint --tasks-file '$TX17_DIR/nocollide.json' --wave 1"
+fi
 
 echo
 echo "== Summary =="
