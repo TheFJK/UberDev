@@ -4703,8 +4703,12 @@ for verb, argv in (
 # So every claim below is EXECUTED, and the two one-sided MUTANTS are what make
 # the execution a discriminator rather than a demonstration: each patches ONE
 # gate of an independently-loaded copy of the module and shows this block reds.
-# Measured on the tree this change starts from (3654f0fb) the whole block reds
-# at the first mint, with `launch_binding_invalid`.
+# Measured on 3654f0fb -- whose helper has no WORKFLOW_POSTFIX_EDGE_IDS at all
+# -- the block reds at its first set assertion below, with `AttributeError: no
+# attribute 'WORKFLOW_POSTFIX_EDGE_IDS'`, and never reaches the mint. On
+# a468e0b6, the commit this block was added on top of, both gates were already
+# widened and the block passes outright. Neither tree is therefore the proof of
+# discrimination -- the two mutants below are.
 
 POSTFIX_EDGE = "review_pr.postfix.correctness"
 POSTFIX_NONCE = "b7" * 32
@@ -4894,10 +4898,18 @@ with scratch_dir("code-fixer-postfix-") as temporary:
         )
 
 # 6. The machinery this change must NOT have moved.
-#    The second line is the one that catches a future PHASE_CONTRIBUTORS
-#    ["postfix"]: the reviewer roster is DERIVED from the contributor table, so
-#    adding a third key there silently enlists the post-fix child as an
-#    aggregate contributor.
+#    The FIRST line is the one that catches a future PHASE_CONTRIBUTORS
+#    ["postfix"]: measured, adding that key reds the key-set equality while the
+#    derived-roster equality below still holds. It has to be the key set that
+#    carries this, because WORKFLOW_REVIEWER_EDGE_IDS spells phase1 and phase2
+#    explicitly -- a third key never reaches it. What a third key DOES reach is
+#    the `phase in PHASE_CONTRIBUTORS` gate every aggregate verb shares, which
+#    would start admitting "postfix" as an aggregate phase of its own.
+#    The derived-roster equality is instead what catches a RE-SPELT
+#    WORKFLOW_REVIEWER_EDGE_IDS: it holds only while that set is exactly the
+#    union of the two contributor rosters, so a hand-typed copy that has
+#    drifted from the table reds it. (The one drift it does not get to see is
+#    the post-fix edge folded in -- step 1's foreign-roster loop reds first.)
 assert set(module.PHASE_CONTRIBUTORS) == {"phase1", "phase2"}, (
     module.PHASE_CONTRIBUTORS
 )
