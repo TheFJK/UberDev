@@ -15,6 +15,7 @@ esac
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ORCHESTRATOR="$ROOT/plugins/uberdev/skills/orchestrator/SKILL.md"
 PLAN_WRITER="$ROOT/plugins/uberdev/agents/plan-writer.md"
+DESIGN_PLANNER="$ROOT/plugins/uberdev/agents/design-planner.md"
 RUN_TREE="$ROOT/plugins/uberdev/policy/solve-run-tree-v1.json"
 BRAINSTORM="$ROOT/plugins/uberdev/skills/brainstorm/SKILL.md"
 WRITE_PLAN="$ROOT/plugins/uberdev/skills/write-plan/SKILL.md"
@@ -54,6 +55,7 @@ assert_ge() {
 for required in \
   "$ORCHESTRATOR" \
   "$PLAN_WRITER" \
+  "$DESIGN_PLANNER" \
   "$RUN_TREE" \
   "$BRAINSTORM" \
   "$WRITE_PLAN" \
@@ -2291,7 +2293,7 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-printf '%s\n' '== F10 the plan-document header is ONE contract across its three carriers =='
+printf '%s\n' '== F10 the plan-document header is ONE contract across its four carriers =='
 # #531. The plan-header template has three uncompared copies: write-plan/SKILL.md
 # (the standalone skill), agents/plan-writer.md (the copy the routed medium-tier
 # pipeline actually emits from) and skills/orchestrator/SKILL.md (the in-main
@@ -2299,6 +2301,10 @@ printf '%s\n' '== F10 the plan-document header is ONE contract across its three 
 # alone leaves /solve and /turbo emitting Spec-less plans with a fully green
 # suite, so this row EXTRACTS each carrier's header labels and compares them
 # rather than pinning one wording.
+#
+# #656 adds the fourth: agents/design-planner.md, the copy the /turbox lane
+# emits from. It fences the whole plan document like plan-writer does, so it
+# is compared against plan-writer rather than against write-plan.
 #
 # Scope: the header REGION of each fence only, from the fence start up to (not
 # including) its first `---`. The two fences are not comparable as wholes -
@@ -2336,12 +2342,15 @@ PY
 }
 
 if F10_WP_LABELS="$(f10_header_labels "$WRITE_PLAN" '^## Plan Document Header$')" \
-  && F10_PW_LABELS="$(f10_header_labels "$PLAN_WRITER" '^\*\*Plan document structure:\*\*$')"; then
+  && F10_PW_LABELS="$(f10_header_labels "$PLAN_WRITER" '^\*\*Plan document structure:\*\*$')" \
+  && F10_DP_LABELS="$(f10_header_labels "$DESIGN_PLANNER" '^\*\*Plan document structure:\*\*$')"; then
   assert_eq 'F10 write-plan and plan-writer emit the same ordered plan-header labels' \
     "$F10_WP_LABELS" "$F10_PW_LABELS"
+  assert_eq 'F10 plan-writer and design-planner emit the same ordered plan-header labels' \
+    "$F10_PW_LABELS" "$F10_DP_LABELS"
 
   # F10b is the anti-vacuity arm: without it a renamed slot yields an empty list
-  # on BOTH sides and F10 reports green over nothing.
+  # on EVERY side and F10 reports green over nothing.
   F10_MISSING=""
   for f10_want in Goal Architecture 'Tech Stack' Spec; do
     if ! grep -qxF -- "$f10_want" <<<"$F10_WP_LABELS"; then
@@ -2350,8 +2359,11 @@ if F10_WP_LABELS="$(f10_header_labels "$WRITE_PLAN" '^## Plan Document Header$')
     if ! grep -qxF -- "$f10_want" <<<"$F10_PW_LABELS"; then
       F10_MISSING="$F10_MISSING plan-writer:$f10_want"
     fi
+    if ! grep -qxF -- "$f10_want" <<<"$F10_DP_LABELS"; then
+      F10_MISSING="$F10_MISSING design-planner:$f10_want"
+    fi
   done
-  assert_eq 'F10b both label lists carry Goal, Architecture, Tech Stack and Spec' \
+  assert_eq 'F10b all three label lists carry Goal, Architecture, Tech Stack and Spec' \
     '' "$F10_MISSING"
 
   if python3 - "$ORCHESTRATOR" "$F10_WP_LABELS" <<'PY'
@@ -2385,7 +2397,7 @@ PY
     FAIL=$((FAIL + 1))
   fi
 else
-  printf '%s\n' '  FAIL F10/F10a/F10b could not extract a plan-header label list from both carriers'
+  printf '%s\n' '  FAIL F10/F10a/F10b could not extract a plan-header label list from all three fence carriers'
   FAIL=$((FAIL + 1))
 fi
 
