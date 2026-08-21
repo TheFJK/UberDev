@@ -23,9 +23,12 @@
 #   C1  declared agent_kinds  UNION  edge-covered kinds  ==  executed kinds
 #   C2  a kind is ungoverned OR carried by a reserved-prefix edge, never both
 #   C3  every edge sourced from that substrate sits under its reserved prefix
-#   C4  the executed set has at least EXECUTED_KIND_FLOOR kinds (a RATCHET, not
-#       a magic number — see the constant)
-#   C5  dispatch_sites matches the static site count grepped below
+#   C4  the executed set has at least that lane kindFloor kinds (a RATCHET, not
+#       a magic number — see EXECUTED_KIND_FLOOR, which is solve_fleet own)
+#   C5  dispatch_sites matches the static site count of that lane source: the
+#       bash grep below for solve_fleet, countSites() over the lane own bytes
+#       for the rest, matching (agent|workflow) so a nested workflow() dispatch
+#       is counted rather than silently dropped
 #   C6  source is under plugins/uberdev/ and exists; the reserved prefix does not
 #       collide with the prkit-projected review_pr. / simplify. namespaces
 #   C7  tracking_issues is a non-empty integer array (TYPE only — issue churn
@@ -64,6 +67,14 @@
 # way. Widening the universe to a fleet means deriving its agent_kinds by
 # EXECUTING it under the harness the way C1 does, not by adding its path.
 #
+# WHAT #654 ADDED. Exactly that widening. The rule layer is lane-parameterised
+# and the LANES table now carries all six shipped Workflow fleets, each with its
+# own normalizer, its own fixture and its own live kind set derived by EXECUTING
+# it under the harness. C8 own universe is UNCHANGED — it still enumerates only
+# what the solve/turbo/turbox root reaches and still says nothing about the
+# other five either way. What reds when one of those five drifts is its own
+# per-lane C1/C4/C5 row, never C8.
+#
 # GIT-BASH PORTABLE: grep + node only (no python3/PyYAML/mktemp, no temp files,
 # no digests, no PATH stubs). Runs on BOTH the ubuntu and windows shape-check
 # jobs, so it needs no windows-skip-list entry.
@@ -86,7 +97,19 @@ MANIFEST="$REPO_ROOT/plugins/uberdev/policy/solve-run-tree-v1.json"
 # the tree no longer starts at.
 LAUNCHER="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
 
-for f in "$HARNESS" "$WORKFLOW" "$MANIFEST" "$LAUNCHER"; do
+# #654. The five OTHER shipped Workflow fleets. Each lane source gets its own
+# readability FATAL for the reason docs/testing.md gives — fail loud on missing
+# inputs. A lane that vanishes must not silently drop out of the corpus: a
+# fallback that hides the failure is a swallowed error, and here it would be a
+# permanently green hole of exactly the class this file exists to close.
+L_REVIEW="$REPO_ROOT/plugins/uberdev/skills/review-fleet/workflow.js"
+L_SCAN="$REPO_ROOT/plugins/uberdev/skills/scan-fleet/workflow.js"
+L_GOAL="$REPO_ROOT/plugins/uberdev/skills/goal-pipeline/workflow.js"
+L_TESTERS="$REPO_ROOT/plugins/uberdev/skills/testers-pipeline/workflow.js"
+L_UBERTHINK="$REPO_ROOT/plugins/uberdev/skills/uberthink-pipeline/workflow.js"
+
+for f in "$HARNESS" "$WORKFLOW" "$MANIFEST" "$LAUNCHER" \
+         "$L_REVIEW" "$L_SCAN" "$L_GOAL" "$L_TESTERS" "$L_UBERTHINK"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
 command -v node >/dev/null 2>&1 || {
@@ -126,18 +149,41 @@ var WORKFLOW = process.argv[2];
 var MANIFEST = process.argv[3];
 var SITES = parseInt(process.argv[4], 10);
 var LAUNCHER = process.argv[5];
+var L_REVIEW = process.argv[6];
+var L_SCAN = process.argv[7];
+var L_GOAL = process.argv[8];
+var L_TESTERS = process.argv[9];
+var L_UBERTHINK = process.argv[10];
 
 var srcBase = fs.readFileSync(WORKFLOW, "utf8");
 var tree = JSON.parse(fs.readFileSync(MANIFEST, "utf8"));
 var launcherBase = fs.readFileSync(LAUNCHER, "utf8");
 
-// Lane sources OTHER than solve_fleet, keyed by LANES member id. Empty today by
-// construction: LANES carries a single member and the ternary in the derivation
-// loop below therefore never takes this branch. It exists so the loop is already
-// written for a multi-lane table and does not have to be touched when the other
-// fleet lanes land. solve_fleet is deliberately NOT a member here — its source
-// is srcBase, which the Z9 differential mutates in memory.
-var laneSrc = {};
+// The static dispatch-site count of a lane, over that lane own bytes. The bash
+// grep above stays as the INDEPENDENT static backstop for solve_fleet and is
+// not replaced by this: five more bash greps would mean five more non-integer
+// validations and five more argv entries, and a node regex over the same bytes
+// is the same evidence. The alternation is (agent|workflow) rather than agent
+// alone because goal_pipeline dispatches its per-cycle fleet through a NESTED
+// workflow() call, and an agent-only count would report that lane one site
+// short — the same blindness D7 closes on the kind side.
+function countSites(src) {
+  var m = String(src).match(/(await|return) (agent|workflow)\(/g);
+  return m ? m.length : 0;
+}
+
+// Lane sources OTHER than solve_fleet, keyed by LANES member id. solve_fleet is
+// deliberately NOT a member here — its source is srcBase, which the Z9
+// differential mutates in memory. Read ONCE, because the per-lane rename
+// differential below mutates a copy of these bytes and must not re-read a file
+// the mutation did not touch.
+var laneSrc = {
+  review_fleet: fs.readFileSync(L_REVIEW, "utf8"),
+  scan_fleet: fs.readFileSync(L_SCAN, "utf8"),
+  goal_pipeline: fs.readFileSync(L_GOAL, "utf8"),
+  testers_pipeline: fs.readFileSync(L_TESTERS, "utf8"),
+  uberthink_pipeline: fs.readFileSync(L_UBERTHINK, "utf8")
+};
 
 var ANCHOR = "plugins/uberdev/";
 function relOf(p, what) {
@@ -616,6 +662,440 @@ function rC3(t, lane) {
 var EXECUTED_KIND_FLOOR = 16;
 
 // ---------------------------------------------------------------------------
+// THE FIVE FLEET LANES (#654) — one normalizer and one fixture per lane, each
+// DERIVED FROM THAT LANE OWN BYTES and never borrowed from a sibling.
+//
+// A borrowed normalizer is the realistic error and it fails in BOTH directions.
+// kindOf() collapses only the colon-prefixed :t<n> / :r<n>, so applied to
+// scan_fleet (which indexes with a trailing zero-padded area id) every area
+// stays its own kind, the kind space grows with --areas, and no finite
+// agent_kinds list could satisfy C1 for a run that actually happens. Applied to
+// goal_pipeline it leaves the CYCLE index in, and the kind space grows with
+// maxCycles. In the other direction a normalizer that collapsed a lane
+// SEMANTIC token — review_fleet lens slugs, scan_fleet scan-area versus
+// simplify-area — would merge distinct dispatch edges into one kind and satisfy
+// C1 trivially. Each function below therefore collapses exactly the instance
+// indices its own label expressions carry and nothing else.
+//
+// The fixtures are INLINED rather than required from the Wave-B driver scripts:
+// those drivers are evidence for the numbers, not a dependency this shipped
+// test may load, and a workflow-harness fixture that lives outside tests/ would
+// rot silently. Every args value is a JSON STRING, because that is the shape
+// the runtime hands a scriptPath workflow (RFC 0015 section 6b) and an object
+// fixture would be a silent no-op on some of these lanes — zero executed kinds,
+// certifying a fleet as dispatching nothing.
+// ---------------------------------------------------------------------------
+
+// review_fleet. The ONE index its six label expressions carry is the Phase-3
+// loop counter ciSlug() appends (base + "-ci" + pad2(ciLoopIter), clamped to
+// 1..3). Everything else is semantic: the seven REVIEW_ROSTER slugs and three
+// LENS_ROSTER slugs are fixed lens names, edgeSlug(fixerEdgeId) ranges over
+// three FIXED edge ids, and ci-fix-code versus ci-rebase come from the fixed
+// two-entry CI_FIX_ARMS route table.
+function normReviewFleet(label) {
+  return String(label)
+    .replace(/-ci\d+/g, "-ciN")
+    .split(":").join(".")
+    .split("-").join("_");
+}
+// 64 lowercase hex — the grammar isNonce()/isSha256() enforce on the envelope.
+function rfHex64(seed) {
+  var alphabet = "0123456789abcdef";
+  var out = "";
+  for (var i = 0; i < 64; i++) { out += alphabet[(i * 7 + seed) % 16]; }
+  return out;
+}
+function rfNonces(n) {
+  var out = [];
+  for (var i = 0; i < n; i++) { out.push(rfHex64(i + 1)); }
+  return out.join(",");
+}
+function rfArgs(extra) {
+  var config = {
+    runId: "RID", pluginRootAbs: "/p", repoRootAbs: "/r", runDirAbs: "/r/run",
+    startedAtIso: "2026-01-01T00:00:00Z", repoSlug: "TheFJK/UberDev",
+    prNumber: 654, reviewIteration: 1, workspaceMode: "caller",
+    worktreeAbs: "/r", branchName: "feat/654-lane"
+  };
+  Object.keys(extra).forEach(function (k) { config[k] = extra[k]; });
+  return JSON.stringify({
+    v: 1, run_id: "RID", now_iso: "2026-01-01T00:00:00Z",
+    plugin_root: "/p", repo_root: "/r", cwd: "/r", pipeline: "review-fleet",
+    config: config
+  });
+}
+// ONE RUN PER stage ARM THAT CARRIES ITS OWN agent( SITE. The three remaining
+// dispatching arms (simplify, verify, ci-conflicts) carry no site of their own
+// — all three re-enter dispatchRoster, which run 1 already reaches — and the
+// two dynamic ones build their roster from an envelope COUNT knob, so driving
+// them would pin the floor to a number this fixture picked. agentReturns is {}
+// on every run: this lane dispatch is gated on ENVELOPE shape, never on what a
+// previous child returned. The ciLoopIter differs across the three CI runs
+// (1, 2, 3 — the full clamp range) so the index collapse is exercised rather
+// than merely declared.
+function reviewFleetRuns() {
+  return [
+    { args: rfArgs({ mode: "review-pr", stage: "review",
+        diffPathAbs: "/r/run/diff.md",
+        phase1ContractPathAbs: "/p/policy/contracts/phase1-reviewer-v1.md",
+        ruleSourcesPathAbs: "/r/run/rule-sources.txt",
+        aspects: "correctness,tests", runNonces: rfNonces(7) }), agentReturns: {} },
+    { args: rfArgs({ mode: "review-pr", stage: "fix",
+        fixerEdgeId: "review_pr.fix.phase1", commitType: "fix",
+        fixerContractPathAbs: "/p/policy/contracts/code-fixer-v1.md",
+        findingsPathAbs: "/r/run/findings.md", findingsSha256: rfHex64(11),
+        commitRangePathAbs: "/r/run/commit-range.json", commitRangeSha256: rfHex64(12),
+        authorityPathAbs: "/r/run/authority.json", authoritySha256: rfHex64(13),
+        dispositionPathAbs: "/r/run/disposition.yaml",
+        appliedContentPathAbs: "/r/run/applied.json", workingDirAbs: "/r",
+        runNonces: rfNonces(1) }), agentReturns: {} },
+    { args: rfArgs({ mode: "review-pr", stage: "defer",
+        phase1PathAbs: "/r/run/phase1-aggregate.md",
+        phase2PathAbs: "/r/run/phase2-aggregate.md",
+        phase1DispositionPathAbs: "/r/run/phase1-disposition.yaml",
+        phase2DispositionPathAbs: "",
+        verificationPathAbs: "/r/run/verification.json",
+        runNonces: rfNonces(1) }), agentReturns: {} },
+    { args: rfArgs({ mode: "review-pr", stage: "ci-classify", ciLoopIter: 1,
+        ciAuthorityPathAbs: "/r/run/ci-authority.json", ciAuthoritySha256: rfHex64(21),
+        ciInputSha256: rfHex64(22), ciRunId: "17777777777",
+        ciHeadSha: rfHex64(23).slice(0, 40), runNonces: rfNonces(1) }), agentReturns: {} },
+    { args: rfArgs({ mode: "review-pr", stage: "ci-fix", ciLoopIter: 2,
+        ciFixerEdgeId: "review_pr.ci.fix_code", ciFailureClass: "code_bug",
+        ciSignalAnchor: "tests/foo.test.sh:12",
+        ciAuthorityPathAbs: "/r/run/ci-authority.json", ciAuthoritySha256: rfHex64(21),
+        ciInputSha256: rfHex64(22), workingDirAbs: "/r",
+        ciPrBranch: "feat/654-lane", ciBaseBranch: "main",
+        runNonces: rfNonces(1) }), agentReturns: {} },
+    { args: rfArgs({ mode: "review-pr", stage: "ci-defer", ciLoopIter: 3,
+        ciAuthorityPathAbs: "/r/run/ci-authority.json", ciAuthoritySha256: rfHex64(21),
+        ciAggregatePathAbs: "/r/run/ci-aggregate.md", ciAggregateSha256: rfHex64(24),
+        ciInputSha256: rfHex64(22), runNonces: rfNonces(1) }), agentReturns: {} }
+  ];
+}
+
+// scan_fleet. Its instance index is the TRAILING zero-padded area id pad()
+// appends, carried by three of the twelve label expressions; the other nine are
+// fixed literals. \d{3,} rather than \d{3} because pad() widens past three
+// digits for an id >= 1000. This lane has no ":" in any label, so the ":" half
+// of the launcher rule has nothing to act on.
+var RE_SCAN_PAD_INDEX = /-\d{3,}$/;
+function normScanFleet(label) {
+  return String(label).replace(RE_SCAN_PAD_INDEX, "-NNN").split("-").join("_");
+}
+var SF_RD_SCAN = "/r/.uberdev/scan/RID";
+var SF_RD_SIMP = "/r/.uberdev/simplify/RID";
+function sfArgs(mode) {
+  var RD = mode === "simplify" ? SF_RD_SIMP : SF_RD_SCAN;
+  return JSON.stringify({
+    v: 1, run_id: "RID", now_iso: "2026-01-01T00:00:00Z",
+    plugin_root: "/p", repo_root: "/r", cwd: "/r", pipeline: "scan-fleet",
+    config: {
+      mode: mode, runId: "RID", runDirAbs: RD, pluginRootAbs: "/p", repoRootAbs: "/r",
+      scope: ".", manifestPathAbs: RD + "/manifest.json", numAreas: 8, concurrency: 3,
+      minSeverity: "major", maxNew: mode === "simplify" ? 10 : 15, maxAgents: 250,
+      noIssues: false, noReport: false, lenses: "Reuse,Quality,Efficiency",
+      branchName: mode === "simplify" ? "ubersimplify/RID" : "",
+      timestampIso: "2026-01-01T00:00:00Z"
+    }
+  });
+}
+function sfScanReturns() {
+  var RD = SF_RD_SCAN;
+  return {
+    "area-pack": { areaIds: ["1", "2"], areaCount: 2, overflow: false, rc: 0, skippedOversize: 0 },
+    "scan-area-001": { areaId: "1", outPath: RD + "/chunk-001-findings.yaml", findingCount: 3, blockerCount: 1 },
+    "scan-area-002": { areaId: "2", outPath: RD + "/chunk-002-findings.yaml", findingCount: 2, blockerCount: 0 },
+    "global-pass": { semgrepPath: RD + "/global-security.md", coveragePath: RD + "/global-coverage.md", semgrepFindingCount: 4, coverageGapCount: 2, rc: 0 },
+    "scan-aggregate": { reportPath: RD + "/uberscan-report.md", aggregatePath: RD + "/f2i-aggregate.md", totalFindings: 5, rc: 0 },
+    "findings-to-issues": { issuesCreated: [201, 202], skipped: 1 }
+  };
+}
+function sfSimplifyReturns(fixerStatus) {
+  var RD = SF_RD_SIMP;
+  return {
+    "area-pack": { areaIds: ["1", "2"], areaCount: 2, overflow: false, rc: 0 },
+    "simplify-area-001": { areaId: "1", outPath: RD + "/chunk-001-lens.yaml", findingCount: 2, blockerCount: 1 },
+    "simplify-area-002": { areaId: "2", outPath: RD + "/chunk-002-lens.yaml", findingCount: 1, blockerCount: 0 },
+    "fixer-agg-001": { outPath: RD + "/chunk-001-fixer.md", mergedCount: 2, rc: 0 },
+    "fixer-agg-002": { outPath: RD + "/chunk-002-fixer.md", mergedCount: 1, rc: 0 },
+    "apply-setup": { branch: "ubersimplify/RID", baseBranch: "main", rc: 0 },
+    "fixer-001": { areaId: "1", status: fixerStatus, commitSha: "aaa111", dispositionPath: RD + "/chunk-001-fixer-disposition.json" },
+    "fixer-002": { areaId: "2", status: fixerStatus, commitSha: "bbb222", dispositionPath: RD + "/chunk-002-fixer-disposition.json" },
+    "open-pr": { prNumber: 303, prUrl: "https://example/pull/303", branch: "ubersimplify/RID", commitCount: 2, rc: 0 },
+    "branch-cleanup": { branch: "", baseBranch: "main", rc: 0 },
+    "simplify-issues-agg": { aggregatePath: RD + "/f2i-aggregate.md", rc: 0 },
+    "findings-to-issues": { issuesCreated: [304], skipped: 0 }
+  };
+}
+// THE THIRD RUN IS NOT REDUNDANT. branch-cleanup is the else arm of
+// `appliedAreas > 0`: a run whose fixers all report APPLIED reaches open-pr and
+// can NEVER reach branch-cleanup, and the reverse. The two arms are mutually
+// exclusive in one invocation, so dropping this run pins the floor at 11 and
+// silently certifies an eleven-site fleet.
+function scanFleetRuns() {
+  return [
+    { args: sfArgs("scan"), agentReturns: sfScanReturns() },
+    { args: sfArgs("simplify"), agentReturns: sfSimplifyReturns("APPLIED") },
+    { args: sfArgs("simplify"), agentReturns: sfSimplifyReturns("NO_FIXES_NEEDED") }
+  ];
+}
+
+// goal_pipeline. TWO instance dimensions, not one: a cycle index :c<n> and, in
+// the watch loop, a tick index :t<n>. Order is load-bearing — both collapse
+// while the colons are still colons, and only then is ":" mapped to "." and
+// "-" to "_".
+function normGoalPipeline(label) {
+  return String(label)
+    .replace(/:c\d+/g, ":cN")
+    .replace(/:t\d+/g, ":tN")
+    .split(":").join(".")
+    .split("-").join("_");
+}
+function gpArgs() {
+  return JSON.stringify({
+    v: 1, run_id: "RID", now_iso: "2026-01-01T00:00:00Z", now_epoch: 1767225600,
+    plugin_root: "/p", repo_root: "/r", cwd: "/r", pipeline: "goal",
+    config: {
+      pluginRootAbs: "/p", repoRootAbs: "/r", tmpDirAbs: "/t",
+      goalId: "1700000000-abcd1234", issues: "11,12",
+      maxCycles: 5, maxParallel: 3, maxAgents: 250, maxWatchTicks: 40,
+      barrierTimeoutS: 14400, reviewGraceSecs: 3600,
+      watchPasses: 0, watchBudgetS: 0, onlyMine: false, resumed: false,
+      backend: "workflow", timestampIso: "2026-01-01T00:00:00Z"
+    }
+  });
+}
+// The fleet args envelope the claim relay hands back is itself a STRING the
+// lane re-parses, and a claim whose envelope does not carry the CLAIMED issue
+// set is refused before the nested workflow() fires. Deriving it from dispatch
+// is therefore not cosmetic: a mismatched fixture would zero out the one edge
+// this lane exists to expose while the run still looked healthy.
+function gpFleetEnvelope(issues) {
+  return JSON.stringify({
+    v: 1, run_id: "RID", now_epoch: 1767225600, now_iso: "2026-01-01T00:00:00Z",
+    plugin_root: "/p", repo_root: "/r", cwd: "/r", pipeline: "solve-fleet",
+    config: { runId: "RID", issues: issues, concurrency: 6 }
+  });
+}
+function gpClaim(extra) {
+  var r = {
+    rc: 0, dispatch: "11,12", rollover: "", skipped: "",
+    launcherRc: 0, armed: "11,12", markRc: 0, note: ""
+  };
+  if (extra) { Object.keys(extra).forEach(function (k) { r[k] = extra[k]; }); }
+  r.fleetArgsJson = gpFleetEnvelope(r.dispatch);
+  return r;
+}
+function gpCollect(extra) {
+  var r = {
+    rc: 0, decision: "converged", candidates: 0, queued: 0,
+    queue: "", fingerprints: "", reason: "", phase: "", note: ""
+  };
+  if (extra) { Object.keys(extra).forEach(function (k) { r[k] = extra[k]; }); }
+  return r;
+}
+function gpVerdicts() {
+  return { rows: [{ pr: 901, signal: "green" }, { pr: 902, signal: "yellow" }] };
+}
+// Run 2 contributes NO NEW KIND and is kept anyway: without a second cycle the
+// :c<n> collapse rests on an index that never varied, and the floor of 5 would
+// not be known to be stable in the cycle count.
+function goalPipelineRuns() {
+  return [
+    { args: gpArgs(), agentReturns: {
+        "goal-claim:c1": gpClaim(),
+        "goal-watch:c1:t1": { rc: 0, note: "drained" },
+        "goal-verdicts:c1": gpVerdicts(),
+        "goal-collect:c1": gpCollect()
+      } },
+    { args: gpArgs(), agentReturns: {
+        "goal-claim:c1": gpClaim(),
+        "goal-watch:c1:t1": { rc: 42, note: "bound" },
+        "goal-watch:c1:t2": { rc: 0, note: "drained" },
+        "goal-verdicts:c1": gpVerdicts(),
+        "goal-collect:c1": gpCollect({ rc: 42, decision: "loop", candidates: 2,
+          queued: 2, queue: "31,32", fingerprints: "aabbccdd11223344" }),
+        "goal-claim:c2": gpClaim({ dispatch: "31,32", armed: "31,32" }),
+        "goal-watch:c2:t1": { rc: 0, note: "drained" },
+        "goal-verdicts:c2": gpVerdicts(),
+        "goal-collect:c2": gpCollect({ candidates: 0 })
+      } }
+  ];
+}
+
+// testers_pipeline. Two instance dimensions, both loop variables: the round
+// index -r<n> of the wave loop, and the persona name of the personas.map()
+// fanout at the single persona site. The greedy (.*) takes the LAST -r<digits>
+// so a persona name ending in digits still collapses; the [0-9]+$ anchor is
+// what keeps report-runner out of the round arm.
+function normTestersPipeline(label) {
+  var s = String(label);
+  var round = "";
+  var m = s.match(/^(.*)-r([0-9]+)$/);
+  if (m) { s = m[1]; round = "-rN"; }
+  if (s.indexOf("persona-") === 0) { s = "persona-NAME"; }
+  return (s + round).split("-").join("_");
+}
+// rounds and personas are DELIBERATELY OMITTED so the script own clamped
+// defaults drive the fanout (rounds 3, DEFAULT_PERSONAS 6), which grounds the
+// derived kind set in the script bytes rather than in a fixture-chosen roster.
+// noIssues:false is what keeps the findings-to-issues site live — with it true
+// the lane would silently derive 6 kinds from 6 sites.
+function tpArgs() {
+  var RD = "/r/.uberdev/research/RID/testers";
+  return JSON.stringify({
+    v: 1, run_id: "RID", now_iso: "2026-01-01T00:00:00Z",
+    plugin_root: "/p", repo_root: "/r", cwd: "/r", pipeline: "testers",
+    config: {
+      runId: "RID", runDirAbs: RD, pluginRootAbs: "/p",
+      target: "http://localhost:3000", surface: "web",
+      rpsCap: 10, maxIssues: 10, noIssues: false,
+      invariantsPathAbs: "/p/skills/testers-pipeline/invariants.yaml",
+      invariantIds: "no_5xx,auth_isolation",
+      timestampIso: "2026-01-01T00:00:00Z"
+    }
+  });
+}
+function testersPipelineRuns() {
+  return [{ args: tpArgs(), agentReturns: {} }];
+}
+
+// uberthink_pipeline. Five instance tokens collapse — the island index k, the
+// three-digit pad(c + 1) shortlist-row index, the -r<n> genetic round, the
+// scope gate donor slug and the moderator gap id — and every script-declared
+// literal is kept. UT_OPERATORS is the lane own OPERATORS list: gen-<k>-<x>
+// carries either a declared operator name or an agent-returned donor slug in
+// the same position, and only the first is a kind.
+var UT_OPERATORS = ["triz", "morphological", "provocateur", "bridge"];
+function normUberthinkPipeline(label) {
+  var s = String(label);
+  var m = /^falsify-\d+-\d{3}-(.+)-r\d+$/.exec(s);
+  if (m) { return ("falsify_kN_cN_" + m[1] + "_rN").split("-").join("_"); }
+  m = /^synth-\d+-(.+)-r\d+$/.exec(s);
+  if (m) { return ("synth_kN_" + m[1] + "_rN").split("-").join("_"); }
+  if (/^shortlist-\d+-r\d+$/.test(s)) { return "shortlist_kN_rN"; }
+  if (/^moderator-\d+$/.test(s)) { return "moderator_kN"; }
+  if (/^regen-\d+-.+$/.test(s)) { return "regen_kN_gap"; }
+  m = /^gen-\d+-(.+)$/.exec(s);
+  if (m) {
+    return UT_OPERATORS.indexOf(m[1]) >= 0
+      ? ("gen_kN_" + m[1]).split("-").join("_")
+      : "gen_kN_donor";
+  }
+  return s.split("-").join("_");
+}
+var UT_RD = "/r/.uberdev/think/RID";
+var UT_DONORS = ["distributed-systems", "compilers-pl", "databases", "operating-systems",
+  "networking-protocols", "security-crypto", "concurrency", "compression-coding",
+  "graph-theory", "information-theory", "biology", "economics-markets"];
+function utArgs(extra) {
+  var config = {
+    runId: "RID", runDirAbs: UT_RD, pluginRootAbs: "/p", repoRootAbs: "/r",
+    goal: "make a covert transport that resists active probing",
+    islands: 2, concurrency: 64, maxAgents: 500, maxFlood: 120, loopBackCap: 3,
+    shortlistTop: 7, maxNew: 3, handoff: true, noIssues: false,
+    resumeFromRunId: "", timestampIso: "2026-01-01T00:00:00Z"
+  };
+  if (extra) { Object.keys(extra).forEach(function (k) { config[k] = extra[k]; }); }
+  return JSON.stringify({
+    v: 1, run_id: "RID", now_iso: "2026-01-01T00:00:00Z",
+    plugin_root: "/p", repo_root: "/r", cwd: "/r", pipeline: "uberthink-pipeline",
+    config: config
+  });
+}
+function utNamed(n) { return { name: n, role: n, prompt: "P-" + n }; }
+function utPersonas() {
+  return {
+    rc: 0,
+    frameLenses: [utNamed("schema"), utNamed("teardown"), utNamed("prior-art"), utNamed("constraints")],
+    generators: [{ name: "field_scout", kind: "field_scout", prompt: "P-scout" },
+      { name: "triz", kind: "operator", prompt: "P-triz" },
+      { name: "morphological", kind: "operator", prompt: "P-morph" },
+      { name: "provocateur", kind: "operator", prompt: "P-prov" },
+      { name: "bridge", kind: "meta", prompt: "P-bridge" }],
+    moderator: { role: "Moderator", prompt: "P-mod" },
+    synthesizerLenses: [utNamed("weave"), utNamed("crossover"), utNamed("mutate")],
+    falsifierLenses: [utNamed("steelman"), utNamed("premortem"), utNamed("redteam"), utNamed("physics")]
+  };
+}
+// TWO shortlist rows per island so pad(c + 1) actually varies (001 and 002),
+// and compositePaths that sit under runDirAbs and end in .yaml: underRunDir()
+// drops every row that does not, and a dropped row means the falsify site never
+// dispatches at all.
+function utShortlist(k) {
+  return { rc: 0, stderrTail: "", outPath: UT_RD + "/island-" + k + "/shortlist.yaml",
+    shortlist: ["comp-island-" + k + "-001", "comp-island-" + k + "-002"],
+    compositePaths: [UT_RD + "/island-" + k + "/composites/comp-001-weave.yaml",
+      UT_RD + "/island-" + k + "/composites/comp-002-crossover.yaml"],
+    count: 2 };
+}
+function utGaps(k, ids) {
+  return { islandIndex: k, gapCount: ids.length, outPath: UT_RD + "/island-" + k + "/gaps.yaml",
+    gaps: ids.map(function (id, i) {
+      return { id: id, persona: UT_OPERATORS[i % UT_OPERATORS.length], donor: "", prompt: "q-" + id };
+    }) };
+}
+function utReturns(extra) {
+  var r = {
+    "personas": utPersonas(),
+    "scope-gate": { verdict: "PROCEED", rationale: "legitimate defensive research",
+      framePath: UT_RD + "/frame/frame.md", scopeVerdictPath: UT_RD + "/frame/scope-verdict.yaml",
+      donors: UT_DONORS },
+    "uberdev:uberthink-frame": { lens: "teardown", status: "ok", outPath: UT_RD + "/frame/teardown.md" },
+    "uberdev:uberthink-generator": { islandIndex: 1, persona: "field_scout", candidateCount: 3,
+      outPath: UT_RD + "/island-1/candidates/c.yaml" },
+    "moderator-1": utGaps(1, ["gap-aa", "gap-bb", "gap-cc"]),
+    "moderator-2": utGaps(2, ["gap-dd", "gap-ee", "gap-ff"]),
+    "uberdev:uberthink-synthesizer": { islandIndex: 1, lens: "weave", compositeCount: 2,
+      outDir: UT_RD + "/island-1/composites" },
+    "shortlist-1-r0": utShortlist(1),
+    "shortlist-2-r0": utShortlist(2),
+    "uberdev:uberthink-falsifier": { islandIndex: 1, compositeId: "comp-island-1-001",
+      lens: "steelman", outPath: UT_RD + "/island-1/falsify/x.yaml", fatalKills: 1,
+      fixableKills: 0, repairHints: [] },
+    "cross-pollinate": { islandIndex: 1, lens: "crossover", compositeCount: 3,
+      outDir: UT_RD + "/composites" },
+    "floor-survivors": { rc: 0, stderrTail: "", outPath: UT_RD + "/floor-survivors.yaml",
+      shortlist: ["comp-island-1-001", "comp-island-2-001"], count: 2 },
+    "arbiter": { rankedPath: UT_RD + "/ranked.yaml", rankedCount: 3, culledCount: 1 },
+    "dossier": { rc: 0, stderrTail: "", outPath: UT_RD + "/report.md" },
+    "aggregate": { rc: 0, stderrTail: "", outPath: UT_RD + "/f2i-aggregate.md" },
+    "findings-to-issues": { issuesCreated: [901, 902], skipped: 1 },
+    "partial-report": { rc: 0, stderrTail: "", outPath: UT_RD + "/report.md" },
+    "refusal-report": { rc: 0, stderrTail: "", outPath: UT_RD + "/report.md" },
+    "handoff-seed": { rc: 0, stderrTail: "", outPath: UT_RD + "/handoff-seed.md" },
+    "resume-scan": { runDirExists: true, verdict: "", frameLensesPresent: [],
+      islandsWithCandidates: [], islandsWithShortlist: [], globalCompositeCount: 0,
+      rankedExists: false, donors: [] }
+  };
+  if (extra) { Object.keys(extra).forEach(function (k) { r[k] = extra[k]; }); }
+  return r;
+}
+// SIX ARMS, and every one of them reaches a site the others cannot: resume-scan
+// only under --resume, refusal-report only on a REFUSE verdict, the
+// cross-pollinate passthrough only at islands 1, partial-report only when the
+// arbiter returns nothing, and the -r<n> round only varies once the falsifiers
+// return repair hints under a loop-back cap.
+function uberthinkPipelineRuns() {
+  return [
+    { args: utArgs(), agentReturns: utReturns() },
+    { args: utArgs({ resumeFromRunId: "PRIOR" }), agentReturns: utReturns() },
+    { args: utArgs(), agentReturns: utReturns({
+        "scope-gate": { verdict: "REFUSE", rationale: "weaponisation request",
+          framePath: UT_RD + "/frame/frame.md", donors: [] } }) },
+    { args: utArgs({ islands: 1 }), agentReturns: utReturns() },
+    { args: utArgs(), agentReturns: utReturns({ "arbiter": null }) },
+    { args: utArgs({ loopBackCap: 1 }), agentReturns: utReturns({
+        "uberdev:uberthink-falsifier": { islandIndex: 1, compositeId: "comp-island-1-001",
+          lens: "steelman", outPath: UT_RD + "/island-1/falsify/x.yaml", fatalKills: 0,
+          fixableKills: 2, repairHints: ["tighten the timing channel"] },
+        "shortlist-1-r1": utShortlist(1),
+        "shortlist-2-r1": utShortlist(2) }) }
+  ];
+}
+
+// ---------------------------------------------------------------------------
 // THE LANES TABLE (#654). The rule layer stops being single-substrate: the five
 // rules below take a lane record instead of closing over SRC_REL, so widening the
 // file to another fleet is adding a member here rather than forking a rule.
@@ -644,9 +1124,76 @@ var LANES = [
     kindFloor: EXECUTED_KIND_FLOOR,
     sites: SITES,
     runs: [ { args: buildArgs(), agentReturns: agentReturns() } ]
+  },
+  // The five fleet lanes, in a FIXED order the row labels below depend on.
+  // Every field is the number the lane derivation MEASURED by executing that
+  // lane under the harness, never a number read off a design table.
+  {
+    id: "review_fleet",
+    source: ANCHOR + "skills/review-fleet/workflow.js",
+    normalize: normReviewFleet,
+    kindFloor: 12,
+    sites: countSites(laneSrc.review_fleet),
+    renameFrom: "label: \"findings-to-issues\"",
+    renameTo: "label: \"findings-to-issues-renamed\"",
+    rows: { a: "Z23", b: "Z24", c: "Z25", d: "Z26", e: "Z27", f: "Z28" },
+    runs: reviewFleetRuns()
+  },
+  {
+    id: "scan_fleet",
+    source: ANCHOR + "skills/scan-fleet/workflow.js",
+    normalize: normScanFleet,
+    kindFloor: 12,
+    sites: countSites(laneSrc.scan_fleet),
+    renameFrom: "label: \"branch-cleanup\"",
+    renameTo: "label: \"branch-teardown\"",
+    rows: { a: "Z29", b: "Z30", c: "Z31", d: "Z32", e: "Z33", f: "Z34" },
+    runs: scanFleetRuns()
+  },
+  {
+    id: "goal_pipeline",
+    source: ANCHOR + "skills/goal-pipeline/workflow.js",
+    normalize: normGoalPipeline,
+    kindFloor: 5,
+    sites: countSites(laneSrc.goal_pipeline),
+    renameFrom: "\"goal-collect:c\"",
+    renameTo: "\"goal-collectx:c\"",
+    rows: { a: "Z35", b: "Z36", c: "Z37", d: "Z38", e: "Z39", f: "Z40" },
+    runs: goalPipelineRuns()
+  },
+  {
+    id: "testers_pipeline",
+    source: ANCHOR + "skills/testers-pipeline/workflow.js",
+    normalize: normTestersPipeline,
+    kindFloor: 7,
+    sites: countSites(laneSrc.testers_pipeline),
+    renameFrom: "\"aggregate-A-r\"",
+    renameTo: "\"aggregate-Q-r\"",
+    rows: { a: "Z41", b: "Z42", c: "Z43", d: "Z44", e: "Z45", f: "Z46" },
+    runs: testersPipelineRuns()
+  },
+  {
+    id: "uberthink_pipeline",
+    source: ANCHOR + "skills/uberthink-pipeline/workflow.js",
+    normalize: normUberthinkPipeline,
+    kindFloor: 31,
+    sites: countSites(laneSrc.uberthink_pipeline),
+    renameFrom: "synth-",
+    renameTo: "synthX-",
+    rows: { a: "Z47", b: "Z48", c: "Z49", d: "Z50", e: "Z51", f: "Z52" },
+    runs: uberthinkPipelineRuns()
   }
 ];
 var SOLVE_LANE = LANES[0];
+// The five fleet lanes, in table order. Deriving them by slice rather than by
+// name keeps ONE ordering source; the FATAL beneath is what stops a lane from
+// disappearing quietly, because a vanished lane takes its four rows with it and
+// the row-count lock at the bottom would then be the only thing left to notice.
+var FLEET_LANES = LANES.slice(1);
+if (FLEET_LANES.length !== 5) {
+  throw new Error("expected exactly 5 fleet lanes beyond solve_fleet, found "
+    + FLEET_LANES.length + " — a lane vanished and its rows would have vanished with it");
+}
 
 function rC4(lane, live) {
   return live.length >= lane.kindFloor
@@ -885,12 +1432,25 @@ function copyTree() { return JSON.parse(JSON.stringify(tree)); }
   // on an enumerator that returns the declared set and nothing else. This one
   // cannot: it splices a path into a COPY of the launcher source naming a real
   // dispatch substrate that does_not_govern[] does not declare, and demands the
-  // comparator notice. The fixture is a shipped Workflow fleet outside this
+  // comparator notice. The fixture is a shipped dispatch substrate outside this
   // manifest scope, so it is undeclared for a real reason rather than a
   // synthetic one, and the three guards on applied16 refuse to let the row
   // count if it ever goes missing, becomes enumerated, or becomes declared.
+  //
+  // THE FIXTURE MOVED IN #654, and the third guard is why. It used to be
+  // skills/review-fleet/workflow.js — undeclared at the time, and the last
+  // guard would now be false because that lane is declared above, flipping this
+  // row to FAIL on a manifest that got MORE complete. The guard did its job:
+  // it refuses to certify by splicing in something already declared. Every
+  // shipped Workflow fleet is declared now, so the replacement is the other
+  // shape of undeclared substrate the enumerator classifies — the /merge
+  // session-Task fanout, which dispatches uberdev:conflict-resolver,
+  // uberdev:merge-strategy-decider and uberdev:trust-trail-evaluator through
+  // the Task tool, sources no routed adapter, and is rooted in a command this
+  // run tree never reaches. It is outside this manifest scope for a real
+  // reason, exactly as its predecessor was.
   // ------------------------------------------------------------------------
-  var FIXTURE_REL = ANCHOR + "skills/review-fleet/workflow.js";
+  var FIXTURE_REL = ANCHOR + "skills/merge-pipeline/SKILL.md";
   var alreadySeen = FOUND.filter(function (s) { return s.source === FIXTURE_REL; }).length > 0;
   var applied16 = fs.existsSync(REPO_PREFIX + FIXTURE_REL) && !alreadySeen && !entryFor(tree, FIXTURE_REL);
   var lsrcMut = launcherBase + "\n# scope-test fixture lane surface: " + FIXTURE_REL.slice(ANCHOR.length) + "\n";
@@ -912,12 +1472,77 @@ function copyTree() { return JSON.parse(JSON.stringify(tree)); }
     applied17, "does_not_govern[] carries no entry sourced from " + TURBOX_REL,
     applied17 ? check(t17, LIVE_BY_LANE, launcherBase) : []);
 
+  // ------------------------------------------------------------------------
+  // PER-LANE ROWS (#654). ONE indexed loop over the five fleet lanes, in fixed
+  // lane order, emitting (a) C1, (b) C4, (c) C5 and (e) the rename differential
+  // for each lane before moving to the next. Indexed rather than forEach
+  // because await inside a forEach callback does not suspend the loop, so the
+  // rename re-executions would race instead of running in series.
+  //
+  // THE LABELS ARE FINAL AND NON-CONTIGUOUS ON PURPOSE: the (d) root-naming row
+  // and the (f) entry-deletion row land in a later change at the gaps left
+  // here, so nothing is ever renumbered. Do not tidy these into a contiguous
+  // run — the byte-identity of rows Z0-Z17 and the exact row-count lock at the
+  // bottom of this file are what a renumbering silently breaks.
+  //
+  // rC2 and rC3 get NO ROW OF THEIR OWN here, which is why the per-lane row
+  // count is four and not six. Zero edges are sourced from any of these five
+  // lanes today, so an edge-covered set is empty and both rules are
+  // structurally vacuous for them. They still run inside check(), so an edge
+  // added later must land under the reserved prefix — but a row asserting a
+  // vacuous truth is a permanently green row, and this file does not ship one.
+  // ------------------------------------------------------------------------
+  for (var fi = 0; fi < FLEET_LANES.length; fi++) {
+    var laneF = FLEET_LANES[fi];
+    var liveF = LIVE_BY_LANE[laneF.id];
+
+    var eA = rC1(tree, laneF, liveF);
+    row(eA.length === 0, laneF.rows.a + " C1 " + laneF.id
+        + ": declared kinds UNION edge-covered kinds equals the EXECUTED kinds" + tail(eA));
+
+    var eB = rC4(laneF, liveF);
+    row(eB.length === 0, laneF.rows.b + " C4 " + laneF.id
+        + ": the executed lane yields at least " + laneF.kindFloor
+        + " agent kinds (" + liveF.join(",") + ")" + tail(eB));
+
+    var eC = rC5(tree, laneF);
+    row(eC.length === 0, laneF.rows.c + " C5 " + laneF.id
+        + ": dispatch_sites matches the " + laneF.sites
+        + " static dispatch site(s) in the lane script" + tail(eC));
+
+    // (e) THE RENAME DIFFERENTIAL. The literal Z16 splice does not transfer to
+    // these lanes: their universe is a filesystem path handed in on argv, not a
+    // path enumerator over their own bytes, so splicing a path literal into one
+    // of them changes nothing any rule reads and a per-lane Z16 replica would
+    // be a PERMANENTLY GREEN row. A rename is an ADD plus a DELETE, so this
+    // proves the add-direction sensitivity AND proves the derivation re-reads
+    // this lane own bytes at run time, which the literal splice could not. It
+    // also kills a degenerate normalizer: one that mapped every label to a
+    // constant could not red here. Only the mutated lane re-executes; every
+    // other lane reuses its cached live set, so a differential costs one lane
+    // run rather than six.
+    var baseSrcF = laneSrc[laneF.id];
+    var mutSrcF = baseSrcF.split(laneF.renameFrom).join(laneF.renameTo);
+    var errsF = [];
+    if (mutSrcF !== baseSrcF) {
+      var liveMutF = await liveOf(laneF, mutSrcF);
+      errsF = check(tree, withLane(LIVE_BY_LANE, laneF.id, liveMutF), launcherBase);
+    }
+    differential(laneF.rows.e + " renaming a label literal in the EXECUTED "
+        + laneF.id + " script reds the comparator",
+      mutSrcF !== baseSrcF,
+      "the label literal " + laneF.renameFrom + " is gone from " + laneF.source
+        + ", so the mutation never applied",
+      errsF);
+  }
+
   process.stdout.write(rows.join("\n") + "\n");
 })().catch(function (e) {
   process.stderr.write("comparator threw: " + ((e && e.stack) ? e.stack : String(e)) + "\n");
   process.exit(1);
 });
-' "$HARNESS" "$WORKFLOW" "$MANIFEST" "$SITES" "$LAUNCHER")"
+' "$HARNESS" "$WORKFLOW" "$MANIFEST" "$SITES" "$LAUNCHER" \
+  "$L_REVIEW" "$L_SCAN" "$L_GOAL" "$L_TESTERS" "$L_UBERTHINK")"
 NODE_RC=$?
 [ "$NODE_RC" -eq 0 ] || {
   echo "FATAL: the node comparator threw (rc=$NODE_RC) — see the stderr above" >&2
@@ -940,8 +1565,15 @@ done <<<"$ROWS"
 # deterministic — and a `-ge` floor cannot tell "a row was deleted" from "a row
 # was added", which is how Z13-Z17 could be landed while Z0-Z12 quietly stopped
 # running. Same predicate, same reason, as E70 in tests/solve-run-tree.test.sh.
-[ "$ROW_COUNT" -eq 18 ] || {
-  echo "FATAL: the comparator emitted $ROW_COUNT row(s), expected exactly 18 (Z0-Z17)" >&2
+#
+# 38 = 18 + 4 x 5: the eighteen manifest-wide and launcher-lane rows Z0-Z17,
+# plus four rows for each of the five fleet lanes. The LABELS run to Z51 with
+# GAPS — Z18-Z22, Z26, Z28, Z32, Z34, Z38, Z40, Z44, Z46, Z50, Z52 are reserved
+# for the rows a later change fills in place. A label is a name, not an index:
+# renumbering them to close the gaps would break the byte-identity of Z0-Z17 and
+# leave this lock passing on a set of rows nobody meant to ship.
+[ "$ROW_COUNT" -eq 38 ] || {
+  echo "FATAL: the comparator emitted $ROW_COUNT row(s), expected exactly 38" >&2
   exit 2
 }
 

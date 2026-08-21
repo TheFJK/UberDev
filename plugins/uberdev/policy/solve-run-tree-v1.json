@@ -67,6 +67,133 @@
         "tracking_issues": [
           649
         ]
+      },
+      {
+        "substrate": "workflow-native-review-fleet",
+        "source": "plugins/uberdev/skills/review-fleet/workflow.js",
+        "reason": "A Workflow script has no filesystem (RFC 0012 §2.2 constraint 6, enforced by tests/workflow-scripts.test.sh T1, which forbids fs./process.), so it cannot read this manifest and no edge here can constrain it. What makes THIS lane's gap real: skills/review-fleet/workflow.js is the DEFAULT engine for BOTH /uberdev:review-pr and /uberdev:simplify — lib/dispatch.sh:610 resolves the `review-pr|simplify` case arm straight to it — and since #383 all four Phase-3 CI stages route through it as well, so nothing in the review arc reaches the routed-child adapter this manifest governs. Two of the six sites dispatch children that MUTATE the caller's checkout with no worktree isolation (uberdev:code-fixer at :1882, which commits on the PR branch, and uberdev:ci-rebase-handler at :2092, whose rebase precedes the single leased force-push), and neither mints an instance id, creates a handoff, or produces a run-tree receipt. The reserved prefix is the LANE id and not an edge id the lane emits: its own edge ids are `review_pr.*` and `simplify.*`, both already claimed by governed routed-child edges here, and C6 rejects those two prefixes as prkit-projected namespace collisions. Declaring the lane does not close that gap; it makes the gap machine-visible and pins its six sites and twelve kinds so a silent widening reds (#654).",
+        "reserved_edge_prefix": "review_fleet.",
+        "dispatch_sites": 6,
+        "agent_kinds": [
+          "ci_classify_ciN",
+          "ci_defer_ciN",
+          "ci_fix_code_ciN",
+          "comments",
+          "convention",
+          "correctness",
+          "findings_to_issues",
+          "fixer_review_pr_fix_phase1",
+          "general",
+          "silent_failures",
+          "tests",
+          "types"
+        ],
+        "tracking_issues": [
+          654
+        ]
+      },
+      {
+        "substrate": "workflow-native-scan-fleet",
+        "source": "plugins/uberdev/skills/scan-fleet/workflow.js",
+        "reason": "A Workflow script has no filesystem (RFC 0012 §2.2 constraint 6, enforced by tests/workflow-scripts.test.sh T1, which forbids fs./process.), so it cannot read this manifest and no edge here can constrain it. What makes THIS lane's gap real rather than nominal: it is the shared fixed-fleet engine behind TWO commands — /uberscan at mode=scan and /ubersimplify at mode=simplify — and unlike the read-only fleets it is a WRITING workflow: the apply arm dispatches one uberdev:code-fixer per area sequentially onto a shared branch, each committing, and the pr arm opens a PR. An ungoverned lane here mutates the repository and opens PRs, not just files issues. It also scales past any fixed edge list: numAreas clamps to 1..24 and each area costs a reviewer plus (in simplify) a fixer and a fixer-aggregate, with maxAgents clamping to 2000, so one run can dispatch far more agents than the twelve sites suggest. Because two commands enter one script, a name-based reading of coverage is doubly wrong — neither `uberscan.` nor `ubersimplify.` names the substrate — which is why the entry is keyed `scan_fleet.`, after the script rather than after either command, and recorded here so the gap is visible and machine-checked rather than inferred from a name (#654).",
+        "reserved_edge_prefix": "scan_fleet.",
+        "dispatch_sites": 12,
+        "agent_kinds": [
+          "apply_setup",
+          "area_pack",
+          "branch_cleanup",
+          "findings_to_issues",
+          "fixer_NNN",
+          "fixer_agg_NNN",
+          "global_pass",
+          "open_pr",
+          "scan_aggregate",
+          "scan_area_NNN",
+          "simplify_area_NNN",
+          "simplify_issues_agg"
+        ],
+        "tracking_issues": [
+          654
+        ]
+      },
+      {
+        "substrate": "workflow-native-goal-pipeline",
+        "source": "plugins/uberdev/skills/goal-pipeline/workflow.js",
+        "reason": "RFC 0015 §5 made /goal a Workflow-native driver: lib/goal-phase0.sh emits the args envelope and skills/goal-pipeline/workflow.js owns the cycle loop that used to live in five SKILL.md bash fences the orchestrating model was merely trusted to re-run in order. A Workflow script has no filesystem (RFC 0012 §2.2 constraint 6, enforced by tests/workflow-scripts.test.sh T1, which forbids fs./process.), so it cannot read this manifest and no edge here can constrain it. This lane's gap is the sharpest of the five, because its real fleet dispatch is not an agent() call at all: the four agent() sites are shell relays (claim, watch, verdicts, collect) and the run that actually solves a cycle is a nested `await workflow({ scriptPath: solveFleetJs }, fleetArgs)` at :884, built from the literal at :170. The test harness records that in record.workflowCalls and never in record.agentCalls, so a derivation keyed on agent labels alone certifies four shell relays as this lane's entire dispatch surface while the fleet run it exists to perform goes unrecorded — a manifest that reads as complete exactly where it is blind. That is why dispatch_sites counts 4 agent sites plus 1 workflow site, and why agent_kinds carries workflow.solve_fleet. RFC 0012 §2.2 constraint 7 bounds the nesting chase at one level, so the nested namespace is complete by construction rather than open-ended. Recorded here so the gap is visible and machine-checked (#654).",
+        "reserved_edge_prefix": "goal_pipeline.",
+        "dispatch_sites": 5,
+        "agent_kinds": [
+          "goal_claim.cN",
+          "goal_collect.cN",
+          "goal_verdicts.cN",
+          "goal_watch.cN.tN",
+          "workflow.solve_fleet"
+        ],
+        "tracking_issues": [
+          654
+        ]
+      },
+      {
+        "substrate": "workflow-native-testers-pipeline",
+        "source": "plugins/uberdev/skills/testers-pipeline/workflow.js",
+        "reason": "A Workflow script has no filesystem (RFC 0012 §2.2 constraint 6, enforced by tests/workflow-scripts.test.sh T1, which forbids fs./process.), so it cannot read this manifest and no edge here can constrain it. What makes THIS lane's gap real rather than theoretical: /uberdev:testers is a shipped, user-invocable command whose default route is this script — skills/testers-pipeline/SKILL.md:174 validates that it exists and :198 mandates the Workflow({scriptPath: ...}) call, and only --watch takes the inline fallback — and a bare default run dispatches 32 agents across 7 sites in 3 rounds: six persona agents probing an untrusted external target, two monitors, four aggregate/report relays, and a uberdev:findings-to-issues agent that CREATES GitHub issues, a real write-side effect. None of that sources lib/child-dispatch.sh, so it mints no instance id, writes no handoff, and produces no run-tree edge or receipt: the run is entirely invisible to the governed substrate. Recorded here so the gap is visible and machine-checked rather than inferred from the absence of an entry (#654).",
+        "reserved_edge_prefix": "testers_pipeline.",
+        "dispatch_sites": 7,
+        "agent_kinds": [
+          "aggregate_A_rN",
+          "aggregate_B_rN",
+          "findings_to_issues",
+          "monitor_da_rN",
+          "monitor_primary_rN",
+          "persona_NAME_rN",
+          "report_runner"
+        ],
+        "tracking_issues": [
+          654
+        ]
+      },
+      {
+        "substrate": "workflow-native-uberthink-pipeline",
+        "source": "plugins/uberdev/skills/uberthink-pipeline/workflow.js",
+        "reason": "A Workflow script has no filesystem (RFC 0012 §2.2 constraint 6, enforced by tests/workflow-scripts.test.sh T1, which forbids fs./process.), so it cannot read this manifest and no edge here can constrain it. This lane is the largest agent producer in the plugin — 21 dispatch sites against solve-fleet's 14 — and its fanout is combinatorial rather than fixed: islands x donors/generators, islands x synthesizer lenses x genetic rounds, islands x shortlist rows x falsifier lenses x rounds. One default two-island run dispatches 76 agents, and the whole of it is invisible to the routed-child adapter this manifest governs. Left undeclared, the manifest's silence about the biggest fanout in the repo reads as \"nothing here dispatches\", which is the false negative this entry exists to close. The gap is real and tracked; it is recorded here so it is visible and machine-checked rather than inferred from a name (#654).",
+        "reserved_edge_prefix": "uberthink_pipeline.",
+        "dispatch_sites": 21,
+        "agent_kinds": [
+          "aggregate",
+          "arbiter",
+          "cross_pollinate",
+          "dossier",
+          "falsify_kN_cN_physics_rN",
+          "falsify_kN_cN_premortem_rN",
+          "falsify_kN_cN_redteam_rN",
+          "falsify_kN_cN_steelman_rN",
+          "findings_to_issues",
+          "floor_survivors",
+          "frame_constraints",
+          "frame_prior_art",
+          "frame_teardown",
+          "gen_kN_bridge",
+          "gen_kN_donor",
+          "gen_kN_morphological",
+          "gen_kN_provocateur",
+          "gen_kN_triz",
+          "handoff_seed",
+          "moderator_kN",
+          "partial_report",
+          "passthrough",
+          "personas",
+          "refusal_report",
+          "regen_kN_gap",
+          "resume_scan",
+          "scope_gate",
+          "shortlist_kN_rN",
+          "synth_kN_crossover_rN",
+          "synth_kN_mutate_rN",
+          "synth_kN_weave_rN"
+        ],
+        "tracking_issues": [
+          654
+        ]
       }
     ]
   },
