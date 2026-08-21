@@ -891,11 +891,20 @@ def build_diff_summary():
     if omitted: summary.append(f'[{omitted} additional file summaries omitted to preserve the artifact limit]')
     return ('\n'.join(summary)+'\n').encode()
 def select_bounded_wrapped_diff(payload,summary_factory):
+    # Returns (wrapped_bytes, used_summary), and the second element is NOT
+    # optional for the caller. This is the one path that substitutes a summary
+    # without the read loop above ever setting its own flag: a raw diff under
+    # both the 2000-line and the 8-MiB cap whose ESCAPED, enveloped form still
+    # overflows the 16-MiB wrapped cap. Inferring the flag from the read loop
+    # alone published false there, so a GREEN run asserted the post-fix reviewer
+    # had read the fixer diff when what reached it was a per-file summary --
+    # exactly the degradation the header above says must be reported, not
+    # swallowed. The wrapper reports which payload it returned; nobody guesses.
     wrapped=wrap_untrusted_diff(payload)
-    if len(wrapped)<=MAX_WRAPPED_DIFF_BYTES: return wrapped
+    if len(wrapped)<=MAX_WRAPPED_DIFF_BYTES: return wrapped,False
     wrapped=wrap_untrusted_diff(summary_factory())
     if len(wrapped)>MAX_WRAPPED_DIFF_BYTES: raise ValueError()
-    return wrapped
+    return wrapped,True
 process=subprocess.Popen(['git','-C',root,'diff','--binary','--no-ext-diff',f'{before}..{after}'],stdout=subprocess.PIPE)
 diff_buffer=bytearray(); diff_lines=0; summarized=False
 while True:
@@ -907,7 +916,12 @@ while True:
 process.stdout.close(); process.wait()
 if not summarized and process.returncode!=0: raise SystemExit(2)
 diff=build_diff_summary() if summarized else bytes(diff_buffer)
-wrapped_diff=select_bounded_wrapped_diff(diff,(lambda: diff) if summarized else build_diff_summary)
+wrapped_diff,wrapped_from_summary=select_bounded_wrapped_diff(diff,(lambda: diff) if summarized else build_diff_summary)
+# The flag follows the payload that was actually WRITTEN, never the read loop
+# alone. Where summarized was already true the factory hands back that same
+# summary, so this can only confirm it; where it was false this is the
+# wrapped-cap fallback the loop has no way to observe.
+if wrapped_from_summary: summarized=True
 def replace_private(destination,payload):
     parent=os.path.dirname(destination) or '.'
     fd,tmp=tempfile.mkstemp(prefix='.review-postfix-scope.',dir=parent)

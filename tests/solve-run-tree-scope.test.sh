@@ -554,9 +554,12 @@ var RE_SESSION_TASK = /Task\(|subagent_type/;
 // Which substrate a surface belongs to, decided by its own bytes.
 //
 // EXECUTABLE EVIDENCE OUTRANKS PROSE, and this order is load-bearing rather than
-// arbitrary. RE_ROUTED matches a bare filename, which every one of its current
-// hits in this repo is — three COMMENTS, in lib/solve-launcher.sh:1540,
-// lib/dispatch.sh:1248 and skills/review-fleet/workflow.js:843. Tested first it
+// arbitrary. RE_ROUTED matches a bare filename, and every one of its current
+// hits in this repo is a COMMENT naming the adapter rather than a call into it.
+// They are deliberately NOT enumerated by file:line here: both the count and the
+// line move whenever a fence gains or loses such a mention, and an enumeration
+// that rots reads as evidence while describing a tree that no longer exists.
+// Re-find them from the pattern above rather than from a list. Tested first it
 // would rule a Workflow fleet governed for mentioning the adapter it does not
 // use, and the first draft of row Z16 passed vacuously for exactly that reason:
 // the fixture substrate spliced into the launcher was classified routed off a

@@ -47,21 +47,15 @@
         "source": "plugins/uberdev/skills/turbox-fleet/SKILL.md",
         "reason": "RFC 0020 added /turbox as a SECOND lane off the same launcher: `--standard` pins the resolved backend to `workflow` and then emits a turbox plan instead of a Workflow args envelope, so the calling SESSION becomes the fleet orchestrator and dispatches every agent through the Task tool. It never sources lib/child-dispatch.sh, so it mints no instance id, creates no handoff, and produces no run-tree edge or receipt — it is neither the governed routed-child substrate nor the Workflow-native one above. RFC 0020 §1 positions this lane as the one that CAN run the parallel-wave implementation phase, so it is a candidate default; a default lane with zero run-tree governance and no declaration of that fact would let this manifest read as full coverage. Recorded here so the gap is visible and machine-checked (#649).",
         "reserved_edge_prefix": "turbox_fleet.",
-        "dispatch_sites": 14,
+        "dispatch_sites": 8,
         "agent_kinds": [
           "code_reviewer",
+          "design_planner",
           "general_purpose",
           "implementation_worker",
           "plan_reviewer",
-          "plan_writer",
-          "research_codebase",
-          "research_constraints",
           "research_security",
-          "research_test_coverage",
-          "spec_compliance_reviewer",
-          "spec_reviewer",
-          "spec_reviser",
-          "spec_writer"
+          "spec_compliance_reviewer"
         ],
         "agent_kind_rule": "The rule in scope.agent_kind_rule normalizes a Workflow opts.label and cannot apply here: this lane runs no script, so there is no label to normalize and nothing to execute under the test harness. A kind is instead an agent identifier the source names — `uberdev:<stem>` where plugins/uberdev/agents/<stem>.md exists (which is what excludes the label `uberdev:active`, the command `uberdev:turbox` and the skill `uberdev:orchestrator`), plus the host built-in `general-purpose`, with `-` mapped to `_`. dispatch_sites is the number of such mentions rather than the number of distinct kinds: every one of them is a dispatch instruction, and `implementation-worker` is named at two of them (the Phase 4b wave implementer and the Phase 5 fix round). The Phase 6 delivery rung names no agent type at all, so it contributes no site. Derived from the source by C9 in tests/solve-run-tree-scope.test.sh, never by hand.",
         "tracking_issues": [

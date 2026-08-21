@@ -2495,8 +2495,17 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
      # the caller of a function the fixer changed. The digest re-check is what
      # replaces the published 0400 copy the Phase 1 fanout gets: it proves the
      # bytes about to be transcribed are the bytes the capture verb proved.
+     # THE DIGEST VERB IS CAPTURED ON ITS OWN LINE and its rc is honoured, like
+     # every other digest call site in this command. Inlined into the test below
+     # it could not be: a non-zero exit — an unreadable or over-size result file,
+     # a broken interpreter — substituted empty, merely failed the equality, and
+     # landed `blocked` / `child-unavailable`, so a controller that could not run
+     # its own digest tool was recorded as a child that never arrived, and the
+     # run continued at rc 0 with the fixer commits unreviewed. A tooling fault
+     # is reported as itself; the equality below is now only ever a real mismatch.
+     POSTFIX_RESULT_DIGEST="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$POSTFIX_RESULT_PATH" --minimum 1 --maximum 1048576)" || return 74
      if uberdev_child_validate_phase1_review_result "$POSTFIX_RESULT_PATH" >/dev/null \
-        && [ "$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$POSTFIX_RESULT_PATH" --minimum 1 --maximum 1048576)" = "$POSTFIX_RESULT_SHA256" ]; then
+        && [ "$POSTFIX_RESULT_DIGEST" = "$POSTFIX_RESULT_SHA256" ]; then
        :
      else
        echo "warn: /uberdev:review-pr — the $POSTFIX_PHASE post-fix result did not survive the canonical reviewer boundary or its captured digest; recording the pass as blocked." >&2
@@ -2532,6 +2541,24 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
        POSTFIX_REASON=child-unavailable
      fi
    fi
+   # STATUS AND REASON ARE ONE TAGGED UNION, not two independent scalars, and
+   # this is the only place a contradictory pair is representable: both
+   # `skipped` arms publish a LITERAL sidecar and return long before here, so
+   # they are correct by construction, while this arm assembles the pair from
+   # two variables. Exactly two pairings are reachable — `ran` with no reason,
+   # and `blocked` with `child-unavailable`. Anything else is refused rather
+   # than published, because this object is copied verbatim into the audit JSON
+   # block that trust-trail-evaluator is told to read as unknown-when-absent,
+   # and there the whole value of `blocked` is telling silence apart from
+   # cleanliness. It sits beside the counter-sum invariant above for the same
+   # reason: a record no reader can act on must not reach a reader.
+   case "$POSTFIX_STATUS:$POSTFIX_REASON" in
+     ran: | blocked:child-unavailable) : ;;
+     *)
+       echo "error: /uberdev:review-pr — the $POSTFIX_PHASE post-fix sidecar would pair status '$POSTFIX_STATUS' with reason '${POSTFIX_REASON:-<none>}'; refusing to publish a combination no downstream reader can interpret." >&2
+       return 74
+       ;;
+   esac
    # PUBLISHED ON EVERY PATH, this one included. A run that recorded nothing must
    # not read downstream like a run that found nothing.
    ( umask 077 && jq -cn --arg phase "$POSTFIX_PHASE" --arg status "$POSTFIX_STATUS" \
@@ -3168,6 +3195,12 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
    ```
 
    **6p.2 — prove the child, transcribe its findings, publish the sidecar.**
+   This is a fresh shell, so it re-derives every path from disk — including the
+   fence above's own dispatch decision, which is why running it after a
+   short-circuit is a typed no-op instead of a `return 74`. Stated here as well
+   as at 5p.2, and deliberately: a reader who meets 6p first would otherwise get
+   the code without the reason, and an asymmetry between two bodies this PR
+   keeps in lockstep is where the pair starts to drift.
 
    ```bash uberdev-executable origin=review-pr
    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
@@ -3249,8 +3282,17 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
      # the caller of a function the fixer changed. The digest re-check is what
      # replaces the published 0400 copy the Phase 1 fanout gets: it proves the
      # bytes about to be transcribed are the bytes the capture verb proved.
+     # THE DIGEST VERB IS CAPTURED ON ITS OWN LINE and its rc is honoured, like
+     # every other digest call site in this command. Inlined into the test below
+     # it could not be: a non-zero exit — an unreadable or over-size result file,
+     # a broken interpreter — substituted empty, merely failed the equality, and
+     # landed `blocked` / `child-unavailable`, so a controller that could not run
+     # its own digest tool was recorded as a child that never arrived, and the
+     # run continued at rc 0 with the fixer commits unreviewed. A tooling fault
+     # is reported as itself; the equality below is now only ever a real mismatch.
+     POSTFIX_RESULT_DIGEST="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$POSTFIX_RESULT_PATH" --minimum 1 --maximum 1048576)" || return 74
      if uberdev_child_validate_phase1_review_result "$POSTFIX_RESULT_PATH" >/dev/null \
-        && [ "$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$POSTFIX_RESULT_PATH" --minimum 1 --maximum 1048576)" = "$POSTFIX_RESULT_SHA256" ]; then
+        && [ "$POSTFIX_RESULT_DIGEST" = "$POSTFIX_RESULT_SHA256" ]; then
        :
      else
        echo "warn: /uberdev:review-pr — the $POSTFIX_PHASE post-fix result did not survive the canonical reviewer boundary or its captured digest; recording the pass as blocked." >&2
@@ -3286,6 +3328,24 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
        POSTFIX_REASON=child-unavailable
      fi
    fi
+   # STATUS AND REASON ARE ONE TAGGED UNION, not two independent scalars, and
+   # this is the only place a contradictory pair is representable: both
+   # `skipped` arms publish a LITERAL sidecar and return long before here, so
+   # they are correct by construction, while this arm assembles the pair from
+   # two variables. Exactly two pairings are reachable — `ran` with no reason,
+   # and `blocked` with `child-unavailable`. Anything else is refused rather
+   # than published, because this object is copied verbatim into the audit JSON
+   # block that trust-trail-evaluator is told to read as unknown-when-absent,
+   # and there the whole value of `blocked` is telling silence apart from
+   # cleanliness. It sits beside the counter-sum invariant above for the same
+   # reason: a record no reader can act on must not reach a reader.
+   case "$POSTFIX_STATUS:$POSTFIX_REASON" in
+     ran: | blocked:child-unavailable) : ;;
+     *)
+       echo "error: /uberdev:review-pr — the $POSTFIX_PHASE post-fix sidecar would pair status '$POSTFIX_STATUS' with reason '${POSTFIX_REASON:-<none>}'; refusing to publish a combination no downstream reader can interpret." >&2
+       return 74
+       ;;
+   esac
    # PUBLISHED ON EVERY PATH, this one included. A run that recorded nothing must
    # not read downstream like a run that found nothing.
    ( umask 077 && jq -cn --arg phase "$POSTFIX_PHASE" --arg status "$POSTFIX_STATUS" \

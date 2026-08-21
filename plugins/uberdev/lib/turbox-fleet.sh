@@ -264,13 +264,33 @@ def flush():
         tasks.append(current)
 
 
+# A repo-relative path and nothing else: no space, no annotation, no prose. The
+# consumer (wave-disjoint, TB3) compares entries by equality and by directory
+# containment, so an entry that carried a parenthetical or an em-dash note --
+# `lib/x.sh (new)` -- can never equal or contain the same file a sibling task
+# declares plainly, and a colliding wave is then certified DISJOINT and two
+# implementers are dispatched onto one file. A trailing `/` is deliberately
+# admitted: a task may own a directory, and containment is how that collides.
+PATH_SHAPE_RE = re.compile(r'^[A-Za-z0-9._][A-Za-z0-9._/-]*$')
+
+
 def split_paths(raw):
     # The template shows the value in square brackets; a plan that keeps
     # them is describing the same list, not a different one.
     if raw.startswith("[") and raw.endswith("]"):
         raw = raw[1:-1]
     parts = [p.strip().strip('`"\'') for p in re.split(r'[,\n]', raw)]
-    return [p for p in parts if p and not p.startswith("#")]
+    kept = [p for p in parts if p and not p.startswith("#")]
+    # ALL OR NOTHING, never a silent narrowing. Dropping only the malformed
+    # entry would hand TB3 a SHORTER allowlist that still looks healthy, and the
+    # file the dropped entry named would quietly stop colliding with anything --
+    # the same fail-OPEN the shape gate exists to close, one step further in.
+    # Refusing the whole declaration leaves the task `unowned`, which the caller
+    # already routes to the sequential single-solver path: fail-safe, and
+    # visible in the counter a plan author is told to read.
+    if any(not PATH_SHAPE_RE.match(p) for p in kept):
+        return []
+    return kept
 
 
 def read_bullet_list(lines, j):
@@ -296,13 +316,30 @@ def read_bullet_list(lines, j):
         body = bullet.group(1).strip()
         if CHECKBOX_RE.match(body):
             break
-        items.extend(split_paths(body))
+        found = split_paths(body)
+        # One bullet inside the list that is not a bare path refuses the WHOLE
+        # list, for the reason split_paths states: a partially-read allowlist is
+        # indistinguishable from a correct short one, and TB3 would certify it.
+        if not found:
+            return [], j
+        items.extend(found)
         j += 1
     return items, j
 
 
 lines = text.splitlines()
 i = 0
+# THE COLLISION IS REPORTED, NEVER APPLIED SILENTLY. A SECOND `**Wave:**` or
+# `**Owns …:**` line inside one task -- including one written into a step body
+# to show a worker the line it must emit -- overwrites the task's declared
+# value, and neither `unwaved` nor `unowned` can see it: the task DID end up
+# waved and owned, just not with the values the plan declared. The symptom
+# lands three rungs away as a wave-disjoint refusal at dispatch that launches
+# zero implementers, after plan review approved the allowlist the plan actually
+# wrote, with nothing naming the overwrite as the cause. So name the task here,
+# where the second label is seen.
+seen_labels = set()
+duplicate_labels = set()
 while i < len(lines):
     stripped = lines[i].strip()
     i += 1
@@ -310,15 +347,25 @@ while i < len(lines):
     if m:
         flush()
         current = {"id": int(m.group(1)), "title": m.group(2).strip(), "wave": 0, "owns": []}
+        seen_labels = set()
         continue
     if current is None:
         continue
     m = WAVE_RE.match(stripped)
     if m:
+        if "wave" in seen_labels:
+            duplicate_labels.add(current["id"])
+        seen_labels.add("wave")
         current["wave"] = int(m.group(1))
         continue
     m = OWNS_RE.match(stripped)
     if m:
+        # Counted on the LABEL, not on the value: a restated label that happens
+        # to declare nothing still tells the author the plan says the same thing
+        # twice, and the card forbids the restatement itself.
+        if "owns" in seen_labels:
+            duplicate_labels.add(current["id"])
+        seen_labels.add("owns")
         owns = split_paths(m.group(1).strip())
         if not owns:
             owns, i = read_bullet_list(lines, i)
@@ -337,6 +384,7 @@ print(json.dumps({
     "waves": sorted({t["wave"] for t in tasks if t["wave"] >= 1}),
     "unwaved": unwaved,
     "unowned": unowned,
+    "duplicate_labels": sorted(duplicate_labels),
 }, sort_keys=True, separators=(",", ":")))
 PY
 }

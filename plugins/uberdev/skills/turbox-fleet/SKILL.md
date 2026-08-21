@@ -313,8 +313,8 @@ returned.
    `plan_path` and `allowed_paths` alone. A deviation the plan review *mandated*
    — a task's `Owns` list the plan got wrong, say — therefore reads to it as
    extra scope, and it will report it as such. Expect that; it is not evidence
-   the implementer misbehaved, and it costs one `fix_rounds` round against TB4
-   on a change that was correct. The fixer is the only rung holding both
+   the implementer misbehaved, and it costs one `fix_rounds` round against
+   TB4 on a change that was correct. The fixer is the only rung holding both
    documents, which is why Phase 5 hands it both paths: it is the rung that can
    tell a mandated deviation from real scope creep. You cannot see which it was
    — you never read findings — so take the signal you can see: a fix round
@@ -324,8 +324,8 @@ returned.
    run found.
 
 **Degradation, stated at the rung.** A `BLOCKED` return from `design-planner`,
-or a `plan.md` whose `plan-tasks` parse comes back with a non-empty `unwaved` or
-`unowned`, takes that issue off the design path: audit it and route it to the
+or a `plan.md` whose `plan-tasks` parse comes back with a non-empty `unwaved`,
+`unowned` or `duplicate_labels`, takes that issue off the design path: audit it and route it to the
 Phase 1c single solver if a solver can still be useful, otherwise record it
 `FAILED` and carry it to Phase 7. It is stated here, at the rung, because there
 is no upstream design-review gate left to catch a wrong design before a plan is
@@ -348,11 +348,18 @@ For each design-path issue, parse its plan's task table **once**:
 bash "$LIB" plan-tasks --plan <runDirAbs>/issue-<N>/plan.md
 ```
 
-It returns `{tasks:[{id,wave,owns[],title}], waves:[…], unwaved:[…], unowned:[…]}`.
-A non-empty `unwaved` or `unowned` is a plan defect: that issue has no usable
-plan, so route it to the single-solver path and audit `plan_unusable`. **A task
-with no declared wave is never defaulted to wave 1** — a plan that never said
-which wave a task belongs to has proven nothing about what it may run beside.
+It returns `{tasks:[{id,wave,owns[],title}], waves:[…], unwaved:[…], unowned:[…],
+duplicate_labels:[…]}`. A non-empty `unwaved`, `unowned` **or `duplicate_labels`**
+is a plan defect: that issue has no usable plan, so route it to the single-solver
+path and audit `plan_unusable`. **A task with no declared wave is never defaulted
+to wave 1** — a plan that never said which wave a task belongs to has proven
+nothing about what it may run beside. `duplicate_labels` names the tasks that
+carried a **second** `**Wave:**` or `**Owns …:**` line, which the other two
+counters cannot see: such a task ends up waved and owned, just not with the
+values the plan declared, so plan review approves one allowlist while TB3
+enforces the one that overwrote it and the wave refuses `rc 3` at dispatch with
+nothing naming the cause. Treat it as unusable here rather than rediscovering it
+from a dispatch that launched zero children.
 
 Then walk waves `1, 2, 3, …`. For wave *k*, across **every** issue in the batch —
 issues need not agree on how many waves they have, and one that has no wave *k*

@@ -878,10 +878,15 @@ review_fleet_read_postfix_dispatch() {
 #
 # THE CLASS IS ENUMERATED, NOT A RANGE, and that is the whole point of writing
 # it out. `*[!0-9a-f]*` reads as "any byte outside lowercase hex" and is that
-# under bash 5 and zsh -- but under bash 3.2 (stock /bin/bash on macOS, which is
-# where these fences run) a bracket RANGE is resolved by the locale collation
-# sequence, and under a UTF-8 locale `a-f` collates over the uppercase letters
-# too. Measured: a 40-character all-`A` string passes `*[!0-9a-f]*` there and
+# under bash 5 and zsh -- but under bash 3.2 (stock /bin/bash on macOS) a
+# bracket RANGE is resolved by the locale collation sequence, and under a UTF-8
+# locale `a-f` collates over the uppercase letters too. THREE runtimes reach
+# this helper and it is written to hold under every one of them: the command and
+# skill fences that source this file run under /bin/zsh (the `case` note above
+# is that half, and is not the whole answer), CI runs bash 5, and a developer
+# sourcing the library by hand on macOS gets bash 3.2. Reproduce against
+# whichever of the three you are chasing, not against "the" shell — there is no
+# single one. Measured: a 40-character all-`A` string passes `*[!0-9a-f]*` there and
 # fails it under bash 5, from the same bytes. A gate that accepts a SHA it says
 # it rejects is worse than no gate, because the carrier reader is what stands
 # between a corrupt range file and a post-fix pass that reviews the wrong

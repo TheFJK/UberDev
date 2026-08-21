@@ -37,14 +37,20 @@ esac
 #
 # Everything compared below is EXTRACTED from the shipped files at run time.
 # A hand-copied twin would pass while the shipped one was broken — which is
-# the disjoint-predicate failure this suite exists to avoid
-# (tests/turbox-fleet-runtime.test.sh:271-275).
+# the disjoint-predicate failure this suite exists to avoid: see the R6c
+# section header in tests/turbox-fleet-runtime.test.sh, which states the root
+# cause (the parser was written against one card, the writer emitted something
+# else, and nothing ever ran one against the other). Cited by section marker,
+# not by line, under the same house rule as the register below.
 #
 # House rules this file is written under:
 #   * No pipe into an early-exiting reader (`grep -q`, `grep -m N`, `grep -l`,
 #     `head`, `read`) anywhere. Capture first, match against the capture with a
-#     herestring — tests/epipe-guard.test.sh:5-38, exemplar at
-#     tests/docs-accuracy.test.sh:1211-1213. The inverted-polarity form is the
+#     herestring — tests/epipe-guard.test.sh states the rule; the exemplar is
+#     the `JS_CITING_LINES=` capture in tests/docs-accuracy.test.sh, under the
+#     "No pipe into `grep -q`" comment that explains it. Anchored on those two
+#     names rather than on a line span, for the reason the next rule gives.
+#     The inverted-polarity form is the
 #     worse half: it reports a real defect as a PASS, which would be a vacuity
 #     mechanism inside a vacuity fix.
 #   * No register entry is keyed on a LINE NUMBER. Line numbers rot, and a

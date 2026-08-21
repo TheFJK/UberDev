@@ -34,7 +34,7 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `LOCK_STALE_FLOOR_SEC` | `900` (hard floor; lock staleness threshold = max(`command_timeouts.merge`, `LOCK_STALE_FLOOR_SEC`) seconds of heartbeat age — NEVER `started_at` age, which mis-classifies live long runs as stale) | Step 1.1 (contention vs stale classification) |
 | `AUDIT_LOG_DIR_PATTERN` | `.uberdev/` (repo-root; docs-reality reconciliation #303 — every live writer appends to the root `.uberdev/audit.jsonl` and `/goal`'s reader globs the root; the former `runs/<run-id>/` claim documented a path no writer ever used. Note: `review-pr-verdict.json` is a DIFFERENT artifact and legitimately lives under `.uberdev/runs/<run-id>/`) | D15 |
 | `AUDIT_LOG_FILENAME` | `audit.jsonl` | D15 |
-| `AUDIT_EVENT_ENUM` | `gate_pass`, `gate_fail`, `order_proposed`, `order_confirmed`, `strategy_chosen`, `probe_clean`, `probe_conflict`, `agent_dispatched`, `agent_returned`, `patch_applied`, `test_pass`, `test_fail`, `push_resolution`, `merge_executed`, `local_sync`, `branch_deleted`, `worktree_removed`, `admin_bypass`, `waiver_recorded`, `error`, `pr_parked`, `stale_branch_rebase_decision`, `deprecated_flag_used`, `agent_strategy_switch`, `test_fail_agent_decision`, `trust_trail_agent_decision`, `merge_strategy_agent_decision`, `merge_strategy_fanout_wave_started`, `discovery_gh_failed`, `ci_probe_started`, `ci_probe_skipped_no_checks`, `ci_probe_unreachable`, `ci_monitor_green`, `ci_monitor_red`, `ci_monitor_timeout`, `ci_classify_dispatched`, `ci_classify_returned`, `ci_classify_ambiguous_routing_as_flaky`, `ci_fix_dispatched`, `ci_fix_dispatch_unknown_class`, `ci_fix_pushed`, `ci_flaky_rerun_queued`, `ci_flaky_rerun_failed`, `ci_loop_cap_reached`, `ci_phase_outcome`, `auto_review_dispatched`, `auto_review_returned`, `audit_json_phase2_5_parse_failure`, `halt_tool_unavailable`, `uberdev_active_label_cleared` | See the `AUDIT_EVENT_ENUM` event semantics subsection below the Constants table for field-level extensions and the member-addition history. |
+| `AUDIT_EVENT_ENUM` | `gate_pass`, `gate_fail`, `order_proposed`, `order_confirmed`, `strategy_chosen`, `probe_clean`, `probe_conflict`, `agent_dispatched`, `agent_returned`, `patch_applied`, `test_pass`, `test_fail`, `push_resolution`, `merge_executed`, `local_sync`, `branch_deleted`, `worktree_removed`, `admin_bypass`, `waiver_recorded`, `error`, `pr_parked`, `stale_branch_rebase_decision`, `deprecated_flag_used`, `agent_strategy_switch`, `test_fail_agent_decision`, `trust_trail_agent_decision`, `merge_strategy_agent_decision`, `merge_strategy_fanout_wave_started`, `discovery_gh_failed`, `ci_probe_started`, `ci_probe_skipped_no_checks`, `ci_probe_unreachable`, `ci_monitor_green`, `ci_monitor_red`, `ci_monitor_timeout`, `ci_classify_dispatched`, `ci_classify_returned`, `ci_classify_ambiguous_routing_as_flaky`, `ci_fix_dispatched`, `ci_fix_dispatch_unknown_class`, `ci_fix_pushed`, `ci_flaky_rerun_queued`, `ci_flaky_rerun_failed`, `ci_loop_cap_reached`, `ci_phase_outcome`, `auto_review_dispatched`, `auto_review_returned`, `audit_json_phase2_5_parse_failure`, `halt_tool_unavailable`, `uberdev_active_label_cleared`, `merge_partial_unharvested` | See the `AUDIT_EVENT_ENUM` event semantics subsection below the Constants table for field-level extensions and the member-addition history. |
 | `SCRATCH_WORKTREE_PATTERN` | `.claude/worktrees/merge-<run-id>/` | D10 |
 | `BRANCH_NAME_REGEX` | `^[A-Za-z0-9._/-]{1,255}$` | D8 (validation before shell argv use) |
 | `MERGE_STRATEGY_LABEL_PREFIX` | `merge-strategy:` | D-LABEL |
@@ -112,6 +112,9 @@ Plus 2 phase2_5-observability members (#116): `audit_json_phase2_5_parse_failure
 And `halt_tool_unavailable` (`data.tool: string`) — fires from `commands/review-pr.md` Step 6b.1 when `ToolSearch` fails to load the named tool (e.g. `AskUserQuestion`); `/review-pr` aborts (exit 1) rather than silently auto-pick a Phase 2.5 halt-choice.
 
 **+1 issue-claim-cleanup member (#TBD v0.28.0):** `uberdev_active_label_cleared` (`data.issue: int`, `data.pr: int`, `data.reason: string ∈ {"merge", "merge-partial"}`) — fires from Step 3.4 once per linked issue after a successful `gh pr merge`. The two reasons name two different end states, and collapsing them would hide the one an operator has to act on: `merge` is a claim released **because the issue closed** (a closing keyword linked it, GitHub auto-closed it on merge, the work is done); `merge-partial` is a claim released off the non-closing `UberDev-Partial: #N` trailer, where the PR landed real work but the issue is **still OPEN and re-solvable** (#554). The Step 3.4 cleanup performs a **single combined `gh issue edit --remove-label "uberdev:active" --remove-assignee "@me"`** mutation (label and assignee removed in one round-trip; gh fails atomically on partial error) — symmetric with the Phase B dispatch-failure rollback in `solve-pipeline/SKILL.md` (which also clears both label and assignee). Without the assignee removal here, the dispatcher's "Assigned to me" GitHub filter would accumulate closed-and-merged issues over time. The audit event gates on the combined rc: success emits, failure stays silent. Pairs the cleanup-half of the small-team issue-claim protocol set in `solve-pipeline/SKILL.md` Step 4.5 (the dispatch-half emits `claim_acquired`). Fail-soft: a combined-call failure does NOT emit the event (the issue may already be closed by GitHub's auto-close, the label may have been removed by hand, or the assignee may differ from @me — none of these are conditions the operator wants to see surface as an audit-noisy failure on a UI-cleanup pass).
+
+**+1 unharvested-trailer member:** `merge_partial_unharvested` (`data.pr: int`, `data.mentions: int`, `data.released: int`) — fires from Step 3.4 at most once per PR, when the body mentions the `UberDev-Partial: #N` trailer on more lines than the strict flush-and-undecorated harvest released. It records **nothing was done**, which is exactly why it exists: the release predicate is deliberately strict (#646), so a decorated, indented or prose-wrapped trailer harvests as nothing, and without this row that outcome is byte-for-byte indistinguishable in the audit trail from a PR that carried no trailer at all — while the claim stays set on a **still-OPEN** issue and blocks every later `/solve`, `/turbo` and `/goal` dispatch for it. It is not `uberdev_active_label_cleared` under a third reason, because no label was cleared and no issue number is known; conflating the two would let a reader count a strand as a release. Advisory only: it never mutates, never gates the merge, and a body that both documents the trailer and emits one will emit it — a false warning costs a glance, a silent strand costs every future dispatch for that issue. The dispatch-time stale-claim sweeper does not cover this case: it prunes only CLOSED issues.
+
 ## Inputs
 
 Argument parsing:
@@ -1366,6 +1369,32 @@ PARTIAL_ISSUES=($(printf '%s\n' "$PR_BODY_FOR_CLEANUP" | tr -d '\r' \
   | grep -oE '^UberDev-Partial: #[0-9]+[[:space:]]*$' \
   | grep -oE '[0-9]+' \
   | awk -v c0=0 '!seen[$c0]++'))
+# LOOSE DETECTION, ADVISORY ONLY. It releases nothing and can release nothing:
+# the strict predicate above stays exactly as strict, for every reason the
+# FLUSH AND UNDECORATED block gives. What it buys is the one thing that block
+# does not — the ability to LEARN the harvest came back empty. A body whose
+# trailer carries a list marker, a backtick, an indent or surrounding prose
+# yields no match, the loop below runs zero times, rc stays 0, and nothing on
+# stderr or in the audit stream distinguishes that from a PR that never carried
+# a trailer at all. The miss does not heal: the claim label and the assignee
+# stay on a still-OPEN issue, and the Phase A collision check in
+# lib/solve-launcher.sh then refuses every later /solve, /turbo and /goal
+# dispatch for that issue until a human passes the force flag. The
+# dispatch-time stale-claim sweeper is NOT the safety net here — it prunes only
+# CLOSED issues, so it never reaches this case. So count the trailer token in
+# ANY position and, when more lines mention it than the strict harvest yielded,
+# say so on stderr and in the audit stream under a reason of its own, carrying
+# the PR number an operator needs in order to go and look. A body that both
+# documents the trailer and emits one warns too; a false warning costs a glance,
+# a silent strand costs every future dispatch for that issue.
+PARTIAL_MENTIONS=$(printf '%s\n' "$PR_BODY_FOR_CLEANUP" | tr -d '\r' \
+  | grep -cE 'UberDev-Partial:[[:space:]]*#[0-9]+') || PARTIAL_MENTIONS=0
+case "${PARTIAL_MENTIONS:-}" in '' | *[!0-9]*) PARTIAL_MENTIONS=0 ;; esac
+if [ "$PARTIAL_MENTIONS" -gt "${#PARTIAL_ISSUES[@]}" ]; then
+  echo "warn: /uberdev:merge — PR #$PR carries $PARTIAL_MENTIONS UberDev-Partial mention(s) but the strict harvest released ${#PARTIAL_ISSUES[@]}; a decorated or indented trailer leaves the claim set on a still-OPEN issue. Release it by hand." >&2
+  _uberdev_audit_emit merge_partial_unharvested \
+    "{\"pr\":$PR,\"mentions\":$PARTIAL_MENTIONS,\"released\":${#PARTIAL_ISSUES[@]}}" || true
+fi
 for CLEAR_ISSUE_NUM in "${CLOSED_ISSUES[@]}"; do
   # Combined cleanup: label + assignee in one gh round-trip. gh fails atomically
   # on partial error so the previous split-call form (with assignee removal as
