@@ -42,6 +42,13 @@ ACCEPTED_SOURCES = frozenset({
     "ubersimplify-aggregate",
     "testers-aggregate",
     "uberthink-aggregate",
+    # Command-owned, exactly like "ci-refused-synthetic": written by a
+    # commands/review-pr.md fence (review_write_postfix_aggregate) from a
+    # validated post-fix reviewer terminal, NOT by a skills/*/report.py emitter.
+    # So it deliberately has no envelope() call site in this repo — it is a
+    # member here because agents/findings-to-issues.md must accept it, which is
+    # the whole point of this frozenset being the SSOT (issue #655).
+    "postfix-aggregate",
 })
 
 PHASE1_CONTRIBUTORS = (
