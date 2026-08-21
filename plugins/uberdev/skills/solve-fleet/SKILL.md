@@ -312,16 +312,20 @@ same token:
   body, and GitHub closes the issue when that PR merges.
 - `chainComplete: false` → it mandates the non-closing trailer
   `UberDev-Partial: #N` instead — which must **stand alone on its own line**,
-  with nothing before or after it (#603). That mandate is deliberate
-  producer-side strictness, not the only thing holding the claim up: `/merge`
-  harvests the trailer with a line-anchored match that was relaxed in the same
-  change to tolerate the decorations a free-text writer reaches for, so a
-  bulleted or backticked trailer IS harvested. What that anchor still misses is
-  a trailer buried in a sentence — harvested as nothing, stranding the claim on
-  a still-open issue. The tolerated set is owned by
-  `skills/merge-pipeline/SKILL.md` Step 3.4 and is a consumer-end safety net;
-  this end asks for the bare line because the producer is the end that can give
-  it. The brief also forbids any GitHub closing keyword standing
+  with nothing before or after it (#603, #646). Since #646 the brief SHOWS that
+  line, flush and undecorated on a line of its own, rather than quoting it
+  inside a sentence and inside a code span — which is where the decorations
+  writers copied came from — and it tells the writer to read the body file back
+  and check the line before opening the PR. That producer-side shape is now what
+  holds the claim up: `/merge` harvests the trailer with a flush, line-anchored
+  match that accepts no visible decoration, so a bulleted, backticked, indented
+  or mid-sentence trailer is harvested as NOTHING and the claim strands on a
+  still-open issue. #603 had relaxed that harvest to tolerate the decorations
+  instead; the cost was that a PR body merely DOCUMENTING the trailer released a
+  claim a live solver still held, and #646 fixed the emission and dropped the
+  tolerance. What is still tolerated is owned by
+  `skills/merge-pipeline/SKILL.md` Step 3.4 and is deliberately not restated
+  here. The brief also forbids any GitHub closing keyword standing
   in front of this issue's number in the body **or** in any commit message on
   the branch (GitHub honours them in both). The issue therefore stays **OPEN**
   when the PR merges — the tasks the chain never reached still need an issue to

@@ -73,7 +73,7 @@ _UBERDEV_CONSOLIDATE_PLUGIN_ROOT="$(
 _UBERDEV_CONSOLIDATE_EXCLUSION_REASONS="cross_repo closed_mid_run base_deleted fetch_failed conflict_unresolved ancestry_lost push_refused"
 
 # The closing-keyword ERE. BYTE-IDENTICAL to the one inside
-# `# BEGIN merge-issue-cleanup-fence-v3` in skills/merge-pipeline/SKILL.md, and
+# `# BEGIN merge-issue-cleanup-fence-v4` in skills/merge-pipeline/SKILL.md, and
 # tests/review-pr-consolidate.test.sh RCX14 asserts that byte for byte. Two
 # copies that drift give two different answers to "which issues does this PR
 # close", and the drift stays invisible until an issue silently fails to close
