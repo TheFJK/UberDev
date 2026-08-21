@@ -160,6 +160,35 @@ Worker dispatches each wave concurrently; controller waits for the wave to finis
   <For markdown/config files — describe the check: frontmatter parses, links resolve, etc. Do NOT fabricate unit tests for markdown changes. Example: `awk '/^---$/{f=!f; if(!f){exit}; next} f' path/to/file.md | grep -E '^(name|model):' | wc -l` → expected N>
 ```
 
+**`Owns` emission forms:** `plugins/uberdev/lib/turbox-fleet.sh plan-tasks` is
+the single source of truth for what parses, and it reads exactly these two.
+Either is fine; nothing else is.
+
+Inline, after the label:
+
+```markdown
+### Task 1: Inline ownership
+**Depends on:** none
+**Wave:** wave-1
+**Owns (file allowlist):** `lib/parser.sh`, `tests/parser.test.sh`
+```
+
+Or as a markdown bullet list on the lines below it:
+
+```markdown
+### Task 2: Bullet-list ownership
+**Depends on:** none
+**Wave:** wave-1
+**Owns (file allowlist):**
+- `lib/writer.sh`
+- `tests/writer.test.sh`
+```
+
+A label with neither — no inline value and no list under it — declares nothing.
+`plan-tasks` reports that task as `unowned`, and `/turbox` is required to treat
+the whole plan as `plan_unusable` and fall back to a single sequential solver,
+so the wave-parallel lane is lost for that issue.
+
 **Wave assignment rules (MANDATORY):**
 1. A task with `Depends on: none` goes in `wave-1`.
 2. A task's wave = `max(wave of each dependency) + 1`.

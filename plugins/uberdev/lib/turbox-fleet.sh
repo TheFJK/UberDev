@@ -214,6 +214,17 @@ _tbx_cmd_budget_spend() {
 #     ### Task 3: Some component
 #     **Wave:** wave-2 — tasks in the same wave dispatch in parallel
 #     **Owns (file allowlist):** lib/a.sh, tests/a.test.sh
+#
+#   `Owns` has TWO emission forms and this is the single source for which ones
+#   parse — agents/plan-writer.md enumerates the same two, and
+#   tests/turbox-fleet-runtime.test.sh R6c runs the card's own blocks through
+#   here so the two surfaces cannot drift apart again (#653). The second form
+#   puts the allowlist on the lines that follow the label:
+#     **Owns (file allowlist):**
+#     - `lib/a.sh`
+#     - `tests/a.test.sh`
+#   A label with neither an inline value nor a following list declares nothing,
+#   and the task is reported `unowned` exactly as if the label were absent.
 # ---------------------------------------------------------------------------
 _tbx_cmd_plan_tasks() {
   local plan=""
@@ -233,6 +244,8 @@ text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
 TASK_RE = re.compile(r'^###\s+Task\s+(\d+)\s*:\s*(.*)$')
 WAVE_RE = re.compile(r'^\*\*Wave:?\*\*\s*:?\s*\[?\s*wave[-\s]?(\d+)', re.I)
 OWNS_RE = re.compile(r'^\*\*Owns[^*]*\*\*\s*:?\s*(.*)$', re.I)
+BULLET_RE = re.compile(r'^[-*+]\s+(.*)$')
+CHECKBOX_RE = re.compile(r'^\[[ xX]\]')
 
 tasks, current = [], None
 
@@ -242,8 +255,48 @@ def flush():
         tasks.append(current)
 
 
-for line in text.splitlines():
-    stripped = line.strip()
+def split_paths(raw):
+    # The template shows the value in square brackets; a plan that keeps
+    # them is describing the same list, not a different one.
+    if raw.startswith("[") and raw.endswith("]"):
+        raw = raw[1:-1]
+    parts = [p.strip().strip('`"\'') for p in re.split(r'[,\n]', raw)]
+    return [p for p in parts if p and not p.startswith("#")]
+
+
+def read_bullet_list(lines, j):
+    """Read the allowlist a plan puts BELOW its `Owns` label, not beside it.
+
+    Blank lines are allowed before the list opens; once it has opened, the
+    first line that is not a bullet closes it. That boundary is what keeps the
+    `**Files:**` block and the `- [ ] **Step N**` checkboxes that follow every
+    task header out of the allowlist — reading a second form must not become
+    harvesting every bullet on the page.
+    """
+    items = []
+    while j < len(lines):
+        stripped = lines[j].strip()
+        if not stripped:
+            if items:
+                break
+            j += 1
+            continue
+        bullet = BULLET_RE.match(stripped)
+        if not bullet:
+            break
+        body = bullet.group(1).strip()
+        if CHECKBOX_RE.match(body):
+            break
+        items.extend(split_paths(body))
+        j += 1
+    return items, j
+
+
+lines = text.splitlines()
+i = 0
+while i < len(lines):
+    stripped = lines[i].strip()
+    i += 1
     m = TASK_RE.match(stripped)
     if m:
         flush()
@@ -257,13 +310,12 @@ for line in text.splitlines():
         continue
     m = OWNS_RE.match(stripped)
     if m:
-        raw = m.group(1).strip()
-        # The template shows the value in square brackets; a plan that keeps
-        # them is describing the same list, not a different one.
-        if raw.startswith("[") and raw.endswith("]"):
-            raw = raw[1:-1]
-        parts = [p.strip().strip('`"\'') for p in re.split(r'[,\n]', raw)]
-        current["owns"] = [p for p in parts if p and not p.startswith("#")]
+        owns = split_paths(m.group(1).strip())
+        if not owns:
+            owns, i = read_bullet_list(lines, i)
+        # A label that declared nothing never clears one that did.
+        if owns:
+            current["owns"] = owns
 flush()
 
 # A task with no wave is not defaulted to wave 1: a plan that never said which
