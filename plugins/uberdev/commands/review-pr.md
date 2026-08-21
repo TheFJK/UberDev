@@ -2281,90 +2281,23 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
    POSTFIX_DISPATCH_PATH="$REVIEW_FLEET_RUN_DIR/postfix-dispatch-${POSTFIX_PHASE}-iter${REVIEW_ITERATION}.txt"
    POSTFIX_SUMMARISED_PATH="$REVIEW_FLEET_RUN_DIR/postfix-summarised-${POSTFIX_PHASE}-iter${REVIEW_ITERATION}.txt"
    POSTFIX_LAUNCH_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-postfix-${POSTFIX_PHASE}-iter${REVIEW_ITERATION}.launch.json"
-   # THE OFF-SWITCH, READ OFF DISK. Step 1 recorded it in a fence that died
-   # thousands of lines ago, and every `bash` block in this command is a fresh
-   # shell (#427), so `${POST_FIX_REVIEW_PHASE:-1}` here would answer with the
-   # documented default on every invocation and `--no-post-fix-review` would
-   # dispatch anyway — which is exactly how `--no-ci-fix` silently mutated code
-   # and force-pushed (#418). "The flag was absent" and "this fence cannot tell"
-   # are different answers, and only the first may reach a dispatching arm.
-   POST_FIX_REVIEW_PHASE_CARRIER="$REVIEW_FLEET_RUN_DIR/post-fix-review-phase.txt"
-   POST_FIX_REVIEW_PHASE=
-   if [ -r "$POST_FIX_REVIEW_PHASE_CARRIER" ]; then
-     IFS= read -r POST_FIX_REVIEW_PHASE <"$POST_FIX_REVIEW_PHASE_CARRIER" || true
-   fi
-   case "${POST_FIX_REVIEW_PHASE:-}" in
-     0 | 1) ;;
-     *)
-       echo "error: /uberdev:review-pr — post_fix_review_phase_unreadable: could not read the --no-post-fix-review decision from $POST_FIX_REVIEW_PHASE_CARRIER; refusing to default the post-fix pass ON when the operator's flag is unknown." >&2
-       audit review_postfix_pass data.phase="$POSTFIX_PHASE" data.outcome=halted data.subreason=post_fix_review_phase_unreadable
-       return 74
-       ;;
-   esac
-   if [ "$POST_FIX_REVIEW_PHASE" = 0 ]; then
-     ( umask 077 && jq -cn --arg phase "$POSTFIX_PHASE" \
-       '{schema_version:1,phase:$phase,status:"skipped",reason:"off-switch",commit_range:null,diff_summarised:false,findings_count:0,by_severity:{blocker:0,suggestion:0}}' \
-       >"$POSTFIX_SIDECAR_PATH" ) || return 74
-     review_fleet_write_postfix_dispatch "$POSTFIX_DISPATCH_PATH" 0 || return 74
-     printf 'REVIEW_POSTFIX_DISPATCH=0 PHASE=%s REASON=off-switch\n' "$POSTFIX_PHASE" >&2
-     return 0
-   fi
-   # ABSENCE IS THE SHORT-CIRCUIT, and it is the designed common path: rc 0, no
-   # child, and a sidecar that says so. It is only readable that way because the
-   # carrier's writer fails closed — a write that did not land is non-zero at
-   # `review_fleet_write_fixer_range`, so "no file" can mean "no applied commit"
-   # and nothing else.
-   if [ ! -e "$POSTFIX_RANGE_CARRIER" ]; then
-     ( umask 077 && jq -cn --arg phase "$POSTFIX_PHASE" \
-       '{schema_version:1,phase:$phase,status:"skipped",reason:"no-applied-commit",commit_range:null,diff_summarised:false,findings_count:0,by_severity:{blocker:0,suggestion:0}}' \
-       >"$POSTFIX_SIDECAR_PATH" ) || return 74
-     review_fleet_write_postfix_dispatch "$POSTFIX_DISPATCH_PATH" 0 || return 74
-     printf 'REVIEW_POSTFIX_DISPATCH=0 PHASE=%s REASON=no-applied-commit\n' "$POSTFIX_PHASE" >&2
-     return 0
-   fi
-   # PRESENT BUT UNREADABLE IS THE OPPOSITE ANSWER, never a quiet skip.
-   POSTFIX_RANGE="$(review_fleet_read_fixer_range "$POSTFIX_RANGE_CARRIER")" || {
-     echo "error: /uberdev:review-pr — postfix_range_unreadable: $POSTFIX_RANGE_CARRIER exists but does not carry <40-hex>..<40-hex>; the carrier's writer fails closed, so a file that does not parse was written by something else." >&2
-     audit review_postfix_pass data.phase="$POSTFIX_PHASE" data.outcome=halted data.subreason=postfix_range_unreadable
-     return 74
+   # ONE OWNER FOR BOTH PASSES (#672). Everything from the off switch through the
+   # launch binding is `review_postfix_prepare_dispatch` in lib/review-fences.sh,
+   # called from 5p.1 and 6p.1 alike with the only value that differs — the
+   # phase. What stays spelled out in this fence stays because an executable
+   # assertion reads it out of THIS file; the helper's header names each one.
+   #
+   # rc 3 is that helper's documented sentinel for a CLEAN short-circuit — the
+   # off switch, or the absent fixer-range carrier. Both have already published
+   # the sidecar and the dispatch record, so this fence stops at 0 WITHOUT
+   # emitting an envelope. Every other non-zero rc is a real failure and is
+   # propagated unchanged, so `postfix_range_unreadable` still leaves here as 74.
+   review_postfix_prepare_dispatch "$POSTFIX_PHASE" "$POSTFIX_RANGE_CARRIER" "$POSTFIX_SIDECAR_PATH" \
+     "$POSTFIX_DISPATCH_PATH" "$POSTFIX_SUMMARISED_PATH" "$POSTFIX_LAUNCH_SIDECAR" || {
+     POSTFIX_PREPARE_RC=$?
+     if [ "$POSTFIX_PREPARE_RC" -eq 3 ]; then return 0; fi
+     return "$POSTFIX_PREPARE_RC"
    }
-   # `review_build_postfix_scope`, and NEVER `review_refresh_phase1_scope`. That
-   # one replace_private()s BOTH $DIFF_ARTIFACT_PATH and $COMMIT_RANGE_PATH in
-   # place, and those exact bytes are digest-pinned by the NEXT fixer's
-   # prepare-authority receipt — `commit_range_sha256` is a declared input on
-   # review_pr.fix.phase1 and on review_pr.fix.phase2 alike. Re-running it here
-   # merely to obtain a diff would break the Phase 2 authority receipt.
-   review_build_postfix_scope "$POSTFIX_PHASE" "$POSTFIX_RANGE" || {
-     POSTFIX_SCOPE_RC=$?
-     echo "error: /uberdev:review-pr — could not build the $POSTFIX_PHASE post-fix review scope (rc $POSTFIX_SCOPE_RC)" >&2
-     return "$POSTFIX_SCOPE_RC"
-   }
-   # The summarisation flag is REPORTED, not swallowed — and the fence that
-   # publishes the sidecar is a different process, so it travels on disk like
-   # every other cross-fence fact here. A GREEN run whose post-fix pass read a
-   # per-file summary instead of the diff has to be able to say so.
-   case "${REVIEW_POSTFIX_DIFF_SUMMARISED:-}" in
-     true | false) ;;
-     *)
-       echo "error: /uberdev:review-pr — the $POSTFIX_PHASE post-fix scope builder returned no summarisation flag" >&2
-       return 74
-       ;;
-   esac
-   ( umask 077 && printf '%s\n' "$REVIEW_POSTFIX_DIFF_SUMMARISED" >"$POSTFIX_SUMMARISED_PATH" ) || return 74
-   # The PR identity, refused rather than defaulted: `clampInt(CFG.prNumber, …, 0)`
-   # in workflow.js turns an empty value into a prompt that says "PR #0".
-   case "${PR_NUMBER:-}" in
-     '' | *[!0-9]*)
-       echo "error: /uberdev:review-pr — the $POSTFIX_PHASE post-fix pass has no PR number; refusing to dispatch a review that cannot name the PR it is reading." >&2
-       return 2
-       ;;
-   esac
-   # ONE declaration, two stages. The post-fix child is a `code-reviewer`
-   # emitting the SAME `phase1-reviewer-v1` document the Phase 1 fanout binds to,
-   # resolved off the policy manifest rather than restated as prose (#403).
-   REVIEW_FLEET_POSTFIX_CONTRACT_PATH="$(review_fleet_contract_path "$UBERDEV_REVIEW_PLUGIN_ROOT" phase1-reviewer-v1)" || return 74
-   review_fleet_bind_postfix "$REVIEW_FLEET_RUN_DIR" "$REVIEW_ITERATION" "$POSTFIX_PHASE" \
-     "$REVIEW_FLEET_WORKTREE" "$CODE_FIXER_CONTRACT" "$POSTFIX_LAUNCH_SIDECAR" || return 74
    uberdev_emit_workflow_args review-fleet \
      mode=review-pr \
      stage=postfix \
@@ -2411,9 +2344,10 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
    ```
 
    **5p.2 — prove the child, transcribe its findings, publish the sidecar.**
-   This is a fresh shell, so it re-derives every path from disk — including the
-   fence above's own dispatch decision, which is why running it after a
-   short-circuit is a typed no-op instead of a `return 74`.
+   This is a fresh shell, so `review_postfix_publish_sidecar` re-derives every
+   path from disk — including the fence above's own dispatch decision, which is
+   why running it after a short-circuit is a typed no-op instead of a
+   `return 74`.
 
    ```bash uberdev-executable origin=review-pr
    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
@@ -2429,150 +2363,13 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
    POSTFIX_DISPATCH_PATH="$REVIEW_FLEET_RUN_DIR/postfix-dispatch-${POSTFIX_PHASE}-iter${REVIEW_ITERATION}.txt"
    POSTFIX_SUMMARISED_PATH="$REVIEW_FLEET_RUN_DIR/postfix-summarised-${POSTFIX_PHASE}-iter${REVIEW_ITERATION}.txt"
    POSTFIX_LAUNCH_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-postfix-${POSTFIX_PHASE}-iter${REVIEW_ITERATION}.launch.json"
-   # Did a child actually launch? OFF DISK, because the fence that decided is a
-   # dead shell. On `0` the sidecar was already published by a short-circuit and
-   # this fence stops — and stops SAYING SO. An absent or malformed record is NOT
-   # read as `0`: "the pass cannot say what it did" is not "the pass dispatched
-   # nothing".
-   POSTFIX_DISPATCH="$(review_fleet_read_postfix_dispatch "$POSTFIX_DISPATCH_PATH")" || return 74
-   if [ "$POSTFIX_DISPATCH" = 0 ]; then
-     echo "notice: /uberdev:review-pr — the $POSTFIX_PHASE post-fix pass dispatched nobody this iteration; its sidecar was published by the short-circuit" >&2
-     return 0
-   fi
-   POSTFIX_RANGE="$(review_fleet_read_fixer_range "$POSTFIX_RANGE_CARRIER")" || return 74
-   POSTFIX_DIFF_SUMMARISED=
-   if [ -r "$POSTFIX_SUMMARISED_PATH" ]; then
-     IFS= read -r POSTFIX_DIFF_SUMMARISED <"$POSTFIX_SUMMARISED_PATH" || true
-   fi
-   case "${POSTFIX_DIFF_SUMMARISED:-}" in
-     true | false) ;;
-     *)
-       echo "error: /uberdev:review-pr — the $POSTFIX_PHASE post-fix pass dispatched a child but cannot read the scope summarisation flag at $POSTFIX_SUMMARISED_PATH; refusing to publish a sidecar that cannot say whether the reviewed bytes were the diff or a summary of it." >&2
-       return 74
-       ;;
-   esac
-   POSTFIX_LAUNCH_BINDING="$(review_fleet_read_sidecar "$POSTFIX_LAUNCH_SIDECAR" binding)" || return 74
-   # The edge comes OFF THE BINDING, never re-spelled here: the binder wrote it
-   # into the document this fence just read, and a second copy of that string is
-   # the "one contract, N uncompared copies" class the verify capture fence
-   # above already records. `capture-bound-child` re-derives its own edge from
-   # the same binding, so a fence-local literal could only ever agree or fail.
-   POSTFIX_EDGE="$(printf '%s' "$POSTFIX_LAUNCH_BINDING" | jq -er .edge_id)" || return 74
-   POSTFIX_STATUS=ran
-   POSTFIX_REASON=
-   POSTFIX_BLOCKERS=0
-   POSTFIX_SUGGESTIONS=0
-   POSTFIX_FINDINGS=0
-   # PROVE THE CHILD BEFORE READING ITS FINDINGS. `capture-bound-child` binds on
-   # the nonce, freezes `status.json` and `result.md` and computes both digests
-   # itself, so a child that echoed a nonce this run never minted — or published
-   # a torn, half-written result — is refused HERE rather than arriving as an
-   # unparseable finding the transcriber blames on formatting.
-   #
-   # FAIL SOFT, and say so four times. A blocked or malformed post-fix child is
-   # recorded `blocked` / `child-unavailable`, the run continues at rc 0, and the
-   # state is named in the sidecar, in the audit JSON, in the step 7 row and on
-   # stderr. It is never rendered as a clean zero-finding pass. No RFC 0017
-   # "fail toward keeping" precedent is claimed for this: that rule preserves a
-   # finding that already exists when its verifier is unavailable, and an
-   # unavailable post-fix reviewer produces silence, not evidence.
-   if POSTFIX_CAPTURED="$(python3 -I -B "$CODE_FIXER_CONTRACT" capture-bound-child \
-        --edge-id "$POSTFIX_EDGE" --launch-binding-json "$POSTFIX_LAUNCH_BINDING")"; then :; else
-     echo "warn: /uberdev:review-pr — bound-evidence capture REFUSED for $POSTFIX_EDGE ($POSTFIX_PHASE); recording the post-fix pass as blocked." >&2
-     POSTFIX_STATUS=blocked
-     POSTFIX_REASON=child-unavailable
-   fi
-   if [ "$POSTFIX_STATUS" = ran ]; then
-     POSTFIX_RESULT_PATH="$(printf '%s' "$POSTFIX_CAPTURED" | jq -er .result_path)" || return 74
-     POSTFIX_RESULT_SHA256="$(printf '%s' "$POSTFIX_CAPTURED" | jq -er .result_sha256)" || return 74
-     # The CANONICAL boundary, run on the child's own frozen bytes, and then the
-     # captured digest re-proved immediately before the transcription reads them
-     # again. It is deliberately called with neither a changed-path allow-list
-     # nor a publication target: `uberdev_child_validate_phase1_review_result`
-     # requires those two together or not at all, and the only allow-list this
-     # pass could offer is the fixer range's own path set — which would refuse
-     # the WHOLE result, findings and all, the first time a reviewer pointed at
-     # the caller of a function the fixer changed. The digest re-check is what
-     # replaces the published 0400 copy the Phase 1 fanout gets: it proves the
-     # bytes about to be transcribed are the bytes the capture verb proved.
-     # THE DIGEST VERB IS CAPTURED ON ITS OWN LINE and its rc is honoured, like
-     # every other digest call site in this command. Inlined into the test below
-     # it could not be: a non-zero exit — an unreadable or over-size result file,
-     # a broken interpreter — substituted empty, merely failed the equality, and
-     # landed `blocked` / `child-unavailable`, so a controller that could not run
-     # its own digest tool was recorded as a child that never arrived, and the
-     # run continued at rc 0 with the fixer commits unreviewed. A tooling fault
-     # is reported as itself; the equality below is now only ever a real mismatch.
-     POSTFIX_RESULT_DIGEST="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$POSTFIX_RESULT_PATH" --minimum 1 --maximum 1048576)" || return 74
-     if uberdev_child_validate_phase1_review_result "$POSTFIX_RESULT_PATH" >/dev/null \
-        && [ "$POSTFIX_RESULT_DIGEST" = "$POSTFIX_RESULT_SHA256" ]; then
-       :
-     else
-       echo "warn: /uberdev:review-pr — the $POSTFIX_PHASE post-fix result did not survive the canonical reviewer boundary or its captured digest; recording the pass as blocked." >&2
-       POSTFIX_STATUS=blocked
-       POSTFIX_REASON=child-unavailable
-     fi
-   fi
-   if [ "$POSTFIX_STATUS" = ran ]; then
-     # Severity is TRANSCRIBED, never re-severitised: the child's contract fixes
-     # the vocabulary at `blocker | suggestion` and admits nothing else, so the
-     # writer returns exactly those two counters and this fence renders exactly
-     # those two.
-     if POSTFIX_COUNTS="$(review_write_postfix_aggregate "$POSTFIX_PHASE" "$REVIEW_ITERATION" "$POSTFIX_RESULT_PATH")"; then
-       POSTFIX_BLOCKERS="$(printf '%s' "$POSTFIX_COUNTS" | jq -er .by_severity.blocker)" || return 74
-       POSTFIX_SUGGESTIONS="$(printf '%s' "$POSTFIX_COUNTS" | jq -er .by_severity.suggestion)" || return 74
-       POSTFIX_FINDINGS="$(printf '%s' "$POSTFIX_COUNTS" | jq -er .findings_count)" || return 74
-       [ "$POSTFIX_FINDINGS" -eq "$((POSTFIX_BLOCKERS + POSTFIX_SUGGESTIONS))" ] || {
-         echo "error: /uberdev:review-pr — the $POSTFIX_PHASE post-fix aggregate reports $POSTFIX_FINDINGS finding(s) but $POSTFIX_BLOCKERS blocker(s) plus $POSTFIX_SUGGESTIONS suggestion(s); refusing to publish counters that do not add up." >&2
-         return 74
-       }
-     else
-       POSTFIX_AGGREGATE_RC=$?
-       # TWO RCs, and they mean different things. rc 2 = the child's result is
-       # malformed, which is advisory and lands `blocked`. Anything else is the
-       # aggregate failing to reach disk, and a finding that reached no sink is a
-       # swallowed error — so that one HALTS instead of continuing quietly.
-       [ "$POSTFIX_AGGREGATE_RC" -eq 2 ] || {
-         echo "error: /uberdev:review-pr — the $POSTFIX_PHASE post-fix findings reached no sink (rc $POSTFIX_AGGREGATE_RC); refusing to continue with findings this run cannot file." >&2
-         return 74
-       }
-       echo "warn: /uberdev:review-pr — the $POSTFIX_PHASE post-fix result is malformed; recording the pass as blocked." >&2
-       POSTFIX_STATUS=blocked
-       POSTFIX_REASON=child-unavailable
-     fi
-   fi
-   # STATUS AND REASON ARE ONE TAGGED UNION, not two independent scalars, and
-   # this is the only place a contradictory pair is representable: both
-   # `skipped` arms publish a LITERAL sidecar and return long before here, so
-   # they are correct by construction, while this arm assembles the pair from
-   # two variables. Exactly two pairings are reachable — `ran` with no reason,
-   # and `blocked` with `child-unavailable`. Anything else is refused rather
-   # than published, because this object is copied verbatim into the audit JSON
-   # block that trust-trail-evaluator is told to read as unknown-when-absent,
-   # and there the whole value of `blocked` is telling silence apart from
-   # cleanliness. It sits beside the counter-sum invariant above for the same
-   # reason: a record no reader can act on must not reach a reader.
-   case "$POSTFIX_STATUS:$POSTFIX_REASON" in
-     ran: | blocked:child-unavailable) : ;;
-     *)
-       echo "error: /uberdev:review-pr — the $POSTFIX_PHASE post-fix sidecar would pair status '$POSTFIX_STATUS' with reason '${POSTFIX_REASON:-<none>}'; refusing to publish a combination no downstream reader can interpret." >&2
-       return 74
-       ;;
-   esac
-   # PUBLISHED ON EVERY PATH, this one included. A run that recorded nothing must
-   # not read downstream like a run that found nothing.
-   ( umask 077 && jq -cn --arg phase "$POSTFIX_PHASE" --arg status "$POSTFIX_STATUS" \
-     --arg reason "$POSTFIX_REASON" --arg range "$POSTFIX_RANGE" \
-     --argjson summarised "$POSTFIX_DIFF_SUMMARISED" \
-     --argjson blockers "$POSTFIX_BLOCKERS" --argjson suggestions "$POSTFIX_SUGGESTIONS" \
-     --argjson findings "$POSTFIX_FINDINGS" \
-     '{schema_version:1,phase:$phase,status:$status,reason:(if $reason == "" then null else $reason end),commit_range:$range,diff_summarised:$summarised,findings_count:$findings,by_severity:{blocker:$blockers,suggestion:$suggestions}}' \
-     >"$POSTFIX_SIDECAR_PATH" ) || return 74
-   if [ "$POSTFIX_STATUS" = blocked ]; then
-     printf 'REVIEW_POSTFIX_BLOCKED=%s\n' "$POSTFIX_PHASE" >&2
-   fi
-   printf 'REVIEW_POSTFIX_RESULT PHASE=%s STATUS=%s FINDINGS=%s BLOCKER=%s SUGGESTION=%s\n' \
-     "$POSTFIX_PHASE" "$POSTFIX_STATUS" "$POSTFIX_FINDINGS" "$POSTFIX_BLOCKERS" "$POSTFIX_SUGGESTIONS" >&2
+   # ONE OWNER FOR BOTH PASSES (#672). The child proof, the transcription and the
+   # sidecar are `review_postfix_publish_sidecar` in lib/review-fences.sh, called
+   # from 5p.2 and 6p.2 alike with the only value that differs — the phase. It
+   # returns 0 on the no-dispatch notice too, so a fence that runs after a
+   # short-circuit is the typed no-op described above rather than a `return 74`.
+   review_postfix_publish_sidecar "$POSTFIX_PHASE" "$POSTFIX_RANGE_CARRIER" "$POSTFIX_SIDECAR_PATH" \
+     "$POSTFIX_DISPATCH_PATH" "$POSTFIX_SUMMARISED_PATH" "$POSTFIX_LAUNCH_SIDECAR" || return $?
    ```
 
    The `postfix-aggregate` envelope this writes at `postfix-phase1-iter<N>.md` is
@@ -3035,10 +2832,14 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
    the `no-applied-commit` short-circuit and publishes a `skipped` sidecar — which
    is the honest record, and a different fact from "no findings".
 
-   Both fences below are byte-identical to 5p.1 and 5p.2 apart from the single
-   scalar `POSTFIX_PHASE`. They are separate fences rather than one parameterised
-   pair because a fence is a shell, not a function: nothing survives the closing
-   marker, and each phase owes its own envelope. Everything 5p states about the
+   Both fences below call the SAME two helpers 5p.1 and 5p.2 call, with the phase
+   as an argument — so "the two passes differ only in `POSTFIX_PHASE`" is now a
+   property of `lib/review-fences.sh` rather than a claim this paragraph made
+   about 289 lines nothing compared (#672). What is still written out per fence
+   is what an executable assertion reads out of THIS file: the four artifact
+   names (tests/review-pr-phase3-ci.test.sh S35), the phase literal, and the
+   `stage=postfix` envelope with its existence guard and per-child layout root
+   (tests/review-pr-workflow.test.sh G1-G5). Everything 5p states about the
    sidecar shape, the carrier-absence short-circuit, the two cost constants and
    the fail-soft `blocked` path holds here unchanged.
 
@@ -3065,90 +2866,23 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
    POSTFIX_DISPATCH_PATH="$REVIEW_FLEET_RUN_DIR/postfix-dispatch-${POSTFIX_PHASE}-iter${REVIEW_ITERATION}.txt"
    POSTFIX_SUMMARISED_PATH="$REVIEW_FLEET_RUN_DIR/postfix-summarised-${POSTFIX_PHASE}-iter${REVIEW_ITERATION}.txt"
    POSTFIX_LAUNCH_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-postfix-${POSTFIX_PHASE}-iter${REVIEW_ITERATION}.launch.json"
-   # THE OFF-SWITCH, READ OFF DISK. Step 1 recorded it in a fence that died
-   # thousands of lines ago, and every `bash` block in this command is a fresh
-   # shell (#427), so `${POST_FIX_REVIEW_PHASE:-1}` here would answer with the
-   # documented default on every invocation and `--no-post-fix-review` would
-   # dispatch anyway — which is exactly how `--no-ci-fix` silently mutated code
-   # and force-pushed (#418). "The flag was absent" and "this fence cannot tell"
-   # are different answers, and only the first may reach a dispatching arm.
-   POST_FIX_REVIEW_PHASE_CARRIER="$REVIEW_FLEET_RUN_DIR/post-fix-review-phase.txt"
-   POST_FIX_REVIEW_PHASE=
-   if [ -r "$POST_FIX_REVIEW_PHASE_CARRIER" ]; then
-     IFS= read -r POST_FIX_REVIEW_PHASE <"$POST_FIX_REVIEW_PHASE_CARRIER" || true
-   fi
-   case "${POST_FIX_REVIEW_PHASE:-}" in
-     0 | 1) ;;
-     *)
-       echo "error: /uberdev:review-pr — post_fix_review_phase_unreadable: could not read the --no-post-fix-review decision from $POST_FIX_REVIEW_PHASE_CARRIER; refusing to default the post-fix pass ON when the operator's flag is unknown." >&2
-       audit review_postfix_pass data.phase="$POSTFIX_PHASE" data.outcome=halted data.subreason=post_fix_review_phase_unreadable
-       return 74
-       ;;
-   esac
-   if [ "$POST_FIX_REVIEW_PHASE" = 0 ]; then
-     ( umask 077 && jq -cn --arg phase "$POSTFIX_PHASE" \
-       '{schema_version:1,phase:$phase,status:"skipped",reason:"off-switch",commit_range:null,diff_summarised:false,findings_count:0,by_severity:{blocker:0,suggestion:0}}' \
-       >"$POSTFIX_SIDECAR_PATH" ) || return 74
-     review_fleet_write_postfix_dispatch "$POSTFIX_DISPATCH_PATH" 0 || return 74
-     printf 'REVIEW_POSTFIX_DISPATCH=0 PHASE=%s REASON=off-switch\n' "$POSTFIX_PHASE" >&2
-     return 0
-   fi
-   # ABSENCE IS THE SHORT-CIRCUIT, and it is the designed common path: rc 0, no
-   # child, and a sidecar that says so. It is only readable that way because the
-   # carrier's writer fails closed — a write that did not land is non-zero at
-   # `review_fleet_write_fixer_range`, so "no file" can mean "no applied commit"
-   # and nothing else.
-   if [ ! -e "$POSTFIX_RANGE_CARRIER" ]; then
-     ( umask 077 && jq -cn --arg phase "$POSTFIX_PHASE" \
-       '{schema_version:1,phase:$phase,status:"skipped",reason:"no-applied-commit",commit_range:null,diff_summarised:false,findings_count:0,by_severity:{blocker:0,suggestion:0}}' \
-       >"$POSTFIX_SIDECAR_PATH" ) || return 74
-     review_fleet_write_postfix_dispatch "$POSTFIX_DISPATCH_PATH" 0 || return 74
-     printf 'REVIEW_POSTFIX_DISPATCH=0 PHASE=%s REASON=no-applied-commit\n' "$POSTFIX_PHASE" >&2
-     return 0
-   fi
-   # PRESENT BUT UNREADABLE IS THE OPPOSITE ANSWER, never a quiet skip.
-   POSTFIX_RANGE="$(review_fleet_read_fixer_range "$POSTFIX_RANGE_CARRIER")" || {
-     echo "error: /uberdev:review-pr — postfix_range_unreadable: $POSTFIX_RANGE_CARRIER exists but does not carry <40-hex>..<40-hex>; the carrier's writer fails closed, so a file that does not parse was written by something else." >&2
-     audit review_postfix_pass data.phase="$POSTFIX_PHASE" data.outcome=halted data.subreason=postfix_range_unreadable
-     return 74
+   # ONE OWNER FOR BOTH PASSES (#672). Everything from the off switch through the
+   # launch binding is `review_postfix_prepare_dispatch` in lib/review-fences.sh,
+   # called from 5p.1 and 6p.1 alike with the only value that differs — the
+   # phase. What stays spelled out in this fence stays because an executable
+   # assertion reads it out of THIS file; the helper's header names each one.
+   #
+   # rc 3 is that helper's documented sentinel for a CLEAN short-circuit — the
+   # off switch, or the absent fixer-range carrier. Both have already published
+   # the sidecar and the dispatch record, so this fence stops at 0 WITHOUT
+   # emitting an envelope. Every other non-zero rc is a real failure and is
+   # propagated unchanged, so `postfix_range_unreadable` still leaves here as 74.
+   review_postfix_prepare_dispatch "$POSTFIX_PHASE" "$POSTFIX_RANGE_CARRIER" "$POSTFIX_SIDECAR_PATH" \
+     "$POSTFIX_DISPATCH_PATH" "$POSTFIX_SUMMARISED_PATH" "$POSTFIX_LAUNCH_SIDECAR" || {
+     POSTFIX_PREPARE_RC=$?
+     if [ "$POSTFIX_PREPARE_RC" -eq 3 ]; then return 0; fi
+     return "$POSTFIX_PREPARE_RC"
    }
-   # `review_build_postfix_scope`, and NEVER `review_refresh_phase1_scope`. That
-   # one replace_private()s BOTH $DIFF_ARTIFACT_PATH and $COMMIT_RANGE_PATH in
-   # place, and those exact bytes are digest-pinned by the NEXT fixer's
-   # prepare-authority receipt — `commit_range_sha256` is a declared input on
-   # review_pr.fix.phase1 and on review_pr.fix.phase2 alike. Re-running it here
-   # merely to obtain a diff would break the Phase 2 authority receipt.
-   review_build_postfix_scope "$POSTFIX_PHASE" "$POSTFIX_RANGE" || {
-     POSTFIX_SCOPE_RC=$?
-     echo "error: /uberdev:review-pr — could not build the $POSTFIX_PHASE post-fix review scope (rc $POSTFIX_SCOPE_RC)" >&2
-     return "$POSTFIX_SCOPE_RC"
-   }
-   # The summarisation flag is REPORTED, not swallowed — and the fence that
-   # publishes the sidecar is a different process, so it travels on disk like
-   # every other cross-fence fact here. A GREEN run whose post-fix pass read a
-   # per-file summary instead of the diff has to be able to say so.
-   case "${REVIEW_POSTFIX_DIFF_SUMMARISED:-}" in
-     true | false) ;;
-     *)
-       echo "error: /uberdev:review-pr — the $POSTFIX_PHASE post-fix scope builder returned no summarisation flag" >&2
-       return 74
-       ;;
-   esac
-   ( umask 077 && printf '%s\n' "$REVIEW_POSTFIX_DIFF_SUMMARISED" >"$POSTFIX_SUMMARISED_PATH" ) || return 74
-   # The PR identity, refused rather than defaulted: `clampInt(CFG.prNumber, …, 0)`
-   # in workflow.js turns an empty value into a prompt that says "PR #0".
-   case "${PR_NUMBER:-}" in
-     '' | *[!0-9]*)
-       echo "error: /uberdev:review-pr — the $POSTFIX_PHASE post-fix pass has no PR number; refusing to dispatch a review that cannot name the PR it is reading." >&2
-       return 2
-       ;;
-   esac
-   # ONE declaration, two stages. The post-fix child is a `code-reviewer`
-   # emitting the SAME `phase1-reviewer-v1` document the Phase 1 fanout binds to,
-   # resolved off the policy manifest rather than restated as prose (#403).
-   REVIEW_FLEET_POSTFIX_CONTRACT_PATH="$(review_fleet_contract_path "$UBERDEV_REVIEW_PLUGIN_ROOT" phase1-reviewer-v1)" || return 74
-   review_fleet_bind_postfix "$REVIEW_FLEET_RUN_DIR" "$REVIEW_ITERATION" "$POSTFIX_PHASE" \
-     "$REVIEW_FLEET_WORKTREE" "$CODE_FIXER_CONTRACT" "$POSTFIX_LAUNCH_SIDECAR" || return 74
    uberdev_emit_workflow_args review-fleet \
      mode=review-pr \
      stage=postfix \
@@ -3195,12 +2929,10 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
    ```
 
    **6p.2 — prove the child, transcribe its findings, publish the sidecar.**
-   This is a fresh shell, so it re-derives every path from disk — including the
-   fence above's own dispatch decision, which is why running it after a
-   short-circuit is a typed no-op instead of a `return 74`. Stated here as well
-   as at 5p.2, and deliberately: a reader who meets 6p first would otherwise get
-   the code without the reason, and an asymmetry between two bodies this PR
-   keeps in lockstep is where the pair starts to drift.
+   This is a fresh shell, so `review_postfix_publish_sidecar` re-derives every
+   path from disk — including the fence above's own dispatch decision, which is
+   why running it after a short-circuit is a typed no-op instead of a
+   `return 74`.
 
    ```bash uberdev-executable origin=review-pr
    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
@@ -3216,150 +2948,13 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
    POSTFIX_DISPATCH_PATH="$REVIEW_FLEET_RUN_DIR/postfix-dispatch-${POSTFIX_PHASE}-iter${REVIEW_ITERATION}.txt"
    POSTFIX_SUMMARISED_PATH="$REVIEW_FLEET_RUN_DIR/postfix-summarised-${POSTFIX_PHASE}-iter${REVIEW_ITERATION}.txt"
    POSTFIX_LAUNCH_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-postfix-${POSTFIX_PHASE}-iter${REVIEW_ITERATION}.launch.json"
-   # Did a child actually launch? OFF DISK, because the fence that decided is a
-   # dead shell. On `0` the sidecar was already published by a short-circuit and
-   # this fence stops — and stops SAYING SO. An absent or malformed record is NOT
-   # read as `0`: "the pass cannot say what it did" is not "the pass dispatched
-   # nothing".
-   POSTFIX_DISPATCH="$(review_fleet_read_postfix_dispatch "$POSTFIX_DISPATCH_PATH")" || return 74
-   if [ "$POSTFIX_DISPATCH" = 0 ]; then
-     echo "notice: /uberdev:review-pr — the $POSTFIX_PHASE post-fix pass dispatched nobody this iteration; its sidecar was published by the short-circuit" >&2
-     return 0
-   fi
-   POSTFIX_RANGE="$(review_fleet_read_fixer_range "$POSTFIX_RANGE_CARRIER")" || return 74
-   POSTFIX_DIFF_SUMMARISED=
-   if [ -r "$POSTFIX_SUMMARISED_PATH" ]; then
-     IFS= read -r POSTFIX_DIFF_SUMMARISED <"$POSTFIX_SUMMARISED_PATH" || true
-   fi
-   case "${POSTFIX_DIFF_SUMMARISED:-}" in
-     true | false) ;;
-     *)
-       echo "error: /uberdev:review-pr — the $POSTFIX_PHASE post-fix pass dispatched a child but cannot read the scope summarisation flag at $POSTFIX_SUMMARISED_PATH; refusing to publish a sidecar that cannot say whether the reviewed bytes were the diff or a summary of it." >&2
-       return 74
-       ;;
-   esac
-   POSTFIX_LAUNCH_BINDING="$(review_fleet_read_sidecar "$POSTFIX_LAUNCH_SIDECAR" binding)" || return 74
-   # The edge comes OFF THE BINDING, never re-spelled here: the binder wrote it
-   # into the document this fence just read, and a second copy of that string is
-   # the "one contract, N uncompared copies" class the verify capture fence
-   # above already records. `capture-bound-child` re-derives its own edge from
-   # the same binding, so a fence-local literal could only ever agree or fail.
-   POSTFIX_EDGE="$(printf '%s' "$POSTFIX_LAUNCH_BINDING" | jq -er .edge_id)" || return 74
-   POSTFIX_STATUS=ran
-   POSTFIX_REASON=
-   POSTFIX_BLOCKERS=0
-   POSTFIX_SUGGESTIONS=0
-   POSTFIX_FINDINGS=0
-   # PROVE THE CHILD BEFORE READING ITS FINDINGS. `capture-bound-child` binds on
-   # the nonce, freezes `status.json` and `result.md` and computes both digests
-   # itself, so a child that echoed a nonce this run never minted — or published
-   # a torn, half-written result — is refused HERE rather than arriving as an
-   # unparseable finding the transcriber blames on formatting.
-   #
-   # FAIL SOFT, and say so four times. A blocked or malformed post-fix child is
-   # recorded `blocked` / `child-unavailable`, the run continues at rc 0, and the
-   # state is named in the sidecar, in the audit JSON, in the step 7 row and on
-   # stderr. It is never rendered as a clean zero-finding pass. No RFC 0017
-   # "fail toward keeping" precedent is claimed for this: that rule preserves a
-   # finding that already exists when its verifier is unavailable, and an
-   # unavailable post-fix reviewer produces silence, not evidence.
-   if POSTFIX_CAPTURED="$(python3 -I -B "$CODE_FIXER_CONTRACT" capture-bound-child \
-        --edge-id "$POSTFIX_EDGE" --launch-binding-json "$POSTFIX_LAUNCH_BINDING")"; then :; else
-     echo "warn: /uberdev:review-pr — bound-evidence capture REFUSED for $POSTFIX_EDGE ($POSTFIX_PHASE); recording the post-fix pass as blocked." >&2
-     POSTFIX_STATUS=blocked
-     POSTFIX_REASON=child-unavailable
-   fi
-   if [ "$POSTFIX_STATUS" = ran ]; then
-     POSTFIX_RESULT_PATH="$(printf '%s' "$POSTFIX_CAPTURED" | jq -er .result_path)" || return 74
-     POSTFIX_RESULT_SHA256="$(printf '%s' "$POSTFIX_CAPTURED" | jq -er .result_sha256)" || return 74
-     # The CANONICAL boundary, run on the child's own frozen bytes, and then the
-     # captured digest re-proved immediately before the transcription reads them
-     # again. It is deliberately called with neither a changed-path allow-list
-     # nor a publication target: `uberdev_child_validate_phase1_review_result`
-     # requires those two together or not at all, and the only allow-list this
-     # pass could offer is the fixer range's own path set — which would refuse
-     # the WHOLE result, findings and all, the first time a reviewer pointed at
-     # the caller of a function the fixer changed. The digest re-check is what
-     # replaces the published 0400 copy the Phase 1 fanout gets: it proves the
-     # bytes about to be transcribed are the bytes the capture verb proved.
-     # THE DIGEST VERB IS CAPTURED ON ITS OWN LINE and its rc is honoured, like
-     # every other digest call site in this command. Inlined into the test below
-     # it could not be: a non-zero exit — an unreadable or over-size result file,
-     # a broken interpreter — substituted empty, merely failed the equality, and
-     # landed `blocked` / `child-unavailable`, so a controller that could not run
-     # its own digest tool was recorded as a child that never arrived, and the
-     # run continued at rc 0 with the fixer commits unreviewed. A tooling fault
-     # is reported as itself; the equality below is now only ever a real mismatch.
-     POSTFIX_RESULT_DIGEST="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$POSTFIX_RESULT_PATH" --minimum 1 --maximum 1048576)" || return 74
-     if uberdev_child_validate_phase1_review_result "$POSTFIX_RESULT_PATH" >/dev/null \
-        && [ "$POSTFIX_RESULT_DIGEST" = "$POSTFIX_RESULT_SHA256" ]; then
-       :
-     else
-       echo "warn: /uberdev:review-pr — the $POSTFIX_PHASE post-fix result did not survive the canonical reviewer boundary or its captured digest; recording the pass as blocked." >&2
-       POSTFIX_STATUS=blocked
-       POSTFIX_REASON=child-unavailable
-     fi
-   fi
-   if [ "$POSTFIX_STATUS" = ran ]; then
-     # Severity is TRANSCRIBED, never re-severitised: the child's contract fixes
-     # the vocabulary at `blocker | suggestion` and admits nothing else, so the
-     # writer returns exactly those two counters and this fence renders exactly
-     # those two.
-     if POSTFIX_COUNTS="$(review_write_postfix_aggregate "$POSTFIX_PHASE" "$REVIEW_ITERATION" "$POSTFIX_RESULT_PATH")"; then
-       POSTFIX_BLOCKERS="$(printf '%s' "$POSTFIX_COUNTS" | jq -er .by_severity.blocker)" || return 74
-       POSTFIX_SUGGESTIONS="$(printf '%s' "$POSTFIX_COUNTS" | jq -er .by_severity.suggestion)" || return 74
-       POSTFIX_FINDINGS="$(printf '%s' "$POSTFIX_COUNTS" | jq -er .findings_count)" || return 74
-       [ "$POSTFIX_FINDINGS" -eq "$((POSTFIX_BLOCKERS + POSTFIX_SUGGESTIONS))" ] || {
-         echo "error: /uberdev:review-pr — the $POSTFIX_PHASE post-fix aggregate reports $POSTFIX_FINDINGS finding(s) but $POSTFIX_BLOCKERS blocker(s) plus $POSTFIX_SUGGESTIONS suggestion(s); refusing to publish counters that do not add up." >&2
-         return 74
-       }
-     else
-       POSTFIX_AGGREGATE_RC=$?
-       # TWO RCs, and they mean different things. rc 2 = the child's result is
-       # malformed, which is advisory and lands `blocked`. Anything else is the
-       # aggregate failing to reach disk, and a finding that reached no sink is a
-       # swallowed error — so that one HALTS instead of continuing quietly.
-       [ "$POSTFIX_AGGREGATE_RC" -eq 2 ] || {
-         echo "error: /uberdev:review-pr — the $POSTFIX_PHASE post-fix findings reached no sink (rc $POSTFIX_AGGREGATE_RC); refusing to continue with findings this run cannot file." >&2
-         return 74
-       }
-       echo "warn: /uberdev:review-pr — the $POSTFIX_PHASE post-fix result is malformed; recording the pass as blocked." >&2
-       POSTFIX_STATUS=blocked
-       POSTFIX_REASON=child-unavailable
-     fi
-   fi
-   # STATUS AND REASON ARE ONE TAGGED UNION, not two independent scalars, and
-   # this is the only place a contradictory pair is representable: both
-   # `skipped` arms publish a LITERAL sidecar and return long before here, so
-   # they are correct by construction, while this arm assembles the pair from
-   # two variables. Exactly two pairings are reachable — `ran` with no reason,
-   # and `blocked` with `child-unavailable`. Anything else is refused rather
-   # than published, because this object is copied verbatim into the audit JSON
-   # block that trust-trail-evaluator is told to read as unknown-when-absent,
-   # and there the whole value of `blocked` is telling silence apart from
-   # cleanliness. It sits beside the counter-sum invariant above for the same
-   # reason: a record no reader can act on must not reach a reader.
-   case "$POSTFIX_STATUS:$POSTFIX_REASON" in
-     ran: | blocked:child-unavailable) : ;;
-     *)
-       echo "error: /uberdev:review-pr — the $POSTFIX_PHASE post-fix sidecar would pair status '$POSTFIX_STATUS' with reason '${POSTFIX_REASON:-<none>}'; refusing to publish a combination no downstream reader can interpret." >&2
-       return 74
-       ;;
-   esac
-   # PUBLISHED ON EVERY PATH, this one included. A run that recorded nothing must
-   # not read downstream like a run that found nothing.
-   ( umask 077 && jq -cn --arg phase "$POSTFIX_PHASE" --arg status "$POSTFIX_STATUS" \
-     --arg reason "$POSTFIX_REASON" --arg range "$POSTFIX_RANGE" \
-     --argjson summarised "$POSTFIX_DIFF_SUMMARISED" \
-     --argjson blockers "$POSTFIX_BLOCKERS" --argjson suggestions "$POSTFIX_SUGGESTIONS" \
-     --argjson findings "$POSTFIX_FINDINGS" \
-     '{schema_version:1,phase:$phase,status:$status,reason:(if $reason == "" then null else $reason end),commit_range:$range,diff_summarised:$summarised,findings_count:$findings,by_severity:{blocker:$blockers,suggestion:$suggestions}}' \
-     >"$POSTFIX_SIDECAR_PATH" ) || return 74
-   if [ "$POSTFIX_STATUS" = blocked ]; then
-     printf 'REVIEW_POSTFIX_BLOCKED=%s\n' "$POSTFIX_PHASE" >&2
-   fi
-   printf 'REVIEW_POSTFIX_RESULT PHASE=%s STATUS=%s FINDINGS=%s BLOCKER=%s SUGGESTION=%s\n' \
-     "$POSTFIX_PHASE" "$POSTFIX_STATUS" "$POSTFIX_FINDINGS" "$POSTFIX_BLOCKERS" "$POSTFIX_SUGGESTIONS" >&2
+   # ONE OWNER FOR BOTH PASSES (#672). The child proof, the transcription and the
+   # sidecar are `review_postfix_publish_sidecar` in lib/review-fences.sh, called
+   # from 5p.2 and 6p.2 alike with the only value that differs — the phase. It
+   # returns 0 on the no-dispatch notice too, so a fence that runs after a
+   # short-circuit is the typed no-op described above rather than a `return 74`.
+   review_postfix_publish_sidecar "$POSTFIX_PHASE" "$POSTFIX_RANGE_CARRIER" "$POSTFIX_SIDECAR_PATH" \
+     "$POSTFIX_DISPATCH_PATH" "$POSTFIX_SUMMARISED_PATH" "$POSTFIX_LAUNCH_SIDECAR" || return $?
    ```
 
    Its aggregate at `postfix-phase2-iter<N>.md` binds as the OPTIONAL
@@ -4698,7 +4293,10 @@ EOF_VERIFY_AUDIT
     CLASSIFY. A pending-only initial probe can become red while `--watch` is
     running; retaining the pre-watch JSON would leave no failed row from which
     to derive the authoritative run. The refreshed projection uses the exact
-    6c.1 field set and replaces (never appends to) `PROBE_JSON`:
+    6c.1 field set, replaces (never appends to) `PROBE_JSON`, and — because
+    CLASSIFY is a different process — **re-publishes `ci-probe.json` through the
+    same writer 6c.1 uses**, so the payload CLASSIFY selects from is the payload
+    this fence just observed:
 
     ```bash uberdev-executable origin=review-pr
     . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
@@ -4711,6 +4309,46 @@ EOF_VERIFY_AUDIT
       # carve-out or omit Phase 3. Preserve status=ran with a halted outcome.
       OUTCOME=halted
       audit ci_phase_outcome outcome=halted subreason=post_monitor_refresh_failed
+      exit 1
+    fi
+    # THE REFRESHED PROJECTION CROSSES ON DISK (#418), through the writer 6c.1
+    # PROBE already uses. The `PROBE_JSON=` above rebinds a scalar in THIS
+    # shell; 6c.3 CLASSIFY is a different process and reads the payload back off
+    # `ci-probe.json`. Without this write that file still held the PRE-MONITOR
+    # projection — all-pending on exactly the run this arm exists for, one whose
+    # CI went red DURING the watch — so review_select_failed_ci_run had no
+    # failed row to choose from and the run halted
+    # `classification_run_selection_invalid`: a message about a malformed
+    # selection, on a probe that was never handed anything to select. Observed
+    # on a live /review-pr run and bridged by hand.
+    #
+    # FAIL CLOSED HERE, NOT AT THE READER, and UNCONDITIONALLY — unlike 6c.1's
+    # sibling write, which sits inside a `case` on the verdict vocabulary
+    # because the documented `gh`-unreachable carve-out must not become a phase
+    # halt. There is no carve-out left on this path: MONITOR has already
+    # established red CI, the guard above has already converted an unusable
+    # refresh into `post_monitor_refresh_failed`, and the only reader downstream
+    # is a MUTATING phase. A carrier this fence cannot write must halt where the
+    # `gh` call was spent, not be discovered two fences later.
+    #
+    # `[ -n … ]` BEFORE the `cd`, for the reason 6c.3 states in full below:
+    # these fences run under /bin/zsh, where `cd ""` SUCCEEDS and leaves the
+    # shell where it was, so an unbound run dir would write the carrier into the
+    # working tree as untracked residue the mutating verbs then refuse over.
+    CI_REFRESH_RUN_DIR=
+    if [ -n "${RESEARCH_DIR_ABS:-}" ]; then
+      CI_REFRESH_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || CI_REFRESH_RUN_DIR=
+    fi
+    [ -n "$CI_REFRESH_RUN_DIR" ] || {
+      echo "error: /uberdev:review-pr — Phase 3 refreshed the check projection after a red MONITOR but cannot resolve the run directory to persist it; CLASSIFY would select from the pre-watch payload." >&2
+      audit ci_phase_outcome data.outcome=halted data.subreason=ci_probe_json_uncarried
+      OUTCOME=halted
+      exit 1
+    }
+    if ! review_fleet_write_ci_probe_json "$CI_REFRESH_RUN_DIR/ci-probe.json" "$PROBE_JSON"; then
+      echo "error: /uberdev:review-pr — Phase 3 could not persist the post-MONITOR check projection to $CI_REFRESH_RUN_DIR/ci-probe.json; refusing to hand CLASSIFY the pre-watch payload it would otherwise select from." >&2
+      audit ci_phase_outcome data.outcome=halted data.subreason=ci_probe_json_uncarried
+      OUTCOME=halted
       exit 1
     fi
     ```
@@ -6102,7 +5740,7 @@ sys.stdout.write(slug)' "$CI_PUSH_REMOTE_URL")" \
 
           This replaces the previous inline `gh issue create` with a `routed child (subagent_type: uberdev:findings-to-issues)` dispatch that funnels CI-REFUSED issue creation through the same agent that handles all other deferred-finding issue creation; eliminates the prose-drift risk between the two issue-creation sites.
 
-          Construct a synthetic single-row aggregate wrapped in the `<external-untrusted-input source="ci-refused-synthetic">…</external-untrusted-input>` envelope (the receiving agent's Step 1 input validation recognises this source attribute — see `agents/findings-to-issues.md` Step 1 accepted-source allow-list). The aggregate carries one finding-row with `severity: critical`, `tier: CRITICAL`, and four values that each come off the run-dir carrier written by the fence that BOUND them (#418) — `failure_class` and `signal_anchor` from `ci-classification.json` (6c.3w.2's validated classification), `check_name` from `ci-check-name.txt` (6c.3's failed-check selection), and `rationale` from `ci-fixer-terminal.json` (6c.4w.2's validated terminal). None of the four is a value `ci-code-fixer` returns, and none of them survives a fence boundary in a shell variable: read that way they were `unknown` / `unknown:1` / `unspecified` on every run, which filed a CRITICAL issue with the entire diagnosis erased. Title is built downstream by the agent using its existing CRITICAL-tier shape (`[finding] $file_path:$line — $summary`); labels and `--assignee` flag come from the agent's tier-aware bindings (`--label review-pr-finding`, `--assignee @<pr-author>`). The agent's return YAML's `created_urls[0].url` is captured into `CI_REFUSED_ISSUE_URL`.
+          Construct a synthetic single-row aggregate wrapped in the `<external-untrusted-input source="ci-refused-synthetic">…</external-untrusted-input>` envelope (the receiving agent's Step 1 input validation recognises this source attribute — see `agents/findings-to-issues.md` Step 1 accepted-source allow-list). The aggregate carries one finding-row with `severity: critical`, `tier: CRITICAL`, and four values that each come off the run-dir carrier written by the fence that BOUND them (#418) — `failure_class` and `signal_anchor` from `ci-classification.json` (6c.3w.2's validated classification), `check_name` from `ci-check-name.txt` (6c.3's failed-check selection), and `rationale` from `ci-fixer-terminal.json` (6c.4w.2's validated terminal). None of the four is a value `ci-code-fixer` returns, and none of them survives a fence boundary in a shell variable: read that way they were `unknown` / `unknown:1` / `unspecified` on every run, which filed a CRITICAL issue with the entire diagnosis erased. Title is built downstream by the agent using its existing CRITICAL-tier shape (`[finding] $file_path:$line — $summary`); labels and `--assignee` flag come from the agent's tier-aware bindings (`--label review-pr-finding`, `--assignee <pr-author>`). **The assignee is a BARE login, never `@<pr-author>`** — `gh issue create --assignee` assigns people by their login, and the only `@`-prefixed values it understands are the sentinels `@me` and `@copilot`, so `@<login>` resolves as a literal username, exits 1 with `could not assign user: '@<login>' not found`, and files no issue at all. That is the whole `gh` call, not a degraded one, so a CRITICAL CI-refusal finding reaches no sink. The `@` stays where it belongs: the body's `mention_line` is prose addressed to a person and renders as a GitHub notification, so it keeps it (see `agents/findings-to-issues.md` Step 8c.5, fixed there for the same reason). The agent's return YAML's `created_urls[0].url` is captured into `CI_REFUSED_ISSUE_URL`.
 
           ```bash
           . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
@@ -6187,7 +5825,25 @@ row={'severity':'critical','tier':'CRITICAL','agent_name':'ci-code-fixer',
 payload=('<external-untrusted-input source="ci-refused-synthetic">\n- '
          +json.dumps(row,sort_keys=True,separators=(',',':'))
          +'\n</external-untrusted-input>\n').encode('utf-8')
-fd=os.open(path,os.O_WRONLY|getattr(os,'O_NOFOLLOW',0))
+# O_BINARY IS LOAD-BEARING, NOT DEFENSIVE PADDING, and this writer is the twin
+# #670 left behind when it fixed the post-fix aggregate publisher in
+# lib/review-fences.sh. On Windows os.open() honours the CRT default of TEXT
+# mode unless O_BINARY is passed, so every '\n' below reaches disk as '\r\n' and
+# the envelope findings-to-issues actually parses is a DIFFERENT document there
+# than on the other two platforms. Measured under a text-mode emulation of
+# os.open/os.write: 3 CR bytes, and the writer still exits 0.
+#
+# It exits 0 because the short-write guard cannot see it either -- MSVCRT
+# _write() returns the UNtranslated count, so `os.write(...)!=len(payload)` is
+# False on exactly the runs that corrupted the bytes. Nor can grep, which
+# structurally cannot match a CR at end-of-line; the row that caught the twin
+# reads its file through byte-transparent `tr`.
+#
+# Every other publisher on this path already ORs it in: lib/child-dispatch.sh
+# uberdev_child_validate_phase1_review_result explicitly, the two
+# replace_private() writers by way of tempfile.mkstemp, and (since #670)
+# review_write_postfix_aggregate.
+fd=os.open(path,os.O_WRONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_BINARY',0))
 try:
     opened=os.fstat(fd); current=os.lstat(path)
     if (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino): raise SystemExit(2)
