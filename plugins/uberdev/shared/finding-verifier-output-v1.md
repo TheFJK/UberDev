@@ -16,6 +16,33 @@ score: <integer 0-100>
 reason: <one of: reproduced-from-diff | contradicted-by-diff | pre-existing | out-of-scope-line | linter-domain | gate-disabled | over-cap-unverified | verifier-unavailable>
 ```
 
+**The opening fence carries no info string, or `yaml` — nothing else.** Emit
+the bare ` ``` ` opener shown above. ` ```yaml ` is accepted as well, because
+the sibling reviewer edges' prompts name that tag and a child that has read one
+of them may reach for it; those two openers are the whole accepted set at
+`uberdev_child_validate_finding_verifier_result`. Every other info string is a
+malformed document, refused there: ` ```yml `, ` ```YAML `, ` ```json `, a tag
+behind a space (` ``` yaml `), and a tag with anything appended
+(` ```yaml wrapped `) are each refused, as is a fence built from four backticks
+or from tildes.
+
+Until issue #670 that rule was written down nowhere a child could read. This
+file said "one fenced YAML document" and printed its worked example behind a
+bare fence, while the boundary matched ` ```yaml ` literally. A verifier child
+copied the example, emitted a bare fence, and had a well-formed `score: 93` /
+`reason: reproduced-from-diff` thrown away by a requirement no document it was
+given ever stated — recorded as `verifier-unavailable`, the row reserved for a
+child that never ran. This paragraph is now where the accepted opener set is
+declared; the reader deliberately accepts no less than the prose here allows, so
+the two can forgive a child but never surprise one.
+
+**The fence itself stays mandatory.** A two-key body with no fence around it is
+refused. The boundary is tolerant about the info string, and about whitespace
+surrounding the document; it is tolerant about nothing else, and none of the
+body rules below are relaxed by that tolerance. Behind a bare fence, a `verdict`
+key, a quoted `score`, an unknown `reason`, a preamble, a trailer, and a second
+fenced document are each still malformed.
+
 A third key, a missing key, a quoted `score` (`score: "80"`), a `score` outside
 `[0, 100]`, and a `reason` outside the list above are each a malformed
 document, refused at the validation boundary.
