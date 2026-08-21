@@ -150,13 +150,30 @@
 #      The hand-proof drifts the manifest instead, which proves the comparator
 #      compares but not that the site counter re-counts.
 #
-# GIT-BASH PORTABLE: grep + node only (no python3/PyYAML/mktemp, no temp files,
-# no digests, no PATH stubs). Runs on BOTH the ubuntu and windows shape-check
-# jobs, so it needs no windows-skip-list entry.
+# GIT-BASH PORTABLE: grep + node only (no python3/PyYAML/mktemp, no digests, no
+# PATH stubs). Runs on BOTH the ubuntu and windows shape-check jobs, so it needs
+# no windows-skip-list entry.
 #
-# The node program is embedded in a single-quoted shell string and therefore
-# contains no single-quote character anywhere — same constraint the inline
-# program in tests/solve-fleet-workflow.test.sh already obeys.
+# The comparator is written to a scratch .js file and run from there rather than
+# passed to `node -e`. Windows caps a CreateProcess command line at 32,767
+# characters; this program is ~88 KB, so `node -e` could not spawn it at all and
+# the windows job died with "Argument list too long" (rc=126) while ubuntu and
+# macOS stayed green. It crossed the cap when the suite grew from 18 rows to 53;
+# each earlier increment was inside it, which is why no single PR could see it.
+# Run from a file the command line is sixteen short arguments regardless of
+# program size — measured, it fell from 90,002 bytes to 1,685. This mirrors the
+# fixture in tests/solve-fleet-workflow.test.sh, which hit the same cap and is
+# written to a scratch file the same way.
+#
+# No mktemp: this file is Git-Bash portable by contract (see above). $$ is unique
+# enough for a per-process scratch file and the trap removes it.
+#
+# The program is a QUOTED heredoc, so `$`, backticks and backslashes stay literal
+# exactly as the single-quoted shell string used to keep them. It still contains
+# no single-quote character anywhere — the heredoc no longer forces that, but the
+# APOSTROPHE clause in the agent_kind_rule prose of
+# plugins/uberdev/policy/solve-run-tree-v1.json still tells an editor it does, so
+# leave it that way until both sides can be updated together.
 
 set -u
 set -o pipefail
@@ -228,24 +245,31 @@ esac
 
 # argv is paths and one integer only: the two argv shapes Git Bash MSYS
 # translation handles correctly. No JSON blob is ever passed as an argument.
-ROWS="$(node -e '
-var h = require(process.argv[1]);
+#
+# argv[1] is the SCRIPT PATH now that the program runs from a file, so every
+# operand below sits one slot later than it did under `node -e`: the harness is
+# argv[2], not argv[1]. Same indexing as the fixture in
+# tests/solve-fleet-workflow.test.sh.
+COMPARATOR_JS="${TMPDIR:-/tmp}/uberdev-solve-run-tree-scope-$$.js"
+trap 'rm -f "$COMPARATOR_JS"' EXIT
+cat > "$COMPARATOR_JS" <<'UBERDEV_RUN_TREE_SCOPE_JS'
+var h = require(process.argv[2]);
 var fs = require("fs");
 var vm = require("vm");
-var WORKFLOW = process.argv[2];
-var MANIFEST = process.argv[3];
-var SITES = parseInt(process.argv[4], 10);
-var LAUNCHER = process.argv[5];
-var L_REVIEW = process.argv[6];
-var L_SCAN = process.argv[7];
-var L_GOAL = process.argv[8];
-var L_TESTERS = process.argv[9];
-var L_UBERTHINK = process.argv[10];
-var R_REVIEW = process.argv[11];
-var R_SCAN = process.argv[12];
-var R_GOAL = process.argv[13];
-var R_TESTERS = process.argv[14];
-var R_UBERTHINK = process.argv[15];
+var WORKFLOW = process.argv[3];
+var MANIFEST = process.argv[4];
+var SITES = parseInt(process.argv[5], 10);
+var LAUNCHER = process.argv[6];
+var L_REVIEW = process.argv[7];
+var L_SCAN = process.argv[8];
+var L_GOAL = process.argv[9];
+var L_TESTERS = process.argv[10];
+var L_UBERTHINK = process.argv[11];
+var R_REVIEW = process.argv[12];
+var R_SCAN = process.argv[13];
+var R_GOAL = process.argv[14];
+var R_TESTERS = process.argv[15];
+var R_UBERTHINK = process.argv[16];
 
 var srcBase = fs.readFileSync(WORKFLOW, "utf8");
 var tree = JSON.parse(fs.readFileSync(MANIFEST, "utf8"));
@@ -1962,7 +1986,18 @@ function copyTree() { return JSON.parse(JSON.stringify(tree)); }
   process.stderr.write("comparator threw: " + ((e && e.stack) ? e.stack : String(e)) + "\n");
   process.exit(1);
 });
-' "$HARNESS" "$WORKFLOW" "$MANIFEST" "$SITES" "$LAUNCHER" \
+UBERDEV_RUN_TREE_SCOPE_JS
+
+# Fail at the WRITE, the way every input above fails at the read. An unwritable
+# scratch dir would otherwise hand node an empty program, which emits no rows and
+# surfaces as the row-count FATAL far below — a true failure reported as the
+# wrong one.
+[ -s "$COMPARATOR_JS" ] || {
+  echo "FATAL: could not write the comparator program to $COMPARATOR_JS" >&2
+  exit 2
+}
+
+ROWS="$(node "$COMPARATOR_JS" "$HARNESS" "$WORKFLOW" "$MANIFEST" "$SITES" "$LAUNCHER" \
   "$L_REVIEW" "$L_SCAN" "$L_GOAL" "$L_TESTERS" "$L_UBERTHINK" \
   "$R_REVIEW" "$R_SCAN" "$R_GOAL" "$R_TESTERS" "$R_UBERTHINK")"
 NODE_RC=$?
