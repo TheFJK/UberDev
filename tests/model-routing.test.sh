@@ -179,6 +179,18 @@ expected_route_groups = {
 }
 workspace_write_roles = {"ci-code-fixer", "ci-rebase-handler", "code-fixer", "conflict-resolver", "design-planner", "implementation-worker", "plan-writer", "spec-reviser", "spec-writer"}
 expected_floor = {"economy": "economy", "standard": "economy", "quality": "standard", "deep": "deep", "frontier": "deep"}
+# The buckets must PARTITION the inventory, not merely sample it (#656). The
+# loop below iterates expected_route_groups, so a role missing from every
+# bucket is not a failure -- its route / floor / sandbox / leaf checks simply
+# never run, and the suite stays green at a lower check count. That makes every
+# per-role assertion opt-in, which is the same vacuous green as no assertion.
+# `check` counts are not a backstop either: nothing pins the total.
+routed_roles = set().union(*expected_route_groups.values())
+check(sum(len(roles) for roles in expected_route_groups.values()) == len(routed_roles),
+      "a role appears in more than one route bucket")
+check(routed_roles == source_roles,
+      "route buckets do not partition the role inventory: "
+      f"unrouted={sorted(source_roles - routed_roles)!r} unknown={sorted(routed_roles - source_roles)!r}")
 for route, roles in expected_route_groups.items():
     for role in roles:
         row = policy["roles"][role]
