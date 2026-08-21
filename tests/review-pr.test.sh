@@ -5282,10 +5282,22 @@ assert_grep "$REVIEW_PR" 'post-fix-review-phase\.txt' \
   "R49.3 — the decision is PERSISTED, not left in a variable a fresh fence cannot see"
 assert_grep "$REVIEW_PR" 'post_fix_review_phase_unreadable' \
   "R49.4 — an unreadable record halts by name rather than defaulting the pass ON"
-# The two consuming fences must READ the record. `${POST_FIX_REVIEW_PHASE:-1}`
-# anywhere is the defect itself, so it is asserted absent.
-assert_no_grep "$REVIEW_PR" 'if \[ "\$\{POST_FIX_REVIEW_PHASE:-1\}" ' \
-  "R49.5 — no fence defaults the phase from an unbound variable"
+# The consuming fence must READ the record, so `${POST_FIX_REVIEW_PHASE:-1}` on
+# a LIVE line is the defect itself and is asserted absent — from the file that
+# actually holds the reader. The old row scanned only commands/review-pr.md and
+# keyed on an `if [ … ]` shape; #655 moved the read into lib/review-fences.sh
+# and wrote it as a `case`, so the row was matching a statement shape nobody
+# writes in a file that no longer holds the reader — green either way, and green
+# even if the library defaulted the phase ON.
+#
+# `^[^#]*` is what keeps the widened scan non-vacuous rather than over-broad:
+# BOTH files discuss the defaulted expansion in prose (review-pr.md's step-1
+# note, the fence's own header), so a bare token scan would red on the very
+# comments that explain why the shape is forbidden.
+assert_no_grep "$REVIEW_PR" '^[^#]*\$\{POST_FIX_REVIEW_PHASE:-1\}' \
+  "R49.5 — commands/review-pr.md defaults the phase from an unbound variable on no live line"
+assert_no_grep "$REVIEW_FENCES" '^[^#]*\$\{POST_FIX_REVIEW_PHASE:-1\}' \
+  "R49.5b — and neither does lib/review-fences.sh, which now holds the reader"
 assert_grep "$REVIEW_PR" '\(skipped: --no-post-fix-review\)' \
   "R49.6 — Step 7 renders the off-switch skip as its own row, so a suppressed pass is visible"
 assert_grep "$REVIEW_PR" '\(skipped: no applied fixer commit\)' \

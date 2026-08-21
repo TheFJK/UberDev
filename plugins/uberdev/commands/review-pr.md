@@ -7091,6 +7091,23 @@ change that wires this block into a predicate would silently inherit `absent == 
 and read every pre-#655 trail as "the fixer commits were reviewed and were clean".
 Stated normatively here so that change is forced to revisit this paragraph.
 
+**Present-and-blocked policy — the state the absence rule above does NOT cover.**
+A block that is PRESENT with `status: "blocked"` (and a `reason` of
+`child-unavailable`) is the one state that actually means *the fixer commits went
+unreviewed*, and it is the state the "visible in four places" argument above rests
+on. Three of those four places are read by a human; `trust-trail-evaluator` is the
+only durable machine reader of the trail, so it needs a rule here too, not just for
+the absent case. **It must surface a present `status: "blocked"` member as a named
+`unknown` — `postfix-unreviewed`, keyed by phase — and never fold it into "reviewed
+and clean", and never read its `findings_count: 0` / `by_severity` zeros as
+evidence.** `status: "skipped"` is NOT that state: `off-switch` is an operator
+decision and `no-applied-commit` means there were no fixer commits to review, so
+both are legitimately zero. The GREEN / YELLOW / RED predicate above is
+deliberately UNCHANGED by this paragraph — no term is added and no gate moves — so
+this binds what the evaluator must *report*, not what it must refuse. Wiring the
+block into a predicate is the change the absence rule above is written to catch,
+and it must revisit this paragraph as well.
+
 Assemble that exact object in `AUDIT_JSON_PAYLOAD`, then publish it through the
 fresh-shell receipt fence:
 

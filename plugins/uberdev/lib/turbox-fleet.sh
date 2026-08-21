@@ -274,6 +274,24 @@ def flush():
 PATH_SHAPE_RE = re.compile(r'^[A-Za-z0-9._][A-Za-z0-9._/-]*$')
 
 
+def path_traverses(entry):
+    # THE SHAPE GATE ALONE IS NOT CONFINEMENT. Its character class holds both the
+    # dot and the slash, so `../../lib/x.sh` and `a/./b.sh` match it while
+    # declaring something that is not repo-relative at all -- and nothing
+    # downstream on this lane refuses one: normpath preserves the segments, the
+    # wave-disjoint comparison without a --root argument compares entries exactly
+    # as declared, and the only confinement check is the opt-in root arm the
+    # shipped skill call site does not exercise. So a task could declare
+    # ownership resolving outside its own issue worktree. Refused here, at the
+    # one gate every entry already passes through.
+    #
+    # Only `.` and `..` are named. An EMPTY segment is left alone on purpose:
+    # a trailing slash is deliberately admitted above (a task may own a
+    # directory, and containment is how that collides), and splitting such an
+    # entry always ends in an empty segment.
+    return any(part in {".", ".."} for part in entry.split("/"))
+
+
 def split_paths(raw):
     # The template shows the value in square brackets; a plan that keeps
     # them is describing the same list, not a different one.
@@ -288,7 +306,7 @@ def split_paths(raw):
     # Refusing the whole declaration leaves the task `unowned`, which the caller
     # already routes to the sequential single-solver path: fail-safe, and
     # visible in the counter a plan author is told to read.
-    if any(not PATH_SHAPE_RE.match(p) for p in kept):
+    if any(not PATH_SHAPE_RE.match(p) or path_traverses(p) for p in kept):
         return []
     return kept
 

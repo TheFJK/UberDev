@@ -798,12 +798,23 @@ _review_fleet_write_dispatch_decision() {
 
 _review_fleet_read_dispatch_decision() {
   [ "$#" -eq 2 ] || return 2
-  local label="$1" target="$2" recorded
+  # `recorded` is seeded EMPTY, not left unset: the read below no longer returns
+  # on its own status, so nothing else guarantees it is bound before the `case`.
+  local label="$1" target="$2" recorded=""
   [ -r "$target" ] || {
     echo "error: review-fleet $label dispatch decision missing: $target" >&2
     return 2
   }
-  IFS= read -r recorded <"$target" || return 2
+  # NOT `|| return 2` -- the same rule review_fleet_read_fixer_range states
+  # below, and for the same reason: `read` reports failure for BOTH a zero-byte
+  # file and an unterminated final line, so returning on its status makes
+  # exactly those two corruption modes fail in silence -- rc 2 with nothing on
+  # stderr, which review_postfix_publish_sidecar then maps straight to 74. The
+  # operator is left with a bare exit code, no line naming the file, and an
+  # absent `phases.postfix` member the legacy-absence policy tells
+  # trust-trail-evaluator to read as `unknown`. Judge the CONTENT below instead,
+  # so every rejection names itself.
+  IFS= read -r recorded <"$target" || :
   case "$recorded" in
     0 | 1) ;;
     *)
@@ -882,8 +893,11 @@ review_fleet_read_postfix_dispatch() {
 # is that half, and is not the whole answer), CI runs bash 5, and a developer
 # sourcing the library by hand on macOS gets bash 3.2. Reproduce against
 # whichever of the three you are chasing, not against "the" shell — there is no
-# single one. Measured: a 40-character all-`A` string passes `*[!0-9a-f]*` there and
-# fails it under bash 5, from the same bytes. A gate that accepts a SHA it says
+# single one. Measured, and stated as the GATE OUTCOME rather than as a pattern
+# match, because "passes `*[!0-9a-f]*`" reads both ways and the two readings
+# invert this paragraph: the old form ACCEPTED a 40-character all-uppercase
+# string as a valid SHA under bash 3.2, and REJECTED the same bytes under bash 5.
+# A gate that accepts a SHA it says
 # it rejects is worse than no gate, because the carrier reader is what stands
 # between a corrupt range file and a post-fix pass that reviews the wrong
 # commits. Enumerating the sixteen members removes the collation from the

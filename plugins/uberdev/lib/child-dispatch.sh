@@ -1763,13 +1763,18 @@ try:
  # strictness is documented and must stay. Do not "restore consistency" by
  # re-narrowing this one -- that would re-open #670's discarded-opinion bug.
  #
- # Until the contract file states the info-string rule in its own words, THIS
- # comment is where the accepted set is written down, and the parser is
- # deliberately the more permissive of the two: every shape the prose describes
- # is accepted here, so the gap can only ever forgive a child, never surprise
- # one. Amending shared/finding-verifier-output-v1.md is a vendored-file change
- # -- it is in the prkit copy set, so it also needs a `pending` declaration in
- # tools/prkit/published.json or tests/prkit-publish.test.sh reds.
+ # THE CONTRACT OWNS THE RULE; this comment does not restate it.
+ # shared/finding-verifier-output-v1.md states the accepted opener set in its own
+ # words -- the two it admits, the six spellings it refuses, and this boundary by
+ # name -- and it is the document a child is actually given. Writing the set down
+ # a second time here would be one rule in two uncompared copies, which is the
+ # class #673 tracks; read it there.
+ #
+ # What is left is the READER-SIDE invariant, which is this parser's alone: it
+ # must never be NARROWER than that prose. Every shape the contract describes is
+ # accepted here, so a gap between the two can only ever forgive a child, never
+ # surprise one -- which is what makes a widening of the prose safe to land
+ # before this regex catches up, and a narrowing of this regex never safe.
  match=re.fullmatch(r'\s*```(?:yaml)?[ \t]*\r?\n(.*?)\r?\n```[ \t]*\s*',raw,re.S)
  if not match: raise ValueError()
  # Exactly two lines, in this order. `score` is a bare non-negative integer

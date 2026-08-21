@@ -349,11 +349,18 @@ review_fixer_child_bound() {
   # `newline="\n"` IS UNIFORMITY, NOT A BUG FIX, and the distinction is recorded
   # rather than blurred. Text mode is what translates '\n' to '\r\n' on Windows,
   # and #670 fixed exactly that in two publishers on this path whose bytes a
-  # reader DOES compare. This one has no reader at all: `$prefix` is only ever
-  # `$RESEARCH_DIR_ABS/phase1-fixer` or `.../phase2-fixer` (commands/review-pr.md
-  # steps 5 and 6), and nothing in the tree opens either `.launched`. The only
-  # `.launched` documents anything reads back are review_child_fanout's, and
-  # review_child_wait_all is the one that reads them.
+  # reader DOES compare. THIS record has no reader at all, and the claim is
+  # deliberately scoped to these two prefixes rather than to `.launched`
+  # tree-wide: `$prefix` is only ever `$RESEARCH_DIR_ABS/phase1-fixer` or
+  # `.../phase2-fixer` (commands/review-pr.md steps 5 and 6), and nothing in the
+  # tree opens either of those two files. Other `.launched` documents ARE read
+  # back -- the review- and simplify-stage roster ledgers review_fleet_bind_roster
+  # writes are consumed line by line in commands/review-pr.md, handed on as the
+  # aggregate's initial ledger, and folded byte for byte into a sha256 context
+  # digest in lib/review-aggregate.sh; review_child_fanout's are read by
+  # review_child_wait_all. A tree-wide generalisation here would be false, and
+  # naming the readers is the load-bearing half of the argument: text-mode
+  # translation only matters where a reader compares bytes.
   #
   # So this line was not corrupting anything, and saying otherwise would be the
   # overclaim this file's comments exist to avoid. It changes anyway because the
@@ -996,6 +1003,16 @@ PY
 # TWO DISTINCT FAILURE RCs, because the caller must tell them apart:
 #   rc 2  the child result is absent, unreadable or malformed. Advisory: the
 #         caller publishes a `blocked` sidecar and the run continues.
+#         IT ALSO COVERS THIS FUNCTION'S CALLER-USAGE ARMS, and that is written
+#         down rather than claimed away: a wrong argument count, a phase outside
+#         {phase1, phase2}, an iteration counter the artifact cannot be keyed on,
+#         and an unset $RESEARCH_DIR_ABS each return 2 as well. So a caller may
+#         NOT read rc 2 as "the child misbehaved" -- a controller wiring fault
+#         is filed in the sidecar and the audit trail under `child-unavailable`
+#         too, which is the same misattribution this diff objects to at the
+#         verifier boundary in lib/child-dispatch.sh. Telling them apart needs
+#         the usage arms to carry a code of their own; until they do, no reader
+#         may claim the distinction.
 #   rc 74 the aggregate did not reach disk. A finding that reached no sink is a
 #         swallowed error, so this one halts.
 #
@@ -1175,12 +1192,16 @@ body=''.join(
     '- '+json.dumps(row,sort_keys=True,separators=(',',':'),ensure_ascii=True).replace(CLOSE,'\\u003c/external-untrusted-input>')+'\n'
     for row in rows)
 payload=(OPEN+'\n'+body+CLOSE+'\n').encode('utf-8')
+# Identity of the empty file the caller handed us, captured so the failure arm
+# below can prove it is unlinking THAT file and not a replacement.
+handed=None
 try:
  entry=os.lstat(target); uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
  if (stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1
          or (uid is not None and entry.st_uid!=uid) or entry.st_size!=0
          or (os.name!='nt' and stat.S_IMODE(entry.st_mode)!=0o600)):
   raise OSError()
+ handed=(entry.st_dev,entry.st_ino)
  # O_BINARY IS LOAD-BEARING, NOT DEFENSIVE PADDING. On Windows os.open()
  # honours the CRT default of TEXT mode unless O_BINARY is passed, so every
  # '\n' in `payload` reached disk as '\r\n' and the envelope this fence
@@ -1209,6 +1230,24 @@ try:
  with open(target,'rb') as stream:
   if not stream.read(128).startswith(OPEN.encode('utf-8')): raise OSError()
 except OSError:
+ # LEAVE NO HALF-WRITTEN ENVELOPE, the same invariant the parse region above
+ # states -- and the residue this arm used to strand is the WORSE of the two.
+ # A short or interrupted os.write, a failed fsync, or a marker read-back that
+ # comes back wrong all leave a file whose first 128 bytes DO carry the opening
+ # marker, which is the exact byte range findings-to-issues Step 1 validates on.
+ # A truncated document therefore passes that source check and is parsed row by
+ # row, silently dropping the rows that never reached disk: a shorter finding
+ # set indistinguishable from a correct short one. Only the exact file the
+ # caller handed us is removed -- same device and inode, still a regular file,
+ # still single-linked -- so a symlink, a hard-linked path or a replacement that
+ # arrived under us is left strictly alone.
+ if handed is not None:
+  try:
+   leftover=os.lstat(target)
+   if (stat.S_ISREG(leftover.st_mode) and leftover.st_nlink==1
+           and (leftover.st_dev,leftover.st_ino)==handed):
+    os.unlink(target)
+  except OSError: pass
  raise SystemExit(74)
 print(json.dumps({'by_severity':counts,'findings_count':len(rows)},sort_keys=True,separators=(',',':')),end='')
 PY
@@ -1617,12 +1656,19 @@ review_validate_trust_anchor() {
 #       return "$POSTFIX_PREPARE_RC"
 #     }
 #
-# TWO GLOBALS CROSS BACK ON PURPOSE. `review_build_postfix_scope` binds
-# REVIEW_POSTFIX_DIFF_PATH and this helper binds REVIEW_FLEET_POSTFIX_CONTRACT_PATH;
-# the envelope the fence emits reads both. Neither is declared `local` below, for
-# that reason. This is not the #427 carrier class -- that one is about a scalar
-# dying at a fence marker, i.e. across a PROCESS. These two live and die inside one
-# shell, between a callee and the caller three lines later.
+# THREE GLOBALS CROSS BACK ON PURPOSE, and the emitting fence reads only two of
+# them. `review_build_postfix_scope` binds REVIEW_POSTFIX_DIFF_PATH and
+# REVIEW_POSTFIX_DIFF_SUMMARISED -- the two its own docblock declares -- and this
+# helper binds REVIEW_FLEET_POSTFIX_CONTRACT_PATH. None of the three is declared
+# `local` below, for that reason. The envelope the fence emits reads the diff path
+# and the contract path; the summarisation flag is consumed HERE instead, gated
+# against `true | false` and forwarded to $POSTFIX_SUMMARISED_PATH a few lines
+# down, because the fence that publishes the sidecar is a different process. That
+# is why the escaping set is three names and the set the fence reads is two, and
+# the two counts are stated separately rather than one standing in for the other.
+# This is not the #427 carrier class -- that one is about a scalar dying at a
+# fence marker, i.e. across a PROCESS. These three live and die inside one shell,
+# between a callee and the caller three lines later.
 #
 # Every other name these bodies touch IS local, so a helper that fails leaves the
 # fence's own bindings exactly as it found them.
