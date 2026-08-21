@@ -312,8 +312,14 @@ echo "== TX16: the design path is two rungs, and no spec artifact survives =="
 # and to a requirements document -- and the fourth is the negative control that
 # says the thing it replaced is actually gone.
 ck "the design rung dispatches design-planner"  "grep -q 'uberdev:design-planner' '$SKILL'"
+# Scoped to the Phase 3 section on purpose. The same token appears in Phase 4's
+# `plan-tasks --plan` line, which predates the collapse -- so a whole-file grep
+# is vacuous: it stays green on a skill whose design rung binds no `plan_path`
+# at all, and it passes unchanged against the pre-collapse skill. Only the
+# section-scoped form proves the RUNG is pointed at that path. The awk range
+# reads to EOF, so it is E1-safe, and the needle carries no `$` (ck() evals).
 ck "the design rung writes plan.md in the run dir" \
-   "grep -q '<runDirAbs>/issue-<N>/plan.md' '$SKILL'"
+   "[ \$(awk '/^## Phase 3 /,/^## Phase 4 /' '$SKILL' | grep -c '<runDirAbs>/issue-<N>/plan.md') -ge 1 ]"
 # Both reviewer rungs read the issue body as their requirements document on this
 # lane -- Phase 3's plan-reviewer and Phase 5's spec-compliance-reviewer. The
 # count is >= 2 because ONE of them stating it is the half-migration that would
