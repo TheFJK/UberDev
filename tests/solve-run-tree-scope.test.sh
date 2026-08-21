@@ -84,11 +84,21 @@
 #       blindness. Rows Z21 and Z22 prove the sh and md classifiers in BOTH
 #       directions on synthetic bytes.
 #   C12 KIND-RULE PROVENANCE. Each of the five lane entries carries its own
-#       agent_kind_rule, and four conjuncts hold it to the code: non-empty, it
-#       names its own lane id, it carries EVERY index token that lane normalizer
-#       collapses, and it carries the fixed K-of-N clause verbatim. Conjunct 3
+#       agent_kind_rule, and FIVE conjuncts hold it to the code: non-empty, it
+#       names its own lane id, it carries every literal in that lane
+#       indexTokens list, and it carries BOTH fixed clauses verbatim — the
+#       K-of-N one and the one saying this prose is not executed. Conjunct 3
 #       is the one with teeth — it compares manifest prose against TEST CODE, so
 #       a rule copy-pasted from a sibling lane with only the id swapped reds.
+#       indexTokens names, for each index that lane normalizer collapses, the
+#       literal the rule prose must carry to describe it — the grammar the
+#       normalizer matches (`-ci<n>`), the token it collapses to (`NNN`), or
+#       BOTH (uberthink_pipeline, scan_fleet). Which form is per lane and is
+#       whatever that prose commits to; adding a form tightens conjunct 3 and
+#       deleting one loosens it, so the list only ever grows. Conjunct 5 exists
+#       because the rule PROSE is hand-written and unexecuted — see residual 3,
+#       which C12 narrows but does not close, and which conjunct 5 puts in front
+#       of a manifest reader instead of leaving it in this header alone.
 #
 # The nested-workflow() namespace is derived rather than assumed: goal_pipeline
 # dispatches its per-cycle fleet through a nested workflow() call that the agent
@@ -100,10 +110,24 @@
 #
 #   1. dispatch_sites is not proven REACHED. A fixture that drives K of N sites
 #      certifies a K-kind list; the C4 floor proves K did not shrink and C1
-#      proves the manifest agrees with what ran, but NEITHER PROVES K == N. The
-#      named mechanism most likely to hold K below N is the harness falsy
-#      default budget.total, which is why each lane records whether its floor
-#      was budget-bounded.
+#      proves the manifest agrees with what ran, but NEITHER PROVES K == N.
+#      THREE mechanisms actually hold K below N, and the per-lane comments name
+#      each one where it happens: (a) an arm left UNDRIVEN because its roster
+#      comes from an envelope COUNT knob, so driving it would pin the floor to a
+#      number this fixture picked rather than to the lane bytes — see the
+#      reviewFleetRuns header; (b) an arm reachable only under one particular
+#      fixture argument or agentReturns shape, so its site is live in one run
+#      and dead in the others — see the uberthinkPipelineRuns header, whose six
+#      arms exist one per site the other five cannot reach; (c) a fanout handed
+#      to the lane own clamped defaults instead of a fixture knob — tpArgs omits
+#      rounds and personas so the script chooses, which grounds the floor in the
+#      lane bytes but leaves the fixture no way to widen it.
+#      The HARNESS BUDGET IS NOT ONE OF THEM, and reading it as one
+#      inverts it: budgetTotal defaults to null, every shipped lane gate is the
+#      DR-8 form `budget && budget.total && budget.remaining()`, and a null
+#      total short-circuits every one of them FALSE. The default therefore runs
+#      each loop to completion — it cannot truncate a lane, and no lane records
+#      a budget bound because none is ever applied.
 #   2. Normalizer tightness is human-curated. The rename differential proves the
 #      normalizer is not degenerate; it does not prove it collapses exactly the
 #      instance indices and nothing semantic.
@@ -111,6 +135,11 @@
 #      equivalence, and this change multiplies the pairs from ONE to SIX — five
 #      of them newly hand-written inside a versioned policy artifact. C12
 #      narrows that gap; it does not close it and must not be claimed closed.
+#      C12 conjunct 5 makes the residual VISIBLE where it lives: each of the
+#      five rules must carry, verbatim, a clause saying its own text is prose
+#      no test executes and pointing at the normalizer that is executed. That
+#      is disclosure, not proof — a manifest reader now sees the gap instead of
+#      having to find this header to learn of it.
 #   4. Corpus completeness is a FILESYSTEM property, not a dispatch property.
 #      Neither C10 nor C11 proves the repo has no other dispatch substrate
 #      outside skills/*/workflow.js and outside the launcher reach.
@@ -396,19 +425,21 @@ function agentReturns() {
     "solve:#12 (trivial)": solvedRec(12, 902)
   };
 }
-// One execution of one lane run. budgetTotal is threaded through rather than
-// hardcoded because hasOwnProperty is how the harness decides between an
-// explicit budget and its falsy default, and a loop-driven lane truncated by
-// that default would have its kind set measured short. A dry-run budget is a
-// hang detector, never a stopwatch, so a lane that needs one sets it high.
+// One execution of one lane run. NO BUDGET IS SET, and that is the setting a
+// kind-set derivation wants rather than an omission: the harness defaults
+// budgetTotal to null, every shipped lane gate is the DR-8 form
+// `budget && budget.total && budget.remaining()`, and a null total
+// short-circuits every one of them false — so the default lets each loop run to
+// completion. It cannot truncate a lane, which is why nothing here threads a
+// budget through and no lane records a budget bound. A budget belongs in this
+// fixture only as a hang detector for a lane that needs one, set high and
+// explained at the run that sets it; see residual 1 for what actually holds the
+// reached-site count below the static one.
 function runFixture(lane, source, run) {
   var meta = h.extractMeta(source).meta;
   var pre = h.preprocess(source);
   var record = h.makeRecord();
   var fixture = { args: run.args, agentReturns: run.agentReturns };
-  if (Object.prototype.hasOwnProperty.call(run, "budgetTotal")) {
-    fixture.budgetTotal = run.budgetTotal;
-  }
   var sb = h.makeSandbox(fixture, meta, record).sandbox;
   var pending = vm.runInNewContext(pre.wrapped, sb, { filename: lane.id + "-scope", timeout: 8000 });
   return Promise.resolve(pending).then(function () { return record; });
@@ -1266,7 +1297,15 @@ var LANES = [
     source: ANCHOR + "skills/uberthink-pipeline/workflow.js",
     root_source: ANCHOR + "skills/uberthink-pipeline/SKILL.md",
     rootKind: "md",
-    indexTokens: ["kN", "cN", "rN", "donor", "gap"],
+    // BOTH FORMS, deliberately. The five post-collapse outputs alone left this
+    // record the only one in the table naming no grammar at all, which read as
+    // a third convention rather than as a choice; the four grammar literals the
+    // normalizer actually matches are listed beside them so conjunct 3 holds
+    // this rule to the shape of the labels as well as to their collapsed names.
+    // Every literal here is one the rule prose must carry to describe its index,
+    // and the list only grows — see the indexTokens paragraph in the C12 header.
+    indexTokens: ["gen-<k>-<x>", "regen-<k>-<id>", "pad(c + 1)", "-r<n>",
+      "kN", "cN", "rN", "donor", "gap"],
     normalize: normUberthinkPipeline,
     kindFloor: 31,
     sites: countSites(laneSrc.uberthink_pipeline),
@@ -1279,7 +1318,7 @@ var LANES = [
 var SOLVE_LANE = LANES[0];
 // The five fleet lanes, in table order. Deriving them by slice rather than by
 // name keeps ONE ordering source; the FATAL beneath is what stops a lane from
-// disappearing quietly, because a vanished lane takes its four rows with it and
+// disappearing quietly, because a vanished lane takes its six rows with it and
 // the row-count lock at the bottom would then be the only thing left to notice.
 var FLEET_LANES = LANES.slice(1);
 if (FLEET_LANES.length !== 5) {
@@ -1473,15 +1512,38 @@ function rC11(lane, src) {
        + lane.root_source + " — a comment, a frontmatter field or a prose sentence does not count"];
 }
 
-// C12 — KIND-RULE PROVENANCE, four conjuncts. Conjunct 3 is the one that
+// C12 — KIND-RULE PROVENANCE, FIVE conjuncts. Conjunct 3 is the one that
 // survives contact with the realistic error: it compares manifest prose against
 // TEST CODE, because indexTokens sits beside the normalizer that consumes it. A
 // rule copy-pasted from a sibling lane with only the id token swapped describes
-// the wrong index grammar and fails here. Conjunct 4 puts the K-of-N residual in
-// the artifact a manifest reader actually consults, as a FIXED literal with no
-// numbers in it, so it adds no second copy of dispatch_sites to drift against.
-// C12 does NOT execute the prose; residual 3 records what stays open.
+// the wrong index grammar and fails here.
+//
+// CONJUNCTS 4 AND 5 ARE FIXED LITERALS MIRRORED VERBATIM INTO FIVE MANIFEST
+// STRINGS. Both carry two constraints that are invisible at the point of edit:
+//
+//   NO COUNTS. A quantity here would be a second copy of dispatch_sites, or of
+//   a kind total, for the manifest to drift against — the exact class this file
+//   exists to close. A rule NAME that happens to contain digits is not a count.
+//
+//   NO APOSTROPHE, and it is unusable from BOTH sides for two different
+//   reasons. Put one in THIS copy and it closes the enclosing single-quoted
+//   shell string at the SHELL level: the rest of the clause and everything
+//   after it stop being program text, the file dies with a shell syntax error
+//   rather than failing a row, and nothing points back at this line. Put one in
+//   the MANIFEST copy alone and the two copies simply stop matching, so C12
+//   reds with an omits-the-fixed-clause message that says nothing about
+//   apostrophes. The surrounding manifest prose uses them freely and may keep
+//   doing so; these two sentences may not. The manifest carries the same
+//   warning immediately before the clauses — keep the two in step.
+//
+// Conjunct 4 puts the K-of-N residual (residual 1) in the artifact a manifest
+// reader actually consults. Conjunct 5 does the same for residual 3, the one
+// residual whose subject is the rule text itself: C12 never executes that
+// prose, so each rule has to say so and point at the normalizer that IS
+// executed. Neither clause is proof — both are disclosure, and residual 3
+// records what stays open.
 var KOFN = "agent_kinds is the kind set the fixture reached, not proof that every dispatch_sites site ran";
+var PROSE = "This rule text is PROSE that no test executes: the grammar that actually runs is the lane normalizer in tests/solve-run-tree-scope.test.sh, and C12 compares this text against the index tokens listed beside that normalizer, never against a label";
 function rC12(t, lane) {
   var E = entryFor(t, lane.source);
   if (!E) return ["no scope.does_not_govern entry declares source " + lane.source];
@@ -1495,6 +1557,9 @@ function rC12(t, lane) {
     }
   });
   if (r.indexOf(KOFN) < 0) e.push(lane.id + ".agent_kind_rule omits the fixed K-of-N clause");
+  if (r.indexOf(PROSE) < 0) {
+    e.push(lane.id + ".agent_kind_rule omits the fixed clause disclosing that the rule text is not executed");
+  }
   return e;
 }
 
@@ -1792,15 +1857,17 @@ function copyTree() { return JSON.parse(JSON.stringify(tree)); }
   // because await inside a forEach callback does not suspend the loop, so the
   // rename re-executions would race instead of running in series.
   //
-  // THE LABELS ARE NON-CONTIGUOUS HERE ON PURPOSE, and they stay that way: the
-  // (d) root-naming row and the (f) entry-deletion row are emitted by a SECOND
-  // loop below, filling the gaps this one leaves rather than renumbering
-  // anything. Do not tidy these into a contiguous run — the byte-identity of
-  // rows Z0-Z17 and the exact row-count lock at the bottom of this file are
-  // what a renumbering silently breaks.
+  // THE LABELS THIS LOOP EMITS ARE NON-CONTIGUOUS ON PURPOSE, and they stay
+  // that way: the (d) root-naming row and the (f) entry-deletion row are
+  // emitted by a SECOND loop below, filling the gaps this one leaves rather
+  // than renumbering anything. Do not tidy them into a contiguous run. A row
+  // label is a NAME, not an index — the row-count lock at the bottom says so in
+  // as many words — so a renumbering silently repoints every reference to a
+  // label, in a review, an issue or a commit message, at a different assertion,
+  // and the lock cannot see it happen because the COUNT does not move.
   //
-  // rC2 and rC3 get NO ROW OF THEIR OWN here, which is why the per-lane row
-  // count is four and not six. Zero edges are sourced from any of these five
+  // rC2 and rC3 get NO ROW OF THEIR OWN, which is why the per-lane row count is
+  // six (a-f) and not eight. Zero edges are sourced from any of these five
   // lanes today, so an edge-covered set is empty and both rules are
   // structurally vacuous for them. They still run inside check(), so an edge
   // added later must land under the reserved prefix — but a row asserting a
@@ -1852,10 +1919,19 @@ function copyTree() { return JSON.parse(JSON.stringify(tree)); }
 
   // ------------------------------------------------------------------------
   // THE (d) AND (f) PER-LANE ROWS (#654), landing in the gaps the loop above
-  // left. A SECOND indexed loop rather than four more rows inside the first:
-  // the labels the first loop emits are already shipped and their order is what
-  // A2 byte-identity rests on, so this appends instead of interleaving. Indexed
-  // for the same reason as the first — no await inside a forEach callback.
+  // left. A SECOND indexed loop rather than two more rows inside the first, and
+  // the reason is the WAVE BOUNDARY, not byte-identity. Rows (a)(b)(c)(e)
+  // landed in one wave against a row-count lock of 38; C11, C12 and these two
+  // rows landed on top of it in the next, so appending kept the first wave
+  // exactly as it was verified instead of re-verifying every row it emits.
+  //
+  // BYTE-IDENTITY IS NOT THE REASON, and must not be written down as one: the
+  // byte-identity constraint covers Z0-Z17 only, and every label either loop
+  // emits (Z23-Z52) is new in this change, so nothing outside it pins their
+  // order. Folding the two loops is therefore legitimate for any change that is
+  // touching both halves anyway — it would move rows within the emitted
+  // sequence, which is a diff to read, not a lock to break. Indexed for the
+  // same reason as the first loop — no await inside a forEach callback.
   // ------------------------------------------------------------------------
   for (var gi = 0; gi < FLEET_LANES.length; gi++) {
     var laneD = FLEET_LANES[gi];
