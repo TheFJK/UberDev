@@ -24,6 +24,8 @@
 #   TX12 — the parallel-issue cap of 3 has ONE definition (anti-drift)
 #   TX13 — RFC 0020 exists, is numbered uniquely, and states the decision
 #   TX14 — the lib is invoked as an executable, never sourced (zsh trap)
+#   TX15 — the issue-body channel is locked end to end
+#   TX16 — the design path is two rungs, and no spec artifact survives (#656)
 set -u; set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -102,7 +104,8 @@ ck "skill never instructs a bare 'git add -A'" \
 
 echo "== TX6: dispatch-before-wait is stated where it matters =="
 ck "invariant names ONE message"        "grep -q 'in \*\*ONE message\*\*' '$SKILL'"
-ck "research phase says ALL x ALL"      "grep -q 'ALL issues × ALL lenses in ONE message' '$SKILL'"
+ck "research phase batches every gated issue" \
+   "grep -q 'ALL risk-gated issues in ONE message' '$SKILL'"
 ck "impl phase dispatches a whole wave" "grep -q 'Every task of wave \*k\*, for every issue, in ONE message' '$SKILL'"
 ck "delivery dispatches all issues"     "grep -q 'all issues in one message' '$SKILL'"
 
@@ -194,9 +197,37 @@ echo "== TX11b: the skill still names a full agent roster =="
 # THIS skill names. L10 answers "does every name resolve"; it cannot notice a
 # phase quietly losing its agent, because a shorter roster still resolves
 # perfectly. Derived from the skill, so a new agent needs no edit here.
+#
+# RETARGETED by #656, which collapsed the design path. The roster went from 12
+# names to 6 when the three always-on research lenses and the three spec rungs
+# left this lane, so the floor moved 8 -> 6 with it. A lowered floor on its own
+# is a weaker guard, and lowering one in the same commit that changes what it
+# guards is how a register quietly stops registering. So the floor is now paired
+# with membership rows in BOTH directions: six names that must be there, seven
+# that must not. Together they pin the roster exactly, where the count alone
+# could not tell a lost agent from a swapped one.
 named_agents="$(grep -oE '`uberdev:[a-z0-9-]+`' "$SKILL" | tr -d '`' | sed 's/^uberdev://' | sort -u)"
-ck "the skill names at least 8 agent types (found: $(printf '%s' "$named_agents" | grep -c .))" \
-   "[ \$(printf '%s' \"\$named_agents\" | grep -c .) -ge 8 ]"
+ck "the skill names at least 6 agent types (found: $(printf '%s' "$named_agents" | grep -c .))" \
+   "[ \$(printf '%s' \"\$named_agents\" | grep -c .) -ge 6 ]"
+# Membership, positive: the post-collapse roster, one row per name.
+#
+# A HERESTRING, never `printf ... | grep -q`. This file sets pipefail (:27), and
+# piping into a reader that can exit before its writer's last write is the EPIPE
+# class tests/epipe-guard.test.sh E1 reds on BOTH CI jobs. TX11b's own
+# `printf ... | grep -c .` above is safe because `grep -c` reads to EOF; `-q`
+# beside it would not be, and it is the obvious thing to copy.
+for agent in code-reviewer design-planner implementation-worker \
+             plan-reviewer research-security spec-compliance-reviewer; do
+  ck "the roster names '$agent'"        "grep -qxF '$agent' <<<\"\$named_agents\""
+done
+# Membership, negative: the seven #656 took off THIS lane. Each remains a live,
+# shipped card for /solve, /turbo and the orchestrator -- only their absence
+# from this controller is asserted, never their absence from the repo.
+for agent in plan-writer research-codebase research-constraints \
+             research-test-coverage spec-reviewer spec-reviser spec-writer; do
+  ck "the lane no longer dispatches '$agent'" \
+     "! grep -qxF '$agent' <<<\"\$named_agents\""
+done
 
 echo "== TX12: the parallel-issue cap of 3 has ONE definition =="
 ck "lib defines TURBOX_ISSUE_CAP=3"     "grep -q '^TURBOX_ISSUE_CAP=3' '$LIB'"
@@ -250,9 +281,9 @@ ck "no site reads the body from context_file"   "[ \$(grep -c 'issue body from i
 ck "controller is told not to re-fetch it"      "[ \$(grep -c 're-fetch the body' '$SKILL') -ge 1 ]"
 ck "controller is told not to open it itself"   "[ \$(grep -c 'never open the file' '$SKILL') -ge 1 ]"
 ck "an absent issue_body_file is audited"       "grep -q 'issue_body_missing' '$SKILL'"
-ck "stale-card warning names spec-reviewer"     "grep -q 'agents/spec-reviewer.md' '$SKILL'"
-ck "stale-card warning names spec-writer"       "grep -q 'agents/spec-writer.md' '$SKILL'"
-ck "research phase names the inputs it passes"  "grep -q 'Every lens gets the same three inputs' '$SKILL'"
+ck "not-dispatched-here note names spec-reviewer" "grep -q 'agents/spec-reviewer.md' '$SKILL'"
+ck "not-dispatched-here note names spec-writer"   "grep -q 'agents/spec-writer.md' '$SKILL'"
+ck "research phase names the inputs it passes"  "grep -q 'The security lens gets the same three inputs' '$SKILL'"
 # #623 renamed the six research-* cards onto the wire keys the orchestrator was
 # already sending. This controller is the SECOND dispatcher of those same cards
 # and nothing else in the suite compares it against them, so the rename could --
@@ -262,12 +293,41 @@ ck "research phase names the inputs it passes"  "grep -q 'Every lens gets the sa
 # (F2h); these rows are the turbox-side half, in the file that owns this prose.
 ck "phase 2 passes the summary_path wire key"   "grep -q 'summary_path' '$SKILL'"
 ck "phase 2 never passes a summary DIRECTORY"   "[ \$(grep -c 'summary_dir' '$SKILL') -eq 0 ]"
-ck "each issue x lens gets its own artifact"    "grep -q 'research/<lens>.md' '$SKILL'"
-# The stale-card warning is operative instruction, not commentary: a controller
-# told the research cards are wrong will override cards that are now right.
-ck "stale-card warning is scoped to two cards"  "grep -q 'Both cards are stale' '$SKILL'"
+ck "the one surviving lens names its artifact"  "grep -q 'research/security.md' '$SKILL'"
+# The spec-card note is operative instruction, not commentary. It used to say
+# both cards were STALE; after #656 they are simply not dispatched here, and
+# they stay correct for the lanes that do dispatch them. A controller told a
+# live card is wrong will override a card that is now right, so the note has to
+# say not-here rather than not-valid -- and this row is what holds it to that.
+ck "the two spec cards are marked not-dispatched-here" \
+   "grep -q 'Neither card is dispatched on this lane' '$SKILL'"
 ck "research cards are NOT called stale"        "[ \$(grep -c 'cards declare' '$SKILL') -eq 0 ]"
 ck "no deferral pointer to the closed #623"     "[ \$(grep -c '#623' '$SKILL') -eq 0 ]"
+
+echo "== TX16: the design path is two rungs, and no spec artifact survives =="
+# #656 collapsed Phase 2's fan-out and Phase 3's five rungs into
+# research-security -> design-planner -> plan-reviewer. Four rows, because the
+# collapse has to be self-proving: TX11b's roster rows say design-planner is
+# NAMED, the first three here say it is WIRED -- to a rung, to an output path,
+# and to a requirements document -- and the fourth is the negative control that
+# says the thing it replaced is actually gone.
+ck "the design rung dispatches design-planner"  "grep -q 'uberdev:design-planner' '$SKILL'"
+ck "the design rung writes plan.md in the run dir" \
+   "grep -q '<runDirAbs>/issue-<N>/plan.md' '$SKILL'"
+# Both reviewer rungs read the issue body as their requirements document on this
+# lane -- Phase 3's plan-reviewer and Phase 5's spec-compliance-reviewer. The
+# count is >= 2 because ONE of them stating it is the half-migration that would
+# leave the other reviewer measuring a plan against a document that does not
+# exist. The `.` in the pattern spans the backticks and the apostrophe: needles
+# here carry no `$`, because ck() evals them (see the TX15 preamble).
+ck "spec_path is bound to the issue body at BOTH reviewer rungs" \
+   "[ \$(grep -cE 'spec_path. is that issue.s .issue_body_file. path' '$SKILL') -ge 2 ]"
+# The negative control. Without it the collapse is asserted, not proven: every
+# row above would still pass on a skill that ALSO kept the spec rungs. This is
+# the row that reds until the last mention in Phase 3, Phase 4b' and Phase 5 is
+# gone, which is why it cannot land before them.
+ck "no spec artifact is written or read on this lane" \
+   "[ \$(grep -c 'spec.md' '$SKILL') -eq 0 ]"
 
 echo
 echo "== Summary =="
