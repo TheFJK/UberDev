@@ -1075,7 +1075,9 @@
         "pr_number": "integer"
       },
       "optional_inputs": {
-        "verification_path": "optional_path"
+        "verification_path": "optional_path",
+        "postfix_phase1_path": "optional_path",
+        "postfix_phase2_path": "optional_path"
       }
     },
     "review_pr.ci.classify": {
