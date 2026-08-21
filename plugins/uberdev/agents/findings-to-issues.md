@@ -560,8 +560,20 @@ Explicit forbidden patterns:
             PR_AUTHOR_RESOLVED=1
           fi
           if [ -n "$PR_AUTHOR" ]; then
+            # The `@` belongs in the PROSE and nowhere else. `mention_line` is
+            # addressed to a person and renders as a GitHub notification, so it
+            # keeps the `@`. The FLAG does not: `gh issue create --assignee`
+            # takes a bare login ("Assign people by their login"), and the only
+            # `@`-prefixed values it understands are the two sentinels `@me`
+            # and `@copilot`. `@<login>` matches neither, so gh resolves it as
+            # a literal username, fails with `could not assign user:
+            # '@<login>' not found`, and exits 1 — which aborts the WHOLE
+            # `gh issue create` call, so the issue is not filed at all. This is
+            # not a cosmetic mismatch: it is a total write failure on every
+            # BLOCKER/CRITICAL row, and it fails identically for every author,
+            # so it cannot be caught by luck on a later run.
             mention_line="@${PR_AUTHOR} — review-pr Phase 2.5 flagged a ${row_tier,,} finding on PR #${pr_number}."
-            assignee_args=(--assignee "@${PR_AUTHOR}")
+            assignee_args=(--assignee "${PR_AUTHOR}")
           else
             # Author lookup failed (auth, network, or non-PR context). Fall back to
             # silent file — never invent an @mention.
@@ -586,7 +598,7 @@ Explicit forbidden patterns:
       esac
       ```
 
-      The `assignee_args` array is passed to `gh issue create` as `"${assignee_args[@]}"` (empty array = no `--assignee` flag — `gh` does not error on omitted flags). Per-row tier carries through; never assume a run is single-tier.
+      The `assignee_args` array is passed to `gh issue create` as `"${assignee_args[@]}"` (empty array = no `--assignee` flag — `gh` does not error on omitted flags). Its value is a **bare login, never `@login`** — see the comment above the binding; an `@`-prefixed login makes `gh` exit 1 and files no issue at all. Per-row tier carries through; never assume a run is single-tier.
 
    d. **State branching:** every `gh issue create` / `gh issue comment` invocation MUST capture combined stderr+stdout into `CREATE_OUTPUT` and the exit code into `rc`. Step 8f's classifier reads both as preconditions — without this capture the truncation + transient/permanent classification in 8f silently classifies every failure as permanent. Shape: `CREATE_OUTPUT=$(gh issue create ... 2>&1); rc=$?` (or the analogous form for `gh issue comment`).
       - `state == "open"`: build comment body (see Comment body shape below); pipe through `uberdev_run_secret_scan_stdin` — on non-zero exit append to `blocked_by_dedupe[]` with `reason: "secret-scan-hit"` and continue; otherwise `CREATE_OUTPUT=$(gh issue comment "$number" --body-file - 2>&1); rc=$?` from the sanitised tempfile. Append `{url, file, fingerprint}` to `commented_urls[]`.
