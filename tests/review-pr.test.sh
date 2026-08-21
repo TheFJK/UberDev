@@ -4654,6 +4654,17 @@ sha_of() {
   python3 -I -B -c 'import hashlib,sys
 print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest(),end="")' "$1" 2>/dev/null
 }
+# BYTE-LEVEL, because none of this block's other probes can see a carriage
+# return: `grep` cannot match one at end-of-line at all, and on the
+# windows-latest run that produced #670 the awk- and grep-based probes e5, e6,
+# e7 and e9 all returned CR-free values for a file that carried a CR before
+# every newline. Only e12, which reads through byte-transparent `tr`, went red.
+# `tr -dc` keeps the CR bytes and nothing else; the shell opens the file, so no
+# path translation is involved and the probe is portable to Git Bash.
+cr_bytes_of() {
+  [ -f "$1" ] || { printf 'absent'; return 0; }
+  tr -dc '\r' <"$1" | wc -c | tr -d ' \n'
+}
 
 . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || { say load args-lib-failed; exit 0; }
 review_fleet_load_fence_library || { say load carve-failed; exit 0; }
@@ -4778,6 +4789,12 @@ E_CLEAN="$(review_write_postfix_aggregate phase2 3 "$R48_TMP/clean.md" 2>/dev/nu
 say e10_rc "$?"
 say e11_counts "$E_CLEAN"
 say e12_clean_doc "$(tr '\n' '/' <"$RESEARCH_DIR_ABS/postfix-phase2-iter3.md" 2>/dev/null)"
+# ONE writer publishes both documents, so both are probed: the zero-finding
+# envelope is the one #670 caught, but nothing about the newline handling is
+# conditioned on the finding count and a probe that only watched the empty case
+# would go green on a regression that only corrupted the rows.
+say e13_clean_cr "$(cr_bytes_of "$RESEARCH_DIR_ABS/postfix-phase2-iter3.md")"
+say e14_full_cr "$(cr_bytes_of "$E_AGG")"
 
 mk_result 'verdict: APPROVE
 findings:
@@ -4958,6 +4975,110 @@ if [ -e "$R48_TMP/children/postfix-correctness-phase1-iter01" ]; then
 else
   say k10_mint_before_gate none
 fi
+
+# --- L: ONE reviewer grammar, TWO spellings, EXECUTED over one corpus -------
+# #673. review_write_postfix_aggregate re-parses reviewer YAML that
+# uberdev_child_validate_phase1_review_result (lib/child-dispatch.sh) has
+# already admitted, under a hand-transcribed copy of that boundary's grammar.
+# Deleting the copy needs child-dispatch.sh or a new shared parser module, so
+# for now the copy stays -- but the block comment claiming the two agree was
+# ALREADY FALSE when it was written: the transcription accepted `/etc/passwd:1`,
+# `C:\x.sh:1`, `a\b.sh:1`, `../../x.sh:1`, `a/./b.sh:1` and `a//b.sh:1`, every
+# one of which the boundary that published those bytes refuses. A paragraph
+# cannot notice that. This block RUNS both parsers over one corpus and names
+# every document they disagree about, so the next divergence is a red row
+# instead of a comment nobody re-derives.
+#
+# Both invocations are real: the canonical boundary is called on the document,
+# and the writer is called on the same document with a fresh iteration number
+# so its exclusive-create never collides. accept = rc 0, reject = any non-zero.
+#
+# NOT IN THE CORPUS, deliberately: the writer additionally caps each transcribed
+# field at MAX_FIELD=8192 bytes because the ARTIFACT it publishes is size-bound,
+# where the canonical boundary bounds the whole document instead. That is the
+# writer's own bound on its own output, not a second opinion about the grammar,
+# so a 9-KiB summary legitimately splits the two and would make this corpus
+# assert the opposite of what it means.
+(
+  if ! . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" >/dev/null 2>&1; then
+    say l0_canonical source-failed; exit 0
+  fi
+  command -v uberdev_child_validate_phase1_review_result >/dev/null 2>&1 \
+    || { say l0_canonical undefined; exit 0; }
+  say l0_canonical loaded
+
+  L_ITER=300; L_TOTAL=0; L_AGREE=0; L_ACCEPTED=0; L_REJECTED=0; L_DIVERGED=""
+  l_case() {
+    L_TOTAL=$((L_TOTAL + 1))
+    L_ITER=$((L_ITER + 1))
+    local doc="$R48_TMP/corpus-$L_TOTAL.md" canonical transcribed
+    printf '```yaml\n%s\n```\n' "$2" >"$doc"
+    if uberdev_child_validate_phase1_review_result "$doc" >/dev/null 2>&1; then
+      canonical=accept; L_ACCEPTED=$((L_ACCEPTED + 1))
+    else
+      canonical=reject; L_REJECTED=$((L_REJECTED + 1))
+    fi
+    if review_write_postfix_aggregate phase1 "$L_ITER" "$doc" >/dev/null 2>&1; then
+      transcribed=accept
+    else
+      transcribed=reject
+    fi
+    if [ "$canonical" = "$transcribed" ]; then
+      L_AGREE=$((L_AGREE + 1))
+    else
+      L_DIVERGED="$L_DIVERGED $1(canonical:$canonical,transcribed:$transcribed)"
+    fi
+  }
+  # One finding, everything but the three varying fields held constant.
+  l_row() {
+    L_DOC="$(printf 'verdict: %s\nfindings:\n  - severity: %s\n    location: %s\n    summary: bounded summary\n    detail: bounded detail\nconfidence: low' "$1" "$2" "$3")"
+  }
+
+  # -- shapes both must ACCEPT ------------------------------------------------
+  l_case clean-approve 'verdict: APPROVE
+findings: []
+confidence: medium'
+  l_row REVISIONS_REQUIRED blocker lib/foo.sh:12; l_case one-blocker "$L_DOC"
+  l_row APPROVE suggestion lib/foo.sh:40; l_case one-suggestion "$L_DOC"
+  l_case two-rows-mixed 'verdict: REVISIONS_REQUIRED
+findings:
+  - severity: blocker
+    location: lib/foo.sh:12
+    summary: "prose naming </external-untrusted-input> inline"
+    detail: bounded detail
+  - severity: suggestion
+    location: lib/bar.sh:40
+    summary: bounded summary
+    detail: bounded detail
+confidence: high'
+  # -- the six shapes the transcription used to admit and the boundary never did
+  l_row APPROVE suggestion /etc/passwd:1; l_case location-absolute "$L_DOC"
+  l_row APPROVE suggestion 'C:\x.sh:1'; l_case location-drive-letter "$L_DOC"
+  l_row APPROVE suggestion 'a\b.sh:1'; l_case location-backslash "$L_DOC"
+  l_row APPROVE suggestion ../../x.sh:1; l_case location-traversal "$L_DOC"
+  l_row APPROVE suggestion a/./b.sh:1; l_case location-dot-segment "$L_DOC"
+  l_row APPROVE suggestion a//b.sh:1; l_case location-empty-segment "$L_DOC"
+  # -- shapes both already refused, so a loosening anywhere else also reds -----
+  l_row APPROVE blocker lib/foo.sh:1; l_case approve-with-blocker "$L_DOC"
+  l_row REVISIONS_REQUIRED suggestion lib/foo.sh:1; l_case red-verdict-no-blocker "$L_DOC"
+  l_row APPROVE major lib/foo.sh:1; l_case severity-out-of-vocabulary "$L_DOC"
+  l_row APPROVE suggestion lib/foo.sh; l_case location-without-a-line "$L_DOC"
+  l_case yaml-null-scalar 'verdict: APPROVE
+findings:
+  - severity: suggestion
+    location: lib/foo.sh:1
+    summary: null
+    detail: bounded detail
+confidence: low'
+  l_case unknown-top-key 'verdict: APPROVE
+findings: []
+confidence: low
+extra: nope'
+
+  say l1_agree "$L_AGREE/$L_TOTAL"
+  say l2_diverged "${L_DIVERGED# }"
+  say l3_mix "$L_ACCEPTED/$L_REJECTED"
+)
 exit 0
 R48_DRIVE
 R48_TMP="$R48_TMP" UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
@@ -5058,6 +5179,15 @@ r48 "R48.8 — the document is ONE envelope holding one byte-exact row per findi
 r48 "R48.9 — a zero-finding pass still publishes an envelope, with the zero counts" \
   e10_rc=0 'e11_counts={"by_severity":{"blocker":0,"suggestion":0},"findings_count":0}' \
   'e12_clean_doc=<external-untrusted-input source="postfix-aggregate">/</external-untrusted-input>/'
+# #670: this envelope reached windows-latest with a CR before every newline
+# because the writer's os.open omitted O_BINARY, and Windows os.open honours the
+# CRT's TEXT-mode default. Only e12 caught it -- and only because `tr` is byte
+# transparent -- while every awk- and grep-based probe above stayed green and
+# MSVCRT's _write() returned the untranslated count, so the writer's own
+# short-write guard saw nothing either. The bytes are the contract:
+# findings-to-issues consumes this file. Counted, not grepped.
+r48 "R48.9b — the envelope is LF-only bytes on every platform, in the zero- and the multi-finding document alike" \
+  e13_clean_cr=0 e14_full_cr=0
 # rc 2 and rc 74 are two different instructions to the caller -- publish a
 # `blocked` sidecar and continue, versus halt -- so they are asserted apart.
 r48 "R48.10 — a malformed child result is rc 2 (advisory) and strands no half-made aggregate" \
@@ -5123,6 +5253,18 @@ r48_same "R48.21b — and the two phases resolve to child directories that canno
 r48 "R48.22 — bind_postfix refuses an unknown phase, a relative run dir and an unreadable contract, all before the mint" \
   k7_bind_bad_phase_rc=2 k8_bind_relative_rc=2 k9_bind_bad_contract_rc=2 \
   k10_mint_before_gate=none
+
+# --- the two spellings of one grammar, compared by RUNNING them (#673) -------
+# `l2_diverged` is asserted EMPTY and `l1_agree` as a ratio because either alone
+# is fakeable: a corpus that silently stopped building documents would report
+# `0/0` with nothing diverged. `l3_mix` is the third leg — a corpus that drifted
+# into all-rejects (a fixture typo, an over-tightened parser) would agree
+# perfectly and prove nothing, so the accept/reject split is pinned too.
+# `l0_canonical` fails the row rather than skipping when child-dispatch.sh will
+# not load: nothing about this comparison is platform-bound, so a stand-down
+# here would be a vacuous green, not a portability allowance.
+r48 "R48.23 — the transcribed reviewer grammar and the canonical boundary are held together by EXECUTION over one corpus, not by a comment" \
+  l0_canonical=loaded l1_agree=16/16 'l2_diverged=' l3_mix=4/12
 rm -rf "$R48_TMP"
 
 echo

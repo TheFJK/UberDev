@@ -1036,6 +1036,17 @@ OPEN='<external-untrusted-input source="postfix-aggregate">'
 # published; re-parsing here is what turns those bytes into rows, and parsing
 # them under any looser grammar than the one that admitted them would let a
 # shape the validator refused reach the aggregate.
+#
+# THE TRANSCRIPTION IS A KNOWN DEFECT, NOT A DESIGN (#673), AND IT HAD ALREADY
+# DRIFTED when the paragraph above was written: that paragraph asserted the two
+# grammars agree while the location rule below admitted SIX shapes the canonical
+# boundary refuses. Deleting the copy needs the validator to emit the rows it
+# already builds, or one importable parser module both call; neither is
+# reachable from this file alone. Until then the copy is held to the canonical
+# language by EXECUTION, not by prose: tests/review-pr.test.sh R48.23 runs
+# uberdev_child_validate_phase1_review_result and this writer over one corpus
+# and names every document their verdicts differ on. A change to either grammar
+# that is not mirrored in the other reds that row.
 def scalar(raw):
  if not raw or raw.strip()!=raw or any(ord(char)<32 or ord(char)==127 for char in raw): raise ValueError()
  def checked(value):
@@ -1095,7 +1106,20 @@ def parse_reviewer(content):
  if findings_mode=='rows' and not findings: raise ValueError()
  for finding in findings:
   if set(finding)!={'severity','location','summary','detail'}: raise ValueError()
-  if re.fullmatch(r'.+:[1-9][0-9]*',finding['location']) is None: raise ValueError()
+  location=finding['location']
+  if re.fullmatch(r'.+:[1-9][0-9]*',location) is None: raise ValueError()
+  # The location half of the canonical rule, which this copy used to omit --
+  # the ONE place the two spellings had already drifted apart (#673). Without
+  # it this parser admitted `/etc/passwd:1`, `C:\x.sh:1`, `a\b.sh:1`,
+  # `../../x.sh:1`, `a/./b.sh:1` and `a//b.sh:1`, every one of which the
+  # boundary that published these bytes refuses -- so on those documents the
+  # LOOSER half was the one deciding what reached the aggregate.
+  # tests/review-pr.test.sh R48.23 EXECUTES both parsers over one corpus that
+  # carries all six, rather than asserting in prose that they agree.
+  file_name=location.rsplit(':',1)[0]
+  if (file_name.startswith('/') or re.match(r'^[A-Za-z]:',file_name) or '\\' in file_name
+      or any(ord(char)<32 or ord(char)==127 for char in file_name)
+      or any(part in {'','.','..'} for part in file_name.split('/'))): raise ValueError()
  blockers=[finding for finding in findings if finding['severity']=='blocker']
  if (verdict=='APPROVE')==bool(blockers): raise ValueError()
  return findings
@@ -1141,7 +1165,22 @@ try:
          or (uid is not None and entry.st_uid!=uid) or entry.st_size!=0
          or (os.name!='nt' and stat.S_IMODE(entry.st_mode)!=0o600)):
   raise OSError()
- descriptor=os.open(target,os.O_WRONLY|getattr(os,'O_NOFOLLOW',0))
+ # O_BINARY IS LOAD-BEARING, NOT DEFENSIVE PADDING. On Windows os.open()
+ # honours the CRT default of TEXT mode unless O_BINARY is passed, so every
+ # '\n' in `payload` reached disk as '\r\n' and the envelope this fence
+ # publishes was a different document on that platform than on the other two
+ # (#670: R48.9 read `...>\r\n</external-untrusted-input>\r\n`). The short-write
+ # guard below cannot see it either -- MSVCRT _write() returns the UNtranslated
+ # count, so `os.write(...)!=len(payload)` is False on exactly the runs that
+ # corrupted the bytes. Neither can grep, which is why the row that caught it
+ # reads the file through `tr` and the row added beside it counts CR bytes.
+ # The other publishers on this path already get it: the canonical validator's
+ # publication open (lib/child-dispatch.sh
+ # uberdev_child_validate_phase1_review_result) passes it explicitly, and the
+ # two replace_private() writers above inherit it from tempfile.mkstemp, which
+ # ORs O_BINARY into its own flags. The ci-refused-synthetic writer inlined in
+ # commands/review-pr.md is the remaining twin of this bug and still omits it.
+ descriptor=os.open(target,os.O_WRONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_BINARY',0))
  try:
   opened=os.fstat(descriptor); current=os.lstat(target)
   if (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino): raise OSError()
