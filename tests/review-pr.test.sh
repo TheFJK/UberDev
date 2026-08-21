@@ -4909,6 +4909,173 @@ say h12_bad_iteration_rc "$(
 )"
 say h13_scratch "$(ls -a "$RESEARCH_DIR_ABS" 2>/dev/null | grep -c '^\.review-postfix-scope\.')"
 
+# --- N: the SUMMARISED half of review_build_postfix_scope (#670) ------------
+# H drives this fence over a two-line diff, where every cap is satisfied and the
+# flag is false. That left the whole degraded half unrun: the per-file summary
+# builder, the accounting it reports, and -- the branch #670 fixed -- the
+# wrapped-cap fallback, which substitutes a summary WITHOUT the read loop ever
+# setting its own flag. Before the fix that fallback published
+# `diff_summarised: false` over a per-file summary, so a GREEN run asserted the
+# post-fix reviewer had read the fixer's diff when what reached it was a summary
+# of it. Reverting the fix left every R48 row above green, which is why these
+# exist.
+#
+# Each probe runs at its OWN $REVIEW_ITERATION so the three artifacts are
+# separately readable and none overwrites H's; the value is restored to 3
+# afterwards for the sections below.
+#
+# The fixtures land on the SAME $REPO H built, one commit at a time, so the
+# ranges below are disjoint and each drives exactly one branch. `acc-edit.txt`
+# is seeded HERE, before every range, so the accounting probe can modify a file
+# that already existed rather than only adding new ones.
+python3 -I -B -c 'import sys
+open(sys.argv[1],"w",encoding="utf-8",newline="\n").writelines("old-%d\n" % index for index in range(5))' \
+  "$REPO/acc-edit.txt"
+git -C "$REPO" add -- acc-edit.txt
+git -C "$REPO" commit -qm 'test: seed a file for the summary accounting probe'
+
+# N1 -- the OVER-LINE branch. 2101 lines is over the fence's 2000-line cap, so
+# the read loop kills git and sets its own flag, and what reaches disk is the
+# per-file summary rather than the diff.
+N_LINE_BEFORE="$(git -C "$REPO" rev-parse HEAD)"
+python3 -I -B -c 'import sys
+open(sys.argv[1],"w",encoding="utf-8",newline="\n").writelines("line %d\n" % index for index in range(2101))' \
+  "$REPO/over-line.txt"
+git -C "$REPO" add -- over-line.txt
+git -C "$REPO" commit -qm 'test: postfix scope over-line fixture'
+N_LINE_AFTER="$(git -C "$REPO" rev-parse HEAD)"
+REVIEW_ITERATION=4
+export REVIEW_ITERATION
+REVIEW_POSTFIX_DIFF_PATH=''
+REVIEW_POSTFIX_DIFF_SUMMARISED=''
+review_build_postfix_scope phase1 "$N_LINE_BEFORE..$N_LINE_AFTER" 2>"$R48_TMP/n-line.err"
+say n1_rc "$?"
+say n2_summarised "$REVIEW_POSTFIX_DIFF_SUMMARISED"
+say n3_path "$REVIEW_POSTFIX_DIFF_PATH"
+say n_want_line_path "$RESEARCH_DIR_ABS/postfix-diff-phase1-iter4.md"
+say n4_open "$(awk 'NR==1' "$REVIEW_POSTFIX_DIFF_PATH" 2>/dev/null)"
+if grep -Fq '[diff summarized:' "$REVIEW_POSTFIX_DIFF_PATH" 2>/dev/null; then
+  say n5_marker yes
+else
+  say n5_marker no
+fi
+if grep -Fq 'over-line.txt — 2101 additions, 0 deletions' "$REVIEW_POSTFIX_DIFF_PATH" 2>/dev/null; then
+  say n6_row yes
+else
+  say n6_row no
+fi
+# The flag and the marker alone would still pass over an artifact that ALSO
+# carried the raw diff. The bytes the reviewer would have read must be gone.
+if grep -q '^+line 0$' "$REVIEW_POSTFIX_DIFF_PATH" 2>/dev/null; then
+  say n7_raw_diff present
+else
+  say n7_raw_diff absent
+fi
+
+# N2 -- the WRAPPED-CAP fallback, the branch whose flag was wrong. 128 lines of
+# 32 KiB each is 4 MiB: comfortably inside BOTH raw caps, so the read loop's own
+# flag stays false -- but every byte is `&`, which escapes to `&amp;`, so the
+# enveloped form is ~20 MiB and overflows the 16-MiB wrapped cap. The summary
+# can therefore only have been selected by the wrapper, and the flag can only be
+# true if it followed the bytes written rather than the read loop.
+N_AMP_BEFORE="$(git -C "$REPO" rev-parse HEAD)"
+python3 -I -B -c 'import sys
+open(sys.argv[1],"w",encoding="utf-8",newline="\n").write(("&"*32768+"\n")*128)' \
+  "$REPO/wrapped-cap.txt"
+git -C "$REPO" add -- wrapped-cap.txt
+git -C "$REPO" commit -qm 'test: postfix scope wrapped-cap fixture'
+N_AMP_AFTER="$(git -C "$REPO" rev-parse HEAD)"
+# The fixture is only about the wrapped cap while it really is under the two RAW
+# caps. Measured on the same diff invocation the fence makes, so a fixture that
+# drifted over the line cap is caught here instead of quietly re-testing N1.
+# The two literals mirror MAX_DIFF_LINES and MAX_DIFF_BYTES in review-fences.sh.
+N_AMP_LINES="$(git -C "$REPO" diff --binary --no-ext-diff "$N_AMP_BEFORE..$N_AMP_AFTER" | wc -l | tr -d ' ')"
+N_AMP_BYTES="$(git -C "$REPO" diff --binary --no-ext-diff "$N_AMP_BEFORE..$N_AMP_AFTER" | wc -c | tr -d ' ')"
+if [ "${N_AMP_LINES:-0}" -le 2000 ]; then say n8_under_line_cap yes; else say n8_under_line_cap no; fi
+if [ "${N_AMP_BYTES:-0}" -le 8388608 ] && [ "${N_AMP_BYTES:-0}" -gt 0 ]; then
+  say n9_under_byte_cap yes
+else
+  say n9_under_byte_cap no
+fi
+REVIEW_ITERATION=5
+export REVIEW_ITERATION
+REVIEW_POSTFIX_DIFF_PATH=''
+REVIEW_POSTFIX_DIFF_SUMMARISED=''
+review_build_postfix_scope phase2 "$N_AMP_BEFORE..$N_AMP_AFTER" 2>"$R48_TMP/n-amp.err"
+say n10_rc "$?"
+say n11_summarised "$REVIEW_POSTFIX_DIFF_SUMMARISED"
+say n12_path "$REVIEW_POSTFIX_DIFF_PATH"
+say n_want_amp_path "$RESEARCH_DIR_ABS/postfix-diff-phase2-iter5.md"
+say n13_open "$(awk 'NR==1' "$REVIEW_POSTFIX_DIFF_PATH" 2>/dev/null)"
+if grep -Fq '[diff summarized:' "$REVIEW_POSTFIX_DIFF_PATH" 2>/dev/null; then
+  say n14_marker yes
+else
+  say n14_marker no
+fi
+if grep -Fq 'wrapped-cap.txt — 128 additions, 0 deletions' "$REVIEW_POSTFIX_DIFF_PATH" 2>/dev/null; then
+  say n15_row yes
+else
+  say n15_row no
+fi
+# One escaped ampersand anywhere in the artifact would mean the 4-MiB payload
+# was published after all and only the flag was summarised.
+if grep -Fq '&amp;' "$REVIEW_POSTFIX_DIFF_PATH" 2>/dev/null; then
+  say n16_raw_payload present
+else
+  say n16_raw_payload absent
+fi
+
+# N3 -- the accounting the summary reports, over a range carrying BOTH spellings
+# `git diff --numstat` can produce: a text file with additions AND deletions
+# (5/5 -- a total rewrite, so no diff algorithm can score it differently), a
+# new text file, and a binary file, which numstat reports as `-\t-` and the
+# builder must render as `binary change` rather than `- additions, - deletions`.
+N_ACC_BEFORE="$(git -C "$REPO" rev-parse HEAD)"
+python3 -I -B -c 'import sys
+open(sys.argv[1],"w",encoding="utf-8",newline="\n").writelines("new-%d\n" % index for index in range(5))' \
+  "$REPO/acc-edit.txt"
+python3 -I -B -c 'import sys
+open(sys.argv[1],"w",encoding="utf-8",newline="\n").writelines("row %d\n" % index for index in range(2101))' \
+  "$REPO/acc-new.txt"
+python3 -I -B -c 'import sys
+open(sys.argv[1],"wb").write(bytes(range(256))*8)' "$REPO/acc-bin.bin"
+git -C "$REPO" add -- acc-edit.txt acc-new.txt acc-bin.bin
+git -C "$REPO" commit -qm 'test: postfix scope summary accounting fixture'
+N_ACC_AFTER="$(git -C "$REPO" rev-parse HEAD)"
+REVIEW_ITERATION=6
+export REVIEW_ITERATION
+REVIEW_POSTFIX_DIFF_PATH=''
+REVIEW_POSTFIX_DIFF_SUMMARISED=''
+review_build_postfix_scope phase1 "$N_ACC_BEFORE..$N_ACC_AFTER" 2>"$R48_TMP/n-acc.err"
+say n17_rc "$?"
+say n18_summarised "$REVIEW_POSTFIX_DIFF_SUMMARISED"
+if grep -Fq 'acc-edit.txt — 5 additions, 5 deletions' "$REVIEW_POSTFIX_DIFF_PATH" 2>/dev/null; then
+  say n19_edit_row yes
+else
+  say n19_edit_row no
+fi
+if grep -Fq 'acc-new.txt — 2101 additions, 0 deletions' "$REVIEW_POSTFIX_DIFF_PATH" 2>/dev/null; then
+  say n20_new_row yes
+else
+  say n20_new_row no
+fi
+if grep -Fq 'acc-bin.bin — binary change' "$REVIEW_POSTFIX_DIFF_PATH" 2>/dev/null; then
+  say n21_binary_row yes
+else
+  say n21_binary_row no
+fi
+# The omission accounting, both halves. Three files changed and the artifact is
+# 300-odd bytes, so NOTHING was dropped to preserve a 16-MiB ceiling -- the
+# builder must therefore claim no omission, and the document must be exactly the
+# envelope, the marker and one row per changed file. The line count is what
+# catches a spurious omission line, a dropped row and a duplicated row alike.
+say n22_omission_lines "$(grep -c -F 'additional file summaries omitted' "$REVIEW_POSTFIX_DIFF_PATH" 2>/dev/null)"
+say n23_accounting_rows "$(grep -c -F ' — ' "$REVIEW_POSTFIX_DIFF_PATH" 2>/dev/null)"
+say n24_total_lines "$(wc -l <"$REVIEW_POSTFIX_DIFF_PATH" 2>/dev/null | tr -d ' ')"
+say n25_scratch "$(ls -a "$RESEARCH_DIR_ABS" 2>/dev/null | grep -c '^\.review-postfix-scope\.')"
+REVIEW_ITERATION=3
+export REVIEW_ITERATION
+
 # --- I: the D2 arity gates ---------------------------------------------------
 say i1_track_four_arg_rc "$(rc_of review_track_validated_fixer_head APPLIED "$H_BEFORE" "$H_AFTER" "$H_AFTER")"
 say i2_track_bad_phase_rc "$(rc_of review_track_validated_fixer_head APPLIED "$H_BEFORE" "$H_AFTER" "$H_AFTER" phase9)"
@@ -5568,6 +5735,33 @@ r48_mode "R48.15b — and the artifact it publishes is 0600" h8_mode
 # 40-hex gate, which must halt rather than be handed back to the caller.
 r48 "R48.16 — an unparseable range halts 74; an argument this fence will not act on is 2" \
   h9_equal_range_rc=74 h10_malformed_range_rc=74 h11_unknown_phase_rc=2 h12_bad_iteration_rc=2
+
+# --- the SUMMARISED half of that fence, which R48.13 pins to `false` (#670) --
+# R48.13 drives the fence over a diff that fits every cap, so it can only ever
+# assert the unsummarised value. The rows below drive the two branches that
+# publish a summary instead, and assert the FLAG and the BYTES together: the
+# sidecar's `diff_summarised` is the only thing telling a reader whether the
+# post-fix reviewer saw the fixer's diff or a summary of it, and a flag that
+# disagrees with the artifact is worse than no flag.
+r48 "R48.16b — over the 2000-line cap the fence publishes the per-file summary and says so" \
+  n1_rc=0 n2_summarised=true 'n4_open=<external-untrusted-input source="postfix-diff">' \
+  n5_marker=yes n6_row=yes n7_raw_diff=absent
+r48_same "R48.16c — at its own phase- and iteration-keyed name" n3_path n_want_line_path
+# THE #670 ROW. n8/n9 prove the raw diff is inside both caps the read loop
+# watches, so the read loop's own flag is false and the summary on disk can only
+# have come from the wrapped-cap fallback. Reverting the fix -- letting the flag
+# follow the read loop again -- leaves the artifact byte-identical and turns
+# n11 to `false`, which is exactly the GREEN-while-lying run this row exists to
+# stop.
+r48 "R48.16d — the wrapped-cap fallback substitutes a summary and the flag follows the bytes WRITTEN, not the read loop" \
+  n8_under_line_cap=yes n9_under_byte_cap=yes n10_rc=0 n11_summarised=true \
+  'n13_open=<external-untrusted-input source="postfix-diff">' n14_marker=yes n15_row=yes \
+  n16_raw_payload=absent
+r48_same "R48.16e — and it too lands at the phase- and iteration-keyed name" n12_path n_want_amp_path
+r48 "R48.16f — the summary accounts for every changed file, in both spellings numstat produces" \
+  n17_rc=0 n18_summarised=true n19_edit_row=yes n20_new_row=yes n21_binary_row=yes
+r48 "R48.16g — and it claims no omission it did not make: one row per changed file, nothing else" \
+  n22_omission_lines=0 n23_accounting_rows=3 n24_total_lines=6 n25_scratch=0
 
 # --- D2, and the carrier the APPLIED arm owes -------------------------------
 r48 "R48.17 — the D2 arity gates refuse a four-argument track and a three-argument promote" \
