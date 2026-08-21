@@ -59,21 +59,67 @@
 #       plugins/uberdev/agents/<stem>.md exists, which is what keeps the label
 #       `uberdev:active` and the command `uberdev:orchestrator` out of the set.
 #
-# THE BOUNDARY C8 DOES NOT CROSS, stated so nobody reads it as more than it is.
-# Its universe is the lanes this run tree can reach FROM ITS OWN ROOT, which is
-# the solve/turbo/turbox family. The other shipped Workflow fleets — review-fleet,
-# scan-fleet, goal-pipeline, testers-pipeline, uberthink-pipeline — are rooted
-# elsewhere and are not enumerated here, so C8 says nothing about them either
-# way. Widening the universe to a fleet means deriving its agent_kinds by
-# EXECUTING it under the harness the way C1 does, not by adding its path.
+# WHAT #654 ADDED. The widening C8 could not do. Widening the universe to a
+# fleet means deriving its agent_kinds by EXECUTING it under the harness the way
+# C1 does, not by adding its path — so the rule layer is lane-parameterised and
+# the LANES table now carries all six shipped Workflow fleets, each with its own
+# normalizer, its own fixture and its own live kind set derived by EXECUTION.
+# C8 own universe is UNCHANGED: it still enumerates only what the
+# solve/turbo/turbox root reaches and still says nothing about the other five
+# either way. What reds when one of those five drifts is its own per-lane
+# C1/C4/C5 row, never C8. Three further rules come with the widening, and the
+# universes of the first two are ones C8 cannot reach:
 #
-# WHAT #654 ADDED. Exactly that widening. The rule layer is lane-parameterised
-# and the LANES table now carries all six shipped Workflow fleets, each with its
-# own normalizer, its own fixture and its own live kind set derived by EXECUTING
-# it under the harness. C8 own universe is UNCHANGED — it still enumerates only
-# what the solve/turbo/turbox root reaches and still says nothing about the
-# other five either way. What reds when one of those five drifts is its own
-# per-lane C1/C4/C5 row, never C8.
+#   C10 FLEET-CORPUS COMPLETENESS. Every skills/*/workflow.js — plus the
+#       skills/<name>/workflows/*.js child tree RFC 0012 DR-1 reserves, empty
+#       today and globbed anyway — must be declared in does_not_govern[]. The
+#       universe is the FILESYSTEM, so a fleet that no launcher and no manifest
+#       mentions is still named. Row Z19 is the anti-vacuity half.
+#   C11 LANE ROOT NAMING, ON AN EXECUTABLE-REGION LINE. The lane script must be
+#       named by the surface that launches it, on a line the machine actually
+#       runs — not in a comment, a frontmatter field or a prose sentence. A
+#       plain byte match would not do the job: lib/goal-phase0.sh names its lane
+#       on SEVEN lines, of which exactly ONE (:436) is executable. Delete that
+#       one and six comments keep a byte match green, which is certification by
+#       blindness. Rows Z21 and Z22 prove the sh and md classifiers in BOTH
+#       directions on synthetic bytes.
+#   C12 KIND-RULE PROVENANCE. Each of the five lane entries carries its own
+#       agent_kind_rule, and four conjuncts hold it to the code: non-empty, it
+#       names its own lane id, it carries EVERY index token that lane normalizer
+#       collapses, and it carries the fixed K-of-N clause verbatim. Conjunct 3
+#       is the one with teeth — it compares manifest prose against TEST CODE, so
+#       a rule copy-pasted from a sibling lane with only the id swapped reds.
+#
+# The nested-workflow() namespace is derived rather than assumed: goal_pipeline
+# dispatches its per-cycle fleet through a nested workflow() call that the agent
+# call log never sees, so liveKinds() unions record.workflowCalls in, and Z20 is
+# the row that proves the derivation reads them.
+#
+# WHAT REMAINS OPEN, stated so nobody reads any of the above as more than it is.
+# SIX residuals, and this change closes none of them:
+#
+#   1. dispatch_sites is not proven REACHED. A fixture that drives K of N sites
+#      certifies a K-kind list; the C4 floor proves K did not shrink and C1
+#      proves the manifest agrees with what ran, but NEITHER PROVES K == N. The
+#      named mechanism most likely to hold K below N is the harness falsy
+#      default budget.total, which is why each lane records whether its floor
+#      was budget-bounded.
+#   2. Normalizer tightness is human-curated. The rename differential proves the
+#      normalizer is not degenerate; it does not prove it collapses exactly the
+#      instance indices and nothing semantic.
+#   3. agent_kind_rule prose against normalizer code is an ASSERTED
+#      equivalence, and this change multiplies the pairs from ONE to SIX — five
+#      of them newly hand-written inside a versioned policy artifact. C12
+#      narrows that gap; it does not close it and must not be claimed closed.
+#   4. Corpus completeness is a FILESYSTEM property, not a dispatch property.
+#      Neither C10 nor C11 proves the repo has no other dispatch substrate
+#      outside skills/*/workflow.js and outside the launcher reach.
+#   5. C11 proves NAMING, not dispatch. It does not prove that line executes,
+#      that the root is reachable, or that any dispatch occurs at runtime. It
+#      can RED a declared lane; it can never ADD one.
+#   6. No row mutates a lane SOURCE to add a dispatch site and demands C5 red.
+#      The hand-proof drifts the manifest instead, which proves the comparator
+#      compares but not that the site counter re-counts.
 #
 # GIT-BASH PORTABLE: grep + node only (no python3/PyYAML/mktemp, no temp files,
 # no digests, no PATH stubs). Runs on BOTH the ubuntu and windows shape-check
@@ -108,8 +154,20 @@ L_GOAL="$REPO_ROOT/plugins/uberdev/skills/goal-pipeline/workflow.js"
 L_TESTERS="$REPO_ROOT/plugins/uberdev/skills/testers-pipeline/workflow.js"
 L_UBERTHINK="$REPO_ROOT/plugins/uberdev/skills/uberthink-pipeline/workflow.js"
 
+# #654 C11. The ROOT of each lane — the shipped surface that names the lane
+# script on a line the machine actually runs. Each gets its own readability
+# FATAL alongside the lane sources above, for the same reason: a lane whose root
+# vanished must red, not silently lose its C11 row. These are the roots, not the
+# lanes; the lane scripts are the L_* paths above.
+R_REVIEW="$REPO_ROOT/plugins/uberdev/lib/dispatch.sh"
+R_SCAN="$REPO_ROOT/plugins/uberdev/skills/uberscan-pipeline/SKILL.md"
+R_GOAL="$REPO_ROOT/plugins/uberdev/lib/goal-phase0.sh"
+R_TESTERS="$REPO_ROOT/plugins/uberdev/skills/testers-pipeline/SKILL.md"
+R_UBERTHINK="$REPO_ROOT/plugins/uberdev/skills/uberthink-pipeline/SKILL.md"
+
 for f in "$HARNESS" "$WORKFLOW" "$MANIFEST" "$LAUNCHER" \
-         "$L_REVIEW" "$L_SCAN" "$L_GOAL" "$L_TESTERS" "$L_UBERTHINK"; do
+         "$L_REVIEW" "$L_SCAN" "$L_GOAL" "$L_TESTERS" "$L_UBERTHINK" \
+         "$R_REVIEW" "$R_SCAN" "$R_GOAL" "$R_TESTERS" "$R_UBERTHINK"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
 command -v node >/dev/null 2>&1 || {
@@ -154,6 +212,11 @@ var L_SCAN = process.argv[7];
 var L_GOAL = process.argv[8];
 var L_TESTERS = process.argv[9];
 var L_UBERTHINK = process.argv[10];
+var R_REVIEW = process.argv[11];
+var R_SCAN = process.argv[12];
+var R_GOAL = process.argv[13];
+var R_TESTERS = process.argv[14];
+var R_UBERTHINK = process.argv[15];
 
 var srcBase = fs.readFileSync(WORKFLOW, "utf8");
 var tree = JSON.parse(fs.readFileSync(MANIFEST, "utf8"));
@@ -183,6 +246,20 @@ var laneSrc = {
   goal_pipeline: fs.readFileSync(L_GOAL, "utf8"),
   testers_pipeline: fs.readFileSync(L_TESTERS, "utf8"),
   uberthink_pipeline: fs.readFileSync(L_UBERTHINK, "utf8")
+};
+
+// The ROOT bytes of each lane, keyed the same way (#654, C11). NAMED laneRootSrc
+// and not rootSrc: the async comparator body already declares a var rootSrc for
+// the Z15 root_edge check, and a module-scope rootSrc would be SHADOWED by that
+// hoisted declaration everywhere below — every C11 read inside the body would
+// see undefined and throw, for a reason that looks nothing like its cause. The
+// same source-order hazard the LANES table comment records, one scope up.
+var laneRootSrc = {
+  review_fleet: fs.readFileSync(R_REVIEW, "utf8"),
+  scan_fleet: fs.readFileSync(R_SCAN, "utf8"),
+  goal_pipeline: fs.readFileSync(R_GOAL, "utf8"),
+  testers_pipeline: fs.readFileSync(R_TESTERS, "utf8"),
+  uberthink_pipeline: fs.readFileSync(R_UBERTHINK, "utf8")
 };
 
 var ANCHOR = "plugins/uberdev/";
@@ -1131,6 +1208,9 @@ var LANES = [
   {
     id: "review_fleet",
     source: ANCHOR + "skills/review-fleet/workflow.js",
+    root_source: ANCHOR + "lib/dispatch.sh",
+    rootKind: "sh",
+    indexTokens: ["-ci<n>"],
     normalize: normReviewFleet,
     kindFloor: 12,
     sites: countSites(laneSrc.review_fleet),
@@ -1142,6 +1222,9 @@ var LANES = [
   {
     id: "scan_fleet",
     source: ANCHOR + "skills/scan-fleet/workflow.js",
+    root_source: ANCHOR + "skills/uberscan-pipeline/SKILL.md",
+    rootKind: "md",
+    indexTokens: ["-<nnn>", "NNN"],
     normalize: normScanFleet,
     kindFloor: 12,
     sites: countSites(laneSrc.scan_fleet),
@@ -1153,6 +1236,9 @@ var LANES = [
   {
     id: "goal_pipeline",
     source: ANCHOR + "skills/goal-pipeline/workflow.js",
+    root_source: ANCHOR + "lib/goal-phase0.sh",
+    rootKind: "sh",
+    indexTokens: [":c<n>", ":t<n>"],
     normalize: normGoalPipeline,
     kindFloor: 5,
     sites: countSites(laneSrc.goal_pipeline),
@@ -1164,6 +1250,9 @@ var LANES = [
   {
     id: "testers_pipeline",
     source: ANCHOR + "skills/testers-pipeline/workflow.js",
+    root_source: ANCHOR + "skills/testers-pipeline/SKILL.md",
+    rootKind: "md",
+    indexTokens: ["-r<n>", "persona-<name>-"],
     normalize: normTestersPipeline,
     kindFloor: 7,
     sites: countSites(laneSrc.testers_pipeline),
@@ -1175,6 +1264,9 @@ var LANES = [
   {
     id: "uberthink_pipeline",
     source: ANCHOR + "skills/uberthink-pipeline/workflow.js",
+    root_source: ANCHOR + "skills/uberthink-pipeline/SKILL.md",
+    rootKind: "md",
+    indexTokens: ["kN", "cN", "rN", "donor", "gap"],
     normalize: normUberthinkPipeline,
     kindFloor: 31,
     sites: countSites(laneSrc.uberthink_pipeline),
@@ -1193,6 +1285,16 @@ var FLEET_LANES = LANES.slice(1);
 if (FLEET_LANES.length !== 5) {
   throw new Error("expected exactly 5 fleet lanes beyond solve_fleet, found "
     + FLEET_LANES.length + " — a lane vanished and its rows would have vanished with it");
+}
+
+// The lanes C11 and C12 can speak about, and a FATAL when that set shrinks
+// (#654). rC11 and rC12 are BOTH skipped for a lane carrying no root_source,
+// and a rule that silently skips is the permanently green hole this file
+// exists to close — so the skip is legal only while this count is exactly 5.
+var ROOTED = FLEET_LANES.filter(function (l) { return isStr(l.root_source); });
+if (ROOTED.length !== 5) {
+  throw new Error("expected exactly 5 rooted lanes for C11, found " + ROOTED.length
+    + " — a lane lost its root_source and its C11 row would have vanished silently");
 }
 
 function rC4(lane, live) {
@@ -1268,6 +1370,134 @@ function rC9(t, lsrc) {
   return e;
 }
 
+// ---------------------------------------------------------------------------
+// THE EXECUTABLE-REGION CLASSIFIER (#654, C11). A comment is not a producer
+// (RFC 0016), so a lane named only in prose is not rooted there.
+//   sh — a line whose first non-space character is not #
+//   md — a line inside a fenced code block; the fence line itself never counts
+//
+// FAILURE DIRECTION IS SAFE BY CONSTRUCTION. If this rots and calls everything
+// prose, every lane executable hit count falls to zero and C11 REDS. It cannot
+// fail green. The one direction that could is an md root whose fence state ends
+// up stuck open, and rows Z21 and Z22 close that by proving the classifier
+// two-sidedly on synthetic in-memory bytes.
+//
+// FENCE is built from char codes rather than written as a literal. Backticks
+// are inert inside the enclosing single-quoted shell string TODAY, but that
+// safety is a property of the quoting, not of this function; building the
+// marker from codes removes the hazard class entirely. Never reach for a
+// double-quoted heredoc to accommodate a backtick literal — the backticks would
+// become command substitution and this program would change meaning silently.
+// ---------------------------------------------------------------------------
+var FENCE = String.fromCharCode(96, 96, 96);
+function executableLines(src, kind) {
+  var out = [];
+  var inFence = false;
+  String(src).split("\n").forEach(function (ln) {
+    var t = ln.replace(/^[ \t]+/, "");
+    if (kind === "md") {
+      if (t.indexOf(FENCE) === 0) { inFence = !inFence; return; }
+      if (inFence) { out.push(ln); }
+      return;
+    }
+    if (t.length === 0 || t.charAt(0) === "#") { return; }
+    out.push(ln);
+  });
+  return out;
+}
+
+// C10 — FLEET-CORPUS COMPLETENESS. The universe is the FILESYSTEM, never the
+// manifest: a universe sourced from the manifest can only ever contain what the
+// manifest already declared. The child glob matches zero files today and is
+// included anyway — RFC 0012 DR-1 puts child scripts at
+// skills/<name>/workflows/*.js, and an enumeration that looks exhaustive while
+// excluding a whole tree is the bug RFC 0016 records.
+//
+// A RATCHET, not a round number: 6 is today exact skills/*/workflow.js count. A
+// seventh fleet raises it deliberately.
+var FLEET_CORPUS_FLOOR = 6;
+function fleetCorpus() {
+  var base = REPO_PREFIX + ANCHOR + "skills";
+  var out = [];
+  fs.readdirSync(base).forEach(function (name) {
+    var top = base + "/" + name + "/workflow.js";
+    if (fs.existsSync(top)) { out.push(ANCHOR + "skills/" + name + "/workflow.js"); }
+    var kidDir = base + "/" + name + "/workflows";
+    if (fs.existsSync(kidDir)) {
+      fs.readdirSync(kidDir).forEach(function (k) {
+        if (/\.js$/.test(k)) { out.push(ANCHOR + "skills/" + name + "/workflows/" + k); }
+      });
+    }
+  });
+  return out.sort();
+}
+// Read ONCE at module scope, not inside the comparator body: check() closes over
+// it, so a corpus computed in the async body would be invisible to every rule
+// the differential rows re-run.
+var FLEET_CORPUS = fleetCorpus();
+
+function rC10(t, corpus) {
+  var e = [];
+  // Two self-checks FIRST, mirroring rC8: a completeness rule that has gone
+  // blind reports perfect coverage.
+  if (corpus.length < FLEET_CORPUS_FLOOR) {
+    e.push("the fleet corpus glob yielded only " + corpus.length
+      + " member(s), below the floor of " + FLEET_CORPUS_FLOOR
+      + " — a shrunken universe reports every substrate left in it as declared: green, and blind");
+  }
+  var KNOWN = ANCHOR + "skills/solve-fleet/workflow.js";
+  if (corpus.indexOf(KNOWN) < 0) {
+    e.push("the corpus cannot see " + KNOWN + ", which does_not_govern[] ALREADY declares — its silence about every other lane means nothing");
+  }
+  corpus.forEach(function (p) {
+    if (!entryFor(t, p)) { e.push("shipped Workflow fleet declared nowhere: " + p); }
+  });
+  return e;
+}
+
+// C11 — LANE ROOT NAMING, ON AN EXECUTABLE-REGION LINE. rC6 already guarantees
+// source starts with ANCHOR, so the strip is total; the file already ships the
+// slice(ANCHOR.length) idiom at the Z16 fixture. Matching the UN-stripped source
+// would red every lane on day one: the anchored literal appears in ZERO of the
+// five roots, the stripped form appears in all five.
+//
+// C11 PROVES NAMING, NOT DISPATCH. It can RED a declared lane; it can never ADD
+// one. See residual 5 in the header.
+function rC11(lane, src) {
+  var rel = lane.source.slice(ANCHOR.length);
+  var hits = executableLines(src, lane.rootKind).filter(function (ln) {
+    return ln.indexOf(rel) >= 0;
+  });
+  return hits.length > 0 ? []
+    : ["lane " + lane.id + " is not named on any executable-region line of its root "
+       + lane.root_source + " — a comment, a frontmatter field or a prose sentence does not count"];
+}
+
+// C12 — KIND-RULE PROVENANCE, four conjuncts. Conjunct 3 is the one that
+// survives contact with the realistic error: it compares manifest prose against
+// TEST CODE, because indexTokens sits beside the normalizer that consumes it. A
+// rule copy-pasted from a sibling lane with only the id token swapped describes
+// the wrong index grammar and fails here. Conjunct 4 puts the K-of-N residual in
+// the artifact a manifest reader actually consults, as a FIXED literal with no
+// numbers in it, so it adds no second copy of dispatch_sites to drift against.
+// C12 does NOT execute the prose; residual 3 records what stays open.
+var KOFN = "agent_kinds is the kind set the fixture reached, not proof that every dispatch_sites site ran";
+function rC12(t, lane) {
+  var E = entryFor(t, lane.source);
+  if (!E) return ["no scope.does_not_govern entry declares source " + lane.source];
+  var r = E.agent_kind_rule;
+  var e = [];
+  if (!isStr(r)) { return [lane.id + ".agent_kind_rule is not a non-empty string"]; }
+  if (r.indexOf(lane.id) < 0) e.push(lane.id + ".agent_kind_rule does not name its own lane id");
+  lane.indexTokens.forEach(function (tok) {
+    if (r.indexOf(tok) < 0) {
+      e.push(lane.id + ".agent_kind_rule omits the index token its normalizer collapses: " + tok);
+    }
+  });
+  if (r.indexOf(KOFN) < 0) e.push(lane.id + ".agent_kind_rule omits the fixed K-of-N clause");
+  return e;
+}
+
 // The rule ORDER is preserved deliberately — the manifest-wide rules first, the
 // per-lane block in the middle, the enumeration rules last — so the failure text
 // the existing rows emit is unchanged by the widening.
@@ -1284,8 +1514,16 @@ function check(t, liveByLane, lsrc) {
       throw new Error("no live kind set for lane " + lane.id + " — a lane is never skipped");
     }
     e = e.concat(rC1(t, lane, live), rC2(t, lane), rC3(t, lane), rC4(lane, live), rC5(t, lane));
+    // C11 and C12 speak only about a lane that HAS a root and an index grammar,
+    // which today is exactly the five fleet lanes. The skip is not a silent one:
+    // the ROOTED FATAL above reds the whole file the moment that count moves, so
+    // a lane cannot quietly drop out of these two rules the way it could out of a
+    // hand-maintained list.
+    if (isStr(lane.root_source)) {
+      e = e.concat(rC11(lane, laneRootSrc[lane.id]), rC12(t, lane));
+    }
   });
-  return e.concat(rC8(t, lsrc), rC9(t, lsrc));
+  return e.concat(rC8(t, lsrc), rC9(t, lsrc), rC10(t, FLEET_CORPUS));
 }
 
 function copyTree() { return JSON.parse(JSON.stringify(tree)); }
@@ -1473,17 +1711,93 @@ function copyTree() { return JSON.parse(JSON.stringify(tree)); }
     applied17 ? check(t17, LIVE_BY_LANE, launcherBase) : []);
 
   // ------------------------------------------------------------------------
+  // GLOBAL ROWS FOR C10 AND C11 (#654), Z18-Z22. C8 universe is the launcher
+  // reach; this one is the FILESYSTEM, which is the only universe that can name
+  // a fleet no launcher ever mentions.
+  // ------------------------------------------------------------------------
+  var e18 = rC10(tree, FLEET_CORPUS);
+  row(e18.length === 0, "Z18 C10: every shipped Workflow fleet on disk is declared ("
+      + FLEET_CORPUS.join(" ") + ")" + tail(e18));
+
+  // Z19 — the anti-vacuity half for C10, the Z16 shape at the level where this
+  // design universe actually lives. The two guards refuse to let the row count
+  // if the synthetic member ever becomes enumerated or becomes declared.
+  var SYN_MEMBER = ANCHOR + "skills/zz-scope-fixture/workflow.js";
+  var applied19 = !entryFor(tree, SYN_MEMBER) && FLEET_CORPUS.indexOf(SYN_MEMBER) < 0;
+  differential("Z19 a shipped Workflow fleet nobody declares reds C10",
+    applied19,
+    "the synthetic member " + SYN_MEMBER + " is already enumerated or already declared, so splicing it in would prove nothing",
+    applied19 ? rC10(tree, FLEET_CORPUS.concat([SYN_MEMBER]).sort()) : []);
+
+  // Z20 — the nested-workflow() differential. The ONE row that proves the
+  // derivation reads record.workflowCalls: an agentCalls-keyed derivation cannot
+  // fake it, because mutating this literal changes no agent label at all.
+  var GOAL_LANE = null;
+  FLEET_LANES.forEach(function (l) { if (l.id === "goal_pipeline") { GOAL_LANE = l; } });
+  if (!GOAL_LANE) { throw new Error("the goal_pipeline lane is gone, so Z20 would prove nothing"); }
+  var WF_LIT = "\"/skills/solve-fleet/workflow.js\"";
+  var goalBase = laneSrc.goal_pipeline;
+  var goalMut = goalBase.split(WF_LIT).join("\"/skills/zz-not-a-fleet/workflow.js\"");
+  var errs20 = [];
+  if (goalMut !== goalBase) {
+    var live20 = await liveOf(GOAL_LANE, goalMut);
+    errs20 = check(tree, withLane(LIVE_BY_LANE, GOAL_LANE.id, live20), launcherBase);
+  }
+  differential("Z20 repointing the nested workflow() scriptPath literal reds the comparator on the workflow kind",
+    goalMut !== goalBase,
+    "the literal " + WF_LIT + " is gone from " + GOAL_LANE.source + ", so the mutation never applied",
+    errs20);
+
+  // Z21 — the C11 sh-root classifier, both directions, on synthetic in-memory
+  // bytes. The predicate this replaced was a whole-file byte match that SIX
+  // comments in lib/goal-phase0.sh kept green while the one executable naming
+  // line was deleted. That is certification by blindness. Written out rather
+  // than routed through differential() because the assertion is a THREE-part
+  // conjunct: the real roots are clean AND the negative half does not match AND
+  // the positive half does. It touches no disk.
+  var SYN_LANE = "skills/zz-synthetic-lane/workflow.js";
+  var shBase = "set -u\necho hello\n";
+  function hitsIn(src, kind, needle) {
+    return executableLines(src, kind).filter(function (ln) { return ln.indexOf(needle) >= 0; }).length;
+  }
+  var e21 = [];
+  ROOTED.forEach(function (l) { if (l.rootKind === "sh") { e21 = e21.concat(rC11(l, laneRootSrc[l.id])); } });
+  if (hitsIn(shBase + "#   " + SYN_LANE + "\n", "sh", SYN_LANE) !== 0) {
+    e21.push("a # comment line satisfied the sh executable-region rule");
+  }
+  if (hitsIn(shBase + "X=\"" + SYN_LANE + "\"\n", "sh", SYN_LANE) !== 1) {
+    e21.push("a non-# line naming the lane did NOT satisfy the sh executable-region rule");
+  }
+  row(e21.length === 0, "Z21 C11 sh roots: the real sh lanes are clean, a comment mention does not count and an executable line does" + tail(e21));
+
+  // Z22 — the md half. The one direction that could fail green is a fence stuck
+  // open, so both halves are checked against the same classifier state.
+  var mdBase = "# Title\n\nSome prose.\n";
+  var mdFenced = mdBase + FENCE + "bash\nnode " + SYN_LANE + "\n" + FENCE + "\n";
+  var mdProse = mdBase + "See " + SYN_LANE + " for details.\n";
+  var e22 = [];
+  ROOTED.forEach(function (l) { if (l.rootKind === "md") { e22 = e22.concat(rC11(l, laneRootSrc[l.id])); } });
+  if (hitsIn(mdProse, "md", SYN_LANE) !== 0) {
+    e22.push("an out-of-fence prose line satisfied the md executable-region rule");
+  }
+  if (hitsIn(mdFenced, "md", SYN_LANE) !== 1) {
+    e22.push("an in-fence line naming the lane did NOT satisfy the md executable-region rule");
+  }
+  row(e22.length === 0, "Z22 C11 md roots: the real md lanes are clean, a prose mention does not count and an in-fence line does" + tail(e22));
+
+  // ------------------------------------------------------------------------
   // PER-LANE ROWS (#654). ONE indexed loop over the five fleet lanes, in fixed
   // lane order, emitting (a) C1, (b) C4, (c) C5 and (e) the rename differential
   // for each lane before moving to the next. Indexed rather than forEach
   // because await inside a forEach callback does not suspend the loop, so the
   // rename re-executions would race instead of running in series.
   //
-  // THE LABELS ARE FINAL AND NON-CONTIGUOUS ON PURPOSE: the (d) root-naming row
-  // and the (f) entry-deletion row land in a later change at the gaps left
-  // here, so nothing is ever renumbered. Do not tidy these into a contiguous
-  // run — the byte-identity of rows Z0-Z17 and the exact row-count lock at the
-  // bottom of this file are what a renumbering silently breaks.
+  // THE LABELS ARE NON-CONTIGUOUS HERE ON PURPOSE, and they stay that way: the
+  // (d) root-naming row and the (f) entry-deletion row are emitted by a SECOND
+  // loop below, filling the gaps this one leaves rather than renumbering
+  // anything. Do not tidy these into a contiguous run — the byte-identity of
+  // rows Z0-Z17 and the exact row-count lock at the bottom of this file are
+  // what a renumbering silently breaks.
   //
   // rC2 and rC3 get NO ROW OF THEIR OWN here, which is why the per-lane row
   // count is four and not six. Zero edges are sourced from any of these five
@@ -1536,13 +1850,42 @@ function copyTree() { return JSON.parse(JSON.stringify(tree)); }
       errsF);
   }
 
+  // ------------------------------------------------------------------------
+  // THE (d) AND (f) PER-LANE ROWS (#654), landing in the gaps the loop above
+  // left. A SECOND indexed loop rather than four more rows inside the first:
+  // the labels the first loop emits are already shipped and their order is what
+  // A2 byte-identity rests on, so this appends instead of interleaving. Indexed
+  // for the same reason as the first — no await inside a forEach callback.
+  // ------------------------------------------------------------------------
+  for (var gi = 0; gi < FLEET_LANES.length; gi++) {
+    var laneD = FLEET_LANES[gi];
+    var ed = rC11(laneD, laneRootSrc[laneD.id]);
+    row(ed.length === 0, laneD.rows.d + " C11 " + laneD.id
+        + ": the lane is named on an executable-region line of " + laneD.root_source + tail(ed));
+
+    // (f) THE ENTRY-DELETION DIFFERENTIAL — literally "declared nowhere must
+    // red", the Z17 shape, per lane.
+    var tf = copyTree();
+    var df = entriesOf(tf) || [];
+    var idxf = -1;
+    for (var jf = 0; jf < df.length; jf++) {
+      if (isObj(df[jf]) && df[jf].source === laneD.source) { idxf = jf; }
+    }
+    var appliedF = idxf >= 0;
+    if (appliedF) { df.splice(idxf, 1); }
+    differential(laneD.rows.f + " deleting the " + laneD.id + " declaration reds C10",
+      appliedF, "does_not_govern[] carries no entry sourced from " + laneD.source,
+      appliedF ? check(tf, LIVE_BY_LANE, launcherBase) : []);
+  }
+
   process.stdout.write(rows.join("\n") + "\n");
 })().catch(function (e) {
   process.stderr.write("comparator threw: " + ((e && e.stack) ? e.stack : String(e)) + "\n");
   process.exit(1);
 });
 ' "$HARNESS" "$WORKFLOW" "$MANIFEST" "$SITES" "$LAUNCHER" \
-  "$L_REVIEW" "$L_SCAN" "$L_GOAL" "$L_TESTERS" "$L_UBERTHINK")"
+  "$L_REVIEW" "$L_SCAN" "$L_GOAL" "$L_TESTERS" "$L_UBERTHINK" \
+  "$R_REVIEW" "$R_SCAN" "$R_GOAL" "$R_TESTERS" "$R_UBERTHINK")"
 NODE_RC=$?
 [ "$NODE_RC" -eq 0 ] || {
   echo "FATAL: the node comparator threw (rc=$NODE_RC) — see the stderr above" >&2
@@ -1566,14 +1909,13 @@ done <<<"$ROWS"
 # was added", which is how Z13-Z17 could be landed while Z0-Z12 quietly stopped
 # running. Same predicate, same reason, as E70 in tests/solve-run-tree.test.sh.
 #
-# 38 = 18 + 4 x 5: the eighteen manifest-wide and launcher-lane rows Z0-Z17,
-# plus four rows for each of the five fleet lanes. The LABELS run to Z51 with
-# GAPS — Z18-Z22, Z26, Z28, Z32, Z34, Z38, Z40, Z44, Z46, Z50, Z52 are reserved
-# for the rows a later change fills in place. A label is a name, not an index:
-# renumbering them to close the gaps would break the byte-identity of Z0-Z17 and
-# leave this lock passing on a set of rows nobody meant to ship.
-[ "$ROW_COUNT" -eq 38 ] || {
-  echo "FATAL: the comparator emitted $ROW_COUNT row(s), expected exactly 38" >&2
+# 53 = 18 (Z0-Z17, #510 and #649) + 5 global (#654: Z18-Z22) + 6 x 5 per-lane
+# (#654: Z23-Z52). The reserved gaps the previous change left are now filled in
+# place, so the labels run Z0-Z52 with none left over — and NOTHING was
+# renumbered to get there, which is what keeps the byte-identity of Z0-Z17.
+# A label is a name, not an index.
+[ "$ROW_COUNT" -eq 53 ] || {
+  echo "FATAL: the comparator emitted $ROW_COUNT row(s), expected exactly 53 (Z0-Z52)" >&2
   exit 2
 }
 
