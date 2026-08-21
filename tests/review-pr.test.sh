@@ -5079,6 +5079,349 @@ extra: nope'
   say l2_diverged "${L_DIVERGED# }"
   say l3_mix "$L_ACCEPTED/$L_REJECTED"
 )
+
+# --- M: the two post-fix ORCHESTRATION helpers, EXECUTED (#670) -------------
+# Everything above drives a WRITER. This block drives the two helpers that
+# decide which writer runs, in which order, and what the caller is told
+# afterwards -- review_postfix_prepare_dispatch and review_postfix_publish_sidecar.
+# Before this they appeared in review-fences.sh, review-fleet-args.sh and
+# review-pr.md and in no test at all: R48.1 checks that TWO named fences are
+# defined and neither of these is one of them, so every decision the #655 pass
+# makes was unexecuted.
+#
+# THE PROBE THIS BLOCK EXISTS FOR is m6, which row R48.28 reads. rc 3 is
+# prepare_dispatch's CLEAN sentinel and commands/review-pr.md maps it to
+# `return 0`, so a callee rc 3 handed straight back would end the pass at rc 0
+# having published neither the sidecar nor the dispatch record -- and Step 7 and
+# the trust trail would then read a post-fix pass that never ran as a clean
+# zero-finding review of fixer commits nobody read. m6 makes the scope builder
+# return 3 and requires 74; m7/m8 keep it honest by requiring 2 and 74 to still
+# travel back UNCHANGED, so a mutant that hard-codes 74 on every failure arm
+# cannot satisfy the set.
+#
+# The failure arms are driven through DOUBLES of the callee, in command
+# substitutions, so a redefinition dies with the probe. The doubles stand in for
+# exactly one thing each -- a return code, or the one global the callee's
+# docblock says it binds -- and every helper under test is the shipped one.
+(
+  M_RUN="$R48_TMP/m-run"
+  M_RESEARCH="$R48_TMP/m-research"
+  mkdir -p "$M_RUN" "$M_RESEARCH"
+  REVIEW_FLEET_RUN_DIR="$M_RUN"
+  RESEARCH_DIR_ABS="$M_RESEARCH"
+  PR_NUMBER=670
+  export REVIEW_FLEET_RUN_DIR RESEARCH_DIR_ABS PR_NUMBER
+  M_PHASE="$M_RUN/post-fix-review-phase.txt"
+  M_RANGE="$R48_TMP/m-range.txt"
+  if review_fleet_write_fixer_range "$M_RANGE" "$A_BEFORE" "$A_AFTER"; then
+    say m0_fixture ok
+  else
+    say m0_fixture range-write-failed
+  fi
+  printf 'not-a-range\n' >"$R48_TMP/m-bad-range.txt"
+  printf 'false\n' >"$R48_TMP/m-summ.txt"
+  printf 'maybe\n' >"$R48_TMP/m-summ-bad.txt"
+
+  # -- prepare_dispatch: the two CLEAN short-circuits, rc 3 AND the artifacts --
+  # The off-switch row is driven with the range carrier PRESENT, so only the
+  # `--no-post-fix-review` decision can produce this skip and the row cannot
+  # pass by accidentally taking the no-applied-commit arm below it.
+  printf '0\n' >"$M_PHASE"
+  say m1_off_rc "$(rc_of review_postfix_prepare_dispatch phase1 "$M_RANGE" \
+    "$R48_TMP/m1.sidecar" "$R48_TMP/m1.dispatch" "$R48_TMP/m1.summ" "$R48_TMP/m1.launch")"
+  say m1_off_sidecar "$(cat "$R48_TMP/m1.sidecar" 2>/dev/null)"
+  say m1_off_dispatch "$(cat "$R48_TMP/m1.dispatch" 2>/dev/null)"
+  printf '1\n' >"$M_PHASE"
+  say m2_absent_rc "$(rc_of review_postfix_prepare_dispatch phase2 "$R48_TMP/m-no-carrier" \
+    "$R48_TMP/m2.sidecar" "$R48_TMP/m2.dispatch" "$R48_TMP/m2.summ" "$R48_TMP/m2.launch")"
+  say m2_absent_sidecar "$(cat "$R48_TMP/m2.sidecar" 2>/dev/null)"
+  say m2_absent_dispatch "$(cat "$R48_TMP/m2.dispatch" 2>/dev/null)"
+
+  # -- the FAIL-CLOSED off-switch read: absent and out-of-vocabulary alike ----
+  # Driven with the range carrier ABSENT, which is what makes the row
+  # falsifiable rather than merely true: a fence that defaulted the unknown
+  # flag ON would fall through to the no-applied-commit short-circuit and
+  # answer 3 with a `skipped` sidecar on disk. Driven with the carrier present
+  # instead, a defaulted-ON fence would go on to fail in the scope builder and
+  # answer 74 all the same -- the same number, one gate further down, and a
+  # row that cannot tell those apart is not testing this gate.
+  rm -f "$M_PHASE"
+  say m3_no_flag_rc "$(rc_of review_postfix_prepare_dispatch phase1 "$R48_TMP/m-no-carrier" \
+    "$R48_TMP/m3.sidecar" "$R48_TMP/m3.dispatch" "$R48_TMP/m3.summ" "$R48_TMP/m3.launch")"
+  if [ -e "$R48_TMP/m3.sidecar" ]; then say m3_no_flag_sidecar wrote; else say m3_no_flag_sidecar none; fi
+  if [ -e "$R48_TMP/m3.dispatch" ]; then say m3_no_flag_dispatch wrote; else say m3_no_flag_dispatch none; fi
+  printf 'yes\n' >"$M_PHASE"
+  say m4_vocab_rc "$(rc_of review_postfix_prepare_dispatch phase1 "$R48_TMP/m-no-carrier" \
+    "$R48_TMP/m4.sidecar" "$R48_TMP/m4.dispatch" "$R48_TMP/m4.summ" "$R48_TMP/m4.launch")"
+  if [ -e "$R48_TMP/m4.sidecar" ]; then say m4_vocab_sidecar wrote; else say m4_vocab_sidecar none; fi
+  printf '1\n' >"$M_PHASE"
+
+  # -- present-but-unreadable is the OPPOSITE answer from absent --------------
+  # Same hazard, same remedy as the gates in the publishing fence below: a
+  # deleted range gate lands on the scope builder's own 74, so the refusal has
+  # to name itself.
+  review_postfix_prepare_dispatch phase1 "$R48_TMP/m-bad-range.txt" \
+    "$R48_TMP/m5.sidecar" "$R48_TMP/m5.dispatch" "$R48_TMP/m5.summ" "$R48_TMP/m5.launch" \
+    >/dev/null 2>"$R48_TMP/m5.err"
+  say m5_range_rc "$?"
+  if grep -Fq 'postfix_range_unreadable' "$R48_TMP/m5.err" 2>/dev/null; then
+    say m5_range_gate range_unreadable
+  elif grep -Fq 'post-fix review scope' "$R48_TMP/m5.err" 2>/dev/null; then
+    say m5_range_gate scope
+  else
+    say m5_range_gate other
+  fi
+  if [ -e "$R48_TMP/m5.sidecar" ]; then say m5_range_sidecar wrote; else say m5_range_sidecar none; fi
+
+  # -- THE SENTINEL-COLLAPSE GUARD, and the pass-through it must not eat ------
+  say m6_sentinel_rc "$(
+    review_build_postfix_scope() { return 3; }
+    review_postfix_prepare_dispatch phase1 "$M_RANGE" \
+      "$R48_TMP/m6.sidecar" "$R48_TMP/m6.dispatch" "$R48_TMP/m6.summ" "$R48_TMP/m6.launch" >/dev/null 2>&1
+    printf '%s' "$?"
+  )"
+  if [ -e "$R48_TMP/m6.sidecar" ]; then say m6_sentinel_sidecar wrote; else say m6_sentinel_sidecar none; fi
+  if [ -e "$R48_TMP/m6.dispatch" ]; then say m6_sentinel_dispatch wrote; else say m6_sentinel_dispatch none; fi
+  say m7_scope_two_rc "$(
+    review_build_postfix_scope() { return 2; }
+    review_postfix_prepare_dispatch phase1 "$M_RANGE" \
+      "$R48_TMP/m7.sidecar" "$R48_TMP/m7.dispatch" "$R48_TMP/m7.summ" "$R48_TMP/m7.launch" >/dev/null 2>&1
+    printf '%s' "$?"
+  )"
+  say m8_scope_halt_rc "$(
+    review_build_postfix_scope() { return 74; }
+    review_postfix_prepare_dispatch phase1 "$M_RANGE" \
+      "$R48_TMP/m8.sidecar" "$R48_TMP/m8.dispatch" "$R48_TMP/m8.summ" "$R48_TMP/m8.launch" >/dev/null 2>&1
+    printf '%s' "$?"
+  )"
+
+  # -- the summarisation flag: reported, gated, and forwarded to disk ---------
+  say m9_summ_vocab_rc "$(
+    review_build_postfix_scope() { REVIEW_POSTFIX_DIFF_SUMMARISED=maybe; return 0; }
+    review_postfix_prepare_dispatch phase1 "$M_RANGE" \
+      "$R48_TMP/m9.sidecar" "$R48_TMP/m9.dispatch" "$R48_TMP/m9.summ" "$R48_TMP/m9.launch" >/dev/null 2>&1
+    printf '%s' "$?"
+  )"
+  say m10_summ_empty_rc "$(
+    review_build_postfix_scope() { REVIEW_POSTFIX_DIFF_SUMMARISED=; return 0; }
+    review_postfix_prepare_dispatch phase1 "$M_RANGE" \
+      "$R48_TMP/m10.sidecar" "$R48_TMP/m10.dispatch" "$R48_TMP/m10.summ" "$R48_TMP/m10.launch" >/dev/null 2>&1
+    printf '%s' "$?"
+  )"
+  if [ -e "$R48_TMP/m9.summ" ]; then say m9_summ_file wrote; else say m9_summ_file none; fi
+  # The PR identity is refused, not defaulted -- and by then the flag the
+  # publishing fence (a different process) needs has already reached disk.
+  say m11_no_pr_rc "$(
+    unset PR_NUMBER
+    review_build_postfix_scope() { REVIEW_POSTFIX_DIFF_SUMMARISED=true; return 0; }
+    review_postfix_prepare_dispatch phase1 "$M_RANGE" \
+      "$R48_TMP/m11.sidecar" "$R48_TMP/m11.dispatch" "$R48_TMP/m11.summ" "$R48_TMP/m11.launch" >/dev/null 2>&1
+    printf '%s' "$?"
+  )"
+  say m11_summ_recorded "$(cat "$R48_TMP/m11.summ" 2>/dev/null)"
+  say m12_prepare_arity_rc "$(rc_of review_postfix_prepare_dispatch phase1 "$M_RANGE")"
+
+  # -- publish_sidecar: the dispatch record decides whether this fence acts ---
+  review_fleet_write_postfix_dispatch "$R48_TMP/m-disp0.txt" 0
+  review_fleet_write_postfix_dispatch "$R48_TMP/m-disp1.txt" 1
+  printf 'yes\n' >"$R48_TMP/m-disp-bad.txt"
+  # A launch sidecar this fence CAN read, pointing at a child directory that
+  # does not exist. It is what keeps the gate rows below honest: every gate in
+  # this fence answers 74, so a probe whose launch sidecar is also missing would
+  # still report 74 with the gate under test deleted -- it would merely have
+  # halted one line further down. With a readable sidecar the run gets all the
+  # way to a published `blocked` sidecar at rc 0, so removing any single gate
+  # changes the answer.
+  printf '{"binding":{"schema_version":1,"backend":"workflow","edge_id":"review_pr.postfix.correctness","instance_id":"postfix-correctness-phase1-iter41","run_nonce":"%s","result_path":"%s","status_path":"%s","workspace_mode":"caller","worktree":"%s","branch":""},"child_dir":"%s","instance":"postfix-correctness-phase1-iter41","head_before":""}\n' \
+    "$(printf '0%.0s' {1..64})" "$R48_TMP/m-nochild/result.md" "$R48_TMP/m-nochild/status.json" \
+    "$REPO" "$R48_TMP/m-nochild" >"$R48_TMP/m-hand.launch.json"
+  # WHICH gate refused, read off the refusal itself. rc cannot tell them apart --
+  # they are all 74 -- and a deleted gate whose successor also answers 74 would
+  # leave an rc-only row green.
+  m_gate() {
+    if grep -Fq 'scope summarisation flag' "$1" 2>/dev/null; then printf 'summarised'
+    elif grep -Fq 'launch sidecar missing' "$1" 2>/dev/null; then printf 'launch'
+    elif grep -Fq 'fixer commit range' "$1" 2>/dev/null; then printf 'range'
+    else printf 'other'; fi
+  }
+  REVIEW_ITERATION=40
+  say m13_zero_rc "$(rc_of review_postfix_publish_sidecar phase1 "$M_RANGE" \
+    "$R48_TMP/m13.sidecar" "$R48_TMP/m-disp0.txt" "$R48_TMP/m-summ.txt" "$R48_TMP/m-hand.launch.json")"
+  if [ -e "$R48_TMP/m13.sidecar" ]; then say m13_zero_sidecar wrote; else say m13_zero_sidecar none; fi
+  say m14_no_dispatch_rc "$(rc_of review_postfix_publish_sidecar phase1 "$M_RANGE" \
+    "$R48_TMP/m14.sidecar" "$R48_TMP/m-no-dispatch.txt" "$R48_TMP/m-summ.txt" "$R48_TMP/m-hand.launch.json")"
+  if [ -e "$R48_TMP/m14.sidecar" ]; then say m14_no_dispatch_sidecar wrote; else say m14_no_dispatch_sidecar none; fi
+  say m15_bad_dispatch_rc "$(rc_of review_postfix_publish_sidecar phase1 "$M_RANGE" \
+    "$R48_TMP/m15.sidecar" "$R48_TMP/m-disp-bad.txt" "$R48_TMP/m-summ.txt" "$R48_TMP/m-hand.launch.json")"
+  review_postfix_publish_sidecar phase1 "$R48_TMP/m-bad-range.txt" \
+    "$R48_TMP/m16.sidecar" "$R48_TMP/m-disp1.txt" "$R48_TMP/m-summ.txt" "$R48_TMP/m-hand.launch.json" \
+    >/dev/null 2>"$R48_TMP/m16.err"
+  say m16_range_rc "$?"
+  say m16_range_gate "$(m_gate "$R48_TMP/m16.err")"
+  review_postfix_publish_sidecar phase1 "$M_RANGE" \
+    "$R48_TMP/m17.sidecar" "$R48_TMP/m-disp1.txt" "$R48_TMP/m-summ-bad.txt" "$R48_TMP/m-hand.launch.json" \
+    >/dev/null 2>"$R48_TMP/m17.err"
+  say m17_summ_vocab_rc "$?"
+  say m17_summ_vocab_gate "$(m_gate "$R48_TMP/m17.err")"
+  review_postfix_publish_sidecar phase1 "$M_RANGE" \
+    "$R48_TMP/m18.sidecar" "$R48_TMP/m-disp1.txt" "$R48_TMP/m-no-summ.txt" "$R48_TMP/m-hand.launch.json" \
+    >/dev/null 2>"$R48_TMP/m18.err"
+  say m18_summ_absent_rc "$?"
+  say m18_summ_absent_gate "$(m_gate "$R48_TMP/m18.err")"
+  review_postfix_publish_sidecar phase1 "$M_RANGE" \
+    "$R48_TMP/m19.sidecar" "$R48_TMP/m-disp1.txt" "$R48_TMP/m-summ.txt" "$R48_TMP/m19.launch" \
+    >/dev/null 2>"$R48_TMP/m19.err"
+  say m19_launch_absent_rc "$?"
+  say m19_launch_absent_gate "$(m_gate "$R48_TMP/m19.err")"
+  M_GATE_RESIDUE=none
+  for m_leftover in "$R48_TMP/m16.sidecar" "$R48_TMP/m17.sidecar" "$R48_TMP/m18.sidecar" "$R48_TMP/m19.sidecar"; do
+    [ -e "$m_leftover" ] && M_GATE_RESIDUE="published"
+  done
+  say m19_gate_residue "$M_GATE_RESIDUE"
+  say m20_publish_arity_rc "$(rc_of review_postfix_publish_sidecar phase1 "$M_RANGE")"
+
+  # -- FAIL SOFT: a child that never arrived is `blocked`, at rc 0, in writing.
+  # Same hand-built launch sidecar, so `capture-bound-child` refuses whatever
+  # else the platform can or cannot do. This is the one arm that must NOT halt:
+  # a post-fix reviewer that produced silence is recorded as silence, never
+  # rendered as a clean zero-finding pass.
+  REVIEW_ITERATION=41
+  say m21_softfail_rc "$(rc_of review_postfix_publish_sidecar phase1 "$M_RANGE" \
+    "$R48_TMP/m21.sidecar" "$R48_TMP/m-disp1.txt" "$R48_TMP/m-summ.txt" "$R48_TMP/m-hand.launch.json")"
+  say m21_softfail_sidecar "$(cat "$R48_TMP/m21.sidecar" 2>/dev/null)"
+  say m_want_blocked_sidecar "{\"schema_version\":1,\"phase\":\"phase1\",\"status\":\"blocked\",\"reason\":\"child-unavailable\",\"commit_range\":\"$A_BEFORE..$A_AFTER\",\"diff_summarised\":false,\"findings_count\":0,\"by_severity\":{\"blocker\":0,\"suggestion\":0}}"
+
+  # -- the arms BEHIND a proven child ----------------------------------------
+  # Reaching them needs a real bound child: a minted binding whose status.json
+  # echoes this run's nonce, so `capture-bound-child` freezes it and the pass
+  # stays `ran`. That round trip is the one thing here that is NOT proven
+  # portable -- .github/workflows/test.yml skips review-pr-workflow.test.sh and
+  # code-fixer-contract.test.sh on windows-latest for exactly this reason
+  # (the contract CLI over `mktemp -d` paths Git Bash hands python.exe). So the
+  # fixture REPORTS whether it stood up and the parent skips these rows rather
+  # than inventing a second, weaker capture that would pass everywhere and
+  # prove less. Everything above runs on both jobs.
+  m_bound_child() {
+    local iter="$1"
+    # `status_file`, never `status`: zsh ties `status` to `$?`, so a `local
+    # status` inside a function is the shape tests/crossplatform-shell-wrappers.test.sh
+    # exists to keep out. Same rule as `path`.
+    local launch binding result_file status_file nonce worktree
+    launch="$R48_TMP/m-launch-$iter.json"
+    review_fleet_bind_postfix "$M_RUN" "$iter" phase1 "$REPO" "$CODE_FIXER_CONTRACT" "$launch" >/dev/null 2>&1 || return 2
+    binding="$(review_fleet_read_sidecar "$launch" binding 2>/dev/null)" || return 2
+    result_file="$(printf '%s' "$binding" | jq -er .result_path)" || return 2
+    status_file="$(printf '%s' "$binding" | jq -er .status_path)" || return 2
+    nonce="$(printf '%s' "$binding" | jq -er .run_nonce)" || return 2
+    worktree="$(printf '%s' "$binding" | jq -er .worktree)" || return 2
+    # One blocker and one suggestion, so the counters the sidecar renders are
+    # two different non-zero numbers and a writer that returned the same value
+    # twice could not satisfy the row.
+    printf '```yaml\nverdict: REVISIONS_REQUIRED\nfindings:\n  - severity: blocker\n    location: lib/foo.sh:12\n    summary: bounded summary\n    detail: bounded detail\n  - severity: suggestion\n    location: lib/bar.sh:40\n    summary: bounded summary\n    detail: bounded detail\nconfidence: high\n```\n' >"$result_file" || return 2
+    # The result is written BEFORE the status, which is the ordering
+    # boundChildProtocol mandates and capture-bound-child re-derives (#645).
+    printf '{"backend":"workflow","state":"completed","exit_code":0,\n "run_nonce":"%s",\n "workspace_mode":"%s",\n "worktree":"%s",\n "branch":"%s",\n "result":"%s"}\n' \
+      "$nonce" caller "$worktree" "" "$result_file" >"$status_file" || return 2
+    python3 -I -B "$CODE_FIXER_CONTRACT" capture-bound-child \
+      --edge-id "$(printf '%s' "$binding" | jq -er .edge_id)" \
+      --launch-binding-json "$binding" >/dev/null 2>&1 || return 2
+    printf '%s' "$launch"
+  }
+  # EVERY child is counted, not just the first. Four of the rows below expect
+  # 74, and an empty launch path answers 74 too -- so a fixture that stood up
+  # for child 50 and fell over for child 53 would leave those rows passing for
+  # the wrong reason. m30_children is what makes them read the arm they name.
+  M_CHILDREN=0
+  M_L50="$(m_bound_child 50)"
+  [ -n "$M_L50" ] && M_CHILDREN=$((M_CHILDREN + 1))
+  if [ -n "$M_L50" ]; then say m30_bound ok; else say m30_bound unavailable; fi
+
+  if [ -n "$M_L50" ]; then
+    # The whole pass, end to end, with every callee the real one.
+    REVIEW_ITERATION=50
+    say m31_ran_rc "$(rc_of review_postfix_publish_sidecar phase1 "$M_RANGE" \
+      "$R48_TMP/m31.sidecar" "$R48_TMP/m-disp1.txt" "$R48_TMP/m-summ.txt" "$M_L50")"
+    say m31_ran_sidecar "$(cat "$R48_TMP/m31.sidecar" 2>/dev/null)"
+    say m_want_ran_sidecar "{\"schema_version\":1,\"phase\":\"phase1\",\"status\":\"ran\",\"reason\":null,\"commit_range\":\"$A_BEFORE..$A_AFTER\",\"diff_summarised\":false,\"findings_count\":2,\"by_severity\":{\"blocker\":1,\"suggestion\":1}}"
+
+    # HALT: the aggregate cannot reach disk. Driven with the REAL writer, by
+    # pre-creating the artifact it opens exclusively -- the same rc-74 arm
+    # R48.11 pins from the writer's side, now read from the caller's.
+    M_L51="$(m_bound_child 51)"
+    [ -n "$M_L51" ] && M_CHILDREN=$((M_CHILDREN + 1))
+    REVIEW_ITERATION=51
+    : >"$M_RESEARCH/postfix-phase1-iter51.md"
+    say m32_sink_rc "$(rc_of review_postfix_publish_sidecar phase1 "$M_RANGE" \
+      "$R48_TMP/m32.sidecar" "$R48_TMP/m-disp1.txt" "$R48_TMP/m-summ.txt" "$M_L51")"
+    if [ -e "$R48_TMP/m32.sidecar" ]; then say m32_sink_sidecar wrote; else say m32_sink_sidecar none; fi
+
+    # ADVISORY: rc 2 means the child's result is malformed, which lands
+    # `blocked` and CONTINUES. The double returns the one rc that arm reads.
+    M_L52="$(m_bound_child 52)"
+    [ -n "$M_L52" ] && M_CHILDREN=$((M_CHILDREN + 1))
+    say m33_advisory_rc "$(
+      REVIEW_ITERATION=52
+      review_write_postfix_aggregate() { return 2; }
+      review_postfix_publish_sidecar phase1 "$M_RANGE" \
+        "$R48_TMP/m33.sidecar" "$R48_TMP/m-disp1.txt" "$R48_TMP/m-summ.txt" "$M_L52" >/dev/null 2>&1
+      printf '%s' "$?"
+    )"
+    say m33_advisory_sidecar "$(cat "$R48_TMP/m33.sidecar" 2>/dev/null)"
+
+    # The counter-sum invariant: a projection whose parts do not add up is
+    # refused rather than published.
+    M_L53="$(m_bound_child 53)"
+    [ -n "$M_L53" ] && M_CHILDREN=$((M_CHILDREN + 1))
+    say m34_sum_rc "$(
+      REVIEW_ITERATION=53
+      review_write_postfix_aggregate() { printf '{"by_severity":{"blocker":1,"suggestion":1},"findings_count":5}'; return 0; }
+      review_postfix_publish_sidecar phase1 "$M_RANGE" \
+        "$R48_TMP/m34.sidecar" "$R48_TMP/m-disp1.txt" "$R48_TMP/m-summ.txt" "$M_L53" >/dev/null 2>&1
+      printf '%s' "$?"
+    )"
+    if [ -e "$R48_TMP/m34.sidecar" ]; then say m34_sum_sidecar wrote; else say m34_sum_sidecar none; fi
+
+    # THE TAGGED UNION. Only two pairings are reachable through today's
+    # callees, so the contradictory ones are produced the only way a real
+    # regression could produce them: a callee that runs IN THIS FRAME and
+    # writes one half of the pair. `uberdev_child_validate_phase1_review_result`
+    # is called bare inside an `if`, not in a command substitution, so a double
+    # standing in for it assigns the caller's own `local` -- which is exactly
+    # the shape a future arm that sets a status without its reason would have.
+    # m37 is the control: the same double, forging nothing, still publishes.
+    M_L54="$(m_bound_child 54)"
+    [ -n "$M_L54" ] && M_CHILDREN=$((M_CHILDREN + 1))
+    say m35_union_reason_rc "$(
+      REVIEW_ITERATION=54
+      uberdev_child_validate_phase1_review_result() { POSTFIX_REASON=child-unavailable; return 0; }
+      review_postfix_publish_sidecar phase1 "$M_RANGE" \
+        "$R48_TMP/m35.sidecar" "$R48_TMP/m-disp1.txt" "$R48_TMP/m-summ.txt" "$M_L54" >/dev/null 2>&1
+      printf '%s' "$?"
+    )"
+    if [ -e "$R48_TMP/m35.sidecar" ]; then say m35_union_reason_sidecar wrote; else say m35_union_reason_sidecar none; fi
+    M_L55="$(m_bound_child 55)"
+    [ -n "$M_L55" ] && M_CHILDREN=$((M_CHILDREN + 1))
+    say m36_union_status_rc "$(
+      REVIEW_ITERATION=55
+      uberdev_child_validate_phase1_review_result() { POSTFIX_STATUS=blocked; return 0; }
+      review_postfix_publish_sidecar phase1 "$M_RANGE" \
+        "$R48_TMP/m36.sidecar" "$R48_TMP/m-disp1.txt" "$R48_TMP/m-summ.txt" "$M_L55" >/dev/null 2>&1
+      printf '%s' "$?"
+    )"
+    if [ -e "$R48_TMP/m36.sidecar" ]; then say m36_union_status_sidecar wrote; else say m36_union_status_sidecar none; fi
+    M_L56="$(m_bound_child 56)"
+    [ -n "$M_L56" ] && M_CHILDREN=$((M_CHILDREN + 1))
+    say m37_control_rc "$(
+      REVIEW_ITERATION=56
+      uberdev_child_validate_phase1_review_result() { return 0; }
+      review_postfix_publish_sidecar phase1 "$M_RANGE" \
+        "$R48_TMP/m37.sidecar" "$R48_TMP/m-disp1.txt" "$R48_TMP/m-summ.txt" "$M_L56" >/dev/null 2>&1
+      printf '%s' "$?"
+    )"
+    say m37_control_sidecar "$(cat "$R48_TMP/m37.sidecar" 2>/dev/null)"
+    say m30_children "$M_CHILDREN"
+  fi
+)
 exit 0
 R48_DRIVE
 R48_TMP="$R48_TMP" UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
@@ -5265,6 +5608,121 @@ r48 "R48.22 — bind_postfix refuses an unknown phase, a relative run dir and an
 # here would be a vacuous green, not a portability allowance.
 r48 "R48.23 — the transcribed reviewer grammar and the canonical boundary are held together by EXECUTION over one corpus, not by a comment" \
   l0_canonical=loaded l1_agree=16/16 'l2_diverged=' l3_mix=4/12
+
+# --- the two post-fix ORCHESTRATION helpers (#670) ---------------------------
+# R48.2-R48.23 drive the writers. These rows drive the two helpers that decide
+# WHICH writer runs and what the caller is told afterwards. Both were executed
+# by no test before this, so every decision the #655 pass makes -- the rc-3
+# clean sentinel, the fail-closed off-switch read, the absent-versus-unreadable
+# carrier split, the tagged union, the counter-sum invariant and the
+# advisory/halt split on the aggregate -- was unverified.
+
+# rc 3 is the sentinel that tells the caller "already published, stop WITHOUT
+# emitting", so the sidecar and the dispatch record have to be on disk by the
+# time it is returned. rc alone would pass against a helper that returned 3 and
+# wrote nothing, which is the failure the caller cannot see.
+r48 "R48.24 — the --no-post-fix-review off switch short-circuits rc 3, with the skipped sidecar and the zero-dispatch record already written" \
+  m0_fixture=ok m1_off_rc=3 m1_off_dispatch=0 \
+  'm1_off_sidecar={"schema_version":1,"phase":"phase1","status":"skipped","reason":"off-switch","commit_range":null,"diff_summarised":false,"findings_count":0,"by_severity":{"blocker":0,"suggestion":0}}'
+# Driven on phase2, so the phase really is an argument rather than the literal
+# each of the two copies #672 collapsed used to carry.
+r48 "R48.25 — an absent fixer-range carrier short-circuits rc 3 the same way, and says WHY it skipped" \
+  m2_absent_rc=3 m2_absent_dispatch=0 \
+  'm2_absent_sidecar={"schema_version":1,"phase":"phase2","status":"skipped","reason":"no-applied-commit","commit_range":null,"diff_summarised":false,"findings_count":0,"by_severity":{"blocker":0,"suggestion":0}}'
+# "the flag was absent" and "this fence cannot tell" are different answers and
+# only the first may reach a dispatching arm (#418). Both spellings of the
+# second one halt, and neither publishes a sidecar that would let Step 7 render
+# the pass as a clean skip.
+r48 "R48.26 — an unreadable or out-of-vocabulary off-switch record halts 74 rather than defaulting the pass ON" \
+  m3_no_flag_rc=74 m3_no_flag_sidecar=none m3_no_flag_dispatch=none \
+  m4_vocab_rc=74 m4_vocab_sidecar=none
+r48 "R48.27 — a carrier that EXISTS but does not parse halts 74 at its own gate, the opposite answer from an absent one" \
+  m5_range_rc=74 m5_range_gate=range_unreadable m5_range_sidecar=none
+# THE ROW THE #670 REVIEW ASKED FOR. rc 3 from the scope builder must arrive at
+# the caller as 74: commands/review-pr.md maps 3 to `return 0`, so a scope
+# failure handed back unchanged would end the pass at rc 0 having published
+# neither artifact, and Step 7 plus the trust trail would read that as a clean
+# zero-finding review of fixer commits nobody read. m7/m8 are what stop the
+# guard from being satisfied by a mutant that answers 74 to everything.
+r48 "R48.28 — a callee rc 3 is COLLAPSED onto 74 so the clean sentinel is unforgeable, while 2 and 74 travel back unchanged" \
+  m6_sentinel_rc=74 m7_scope_two_rc=2 m8_scope_halt_rc=74
+r48 "R48.29 — and a scope failure publishes neither the sidecar nor the dispatch record" \
+  m6_sentinel_sidecar=none m6_sentinel_dispatch=none
+# The flag is REPORTED, not swallowed: a GREEN run whose post-fix pass read a
+# per-file summary instead of the diff has to be able to say so, and the fence
+# that publishes the sidecar is a different process, so it travels on disk.
+r48 "R48.30 — a scope builder that returns no usable summarisation flag halts 74 and forwards nothing" \
+  m9_summ_vocab_rc=74 m10_summ_empty_rc=74 m9_summ_file=none
+r48 "R48.31 — a post-fix pass that cannot name its PR is refused 2, after the summarisation flag has reached disk for the publishing fence" \
+  m11_no_pr_rc=2 m11_summ_recorded=true
+r48 "R48.32 — both helpers refuse a wrong-arity call before touching anything" \
+  m12_prepare_arity_rc=2 m20_publish_arity_rc=2
+
+# The publishing fence is a fresh shell, so every fact it needs comes off disk
+# and every unreadable one is a halt. `0` is the ONE value that means "a
+# short-circuit already published this phase's sidecar"; absent and malformed
+# are not read as `0`.
+r48 "R48.33 — a zero-dispatch record stops the publishing fence at rc 0 without republishing the short-circuit's sidecar" \
+  m13_zero_rc=0 m13_zero_sidecar=none
+r48 "R48.34 — an absent or malformed dispatch record halts 74 instead of being read as zero-dispatch" \
+  m14_no_dispatch_rc=74 m14_no_dispatch_sidecar=none m15_bad_dispatch_rc=74
+# Each probe is otherwise a run that WOULD complete, so a deleted gate changes
+# the answer instead of merely halting one line later -- and the refusal names
+# WHICH gate fired, because rc alone cannot tell four 74s apart.
+r48 "R48.35 — an unreadable range, summarisation flag or launch sidecar each halt 74, at the gate that owns them, publishing nothing" \
+  m16_range_rc=74 m16_range_gate=range m17_summ_vocab_rc=74 m17_summ_vocab_gate=summarised \
+  m18_summ_absent_rc=74 m18_summ_absent_gate=summarised \
+  m19_launch_absent_rc=74 m19_launch_absent_gate=launch m19_gate_residue=none
+# FAIL SOFT, and say so: a post-fix reviewer that produced silence is recorded
+# as silence at rc 0. This is the arm that must NOT halt -- and must not render
+# as a clean zero-finding pass either.
+r48 "R48.36 — a child that never arrived is recorded BLOCKED at rc 0, never as a clean pass" m21_softfail_rc=0
+r48_same "R48.36b — and the sidecar names the state, with the reviewed range intact" \
+  m21_softfail_sidecar m_want_blocked_sidecar
+
+R48_BOUND="$(sed -n 's/^m30_bound=//p' "$R48_REPORT")"
+if [ "$R48_BOUND" = ok ]; then
+  # Every callee real: capture-bound-child freezes the child, the canonical
+  # reviewer boundary admits its bytes, the captured digest is re-proved and the
+  # aggregate writer transcribes two findings of two different severities.
+  r48 "R48.37 — all seven bound children stood up, and a proven child publishes a RAN sidecar at rc 0" \
+    m30_children=7 m31_ran_rc=0
+  r48_same "R48.37b — carrying the transcribed per-severity counters and the range that was reviewed" \
+    m31_ran_sidecar m_want_ran_sidecar
+  # rc 2 and anything else are two different instructions, so they are asserted
+  # apart: a finding that reached no sink is a swallowed error and halts, while
+  # a malformed child result is advisory and continues.
+  r48 "R48.38 — an aggregate that cannot reach disk halts 74 and publishes no sidecar" \
+    m32_sink_rc=74 m32_sink_sidecar=none
+  r48 "R48.39 — an aggregate rc 2 is ADVISORY: the pass continues at rc 0 and lands BLOCKED" m33_advisory_rc=0
+  r48_same "R48.39b — with the same blocked sidecar the unavailable-child arm publishes" \
+    m33_advisory_sidecar m_want_blocked_sidecar
+  r48 "R48.40 — counters that do not add up are refused 74 rather than published" \
+    m34_sum_rc=74 m34_sum_sidecar=none
+  # Exactly two status/reason pairings are interpretable downstream, where the
+  # whole value of `blocked` is telling silence apart from cleanliness. m37 is
+  # the control: the same double, forging neither half, still publishes -- so
+  # m35/m36 red on the union arm and not on the stubbing.
+  r48 "R48.41 — a RAN status carrying a reason, and a BLOCKED status carrying none, are both refused 74 unpublished" \
+    m35_union_reason_rc=74 m35_union_reason_sidecar=none \
+    m36_union_status_rc=74 m36_union_status_sidecar=none
+  r48 "R48.41b — control: the same double forging neither half still publishes the RAN sidecar" m37_control_rc=0
+  r48_same "R48.41c — and that sidecar is the ordinary one" m37_control_sidecar m_want_ran_sidecar
+elif [ "$R48_BOUND" = unavailable ]; then
+  # The bound-child round trip is the one thing here that is not proven
+  # portable: test.yml skips review-pr-workflow.test.sh and
+  # code-fixer-contract.test.sh on windows-latest for the same reason. Skipping
+  # is honest; a second, weaker capture that passed everywhere would prove less.
+  echo "  SKIP  R48.37-R48.41 (post-child arms): the bound-child fixture did not stand up on this platform"
+else
+  # NOT a third skip. The driver reports `ok` or `unavailable` on every path it
+  # can reach, so a key that is neither is a driver that died before it got
+  # here -- and silently skipping six rows on that reading is exactly the
+  # vacuous green the skip above is allowed to be honest about.
+  echo "  FAIL  R48.37-R48.41 (post-child arms): the driver reported no bound-child fixture verdict"
+  echo "        m30_bound='${R48_BOUND:-<absent>}'"
+  FAIL=$((FAIL + 1))
+fi
 rm -rf "$R48_TMP"
 
 echo
