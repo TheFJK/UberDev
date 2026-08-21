@@ -298,18 +298,45 @@ returned.
    Say so in the brief; `agents/plan-reviewer.md` documents that fork by lane.
    The plan is **never rewritten** — this lane has no plan reviser — so its
    blocking findings ARE its output: forward them, in an untrusted-input
-   envelope, to **all three** rungs that read the plan — the implementer, the
-   task reviewer and the fixer.
-   A finding reaching only the implementer would have the task reviewer report a
-   correct deviation as scope creep.
+   envelope, to the **two** rungs that write code — the Phase 4b implementer and
+   the Phase 5 fixer.
+
+   **Not the task reviewer, and do not invent a channel to it.**
+   `agents/spec-compliance-reviewer.md` requires exactly five keys and says in
+   as many words that no lane adds a sixth; Phase 5 holds to that. No key is
+   left to carry a findings path — and widening `allowed_paths` past the plan's
+   `Owns` to smuggle one through is not a way round that: `allowed_paths` is how
+   the reviewer measures the commit against the plan, so a set you widened stops
+   measuring anything.
+
+   **So say what that costs.** The task reviewer measures the commit against
+   `plan_path` and `allowed_paths` alone. A deviation the plan review *mandated*
+   — a task's `Owns` list the plan got wrong, say — therefore reads to it as
+   extra scope, and it will report it as such. Expect that; it is not evidence
+   the implementer misbehaved, and it costs one `fix_rounds` round against TB4
+   on a change that was correct. The fixer is the only rung holding both
+   documents, which is why Phase 5 hands it both paths: it is the rung that can
+   tell a mandated deviation from real scope creep. You cannot see which it was
+   — you never read findings — so take the signal you can see: a fix round
+   returning `NO_CHANGES` on a task whose plan review had blocking findings.
+   Audit `task_review_scope_from_plan_finding` there and name it in Phase 7, so
+   fix budget spent on correct work is reported as that, and not as a defect the
+   run found.
 
 **Degradation, stated at the rung.** A `BLOCKED` return from `design-planner`,
-or a `plan.md` that `plan-tasks` cannot parse into at least one waved, owned
-task, takes that issue off the design path: audit it and route it to the Phase
-1c single solver if a solver can still be useful, otherwise record it `FAILED`
-and carry it to Phase 7. It is stated here, at the rung, because there is no
-upstream design-review gate left to catch a wrong design before a plan is built
-on it — plan review is the only design gate this lane has.
+or a `plan.md` whose `plan-tasks` parse comes back with a non-empty `unwaved` or
+`unowned`, takes that issue off the design path: audit it and route it to the
+Phase 1c single solver if a solver can still be useful, otherwise record it
+`FAILED` and carry it to Phase 7. It is stated here, at the rung, because there
+is no upstream design-review gate left to catch a wrong design before a plan is
+built on it — plan review is the only design gate this lane has.
+
+That predicate is Phase 4's, word for word, and deliberately so. It is stricter
+than "at least one waved, owned task", and the whole difference is the mixed
+plan: four good tasks and one unowned. Phase 4 carries the rc handling, so it
+decides that case operationally whatever this rung says — a Phase 3 that let the
+issue through would only have it bounce out one phase later, after the design
+path had already been paid for.
 
 ---
 
@@ -466,8 +493,12 @@ bash "$LIB" round-permitted --loop fix_rounds --round <next>
 ```
 
 - rc 0 — dispatch an `uberdev:implementation-worker` fix round with the report
-  path. Fixers do not run git either; you `stage-commit` their reported paths
-  (amend or fix-up commit, your call — record which in the report).
+  path **and** the plan reviewer's findings path — the same path Phase 4b gave
+  the implementer. The fixer is the only rung that holds both, and Phase 3 says
+  why it must: the task reviewer cannot be told what the plan review mandated,
+  so a finding of extra scope may be describing a correct change. Fixers do not
+  run git either; you `stage-commit` their reported paths (amend or fix-up
+  commit, your call — record which in the report).
 - rc 3 — cap exhausted: audit `task_fix_rounds_exhausted`, mark the task
   BLOCKED, and move on. Committed work stays committed.
 

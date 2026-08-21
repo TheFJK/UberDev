@@ -187,16 +187,14 @@ echo "== TX11b: the skill still names a full agent roster =="
 # NARROWED by #628. The RESOLUTION half — does every named agentType exist in
 # agents/ — moved to tests/epipe-guard.test.sh L10, together with the
 # `turbox-fleet` special case (a name resolving to skills/<name>/SKILL.md is
-# skipped there for any skill, not just this one). The extractor below required
-# BACKTICK delimiters and so was blind to the operative
-# `subagent_type: uberdev:<agent>` spelling; L10 reads both shapes across the
-# whole shipped corpus and measured 21 of 21 dispatch sites that this extractor
-# cannot see.
+# skipped there for any skill, not just this one).
 #
 # What stays is the half L10 cannot express: a FLOOR on how many agent types
-# THIS skill names. L10 answers "does every name resolve"; it cannot notice a
-# phase quietly losing its agent, because a shorter roster still resolves
-# perfectly. Derived from the skill, so a new agent needs no edit here.
+# THIS skill names, and membership in both directions. L10 answers "does every
+# name resolve"; it cannot notice a phase quietly LOSING its agent, because a
+# shorter roster still resolves perfectly, and it cannot notice a phase GAINING
+# one it should not have, because `spec-writer` resolves perfectly too. Derived
+# from the skill, so a new agent needs no edit here.
 #
 # RETARGETED by #656, which collapsed the design path. The roster went from 12
 # names to 6 when the three always-on research lenses and the three spec rungs
@@ -206,12 +204,39 @@ echo "== TX11b: the skill still names a full agent roster =="
 # with membership rows in BOTH directions: six names that must be there, seven
 # that must not. Together they pin the roster exactly, where the count alone
 # could not tell a lost agent from a swapped one.
-named_agents="$(grep -oE '`uberdev:[a-z0-9-]+`' "$SKILL" | tr -d '`' | sed 's/^uberdev://' | sort -u)"
+#
+# That pairing only holds if the extractor can SEE a dispatch, and until this
+# round it could not: it required BACKTICK delimiters and was blind to the
+# operative `subagent_type: uberdev:<agent>` spelling, which left every
+# membership row below ornamental. MEASURED, not argued: with the backtick-only
+# extractor, rewriting the Phase 3 design rung to dispatch
+# `subagent_type: uberdev:plan-writer`, and separately resurrecting the whole
+# four-rung spec chain in that same spelling, each left this suite at PASS=155
+# FAIL=0. L10.1 does not close it either — it asks only whether a DISPATCHED
+# name resolves in agents/, and `spec-writer` resolves fine. So the extractor
+# reads both shapes now.
+#
+# The two shapes are deliberately the same two tests/epipe-guard.test.sh L10
+# uses (`L10_CITE_RE` / `L10_DISPATCH_RE`), down to matching `subagent_type`
+# with either `:` or `=` after it, because the corpus uses both spellings.
+# Placeholder names (`uberdev:<agent>`) are matched and then dropped rather than
+# counted — the same call L10 makes in `_l10_unresolved`.
+tx_cite_re='`uberdev:[a-z0-9<>_-]+`'
+tx_dispatch_re='subagent_type[[:space:]]*[:=][[:space:]]*["'"'"']?uberdev:[a-z0-9<>_-]+'
+# ONE extractor, TWO readers: the live skill here, and the polarity fixture at
+# the end of this section. A fixture that re-typed this pipeline would be a COPY
+# of it, permanently green through a revert to backticks-only — which is the
+# defect being closed, not a way to re-ship it. Corpus on stdin, one name a line.
+tx_roster() {
+  grep -oE -e "$tx_cite_re" -e "$tx_dispatch_re" \
+    | sed -e 's/.*uberdev://' -e 's/`$//' -e '/[<>]/d' | sort -u
+}
+named_agents="$(tx_roster < "$SKILL")"
 ck "the skill names at least 6 agent types (found: $(printf '%s' "$named_agents" | grep -c .))" \
    "[ \$(printf '%s' \"\$named_agents\" | grep -c .) -ge 6 ]"
 # Membership, positive: the post-collapse roster, one row per name.
 #
-# A HERESTRING, never `printf ... | grep -q`. This file sets pipefail (:27), and
+# A HERESTRING, never `printf ... | grep -q`. This file sets pipefail (:29), and
 # piping into a reader that can exit before its writer's last write is the EPIPE
 # class tests/epipe-guard.test.sh E1 reds on BOTH CI jobs. TX11b's own
 # `printf ... | grep -c .` above is safe because `grep -c` reads to EOF; `-q`
@@ -228,6 +253,27 @@ for agent in plan-writer research-codebase research-constraints \
   ck "the lane no longer dispatches '$agent'" \
      "! grep -qxF '$agent' <<<\"\$named_agents\""
 done
+# Polarity fixture. Every row in this section is worth exactly what the
+# extractor can see, so that is MEASURED here rather than asserted in the prose
+# above — through `tx_roster` itself, never a re-typed copy of it. Revert the
+# extractor to backticks-only and the first row reds; widen it to a bare
+# `uberdev:<name>` and the third does. Herestrings, never `printf ... | grep -q`:
+# this file sets pipefail (:29) and that pipe is the EPIPE class
+# tests/epipe-guard.test.sh E1 reds on BOTH CI jobs.
+tx_fixture='rung one dispatches subagent_type: uberdev:plan-writer
+rung two cites `uberdev:design-planner`
+the report prints `gh issue edit 7 --remove-label uberdev:active`'
+tx_fixture_roster="$(tx_roster <<<"$tx_fixture")"
+ck "the extractor sees a subagent_type: dispatch" \
+   "grep -qxF 'plan-writer' <<<\"\$tx_fixture_roster\""
+ck "the extractor still sees a backticked citation" \
+   "grep -qxF 'design-planner' <<<\"\$tx_fixture_roster\""
+# The other polarity, and not a hypothetical: the skill names the `uberdev:active`
+# LABEL three times, inside longer backticked command spans. It has to stay out
+# of the roster. A needle loose enough to sweep it in would put a non-agent into
+# the floor's count and leave all seven negative rows measuring noise.
+ck "a bare label mention is not counted as an agent" \
+   "! grep -qxF 'active' <<<\"\$tx_fixture_roster\""
 
 echo "== TX12: the parallel-issue cap of 3 has ONE definition =="
 ck "lib defines TURBOX_ISSUE_CAP=3"     "grep -q '^TURBOX_ISSUE_CAP=3' '$LIB'"
@@ -318,6 +364,14 @@ ck "the design rung dispatches design-planner"  "grep -q 'uberdev:design-planner
 # at all, and it passes unchanged against the pre-collapse skill. Only the
 # section-scoped form proves the RUNG is pointed at that path. The awk range
 # reads to EOF, so it is E1-safe, and the needle carries no `$` (ck() evals).
+#
+# The range's END pattern is load-bearing, and it is NOT independent of TX3: it
+# is TX3's `has '## Phase 4 '` row that keeps `/^## Phase 4 /` matchable. If TX3
+# ever reds and someone repairs it by LOOSENING the pattern instead of restoring
+# the heading, this range stops terminating, runs to EOF, swallows Phase 4's own
+# `plan-tasks --plan <runDirAbs>/issue-<N>/plan.md` line, and this row goes
+# silently vacuous again — green while asserting nothing. Repair a red TX3 by
+# restoring the heading, never by relaxing either pattern.
 ck "the design rung writes plan.md in the run dir" \
    "[ \$(awk '/^## Phase 3 /,/^## Phase 4 /' '$SKILL' | grep -c '<runDirAbs>/issue-<N>/plan.md') -ge 1 ]"
 # Both reviewer rungs read the issue body as their requirements document on this
