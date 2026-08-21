@@ -125,14 +125,13 @@ _tbx_cmd_issue_concurrency() {
 #   TB1. Prints the projection; rc 3 when it exceeds --max, so the run aborts
 #   BEFORE any dispatch rather than discovering the ceiling mid-wave.
 #
-#   projected = small + (9 + implementBudget) x design
-#     9 = 4 research lenses + spec-writer + spec-reviewer + spec-reviser
-#         + plan-writer + plan-reviewer
-#   Pessimistic on the two conditional rungs (the revision round, the
-#   risk-gated security lens): neither is knowable at projection time, and a
-#   projection that guesses low is a ceiling that does not hold.
+#   projected = small + (3 + implementBudget) x design
+#     3 = risk-gated security lens + design-planner + plan-reviewer
+#   Pessimistic on the one conditional rung (the risk-gated security lens):
+#   it is not knowable at projection time, and a projection that guesses low
+#   is a ceiling that does not hold.
 # ---------------------------------------------------------------------------
-TURBOX_DESIGN_RUNGS=9
+TURBOX_DESIGN_RUNGS=3
 
 _tbx_cmd_project_agents() {
   local small="" design="" budget=24 max=600 projected

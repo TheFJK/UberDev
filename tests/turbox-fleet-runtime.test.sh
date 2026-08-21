@@ -24,6 +24,9 @@
 #   R9  — worktree-add: cuts the checkout and is re-entrant
 #   R10 — audit: one JSONL line per event, malformed data preserved not dropped
 #   R11 — launcher --standard: refuses --backend flag AND env, before any claim
+#   R12 — the TURBOX_PLAN envelope, composed from the launcher's own bytes
+#   R13 — the issue-body writer: cap refusals and BYTE truncation
+#   R14 — the design-planner exemplar parses AND dispatches (parser + TB3)
 set -u; set -o pipefail
 # ci-wiring: declared Unix-only in the test.yml windows-skip-list.
 case "$(uname -s)" in
@@ -35,10 +38,13 @@ esac
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LIB="$REPO_ROOT/plugins/uberdev/lib/turbox-fleet.sh"
 LAUNCHER="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
+# R14's subject. Listed as REQUIRED, not optional: a lock that skips itself when
+# the card is absent is the same vacuous green as no lock at all.
+DESIGN_PLANNER="$REPO_ROOT/plugins/uberdev/agents/design-planner.md"
 
 . "$REPO_ROOT/tests/_lib_exit_floor.sh" || { echo "FATAL: _lib_exit_floor.sh missing/unreadable" >&2; exit 2; }
 
-for f in "$LIB" "$LAUNCHER"; do
+for f in "$LIB" "$LAUNCHER" "$DESIGN_PLANNER"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
 command -v git >/dev/null 2>&1 || { echo "FATAL: git is required by this fixture" >&2; exit 2; }
@@ -109,11 +115,11 @@ out_has "below 1" "a value below 1 is floored, and says so"
 
 echo "== R4: project-agents (TB1) =="
 rc_is 0 "1 small + 2 design fits" -- bash "$LIB" project-agents --small 1 --design 2 --implement-budget 24 --max 600
-out_is 67 "projection is small + (9 + budget) x design = 1 + 33*2 = 67"
+out_is 55 "projection is small + (3 + budget) x design = 1 + 27*2 = 55"
 rc_is 0 "all-small batch is cheap" -- bash "$LIB" project-agents --small 5 --design 0 --max 600
 out_is 5 "five single solvers project five agents"
 rc_is 3 "30 design issues REFUSED at 600" -- bash "$LIB" project-agents --small 0 --design 30 --implement-budget 24 --max 600
-out_has "TB1 projected_agents=990" "the refusal reports the projection it computed"
+out_has "TB1 projected_agents=810" "the refusal reports the projection it computed"
 rc_is 2 "missing --design is an error" -- bash "$LIB" project-agents --small 1
 
 echo "== R5: budget-spend (TB2) =="
@@ -387,6 +393,93 @@ if python3 -c "open('$WRITER_ROOT/ib-emoji.md','rb').read().decode('utf-8')" 2>/
 else
   bad "the truncation split a multi-byte character"
 fi
+
+echo "== R14: the design-planner exemplar is a DISPATCHABLE plan, not just prose =="
+# #656. The /turbox lane has no plan-writer rung any more: the fenced "Plan
+# document structure" template inside agents/design-planner.md IS what every
+# /turbox plan is emitted from. A template that reads well but parses to nothing
+# strands every task as unowned and routes the issue to the single-solver
+# fallback -- the whole wave decomposition silently discarded -- and no shape
+# grep in the corpus can see that. So this section runs the SHIPPED parser over
+# the SHIPPED template, then feeds the result to the SHIPPED chokepoint.
+#
+# Every value below is pinned EXACT on purpose. `task_count >= 0`, a `-ge 1`
+# floor or a prose grep would each pass against a gutted template, which is the
+# permanently-green shape this section exists to replace.
+#
+# Placement is load-bearing too: this section sits ABOVE the
+# `[ "$FAIL" -eq 0 ] || exit 1` gate below. bad() only increments a counter, so
+# a section appended after that gate could never fail the suite.
+cat > "$TMP/dp_fence.py" <<'PY'
+# Extracts the template the way tests/orchestrator-plan-flatten.test.sh F10 does
+# -- same anchor, same fence regex -- so the two guards cannot disagree about
+# which bytes are "the template".
+import re
+import sys
+from pathlib import Path
+
+card, out = Path(sys.argv[1]), Path(sys.argv[2])
+text = card.read_text(encoding="utf-8")
+anchor = re.search(r"^\*\*Plan document structure:\*\*$", text, re.MULTILINE)
+if not anchor:
+    raise SystemExit("design-planner.md: the '**Plan document structure:**' anchor is gone")
+fence = re.search(r"^```markdown\n(.*?)^```$", text[anchor.end():],
+                  re.MULTILINE | re.DOTALL)
+if not fence:
+    raise SystemExit("design-planner.md: no ```markdown fence follows the anchor")
+body = fence.group(1)
+if not body.strip():
+    raise SystemExit("design-planner.md: the plan fence is empty")
+out.write_text(body, encoding="utf-8")
+PY
+DP_FENCE="$TMP/design-planner-fence.md"
+rc_is 0 "extracts the plan template from agents/design-planner.md" -- \
+  python3 -I -B "$TMP/dp_fence.py" "$DESIGN_PLANNER" "$DP_FENCE"
+if [ -s "$DP_FENCE" ]; then
+  ok "the extracted template is non-empty"
+else
+  bad "extraction produced no template -- the anchor or the fence moved"
+fi
+
+rc_is 0 "the shipped parser parses the shipped template" -- bash "$LIB" plan-tasks --plan "$DP_FENCE"
+DP_JSON="$LAST_OUT"
+out_has '"task_count":3' "the exemplar carries exactly three tasks"
+out_has '"waves":[1,2]'  "the exemplar spans exactly wave 1 and wave 2"
+out_has '"unwaved":[]'   "every exemplar task declares its wave"
+out_has '"unowned":[]'   "every exemplar task declares a non-empty Owns allowlist"
+
+# The four counters above are the parser's own arithmetic over its own summary.
+# This reads the `tasks` array the controller actually dispatches from, so a
+# parse that summarised healthily over a broken task table still reds.
+cat > "$TMP/dp_shape.py" <<'PY'
+import json
+import sys
+
+try:
+    parsed = json.loads(sys.argv[1])
+except ValueError as exc:
+    # Reached when the parse above already failed. Report it in one line rather
+    # than a traceback, so the row that actually broke stays readable.
+    raise SystemExit("the parse handed here is not JSON: %s" % (exc,))
+tasks = parsed.get("tasks")
+if not isinstance(tasks, list):
+    raise SystemExit("the parse carries no tasks array")
+shape = [(t.get("id"), t.get("wave")) for t in tasks]
+if shape != [(1, 1), (2, 1), (3, 2)]:
+    raise SystemExit("task (id, wave) shape is %r, expected [(1, 1), (2, 1), (3, 2)]"
+                     % (shape,))
+empty = [t.get("id") for t in tasks if not t.get("owns")]
+if empty:
+    raise SystemExit("tasks with an empty Owns allowlist: %r" % (empty,))
+PY
+rc_is 0 "the tasks are (1,wave-1) (2,wave-1) (3,wave-2), each owning at least one path" -- \
+  python3 -I -B "$TMP/dp_shape.py" "$DP_JSON"
+
+# The chokepoint, not merely the parse. Wave 1 holds TWO tasks, so this is a
+# real disjointness decision: a template whose two parallel tasks named the same
+# file would refuse at dispatch time on every /turbox run that copied it.
+rc_is 0 "wave 1 of the exemplar clears TB3 wave-disjoint -- the plan is dispatchable" -- \
+  bash "$LIB" wave-disjoint --tasks "$DP_JSON" --wave 1
 
 echo
 echo "== Summary =="
