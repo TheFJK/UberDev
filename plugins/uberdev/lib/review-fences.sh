@@ -346,28 +346,10 @@ review_fixer_child_bound() {
   }
   # Diagnostics only; authorization retains the exact in-memory binding above.
   #
-  # `newline="\n"` IS UNIFORMITY, NOT A BUG FIX, and the distinction is recorded
-  # rather than blurred. Text mode is what translates '\n' to '\r\n' on Windows,
-  # and #670 fixed exactly that in two publishers on this path whose bytes a
-  # reader DOES compare. THIS record has no reader at all, and the claim is
-  # deliberately scoped to these two prefixes rather than to `.launched`
-  # tree-wide: `$prefix` is only ever `$RESEARCH_DIR_ABS/phase1-fixer` or
-  # `.../phase2-fixer` (commands/review-pr.md steps 5 and 6), and nothing in the
-  # tree opens either of those two files. Other `.launched` documents ARE read
-  # back -- the review- and simplify-stage roster ledgers review_fleet_bind_roster
-  # writes are consumed line by line in commands/review-pr.md, handed on as the
-  # aggregate's initial ledger, and folded byte for byte into a sha256 context
-  # digest in lib/review-aggregate.sh; review_child_fanout's are read by
-  # review_child_wait_all. A tree-wide generalisation here would be false, and
-  # naming the readers is the load-bearing half of the argument: text-mode
-  # translation only matters where a reader compares bytes.
-  #
-  # So this line was not corrupting anything, and saying otherwise would be the
-  # overclaim this file's comments exist to avoid. It changes anyway because the
-  # alternative is a file with TWO rules about how it puts bytes on disk, one of
-  # which is a trap armed for whoever adds the first reader -- on Windows only,
-  # where CI runs and where `grep` cannot see the byte that would explain it.
-  # On POSIX the parameter is a no-op: Python translates nothing there either way.
+  # `newline="\n"` IS UNIFORMITY, NOT A BUG FIX. On Windows the default text
+  # mode would translate this record's line endings, and the parameter is pinned
+  # so every writer in this file puts bytes on disk by ONE rule rather than
+  # leaving a trap armed for whoever adds the first reader of this document.
   python3 -I -B - "$edge" "$instance" "$REVIEW_FIXER_LAUNCH_BINDING" "$prefix.launched" <<'PY' || {
 import json,sys
 edge,instance,binding,path=sys.argv[1:]
