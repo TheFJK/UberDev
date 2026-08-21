@@ -5005,6 +5005,233 @@ fi
 rm -rf "$S34_TMP"
 
 echo
+echo "== S35: the post-fix pass RE-ENTERS at iteration 2 without colliding (#655, AC #7) =="
+# This suite owns the re-entry precedent: 6c.4w.3 pushes a CI fix, the re-entry
+# fence advances both counters, and Phase 1 runs AGAIN. S27.2 already proves
+# every counter-keyed fence reads the counters off disk. What it cannot prove is
+# that the post-fix pass's five artifact families really SEPARATE under that
+# second entry — a name keyed on a counter and a name keyed on a counter that is
+# always 1 look identical to a structural scan.
+#
+# So this row RE-ENTERS. It drives the real producers twice, against two
+# different fixer commits, and asserts that both iterations' evidence is on disk
+# at once and that neither read the other's. The stale-counter failure RFC 0001
+# records is not a crash: it is a clean green built on the previous iteration's
+# bytes, with every equality still passing.
+S35_TMP="$(mktemp -d)"
+S35_REPORT="$S35_TMP/report.txt"
+cat >"$S35_TMP/drive.sh" <<'S35DRIVER'
+# S35 driver — run the post-fix pass's REAL artifact producers twice, once per
+# REVIEW_ITERATION, against two DIFFERENT fixer commits, and report what landed.
+# Emits `key=value` lines only; the parent scores.
+set -u
+say() { printf '%s=%s\n' "$1" "$2"; }
+
+UBERDEV_REVIEW_PLUGIN_ROOT="$S35_PLUGIN"
+export UBERDEV_REVIEW_PLUGIN_ROOT
+. "$S35_PLUGIN/lib/review-fleet-args.sh" || { say load args-lib-failed; exit 0; }
+review_fleet_load_fence_library || { say load carve-failed; exit 0; }
+say load ok
+
+REPO="$S35_TMP/repo"
+mkdir -p "$REPO"
+git -C "$REPO" init -q
+git -C "$REPO" config user.email fixture@example.invalid
+git -C "$REPO" config user.name Fixture
+git -C "$REPO" config core.autocrlf false
+git -C "$REPO" config core.eol lf
+printf 'base\n' >"$REPO/file.txt"
+git -C "$REPO" add -- file.txt
+git -C "$REPO" commit -qm 'test: re-entry base'
+S35_HEAD0="$(git -C "$REPO" rev-parse HEAD)"
+printf 'base\niter1 fix\n' >"$REPO/file.txt"
+git -C "$REPO" add -- file.txt
+git -C "$REPO" commit -qm 'test: iteration 1 fixer commit'
+S35_HEAD1="$(git -C "$REPO" rev-parse HEAD)"
+printf 'base\niter1 fix\niter2 fix\n' >"$REPO/file.txt"
+git -C "$REPO" add -- file.txt
+git -C "$REPO" commit -qm 'test: iteration 2 fixer commit'
+S35_HEAD2="$(git -C "$REPO" rev-parse HEAD)"
+
+RESEARCH_DIR_ABS="$REPO/.uberdev/research/run"
+mkdir -p "$RESEARCH_DIR_ABS"
+WORKTREE_ROOT="$REPO"
+CODE_FIXER_CONTRACT="$S35_PLUGIN/lib/code_fixer_contract.py"
+export RESEARCH_DIR_ABS WORKTREE_ROOT CODE_FIXER_CONTRACT
+
+# The controller's four artifact NAMES, lifted verbatim from review-pr.md rather
+# than re-spelled here. A test that re-spelled them would agree with itself
+# forever; these are the shipped bytes, evaluated.
+REVIEW_FLEET_RUN_DIR="$RESEARCH_DIR_ABS"
+: >"$S35_TMP/lifted.sh"
+S35_LIFTED=0
+for s35_name in POSTFIX_SIDECAR_PATH POSTFIX_DISPATCH_PATH POSTFIX_SUMMARISED_PATH POSTFIX_LAUNCH_SIDECAR; do
+  s35_line="$(grep -m1 -E "^[[:space:]]*$s35_name=" "$S35_REVIEW_PR" 2>/dev/null)"
+  [ -n "$s35_line" ] || continue
+  S35_LIFTED=$((S35_LIFTED + 1))
+  printf '%s\n' "$s35_line" >>"$S35_TMP/lifted.sh"
+done
+say lifted "$S35_LIFTED/4"
+# Every copy of each assignment must be BYTE-IDENTICAL: the two passes carry
+# four copies between them, and a copy that forgot the iteration key would rebind
+# pass 2 onto pass 1's artifact with every equality downstream still passing.
+for s35_name in POSTFIX_SIDECAR_PATH POSTFIX_DISPATCH_PATH POSTFIX_SUMMARISED_PATH POSTFIX_LAUNCH_SIDECAR; do
+  say "copies_$s35_name" "$(grep -E "^[[:space:]]*$s35_name=" "$S35_REVIEW_PR" \
+    | sed -e 's/^[[:space:]]*//' | sort -u | grep -c .)"
+  say "count_$s35_name" "$(grep -cE "^[[:space:]]*$s35_name=" "$S35_REVIEW_PR")"
+done
+
+s35_pass() {  # ITER BEFORE AFTER PHASE
+  local iter="$1" before="$2" after="$3" phase="$4" range counts
+  REVIEW_ITERATION="$iter"
+  export REVIEW_ITERATION
+  POSTFIX_PHASE="$phase"
+  VALIDATED_FIXER_HEAD_SHA="$before"
+  review_track_validated_fixer_head APPLIED "$before" "$after" "$after" "$phase" \
+    2>>"$S35_TMP/err" || { say "track_rc_$iter" "$?"; return 0; }
+  say "track_rc_$iter" 0
+  range="$(review_fleet_read_fixer_range \
+    "$RESEARCH_DIR_ABS/fixer-range-${phase}-iter${iter}.txt" 2>>"$S35_TMP/err")" \
+    || { say "range_rc_$iter" nonzero; return 0; }
+  say "range_$iter" "$range"
+  review_build_postfix_scope "$phase" "$range" 2>>"$S35_TMP/err" \
+    || { say "scope_rc_$iter" "$?"; return 0; }
+  say "scope_rc_$iter" 0
+  say "scope_path_$iter" "$REVIEW_POSTFIX_DIFF_PATH"
+  # The controller-owned names, from the lifted assignments.
+  . "$S35_TMP/lifted.sh"
+  say "sidecar_$iter" "$POSTFIX_SIDECAR_PATH"
+  say "dispatch_$iter" "$POSTFIX_DISPATCH_PATH"
+  say "summarised_$iter" "$POSTFIX_SUMMARISED_PATH"
+  say "launch_$iter" "$POSTFIX_LAUNCH_SIDECAR"
+  review_fleet_write_postfix_dispatch "$POSTFIX_DISPATCH_PATH" 1 2>>"$S35_TMP/err"
+  printf '```yaml\nverdict: REVISIONS_REQUIRED\nfindings:\n  - severity: blocker\n    location: file.txt:%s\n    summary: iteration %s finding\n    detail: the pass that read iteration %s commits\nconfidence: high\n```\n' \
+    "$iter" "$iter" "$iter" >"$S35_TMP/result-$iter.md"
+  counts="$(review_write_postfix_aggregate "$phase" "$iter" "$S35_TMP/result-$iter.md" 2>>"$S35_TMP/err")" \
+    || { say "aggregate_rc_$iter" "$?"; return 0; }
+  say "aggregate_rc_$iter" 0
+  say "aggregate_counts_$iter" "$counts"
+  printf '{"status":"ran","iteration":%s}\n' "$iter" >"$POSTFIX_SIDECAR_PATH"
+}
+
+: >"$S35_TMP/err"
+s35_pass 1 "$S35_HEAD0" "$S35_HEAD1" phase1
+s35_pass 2 "$S35_HEAD1" "$S35_HEAD2" phase1
+
+# What is on disk at the end. All FIVE artifact families, both iterations, and
+# nothing overwritten: a re-entry that rebound pass 2 onto pass 1's names would
+# leave five files instead of ten and freeze iteration 1's evidence.
+S35_PRESENT=0
+S35_MISSING=""
+for s35_file in \
+  fixer-range-phase1-iter1.txt fixer-range-phase1-iter2.txt \
+  postfix-diff-phase1-iter1.md postfix-diff-phase1-iter2.md \
+  postfix-dispatch-phase1-iter1.txt postfix-dispatch-phase1-iter2.txt \
+  postfix-phase1-iter1.md postfix-phase1-iter2.md \
+  postfix-phase1-iter1.json postfix-phase1-iter2.json; do
+  if [ -f "$RESEARCH_DIR_ABS/$s35_file" ]; then
+    S35_PRESENT=$((S35_PRESENT + 1))
+  else
+    S35_MISSING="$S35_MISSING $s35_file"
+  fi
+done
+say present "$S35_PRESENT/10"
+say missing "${S35_MISSING# }"
+# Iteration 1's evidence must still be iteration 1's. Byte equality against what
+# the first pass actually produced, not against a re-spelled expectation.
+say range1 "$(cat "$RESEARCH_DIR_ABS/fixer-range-phase1-iter1.txt" 2>/dev/null)"
+say range2 "$(cat "$RESEARCH_DIR_ABS/fixer-range-phase1-iter2.txt" 2>/dev/null)"
+say want_range1 "$S35_HEAD0..$S35_HEAD1"
+say want_range2 "$S35_HEAD1..$S35_HEAD2"
+say agg1_finding "$(grep -c 'iteration 1 finding' "$RESEARCH_DIR_ABS/postfix-phase1-iter1.md" 2>/dev/null)"
+say agg2_finding "$(grep -c 'iteration 2 finding' "$RESEARCH_DIR_ABS/postfix-phase1-iter2.md" 2>/dev/null)"
+say agg1_has_iter2 "$(grep -c 'iteration 2 finding' "$RESEARCH_DIR_ABS/postfix-phase1-iter1.md" 2>/dev/null)"
+say diff1_carries "$(grep -c 'iter1 fix' "$RESEARCH_DIR_ABS/postfix-diff-phase1-iter1.md" 2>/dev/null)"
+say diff2_carries_iter2 "$(grep -c 'iter2 fix' "$RESEARCH_DIR_ABS/postfix-diff-phase1-iter2.md" 2>/dev/null)"
+say diff1_carries_iter2 "$(grep -c 'iter2 fix' "$RESEARCH_DIR_ABS/postfix-diff-phase1-iter1.md" 2>/dev/null)"
+say stderr "$(tr '\n' ' ' <"$S35_TMP/err" 2>/dev/null)"
+exit 0
+S35DRIVER
+S35_TMP="$S35_TMP" S35_PLUGIN="$REPO_ROOT/plugins/uberdev" S35_REVIEW_PR="$REVIEW_PR" \
+  bash "$S35_TMP/drive.sh" >"$S35_REPORT" 2>"$S35_TMP/drive.err"
+S35_RC=$?
+s35() { sed -n "s/^$1=//p" "$S35_REPORT"; }
+s35_row() {  # DESC then KEY=WANT pairs
+  local desc="$1" bad="" pair key want got
+  shift
+  for pair in "$@"; do
+    key="${pair%%=*}"
+    want="${pair#*=}"
+    got="$(s35 "$key")"
+    [ "$got" = "$want" ] || bad="$bad $key='$got'(want '$want')"
+  done
+  if [ -z "$bad" ]; then
+    echo "  PASS  $desc"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc"; echo "       $bad"; FAIL=$((FAIL + 1))
+  fi
+}
+
+if [ "$S35_RC" = 0 ]; then
+  echo "  PASS  S35.0 — the re-entry driver ran to completion"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S35.0 — the re-entry driver exited $S35_RC; every row below is unreliable"
+  echo "        stderr: $(tr '\n' ' ' <"$S35_TMP/drive.err" 2>/dev/null)"
+  FAIL=$((FAIL + 1))
+fi
+s35_row "S35.1 — the four controller-owned artifact names lift out of review-pr.md" \
+  load=ok lifted=4/4
+# ONE spelling across all four copies. The two passes carry four copies of each
+# assignment between them (5p.1, 5p.2, 6p.1, 6p.2), and a single copy that
+# dropped the iteration key would rebind that pass onto its predecessor's
+# artifact while every downstream equality still held.
+s35_row "S35.2 — each artifact name has exactly ONE spelling across all four fence copies" \
+  copies_POSTFIX_SIDECAR_PATH=1 count_POSTFIX_SIDECAR_PATH=4 \
+  copies_POSTFIX_DISPATCH_PATH=1 count_POSTFIX_DISPATCH_PATH=4 \
+  copies_POSTFIX_SUMMARISED_PATH=1 count_POSTFIX_SUMMARISED_PATH=4 \
+  copies_POSTFIX_LAUNCH_SIDECAR=1 count_POSTFIX_LAUNCH_SIDECAR=4
+s35_row "S35.3 — both passes complete: the tracker, the scope builder and the aggregate writer all return 0" \
+  track_rc_1=0 scope_rc_1=0 aggregate_rc_1=0 \
+  track_rc_2=0 scope_rc_2=0 aggregate_rc_2=0 stderr=
+# FIVE families x TWO iterations. Ten files, not five: the whole point.
+s35_row "S35.4 — all five artifact families exist for BOTH iterations at once" \
+  present=10/10 missing=
+S35_SUFFIX_BAD=""
+for s35_key in sidecar dispatch summarised launch scope_path; do
+  for s35_iter in 1 2; do
+    case "$(s35 "${s35_key}_${s35_iter}")" in
+      *"-iter${s35_iter}."*) : ;;
+      *) S35_SUFFIX_BAD="$S35_SUFFIX_BAD ${s35_key}_${s35_iter}='$(s35 "${s35_key}_${s35_iter}")'" ;;
+    esac
+  done
+done
+if [ -z "$S35_SUFFIX_BAD" ]; then
+  echo "  PASS  S35.5 — every published name carries its own iteration, controller-owned and fence-owned alike"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S35.5 — a published name is not iteration-keyed:$S35_SUFFIX_BAD"
+  FAIL=$((FAIL + 1))
+fi
+# And the evidence did not travel. Iteration 1's range is still the first
+# fixer's commits, its aggregate still carries only its own finding, and its
+# diff artifact never saw the second fixer's line.
+S35_R1="$(s35 range1)"
+S35_R2="$(s35 range2)"
+if [ -n "$S35_R1" ] && [ "$S35_R1" = "$(s35 want_range1)" ] \
+   && [ -n "$S35_R2" ] && [ "$S35_R2" = "$(s35 want_range2)" ] \
+   && [ "$S35_R1" != "$S35_R2" ]; then
+  echo "  PASS  S35.6 — each iteration's commit-range carrier names that iteration's own fixer commit"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S35.6 — a commit-range carrier was rebound: iter1='$S35_R1' iter2='$S35_R2'"
+  FAIL=$((FAIL + 1))
+fi
+s35_row "S35.7 — iteration 1's aggregate and diff still hold iteration 1's evidence, not iteration 2's" \
+  agg1_finding=1 agg1_has_iter2=0 diff1_carries=1 diff1_carries_iter2=0
+s35_row "S35.8 — and iteration 2's hold its own" agg2_finding=1 diff2_carries_iter2=1
+rm -rf "$S35_TMP"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

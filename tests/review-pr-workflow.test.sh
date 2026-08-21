@@ -286,8 +286,13 @@ fence_has() {  # FILE TOKEN NEEDLE LABEL
 }
 
 # review-pr.md: four stages (fix runs twice, on two different edges) plus the
-# four Phase 3 CI stages (#383).
-for stage_token in 'stage=review' 'stage=verify' 'fixerEdgeId=review_pr.fix.phase1' 'stage=simplify' 'fixerEdgeId=review_pr.fix.phase2' 'stage=defer' 'stage=ci-classify' 'stage=ci-fix' 'stage=ci-conflicts' 'stage=ci-defer'; do
+# four Phase 3 CI stages (#383) plus the post-fix pass (#655), which appears
+# ONCE in this list although the command dispatches it twice: 5p and 6p emit
+# byte-identical envelopes apart from `postfixPhase`, and extract_fence lifts
+# the first, so a second row here would assert the same bytes twice. What
+# separates the two passes is asserted where it lives -- in the postfix stage
+# execution rows below, and in the phase-keyed slug.
+for stage_token in 'stage=review' 'stage=verify' 'fixerEdgeId=review_pr.fix.phase1' 'stage=postfix' 'stage=simplify' 'fixerEdgeId=review_pr.fix.phase2' 'stage=defer' 'stage=ci-classify' 'stage=ci-fix' 'stage=ci-conflicts' 'stage=ci-defer'; do
   label="review-pr.md [$stage_token]"
   fence_has "$REVIEW_CMD" "$stage_token" "$GUARD" "G1 $label carries the RFC 0012 §4.1 existence guard"
   fence_has "$REVIEW_CMD" "$stage_token" 'mkdir -p "$REVIEW_FLEET_RUN_DIR/children"' "G2 $label makes the per-child layout root"
@@ -1923,7 +1928,15 @@ if [ -n "$W_UNAP_E2E_REPO" ] && [ -d "$W_UNAP_E2E_RESEARCH" ] \
     # one of them twice cannot satisfy this row.
     w_unap_e2e_promoted="$(sed -n 1p "$w_unap_e2e_dir/promote.argv" 2>/dev/null)"
     w_unap_e2e_promoted_doc="$(sed -n 2p "$w_unap_e2e_dir/promote.argv" 2>/dev/null)"
-    if [ "$w_unap_e2e_promoted" = 3 ] \
+    # FOUR since #655, and this is the strongest executable proof of that arity
+    # anywhere: a real commands/review-pr.md fence, lifted and run under both
+    # interpreters, against a real run fixture. The promote fence refuses a
+    # three-argument call outright, so a fence that forgot the phase would
+    # no-op under UBERDEV_CARRIER_BACKEND=workflow and leave the post-fix pass
+    # with no carrier to find -- reporting "nothing was applied" about a run
+    # that applied a commit. The phase VALUE is asserted below, per phase, so
+    # a fence that hard-coded `phase1` on both passes fails here too.
+    if [ "$w_unap_e2e_promoted" = 4 ] \
        && [ "$(printf '%s' "$w_unap_e2e_promoted_doc" | jq -r '.status')" = REFUSED ] \
        && [ "$(printf '%s' "$w_unap_e2e_promoted_doc" | jq -r '.disposition_sha256')" \
             = "$(python3 -I -B -c 'import hashlib,sys
@@ -1931,8 +1944,10 @@ print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest(),end="")' "$w_una
        && [ "$(sed -n 3p "$w_unap_e2e_dir/promote.argv" 2>/dev/null)" \
             = "$(sed -n 1p "$w_unap_e2e_dir/heads.txt" 2>/dev/null)" ] \
        && [ "$(sed -n 4p "$w_unap_e2e_dir/promote.argv" 2>/dev/null)" \
-            = "$(sed -n 2p "$w_unap_e2e_dir/heads.txt" 2>/dev/null)" ]; then
-      pass "${w_unap_e2e_row}q$w_unap_e2e_phase the phase $w_unap_e2e_phase fence promotes the terminal it just obtained, with both heads ($w_unap_e2e_shell)"
+            = "$(sed -n 2p "$w_unap_e2e_dir/heads.txt" 2>/dev/null)" ] \
+       && [ "$(sed -n 5p "$w_unap_e2e_dir/promote.argv" 2>/dev/null)" \
+            = "phase$w_unap_e2e_phase" ]; then
+      pass "${w_unap_e2e_row}q$w_unap_e2e_phase the phase $w_unap_e2e_phase fence promotes the terminal it just obtained, with both heads AND its own phase ($w_unap_e2e_shell)"
     else
       fail "${w_unap_e2e_row}q$w_unap_e2e_phase the phase $w_unap_e2e_phase promotion argv is wrong ($w_unap_e2e_shell): $(tr '\n' ' ' <"$w_unap_e2e_dir/promote.argv" 2>/dev/null)"
     fi
@@ -2801,6 +2816,207 @@ grep -Fq 'over-cap-unverified' "$REVIEW_CMD" \
 grep -Fq 'verifier-unavailable' "$REVIEW_CMD" \
   && pass "V4c review-pr records an unusable child result as verifier-unavailable (fail toward keeping)" \
   || fail "V4c review-pr has no fail-toward-keeping arm for an unusable verifier result"
+
+# ---------------------------------------------------------------------------
+# P — the TENTH stage: the post-fix review pass (#655)
+# ---------------------------------------------------------------------------
+# The G rows above prove the two command fences emit a well-shaped envelope.
+# These rows prove the ENGINE does something correct with it: what it dispatches,
+# what it refuses, in what order, and what the child is actually told.
+#
+# The order matters as much as the refusals. Every path gate runs BEFORE the
+# nonce mint and before the count gate, because a wiring regression must burn no
+# nonce and dispatch no child — a reviewer with no stated output contract is the
+# #403 failure, where every result is refused at validation and the whole pass
+# reports `child-unavailable` after a real dispatch has already been spent.
+W_POSTFIX_COMMON="$(jq -n '{
+  postfixPhase:"phase1",
+  postfixCount:1,
+  postfixCap:2,
+  postfixDiffPathAbs:"/r/run/postfix-diff-phase1-iter1.md",
+  postfixRangePathAbs:"/r/run/fixer-range-phase1-iter1.txt",
+  postfixContractPathAbs:"/p/shared/phase1-reviewer-output-v1.md"}')"
+assert_stage_runs postfix postfix "$W_NONCE1" "$W_POSTFIX_COMMON" 1
+
+# p_drive EXTRA_JSON [NONCES] -> "<abortReason>|<dispatched>"
+p_drive() {
+  local extra="$1" nonces="${2-$W_NONCE1}" out
+  stage_args postfix "$nonces" "$extra"
+  out="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1)"
+  printf '%s|%s' "$(printf '%s' "$out" | jq -r '.abortReason')" \
+                 "$(printf '%s' "$out" | jq -r '.labels | length')"
+}
+# p_with FIELD VALUE -> the common envelope with ONE field replaced.
+p_with() { printf '%s' "$W_POSTFIX_COMMON" | jq --argjson v "$2" ". + {\"$1\": \$v}"; }
+
+# P1 — mode. The stage reads a /review-pr fixer's commit range, so there is no
+# /simplify shape of it to fall back to.
+P1="$(p_drive "$(p_with mode '"simplify"')")"
+[ "$P1" = "stage_not_available_in_mode|0" ] \
+  && pass "P1 the postfix stage refuses a non-review-pr mode rather than improvising one" \
+  || fail "P1 mode=simplify returned '$P1' (want 'stage_not_available_in_mode|0')"
+
+# P2 — the four path gates, each driven with an EMPTY nonce pool. That is the
+# ordering proof: if any of them ran after nonceGate the refusal here would be
+# `nonce_gate_failed`, not the path's own name.
+P2_BAD=""
+for p2_case in \
+  'postfixDiffPathAbs|bad_postfix_diff_path' \
+  'postfixRangePathAbs|bad_postfix_range_path' \
+  'postfixContractPathAbs|bad_postfix_contract_path' \
+  'workingDirAbs|bad_working_dir'; do
+  p2_field="${p2_case%%|*}"
+  p2_want="${p2_case#*|}"
+  p2_got="$(p_drive "$(p_with "$p2_field" '"run/not-absolute.md"')" "")"
+  [ "$p2_got" = "$p2_want|0" ] || P2_BAD="$P2_BAD $p2_field='$p2_got'(want '$p2_want|0')"
+done
+if [ -z "$P2_BAD" ]; then
+  pass "P2 every postfix path gate refuses a relative value BY NAME, before the nonce is minted"
+else
+  fail "P2 a postfix path gate is missing, misnamed or runs after the mint:$P2_BAD"
+fi
+
+# P3 — the count, against the ceiling the SHELL declares. Two numbers, and
+# conflating them is the shipped bug this engine already records twice: the
+# count is one dispatch's roster, the cap is the per-review-iteration total
+# across BOTH passes.
+P_CAP_SHELL="$(bash -c '. "$1"; printf "%s" "$REVIEW_FLEET_POSTFIX_TOTAL_CAP"' _ "$ARGS_LIB" 2>/dev/null)"
+P_LENS_SHELL="$(bash -c '. "$1"; printf "%s" "$REVIEW_FLEET_POSTFIX_LENS_COUNT"' _ "$ARGS_LIB" 2>/dev/null)"
+if [ -n "$P_CAP_SHELL" ] && [ -n "$E_MAX_AGENTS_MIN" ] && [ "$P_CAP_SHELL" -le "$E_MAX_AGENTS_MIN" ]; then
+  pass "P3 the postfix ceiling ($P_CAP_SHELL) is at or under the lowest emitted maxAgents ($E_MAX_AGENTS_MIN)"
+else
+  fail "P3 postfix ceiling drift: shell cap='$P_CAP_SHELL' lowest emitted maxAgents='$E_MAX_AGENTS_MIN'"
+fi
+# The wave size the controller forwards must BE the engine's roster length, or
+# every real dispatch aborts on the roster arm below.
+P_LENS_OK="$(p_drive "$(p_with postfixCount "${P_LENS_SHELL:-0}")")"
+[ "$P_LENS_OK" = "|1" ] \
+  && pass "P3b the shell's REVIEW_FLEET_POSTFIX_LENS_COUNT ($P_LENS_SHELL) is exactly the engine's roster length" \
+  || fail "P3b postfixCount=$P_LENS_SHELL returned '$P_LENS_OK' (want '|1')"
+# A zero is a wiring bug, not a quiet skip: the controller short-circuits a pass
+# with no applied fixer commit WITHOUT calling this script at all (carrier
+# absence IS that short-circuit), so a zero reaching here means the two sides
+# disagree about whether there is anything to review.
+P_ZERO="$(p_drive "$(p_with postfixCount 0)")"
+[ "$P_ZERO" = "bad_postfix_count|0" ] \
+  && pass "P4a postfixCount=0 refuses by name (a zero roster never reaches the engine)" \
+  || fail "P4a postfixCount=0 returned '$P_ZERO' (want 'bad_postfix_count|0')"
+P_OVER="$(p_drive "$(p_with postfixCount "$((P_CAP_SHELL + 1))")")"
+[ "$P_OVER" = "bad_postfix_count|0" ] \
+  && pass "P4b a roster above the declared ceiling refuses up-front, not agent_ceiling after acceptance" \
+  || fail "P4b postfixCount=$((P_CAP_SHELL + 1)) returned '$P_OVER' (want 'bad_postfix_count|0')"
+# THE ROSTER-LENGTH ARM, which is a DIFFERENT fault under the same name: this
+# count is inside the cap and still wrong, because the roster is fixed (its slug
+# is a wire format shared with the controller) rather than projected from the
+# count. The two arms are told apart by the audit detail, so a single gate
+# covering only the cap cannot satisfy both rows.
+stage_args postfix "$W_NONCE1,$W_NONCE2" "$(p_with postfixCount 2)"
+P_ROSTER_OUT="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1)"
+P_ROSTER_DETAIL="$(printf '%s' "$P_ROSTER_OUT" \
+  | jq -r '[.result.auditEvents[] | select(.event == "bad_postfix_count") | .detail] | first // ""')"
+if [ "$(printf '%s' "$P_ROSTER_OUT" | jq -r '.abortReason')" = bad_postfix_count ] \
+   && [ "$(printf '%s' "$P_ROSTER_OUT" | jq -r '.labels | length')" = 0 ] \
+   && [ "$P_ROSTER_DETAIL" = "2 does not match the 1-child postfix roster" ]; then
+  pass "P4c a count inside the cap that does not match the FIXED roster refuses under its own detail"
+else
+  fail "P4c the roster-length arm did not fire: $(printf '%s' "$P_ROSTER_OUT" | jq -c '{abortReason,dispatched}') detail='$P_ROSTER_DETAIL'"
+fi
+
+# P5 — the phase is GATED, never defaulted. It names which fixer's commits these
+# are, and the controller keys the aggregate and the sidecar on it, so a guess
+# here files a Phase 2 pass's findings under Phase 1.
+P5_BAD=""
+for p5_value in '"phase3"' '"PHASE1"' '""' '"phase"'; do
+  p5_got="$(p_drive "$(p_with postfixPhase "$p5_value")" "")"
+  [ "$p5_got" = "bad_postfix_phase|0" ] || P5_BAD="$P5_BAD $p5_value='$p5_got'"
+done
+if [ -z "$P5_BAD" ]; then
+  pass "P5 a phase outside {phase1, phase2} refuses BY NAME before the mint, never defaulting to phase1"
+else
+  fail "P5 a non-{phase1,phase2} phase was accepted or misnamed:$P5_BAD"
+fi
+
+# P6 — what the child is actually told, and where it is told to write. The slug
+# is keyed by PHASE because both post-fix children run inside ONE
+# reviewIteration: iterSuffix() cannot separate them, so without the phase key
+# the Phase 2 child would land in the Phase 1 child's directory.
+P6_BAD=""
+for p6_phase in phase1 phase2; do
+  stage_args postfix "$W_NONCE1" "$(p_with postfixPhase "\"$p6_phase\"")"
+  p6_prompt="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1 | jq -r '.prompts[0] // ""')"
+  grep -Fq "/r/run/children/postfix-correctness-$p6_phase-iter01/result.md" <<<"$p6_prompt" \
+    || P6_BAD="$P6_BAD $p6_phase-child-dir"
+  grep -Fq "phase             = $p6_phase" <<<"$p6_prompt" || P6_BAD="$P6_BAD $p6_phase-authority-line"
+  # The OTHER phase's directory must not appear anywhere in this prompt.
+  case "$p6_phase" in phase1) p6_other=phase2 ;; *) p6_other=phase1 ;; esac
+  grep -Fq "postfix-correctness-$p6_other-iter01" <<<"$p6_prompt" \
+    && P6_BAD="$P6_BAD $p6_phase-names-$p6_other"
+done
+if [ -z "$P6_BAD" ]; then
+  pass "P6 each pass is told its own phase and its own phase-keyed child directory, so the two cannot collide"
+else
+  fail "P6 the postfix slug or authority block is not phase-keyed:$P6_BAD"
+fi
+
+# P6b — the output contract travels BY PATH, and by the postfix stage's OWN
+# path. Both stages resolve `phase1-reviewer-v1`, so a builder that captured
+# phase1ContractPathAbs instead would look right on every real run and break the
+# moment the two resolve differently (#403 is exactly that class).
+stage_args postfix "$W_NONCE1" \
+  "$(p_with postfixContractPathAbs '"/p/shared/postfix-only-contract-v1.md"')"
+P6B_PROMPT="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1 | jq -r '.prompts[0] // ""')"
+if grep -Fq '/p/shared/postfix-only-contract-v1.md' <<<"$P6B_PROMPT" \
+   && ! grep -Fq '/p/shared/phase1-reviewer-output-v1.md' <<<"$P6B_PROMPT"; then
+  pass "P6b the postfix child is bound to the postfix stage's own contract path, not the Phase 1 fanout's"
+else
+  fail "P6b the postfix prompt named the wrong output contract"
+fi
+
+# P7 — the DEFER half of the same feature, which is the half that fails
+# SILENTLY. `review_pr.defer.findings` travels over the routed transport AND
+# over this one; CFG rejects no unknown key and the defer prompt enumerates each
+# input by name, so a controller emitting `postfixPhase1PathAbs=` with no reader
+# here would get no abort, no `bad_*` refusal and no failing test — the findings
+# would simply never reach the child on the default backend.
+stage_args defer "$W_NONCE1" '{"postfixPhase1PathAbs":"/r/run/postfix-phase1-iter1.md",
+  "postfixPhase2PathAbs":"/r/run/postfix-phase2-iter1.md"}'
+P7_BOTH="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1 | jq -r '.prompts[0] // ""')"
+stage_args defer "$W_NONCE1" '{}'
+P7_NONE="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1 | jq -r '.prompts[0] // ""')"
+if grep -Fq 'postfix_phase1_path      = /r/run/postfix-phase1-iter1.md' <<<"$P7_BOTH" \
+   && grep -Fq 'postfix_phase2_path      = /r/run/postfix-phase2-iter1.md' <<<"$P7_BOTH" \
+   && ! grep -Fq 'postfix_phase1_path' <<<"$P7_NONE" \
+   && ! grep -Fq 'postfix_phase2_path' <<<"$P7_NONE"; then
+  pass "P7 the defer child is handed both post-fix aggregates when they exist, and neither line when they do not"
+else
+  fail "P7 the defer prompt does not carry the two postfix aggregate inputs (both='$(grep -c postfix_phase <<<"$P7_BOTH")' none='$(grep -c postfix_phase <<<"$P7_NONE")')"
+fi
+# Optional does NOT mean ungated: an ungated relative value renders into the
+# prompt and leaves the child to improvise a location. The EMPTY form stays
+# legal — it means that phase ran no post-fix pass.
+P7_BAD=""
+for p7_field in postfixPhase1PathAbs postfixPhase2PathAbs; do
+  stage_args defer "$W_NONCE1" "$(jq -n --arg f "$p7_field" '{($f): "run/not-absolute.md"}')"
+  p7_got="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1 | jq -r '.abortReason')"
+  [ "$p7_got" = bad_postfix_aggregate_path ] || P7_BAD="$P7_BAD $p7_field='$p7_got'"
+done
+if [ -z "$P7_BAD" ]; then
+  pass "P7b a non-empty postfix aggregate path must be absolute; the empty form stays legal"
+else
+  fail "P7b a relative postfix aggregate path was accepted:$P7_BAD"
+fi
+
+# P8 — the closed stage vocabulary really did grow by one. An engine that
+# accepted `postfix` but never listed it would leave the SKILL.md enum row and
+# the #370 contract comparison asserting over nine members while ten exist.
+P8_UNKNOWN="$(stage_args postfix-typo "$W_NONCE1" '{}'; \
+  node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1 | jq -r '.abortReason')"
+if [ "$P8_UNKNOWN" = unknown_stage ] && grep -Fq 'review | verify | postfix | fix | simplify | defer | ci-classify | ci-fix | ci-conflicts | ci-defer' "$WORKFLOW"; then
+  pass "P8 postfix is a member of the engine's own closed stage vocabulary, and an unknown stage still refuses"
+else
+  fail "P8 the stage vocabulary does not carry postfix (unknown-stage probe returned '$P8_UNKNOWN')"
+fi
+
 
 # ---------------------------------------------------------------------------
 # E7 — the CI BINDERS are EXECUTED, against the real contract
@@ -4555,13 +4771,21 @@ esac
 # The tracker's own stubs: the residue receipt and the ancestry/commit-count
 # probes are separate contracts with their own rows, and a real repository here
 # would make this row fail for their reasons instead of for the seed's.
+# FIVE positionals and a bound REVIEW_ITERATION since #655. Both are the
+# tracker's own preconditions now, not this row's subject: the arity gate is
+# `-eq 5` and the APPLIED arm refuses an iteration it cannot key the commit-range
+# carrier on. Without them every probe below would report rc 2 or rc 74 -- a
+# failure with nothing to say about the reviewed-head seed L7 and L8 exist to
+# prove. `review_fleet_rehydrate` deliberately does not bind REVIEW_ITERATION
+# (it is a counter Phase 3 advances, not a carrier), so the drive binds it.
 L7_TRACK='python3(){ printf "{\"status\":\"clean\"}\n"; }
 git(){
   [ "$3" = merge-base ] && [ "$4" = --is-ancestor ] && return 0
   [ "$3" = rev-list ] && [ "$4" = --count ] && printf "1\n" && return 0
   return 2
 }
-review_track_validated_fixer_head APPLIED '"$L7_SEED"' '"$L7_FIXED"' '"$L7_FIXED"' >/dev/null 2>&1
+REVIEW_ITERATION=1
+review_track_validated_fixer_head APPLIED '"$L7_SEED"' '"$L7_FIXED"' '"$L7_FIXED"' phase1 >/dev/null 2>&1
 printf "%s" "$?"'
 if [ -n "$L7_SEED" ]; then
   for l7_seed_env in seed-fast seed-resolved; do

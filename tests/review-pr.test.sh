@@ -1791,21 +1791,45 @@ FIXER_HEAD_OUTPUT="$(
       [ "$3" = rev-list ] && [ "$4" = --count ] && printf "1\\n" && return 0
       return 2
     }
+    # FIVE arguments since #655, and the trailing `phase` is not decoration:
+    # the APPLIED arm keys the post-fix commit-range carrier on it, and the
+    # fence refuses a four-argument call outright (`[ "$#" -eq 5 ]`). A drive
+    # that kept passing four would fail rc 2 at the arity gate and never reach
+    # the `declared_tip` / ancestry conditions this row is about.
+    #
+    # The two typed lib writers the APPLIED arm calls are RECORDERS here, not
+    # holes: this fixture carves ONE function out of the fence library, so
+    # without them the arm dies "command not found" AFTER it has already
+    # advanced VALIDATED_FIXER_HEAD_SHA -- which is exactly the shape that lets
+    # a broken carrier write pass unnoticed. Recording them makes both carrier
+    # targets assertable below.
+    REVIEW_ITERATION=1
+    review_fleet_write_reviewed_head(){ printf "head|%s|%s\n" "$1" "$2" >>"$FIXER_HEAD_LOG"; }
+    review_fleet_write_fixer_range(){ printf "range|%s|%s|%s\n" "$1" "$2" "$3" >>"$FIXER_HEAD_LOG"; }
     VALIDATED_FIXER_HEAD_SHA="$2"
-    review_track_validated_fixer_head APPLIED "$2" "$3" "$3"
-    review_track_validated_fixer_head APPLIED "$3" "$4" "$4"
+    review_track_validated_fixer_head APPLIED "$2" "$3" "$3" phase1
+    review_track_validated_fixer_head APPLIED "$3" "$4" "$4" phase2
     printf "%s" "$VALIDATED_FIXER_HEAD_SHA"
   ' _ "$FIXER_HEAD_FIXTURE" "$PRE_FIX_HEAD" "$PHASE1_FIX_HEAD" "$PHASE2_FIX_HEAD"
 )"
 FIXER_CHAIN_OK=1
 [ "$FIXER_HEAD_OUTPUT" = "$PHASE2_FIX_HEAD" ] || FIXER_CHAIN_OK=0
+# AND the APPLIED arm wrote BOTH carriers, in order, under PHASE-KEYED names.
+# Four lines: reviewed-head then fixer-range, once per phase. This is the whole
+# reason the arity moved from `-ge 3` to `-eq 5`: under `-ge`, a four-argument
+# call bound `phase` to the empty string and wrote `fixer-range--iter1.txt`, a
+# name the post-fix fences never look for -- so the run reported "nothing was
+# applied" about a run that had applied a commit.
+FIXER_HEAD_CARRIERS="$(tr '\n' ' ' <"$FIXER_HEAD_LOG")"
+[ "$FIXER_HEAD_CARRIERS" = "head|/repo/.uberdev/research/run/reviewed-head.txt|$PHASE1_FIX_HEAD range|/repo/.uberdev/research/run/fixer-range-phase1-iter1.txt|$PRE_FIX_HEAD|$PHASE1_FIX_HEAD head|/repo/.uberdev/research/run/reviewed-head.txt|$PHASE2_FIX_HEAD range|/repo/.uberdev/research/run/fixer-range-phase2-iter1.txt|$PHASE1_FIX_HEAD|$PHASE2_FIX_HEAD " ] \
+  || { FIXER_CHAIN_OK=0; echo "        R30 carrier trail: $FIXER_HEAD_CARRIERS"; }
 if VALIDATED_FIXER_HEAD_SHA="$PHASE2_FIX_HEAD" WORKTREE_ROOT=/repo bash -c '
   . "$1"
   RESEARCH_DIR_ABS=/repo/.uberdev/research/run
   CODE_FIXER_CONTRACT=/contract.py
   python3(){ printf "{\"status\":\"clean\"}\n"; }
   git(){ return 0; }
-  review_track_validated_fixer_head REFUSED "$2" "$3" "$3"
+  review_track_validated_fixer_head REFUSED "$2" "$3" "$3" phase1
 ' _ "$FIXER_HEAD_FIXTURE" "$PHASE2_FIX_HEAD" "$UNEXPECTED_HEAD" >/dev/null 2>&1; then
   FIXER_CHAIN_OK=0
 fi
@@ -1815,7 +1839,7 @@ if VALIDATED_FIXER_HEAD_SHA="$PHASE2_FIX_HEAD" WORKTREE_ROOT=/repo \
     . "$1"
     python3(){ [ "${RESIDUE_DIRTY:-0}" != 1 ] || return 74; printf "{\"status\":\"clean\"}\n"; }
     git(){ return 0; }
-    review_track_validated_fixer_head REFUSED "$2" "$2" ""
+    review_track_validated_fixer_head REFUSED "$2" "$2" "" phase1
   ' _ "$FIXER_HEAD_FIXTURE" "$PHASE2_FIX_HEAD" >/dev/null 2>&1; then
   FIXER_CHAIN_OK=0
 fi
@@ -1829,22 +1853,28 @@ VALID_OUTCOME="$(printf '{"applied_content_sha256":"%s","commit":{},"declared_ti
   "$(printf 'c%.0s' {1..64})" "$(printf 'd%.0s' {1..64})" "$(printf 'e%.0s' {1..64})")"
 if ! FIXER_PROMOTE_LOG="$FIXER_PROMOTE_LOG" bash -c '
   . "$1"
-  review_track_validated_fixer_head(){ printf "%s|%s|%s|%s\n" "$@" >>"$FIXER_PROMOTE_LOG"; }
-  review_promote_validated_fixer_outcome "$2" "$3" "$4"
+  # FIVE `%s` fields, matched to the five positionals the promote fence now
+  # forwards. A four-field format is not a smaller assertion, it is a WRONG
+  # one: printf reuses its format string until the arguments run out, so five
+  # arguments through `"%s|%s|%s|%s\n"` emit a second line reading `phase1|||`
+  # and the equality below then fails for a reason that has nothing to do with
+  # the contract. Format and expectation move together or neither moves.
+  review_track_validated_fixer_head(){ printf "%s|%s|%s|%s|%s\n" "$@" >>"$FIXER_PROMOTE_LOG"; }
+  review_promote_validated_fixer_outcome "$2" "$3" "$4" phase1
 ' _ "$FIXER_PROMOTE_FIXTURE" "$VALID_OUTCOME" "$PRE_FIX_HEAD" "$PHASE1_FIX_HEAD"; then
   FIXER_CHAIN_OK=0
 fi
-[ "$(cat "$FIXER_PROMOTE_LOG")" = "APPLIED|$PRE_FIX_HEAD|$PHASE1_FIX_HEAD|$PHASE1_FIX_HEAD" ] \
+[ "$(cat "$FIXER_PROMOTE_LOG")" = "APPLIED|$PRE_FIX_HEAD|$PHASE1_FIX_HEAD|$PHASE1_FIX_HEAD|phase1" ] \
   || FIXER_CHAIN_OK=0
 MALFORMED_OUTCOME="${VALID_OUTCOME%?},\"extra\":true}"
 if FIXER_PROMOTE_LOG="$FIXER_PROMOTE_LOG" bash -c '
   . "$1"
   review_track_validated_fixer_head(){ printf "unexpected\n" >>"$FIXER_PROMOTE_LOG"; }
-  review_promote_validated_fixer_outcome "$2" "$3" "$4"
+  review_promote_validated_fixer_outcome "$2" "$3" "$4" phase1
 ' _ "$FIXER_PROMOTE_FIXTURE" "$MALFORMED_OUTCOME" "$PRE_FIX_HEAD" "$PHASE1_FIX_HEAD" >/dev/null 2>&1; then
   FIXER_CHAIN_OK=0
 fi
-[ "$(cat "$FIXER_PROMOTE_LOG")" = "APPLIED|$PRE_FIX_HEAD|$PHASE1_FIX_HEAD|$PHASE1_FIX_HEAD" ] \
+[ "$(cat "$FIXER_PROMOTE_LOG")" = "APPLIED|$PRE_FIX_HEAD|$PHASE1_FIX_HEAD|$PHASE1_FIX_HEAD|phase1" ] \
   || FIXER_CHAIN_OK=0
 
 # #556 — THE REFUSED TERMINAL'S RECEIPT, PROMOTED. The two documents above are
@@ -2071,10 +2101,10 @@ while IFS=$'\t' read -r unapplied_shape unapplied_receipt; do
   : >"$FIXER_PROMOTE_LOG"
   if FIXER_PROMOTE_LOG="$FIXER_PROMOTE_LOG" bash -c '
     . "$1"
-    review_track_validated_fixer_head(){ printf "%s|%s|%s|%s\n" "$@" >>"$FIXER_PROMOTE_LOG"; }
-    review_promote_validated_fixer_outcome "$2" "$3" "$4"
+    review_track_validated_fixer_head(){ printf "%s|%s|%s|%s|%s\n" "$@" >>"$FIXER_PROMOTE_LOG"; }
+    review_promote_validated_fixer_outcome "$2" "$3" "$4" phase2
   ' _ "$FIXER_PROMOTE_FIXTURE" "$unapplied_receipt" "$PHASE1_FIX_HEAD" "$PHASE1_FIX_HEAD" \
-    && [ "$(cat "$FIXER_PROMOTE_LOG")" = "REFUSED|$PHASE1_FIX_HEAD|$PHASE1_FIX_HEAD|" ]; then
+    && [ "$(cat "$FIXER_PROMOTE_LOG")" = "REFUSED|$PHASE1_FIX_HEAD|$PHASE1_FIX_HEAD||phase2" ]; then
     FIXER_UNAPPLIED_SHAPES=$((FIXER_UNAPPLIED_SHAPES + 1))
   else
     FIXER_CHAIN_OK=0
@@ -2120,10 +2150,24 @@ FIXER_FAILURE_MUTATED_RC=$?
 grep -qF 'validate-failed-return' "$FIXER_FAILURE_GUARD_FIXTURE" || FIXER_CHAIN_OK=0
 grep -qF 'MUTATED_BLOCKED' "$FIXER_FAILURE_GUARD_FIXTURE" || FIXER_CHAIN_OK=0
 rm -rf "$FIXER_FAILURE_REPO"
-grep -qF 'review_promote_validated_fixer_outcome "$PHASE1_FIXER_OUTCOME" "$FIXER_HEAD_BEFORE" "$FIXER_HEAD_AFTER"' "$REVIEW_PR" \
+# The FOURTH argument is asserted verbatim, per phase, because a hook wired at
+# only some of the four call sites is the silent no-op #655 tightened the arity
+# to catch: `phase1` on a Phase 2 promotion would key the Phase 2 fixer's
+# commit-range carrier under Phase 1's name, and every later equality would
+# still pass while the post-fix pass read the wrong commits.
+grep -qF 'review_promote_validated_fixer_outcome "$PHASE1_FIXER_OUTCOME" "$FIXER_HEAD_BEFORE" "$FIXER_HEAD_AFTER" "phase1"' "$REVIEW_PR" \
   || FIXER_CHAIN_OK=0
-grep -qF 'review_promote_validated_fixer_outcome "$PHASE2_FIXER_OUTCOME" "$FIXER_HEAD_BEFORE" "$FIXER_HEAD_AFTER"' "$REVIEW_PR" \
+grep -qF 'review_promote_validated_fixer_outcome "$PHASE2_FIXER_OUTCOME" "$FIXER_HEAD_BEFORE" "$FIXER_HEAD_AFTER" "phase2"' "$REVIEW_PR" \
   || FIXER_CHAIN_OK=0
+# BOTH transports, not just the routed pair above. The Workflow-native fixer
+# fences carry their own copies of the promotion, and a phase argument added to
+# two of the four sites is exactly the half-wiring the hard arity gate exists to
+# convert into a loud refusal -- so COUNT the sites rather than sample them, and
+# require every counted one to carry a phase.
+FIXER_PROMOTE_SITES="$(grep -c 'review_promote_validated_fixer_outcome "\$PHASE[12]_FIXER_OUTCOME"' "$REVIEW_PR")"
+FIXER_PROMOTE_PHASED="$(grep -c 'review_promote_validated_fixer_outcome "\$PHASE[12]_FIXER_OUTCOME" "\$FIXER_HEAD_BEFORE" "\$FIXER_HEAD_AFTER" "phase[12]"' "$REVIEW_PR")"
+[ "$FIXER_PROMOTE_SITES" -eq 4 ] || FIXER_CHAIN_OK=0
+[ "$FIXER_PROMOTE_PHASED" -eq "$FIXER_PROMOTE_SITES" ] || FIXER_CHAIN_OK=0
 
 PROMOTION_REGION="$(awk '/^[[:space:]]*6a\. \*\*Post-fixer push/{active=1} active{print} /^[[:space:]]*6b\. \*\*Phase 2\.5/{exit}' "$REVIEW_PR")"
 # ABSENT is refused BEFORE the inequality, and the inequality no longer carries
@@ -3962,7 +4006,8 @@ review_assert_selected_pr_head review_publish_same_repo_pr_head
 review_resolve_phase1_base review_refresh_phase1_scope review_track_validated_fixer_head
 review_promote_validated_fixer_outcome review_clear_ci_run_selection review_select_failed_ci_run
 review_capture_ci_classification_head review_ci_authority_digest review_ci_json_member
-review_validate_trust_anchor"
+review_validate_trust_anchor
+review_build_postfix_scope review_write_postfix_aggregate"
 R47_MISSING="$(env -i PATH="$PATH" HOME="$HOME" \
   UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
   R47_HELPERS="$R47_HELPERS" \
@@ -4563,6 +4608,577 @@ if [ "$R47_POST_RC" = 2 ] && [ "$R47_POST_NAMED" = yes ]; then
 else
   echo "  FAIL  R47.10 — the loader accepted a library whose declared helper it never defined"
   echo "        rc: $R47_POST_RC; stderr: ${R47_POST_ERR:-<empty>}"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== R48: the post-fix pass's fence writers, EXECUTED (#655) =="
+# R47 proves the new helpers are DEFINED after the carve. This section proves
+# they WORK, by driving each one against real bytes and asserting both its
+# return code and what it left on disk.
+#
+# It exists because the guarantees #655 rests on are guarantees about failure:
+# AC #3's zero-dispatch short-circuit is "no carrier file means no applied
+# commit", which is only true while the carrier writer FAILS CLOSED; AC #5's
+# "a finding is never dropped" is the aggregate writer returning 74 rather than
+# reporting a clean pass over an artifact that never reached disk. A text
+# assertion cannot tell a writer that fails closed from one that returns 0 and
+# writes nothing, so neither guarantee was executable anywhere until here.
+#
+# THE DRIVER ASSERTS NOTHING. It emits one `key=value` line per probe and the
+# rows below compare them. That split is deliberate: an assertion that
+# re-implements the thing under test passes against a broken mutant, and a
+# driver holding its own pass/fail counter would be a second scoring system
+# drifting from this file's.
+R48_TMP="$(mktemp -d)"
+R48_REPORT="$R48_TMP/report.txt"
+cat >"$R48_TMP/drive.sh" <<'R48_DRIVE'
+# R48 driver — every probe emits ONE `key=value` line and the parent asserts on
+# it. Nothing in here decides a verdict: a driver that could pass or fail on its
+# own would be a second scoring system, and two scoring systems drift.
+set -u
+say() { printf '%s=%s\n' "$1" "$2"; }
+# rc-ONLY probes go through this, in a command substitution, so a probe that
+# advances a global (the tracker does) cannot leak that advance into the next
+# one — and a probe that dies is still reported as a value rather than as a
+# missing key the parent would read as the empty string.
+rc_of() { "$@" >/dev/null 2>&1; printf '%s' "$?"; }
+mode_of() {
+  python3 -I -B -c 'import os,stat,sys
+if os.name == "nt":
+    print("skip", end="")
+else:
+    print(oct(stat.S_IMODE(os.lstat(sys.argv[1]).st_mode)), end="")' "$1" 2>/dev/null
+}
+sha_of() {
+  python3 -I -B -c 'import hashlib,sys
+print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest(),end="")' "$1" 2>/dev/null
+}
+
+. "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || { say load args-lib-failed; exit 0; }
+review_fleet_load_fence_library || { say load carve-failed; exit 0; }
+say load ok
+
+R48_DEFINED=0
+for fn in review_build_postfix_scope review_write_postfix_aggregate; do
+  typeset -f "$fn" >/dev/null 2>&1 && R48_DEFINED=$((R48_DEFINED + 1))
+done
+say fences_defined "$R48_DEFINED"
+R48_CARRIERS=0
+for fn in review_fleet_write_fixer_range review_fleet_read_fixer_range \
+          review_fleet_write_postfix_dispatch review_fleet_read_postfix_dispatch \
+          review_fleet_bind_postfix review_fleet_postfix_slug; do
+  typeset -f "$fn" >/dev/null 2>&1 && R48_CARRIERS=$((R48_CARRIERS + 1))
+done
+say carriers_defined "$R48_CARRIERS"
+
+RESEARCH_DIR_ABS="$R48_TMP/research"
+mkdir -p "$RESEARCH_DIR_ABS"
+REVIEW_ITERATION=3
+export RESEARCH_DIR_ABS REVIEW_ITERATION
+
+# --- A/B/C: the `<40hex>..<40hex>` commit-range carrier ----------------------
+A_BEFORE="$(printf 'a%.0s' {1..40})"
+A_AFTER="$(printf 'b%.0s' {1..40})"
+say a1_write_rc "$(rc_of review_fleet_write_fixer_range "$R48_TMP/range.txt" "$A_BEFORE" "$A_AFTER")"
+say a2_bytes "$(cat "$R48_TMP/range.txt" 2>/dev/null)"
+say a3_mode "$(mode_of "$R48_TMP/range.txt")"
+A_READ="$(review_fleet_read_fixer_range "$R48_TMP/range.txt" 2>/dev/null)"
+say a4_read_rc "$?"
+say a5_read "$A_READ"
+say a_want "$A_BEFORE..$A_AFTER"
+
+# Every corruption mode the reader is the last gate against. review_build_postfix_scope
+# re-parses the range too, but only BECAUSE the reader already proved it — so a
+# reader that accepted one of these would hand a fence a range nothing checked.
+B_REFUSED=0
+B_TOTAL=0
+B_ACCEPTED=""
+b_case() {
+  B_TOTAL=$((B_TOTAL + 1))
+  printf '%s' "$2" >"$R48_TMP/bad.txt"
+  if [ "$(rc_of review_fleet_read_fixer_range "$R48_TMP/bad.txt")" != 0 ]; then
+    B_REFUSED=$((B_REFUSED + 1))
+  else
+    B_ACCEPTED="$B_ACCEPTED $1"
+  fi
+}
+b_case non-hex-start "z${A_BEFORE#?}..$A_AFTER
+"
+b_case truncated-start "${A_BEFORE#?}..$A_AFTER
+"
+b_case truncated-end "$A_BEFORE..${A_AFTER#?}
+"
+b_case wrong-separator "$A_BEFORE:$A_AFTER
+"
+b_case single-dot "$A_BEFORE.$A_AFTER
+"
+b_case same-sha-twice "$A_BEFORE..$A_BEFORE
+"
+b_case empty-file ""
+b_case uppercase-hex "$(printf 'A%.0s' {1..40})..$A_AFTER
+"
+b_case trailing-junk "$A_BEFORE..${A_AFTER}x
+"
+B_TOTAL=$((B_TOTAL + 1))
+if [ "$(rc_of review_fleet_read_fixer_range "$R48_TMP/does-not-exist.txt")" != 0 ]; then
+  B_REFUSED=$((B_REFUSED + 1))
+else
+  B_ACCEPTED="$B_ACCEPTED absent-file"
+fi
+say b_refused "$B_REFUSED/$B_TOTAL"
+say b_accepted "${B_ACCEPTED# }"
+
+say c1_nonhex_rc "$(rc_of review_fleet_write_fixer_range "$R48_TMP/c.txt" nothex "$A_AFTER")"
+say c2_equal_rc "$(rc_of review_fleet_write_fixer_range "$R48_TMP/c.txt" "$A_BEFORE" "$A_BEFORE")"
+say c3_arity_rc "$(rc_of review_fleet_write_fixer_range "$R48_TMP/c.txt" "$A_BEFORE")"
+if [ "$(rc_of review_fleet_write_fixer_range "$R48_TMP/no/such/dir/c.txt" "$A_BEFORE" "$A_AFTER")" != 0 ]; then
+  say c4_unwritable refused
+else
+  say c4_unwritable ACCEPTED
+fi
+if [ -e "$R48_TMP/c.txt" ]; then say c5_residue file-left; else say c5_residue none; fi
+
+# --- D: the dispatch-decision carrier ---------------------------------------
+say d1_write_rc "$(rc_of review_fleet_write_postfix_dispatch "$R48_TMP/disp.txt" 1)"
+say d2_read "$(review_fleet_read_postfix_dispatch "$R48_TMP/disp.txt" 2>/dev/null)"
+say d3_bad_write_rc "$(rc_of review_fleet_write_postfix_dispatch "$R48_TMP/disp.txt" 2)"
+printf 'yes\n' >"$R48_TMP/disp2.txt"
+say d4_bad_read_rc "$(rc_of review_fleet_read_postfix_dispatch "$R48_TMP/disp2.txt")"
+
+# --- E/F/G: review_write_postfix_aggregate ----------------------------------
+mk_result() { printf '```yaml\n%s\n```\n' "$1" >"$2"; }
+mk_result 'verdict: REVISIONS_REQUIRED
+findings:
+  - severity: blocker
+    location: plugins/uberdev/lib/foo.sh:12
+    summary: the fix removed the only caller of the validator
+    detail: the guard it replaced was the sole path that refused a bad tip
+  - severity: suggestion
+    location: plugins/uberdev/lib/foo.sh:40
+    summary: the new branch repeats a condition two lines above it
+    detail: hoisting it would keep the two arms provably in step
+confidence: high' "$R48_TMP/result.md"
+E_COUNTS="$(review_write_postfix_aggregate phase1 3 "$R48_TMP/result.md" 2>"$R48_TMP/e.err")"
+say e1_rc "$?"
+say e2_counts "$E_COUNTS"
+E_AGG="$RESEARCH_DIR_ABS/postfix-phase1-iter3.md"
+if [ -f "$E_AGG" ]; then say e3_landed yes; else say e3_landed no; fi
+say e4_mode "$(mode_of "$E_AGG")"
+say e5_open "$(awk 'NR==1' "$E_AGG" 2>/dev/null)"
+say e6_close "$(awk 'END { print }' "$E_AGG" 2>/dev/null)"
+say e7_row1 "$(awk 'NR==2' "$E_AGG" 2>/dev/null)"
+say e8_row2 "$(awk 'NR==3' "$E_AGG" 2>/dev/null)"
+say e9_rows "$(grep -c '^- {' "$E_AGG" 2>/dev/null)"
+
+mk_result 'verdict: APPROVE
+findings: []
+confidence: medium' "$R48_TMP/clean.md"
+E_CLEAN="$(review_write_postfix_aggregate phase2 3 "$R48_TMP/clean.md" 2>/dev/null)"
+say e10_rc "$?"
+say e11_counts "$E_CLEAN"
+say e12_clean_doc "$(tr '\n' '/' <"$RESEARCH_DIR_ABS/postfix-phase2-iter3.md" 2>/dev/null)"
+
+mk_result 'verdict: APPROVE
+findings:
+  - severity: blocker
+    location: a/b.sh:1
+    summary: a blocker under an APPROVE verdict
+    detail: the two-way invariant the child contract states
+confidence: low' "$R48_TMP/illegal.md"
+say f1_approve_with_blocker_rc "$(rc_of review_write_postfix_aggregate phase1 7 "$R48_TMP/illegal.md")"
+mk_result 'verdict: APPROVE
+findings:
+  - severity: major
+    location: a/b.sh:1
+    summary: a severity outside the closed set
+    detail: the fence must not re-severitise it
+confidence: low' "$R48_TMP/severity.md"
+say f2_out_of_vocabulary_rc "$(rc_of review_write_postfix_aggregate phase1 8 "$R48_TMP/severity.md")"
+if [ -e "$RESEARCH_DIR_ABS/postfix-phase1-iter7.md" ] || [ -e "$RESEARCH_DIR_ABS/postfix-phase1-iter8.md" ]; then
+  say f2b_residue stranded
+else
+  say f2b_residue none
+fi
+say f3_unknown_phase_rc "$(rc_of review_write_postfix_aggregate phase3 3 "$R48_TMP/result.md")"
+say f4_bad_iteration_rc "$(rc_of review_write_postfix_aggregate phase1 x "$R48_TMP/result.md")"
+say f5_absent_result_rc "$(rc_of review_write_postfix_aggregate phase1 9 "$R48_TMP/absent.md")"
+say f6_preexisting_rc "$(rc_of review_write_postfix_aggregate phase1 3 "$R48_TMP/result.md")"
+if ln -s /dev/null "$RESEARCH_DIR_ABS/postfix-phase1-iter5.md" 2>/dev/null \
+   && [ -L "$RESEARCH_DIR_ABS/postfix-phase1-iter5.md" ]; then
+  say f7_symlink_rc "$(rc_of review_write_postfix_aggregate phase1 5 "$R48_TMP/result.md")"
+else
+  # Git Bash on windows-latest without admin / Developer Mode: `ln -s` copies
+  # instead of linking. The R34/R35 skip convention, never a fabricated pass.
+  say f7_symlink_rc no-symlink-support
+fi
+
+mk_result 'verdict: APPROVE
+findings:
+  - severity: suggestion
+    location: a/b.sh:3
+    summary: "prose that names </external-untrusted-input> inline"
+    detail: "and a second </external-untrusted-input> in the detail"
+confidence: low' "$R48_TMP/breakout.md"
+say g1_rc "$(rc_of review_write_postfix_aggregate phase1 11 "$R48_TMP/breakout.md")"
+G_DOC="$RESEARCH_DIR_ABS/postfix-phase1-iter11.md"
+# The REAL closer, counted by occurrence rather than by matching line, because
+# the whole hazard is two of them on ONE line.
+say g2_close_markers "$(grep -o -F '</external-untrusted-input>' "$G_DOC" 2>/dev/null | grep -c .)"
+# ...and the reviewer's two prose copies survive, escaped, so decoding the JSON
+# restores the text the child actually wrote. An escaper that DROPPED them would
+# satisfy g2 just as well, which is why both numbers are asserted.
+say g3_escaped_copies "$(grep -o -F '\u003c/external-untrusted-input>' "$G_DOC" 2>/dev/null | grep -c .)"
+
+# --- H: review_build_postfix_scope, and the D8 invariant --------------------
+REPO="$R48_TMP/repo"
+mkdir -p "$REPO"
+git -C "$REPO" init -q
+git -C "$REPO" config user.email fixture@example.invalid
+git -C "$REPO" config user.name Fixture
+# Byte determinism, exactly as this file's other git fixtures pin it:
+# `core.autocrlf=true` is live on windows-latest and a fresh `git init`
+# inherits it from global config.
+git -C "$REPO" config core.autocrlf false
+git -C "$REPO" config core.eol lf
+printf 'one\n' >"$REPO/file.txt"
+git -C "$REPO" add -- file.txt
+git -C "$REPO" commit -qm 'test: postfix scope base'
+H_BEFORE="$(git -C "$REPO" rev-parse HEAD)"
+printf 'one\ntwo\n' >"$REPO/file.txt"
+git -C "$REPO" add -- file.txt
+git -C "$REPO" commit -qm 'test: postfix scope head'
+H_AFTER="$(git -C "$REPO" rev-parse HEAD)"
+WORKTREE_ROOT="$REPO"
+DIFF_ARTIFACT_PATH="$RESEARCH_DIR_ABS/diff.md"
+COMMIT_RANGE_PATH="$RESEARCH_DIR_ABS/commit-range.txt"
+export WORKTREE_ROOT DIFF_ARTIFACT_PATH COMMIT_RANGE_PATH
+printf 'PHASE1 DIFF BYTES\n' >"$DIFF_ARTIFACT_PATH"
+printf '%s..%s\n' "$H_BEFORE" "$H_AFTER" >"$COMMIT_RANGE_PATH"
+H_DIFF_SHA="$(sha_of "$DIFF_ARTIFACT_PATH")"
+H_RANGE_SHA="$(sha_of "$COMMIT_RANGE_PATH")"
+REVIEW_POSTFIX_DIFF_PATH=''
+REVIEW_POSTFIX_DIFF_SUMMARISED=''
+review_build_postfix_scope phase1 "$H_BEFORE..$H_AFTER" 2>"$R48_TMP/h.err"
+say h1_rc "$?"
+say h2_path "$REVIEW_POSTFIX_DIFF_PATH"
+say h_want_path "$RESEARCH_DIR_ABS/postfix-diff-phase1-iter3.md"
+say h3_summarised "$REVIEW_POSTFIX_DIFF_SUMMARISED"
+say h4_open "$(awk 'NR==1' "$REVIEW_POSTFIX_DIFF_PATH" 2>/dev/null)"
+if grep -q '^+two$' "$REVIEW_POSTFIX_DIFF_PATH" 2>/dev/null; then
+  say h5_carries_diff yes
+else
+  say h5_carries_diff no
+fi
+if [ "$(sha_of "$DIFF_ARTIFACT_PATH")" = "$H_DIFF_SHA" ]; then
+  say h6_diff_untouched yes
+else
+  say h6_diff_untouched REWRITTEN
+fi
+if [ "$(sha_of "$COMMIT_RANGE_PATH")" = "$H_RANGE_SHA" ]; then
+  say h7_range_untouched yes
+else
+  say h7_range_untouched REWRITTEN
+fi
+say h8_mode "$(mode_of "$REVIEW_POSTFIX_DIFF_PATH")"
+say h9_equal_range_rc "$(rc_of review_build_postfix_scope phase1 "${H_BEFORE}..${H_BEFORE}")"
+say h10_malformed_range_rc "$(rc_of review_build_postfix_scope phase1 "nothex..$H_AFTER")"
+say h11_unknown_phase_rc "$(rc_of review_build_postfix_scope phase9 "$H_BEFORE..$H_AFTER")"
+say h12_bad_iteration_rc "$(
+  REVIEW_ITERATION=x
+  export REVIEW_ITERATION
+  review_build_postfix_scope phase1 "$H_BEFORE..$H_AFTER" >/dev/null 2>&1
+  printf '%s' "$?"
+)"
+say h13_scratch "$(ls -a "$RESEARCH_DIR_ABS" 2>/dev/null | grep -c '^\.review-postfix-scope\.')"
+
+# --- I: the D2 arity gates ---------------------------------------------------
+say i1_track_four_arg_rc "$(rc_of review_track_validated_fixer_head APPLIED "$H_BEFORE" "$H_AFTER" "$H_AFTER")"
+say i2_track_bad_phase_rc "$(rc_of review_track_validated_fixer_head APPLIED "$H_BEFORE" "$H_AFTER" "$H_AFTER" phase9)"
+say i3_promote_three_arg_rc "$(rc_of review_promote_validated_fixer_outcome '{}' "$H_BEFORE" "$H_AFTER")"
+say i4_promote_bad_phase_rc "$(rc_of review_promote_validated_fixer_outcome '{}' "$H_BEFORE" "$H_AFTER" phase9)"
+
+# --- J: the APPLIED arm writes the carrier; ABSENCE is the short-circuit -----
+# The evidence directory sits BENEATH the worktree, exactly as production's
+# .uberdev/research/<RUN_ID> does: validate-residue refuses `evidence_dir_invalid`
+# for an evidence directory outside the repository it is vouching for.
+CODE_FIXER_CONTRACT="$UBERDEV_REVIEW_PLUGIN_ROOT/lib/code_fixer_contract.py"
+export CODE_FIXER_CONTRACT
+J_RESEARCH="$REPO/.uberdev/research/run"
+mkdir -p "$J_RESEARCH"
+(
+  RESEARCH_DIR_ABS="$J_RESEARCH"
+  REVIEW_ITERATION=2
+  export RESEARCH_DIR_ABS REVIEW_ITERATION
+  VALIDATED_FIXER_HEAD_SHA="$H_BEFORE"
+  review_track_validated_fixer_head APPLIED "$H_BEFORE" "$H_AFTER" "$H_AFTER" phase1
+  printf 'applied_rc=%s\n' "$?"
+  VALIDATED_FIXER_HEAD_SHA="$H_BEFORE"
+  review_track_validated_fixer_head REFUSED "$H_BEFORE" "$H_BEFORE" "" phase2
+  printf 'refused_rc=%s\n' "$?"
+) >"$R48_TMP/j.out" 2>"$R48_TMP/j.err"
+say j1_applied_rc "$(sed -n 's/^applied_rc=//p' "$R48_TMP/j.out")"
+say j2_refused_rc "$(sed -n 's/^refused_rc=//p' "$R48_TMP/j.out")"
+say j_stderr "$(tr '\n' ' ' <"$R48_TMP/j.err" 2>/dev/null)"
+say j3_carrier "$(cat "$J_RESEARCH/fixer-range-phase1-iter2.txt" 2>/dev/null)"
+say j_want_carrier "$H_BEFORE..$H_AFTER"
+if [ -e "$J_RESEARCH/fixer-range-phase2-iter2.txt" ]; then
+  say j4_unapplied_carrier WROTE-ONE
+else
+  say j4_unapplied_carrier none
+fi
+if [ -e "$J_RESEARCH/fixer-range--iter2.txt" ]; then
+  say j5_empty_phase_name reachable
+else
+  say j5_empty_phase_name none
+fi
+(
+  RESEARCH_DIR_ABS="$J_RESEARCH"
+  export RESEARCH_DIR_ABS
+  unset REVIEW_ITERATION
+  VALIDATED_FIXER_HEAD_SHA="$H_BEFORE"
+  review_track_validated_fixer_head APPLIED "$H_BEFORE" "$H_AFTER" "$H_AFTER" phase2
+  printf 'unnamable_rc=%s\n' "$?"
+) >"$R48_TMP/j2.out" 2>/dev/null
+say j6_unnamable_iteration_rc "$(sed -n 's/^unnamable_rc=//p' "$R48_TMP/j2.out")"
+
+# --- K: the roster, the slug, and the gates that run BEFORE the mint --------
+say k1_roster "$(review_fleet_roster postfix 2>/dev/null | tr '\t' '|')"
+say k2_expected "$(review_fleet_expected postfix 2>/dev/null)"
+say k3_slug_phase1 "$(review_fleet_postfix_slug postfix-correctness phase1 2>/dev/null)"
+say k4_slug_phase2 "$(review_fleet_postfix_slug postfix-correctness phase2 2>/dev/null)"
+say k5_slug_bad_phase_rc "$(rc_of review_fleet_postfix_slug postfix-correctness phase9)"
+say k6_child_dir "$(review_fleet_child_dir "$R48_TMP" 1 postfix-correctness-phase1 2>/dev/null)"
+say k_want_child_dir "$R48_TMP/children/postfix-correctness-phase1-iter01"
+say k7_bind_bad_phase_rc "$(rc_of review_fleet_bind_postfix "$R48_TMP" 1 phase9 "$REPO" "$CODE_FIXER_CONTRACT" "$R48_TMP/sc.json")"
+say k8_bind_relative_rc "$(rc_of review_fleet_bind_postfix relative 1 phase1 "$REPO" "$CODE_FIXER_CONTRACT" "$R48_TMP/sc.json")"
+say k9_bind_bad_contract_rc "$(rc_of review_fleet_bind_postfix "$R48_TMP" 1 phase1 "$REPO" "$R48_TMP/no-such-contract.py" "$R48_TMP/sc.json")"
+if [ -e "$R48_TMP/children/postfix-correctness-phase1-iter01" ]; then
+  say k10_mint_before_gate child-dir-created
+else
+  say k10_mint_before_gate none
+fi
+exit 0
+R48_DRIVE
+R48_TMP="$R48_TMP" UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  bash "$R48_TMP/drive.sh" >"$R48_REPORT" 2>"$R48_TMP/drive.err"
+R48_DRIVE_RC=$?
+
+# r48 DESC KEY=WANT [KEY=WANT ...] -- every named key must carry exactly that
+# value. A key the driver never emitted reads as the empty string and fails,
+# which is the point: a driver that died halfway must not leave a row vacuous.
+r48() {
+  local desc="$1" bad="" pair key want got
+  shift
+  for pair in "$@"; do
+    key="${pair%%=*}"
+    want="${pair#*=}"
+    got="$(sed -n "s/^$key=//p" "$R48_REPORT")"
+    [ "$got" = "$want" ] || bad="$bad $key='$got'(want '$want')"
+  done
+  if [ -z "$bad" ]; then
+    echo "  PASS  $desc"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc"; echo "       $bad"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+# r48_same DESC KEY OTHER -- two keys the driver computed independently must
+# agree, and neither may be empty. For values this file cannot spell in advance
+# (a repository's real SHAs, a mktemp path).
+r48_same() {
+  local desc="$1" got other
+  got="$(sed -n "s/^$2=//p" "$R48_REPORT")"
+  other="$(sed -n "s/^$3=//p" "$R48_REPORT")"
+  if [ -n "$got" ] && [ "$got" = "$other" ]; then
+    echo "  PASS  $desc"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc"; echo "        $2='$got' vs $3='$other'"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+# r48_mode DESC KEY -- 0o600, or an honest SKIP. The two writers guard their own
+# chmod with `os.name != "nt"`, so on the Git Bash job there is no POSIX mode to
+# read and the driver says `skip`; asserting a fabricated value there would be a
+# row that passes by agreeing with itself.
+r48_mode() {
+  local desc="$1" got
+  got="$(sed -n "s/^$2=//p" "$R48_REPORT")"
+  case "$got" in
+    0o600)
+      echo "  PASS  $desc"; PASS=$((PASS + 1)) ;;
+    skip)
+      echo "  SKIP  $desc (POSIX modes do not apply on this platform)" ;;
+    *)
+      echo "  FAIL  $desc"; echo "        $2='$got' (want 0o600)"
+      FAIL=$((FAIL + 1)) ;;
+  esac
+}
+
+if [ "$R48_DRIVE_RC" = 0 ]; then
+  echo "  PASS  R48.0 — the fence-writer driver ran to completion"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R48.0 — the fence-writer driver exited $R48_DRIVE_RC; every row below is unreliable"
+  echo "        stderr: $(tr '\n' ' ' <"$R48_TMP/drive.err" 2>/dev/null)"
+  FAIL=$((FAIL + 1))
+fi
+
+r48 "R48.1 — a fresh shell that carves the fence library gets both post-fix fences and all six carriers" \
+  load=ok fences_defined=2 carriers_defined=6
+
+# --- the commit-range carrier, which IS the zero-dispatch short-circuit ------
+r48 "R48.2 — write_fixer_range -> read_fixer_range round-trips the exact <40hex>..<40hex>" \
+  a1_write_rc=0 a4_read_rc=0
+r48_same "R48.2b — the bytes on disk are the range it was handed" a2_bytes a_want
+r48_same "R48.2c — and the reader returns those same bytes" a5_read a_want
+r48_mode "R48.3 — the commit-range carrier is written 0600" a3_mode
+r48 "R48.4 — every malformed carrier is refused, so a file that exists but does not parse is never read as a range" \
+  b_refused=10/10 b_accepted=
+r48 "R48.5 — the carrier writer fails closed on bad input and leaves no file behind" \
+  c1_nonhex_rc=2 c2_equal_rc=2 c3_arity_rc=2 c4_unwritable=refused c5_residue=none
+r48 "R48.6 — the dispatch-decision carrier is a closed {0,1} domain on BOTH sides" \
+  d1_write_rc=0 d2_read=1 d3_bad_write_rc=2 d4_bad_read_rc=2
+
+# --- the aggregate writer ----------------------------------------------------
+r48 "R48.7 — the aggregate writer returns the counts projection its caller's sidecar is rendered from" \
+  e1_rc=0 'e2_counts={"by_severity":{"blocker":1,"suggestion":1},"findings_count":2}'
+r48 "R48.8 — the document is ONE envelope holding one byte-exact row per finding, transcribed and never re-severitised" \
+  e3_landed=yes \
+  'e5_open=<external-untrusted-input source="postfix-aggregate">' \
+  'e6_close=</external-untrusted-input>' \
+  'e7_row1=- {"agent_name":"code-reviewer","disposition":"DEFERRED","location":"plugins/uberdev/lib/foo.sh:12","rationale":"the guard it replaced was the sole path that refused a bad tip","severity":"blocker","source_edges":["review_pr.postfix.correctness"],"summary":"the fix removed the only caller of the validator","tier":"BLOCKER"}' \
+  'e8_row2=- {"agent_name":"code-reviewer","disposition":"DEFERRED","location":"plugins/uberdev/lib/foo.sh:40","rationale":"hoisting it would keep the two arms provably in step","severity":"suggestion","source_edges":["review_pr.postfix.correctness"],"summary":"the new branch repeats a condition two lines above it","tier":null}' \
+  e9_rows=2
+# A clean pass is the ORDINARY outcome of reading a fixer's own commits, and it
+# still owes findings-to-issues a document: an absent artifact and a
+# zero-finding one are the same bytes to a consumer that only checks existence.
+r48 "R48.9 — a zero-finding pass still publishes an envelope, with the zero counts" \
+  e10_rc=0 'e11_counts={"by_severity":{"blocker":0,"suggestion":0},"findings_count":0}' \
+  'e12_clean_doc=<external-untrusted-input source="postfix-aggregate">/</external-untrusted-input>/'
+# rc 2 and rc 74 are two different instructions to the caller -- publish a
+# `blocked` sidecar and continue, versus halt -- so they are asserted apart.
+r48 "R48.10 — a malformed child result is rc 2 (advisory) and strands no half-made aggregate" \
+  f1_approve_with_blocker_rc=2 f2_out_of_vocabulary_rc=2 f2b_residue=none \
+  f3_unknown_phase_rc=2 f4_bad_iteration_rc=2 f5_absent_result_rc=2
+R48_SYMLINK="$(sed -n 's/^f7_symlink_rc=//p' "$R48_REPORT")"
+if [ "$R48_SYMLINK" = no-symlink-support ]; then
+  # Git Bash without admin / Developer Mode, the R34/R35 convention.
+  echo "  SKIP  R48.11 (symlink arm): ln -s did not produce a symlink on this platform"
+  r48 "R48.11 — an artifact that cannot reach disk is rc 74 (halt), never rc 2" f6_preexisting_rc=74
+else
+  r48 "R48.11 — an artifact that cannot reach disk is rc 74 (halt), never rc 2" \
+    f6_preexisting_rc=74 f7_symlink_rc=74
+fi
+r48 "R48.12 — reviewer prose naming the close marker cannot close the envelope early" \
+  g1_rc=0 g2_close_markers=1 g3_escaped_copies=2
+
+# --- the post-fix scope builder, and D8 -------------------------------------
+r48 "R48.13 — build_postfix_scope publishes one enveloped artifact carrying the fixer's own diff" \
+  h1_rc=0 h3_summarised=false 'h4_open=<external-untrusted-input source="postfix-diff">' \
+  h5_carries_diff=yes
+r48_same "R48.13b — at the phase- and iteration-keyed name" h2_path h_want_path
+# D8, EXECUTED. Both files are the prepare-authority receipt's digest-pinned
+# inputs for the NEXT fixer: `commit_range_sha256` is a declared input on
+# review_pr.fix.phase1 and on review_pr.fix.phase2 alike, so a scope builder
+# that rewrote either one in passing would break the Phase 2 authority receipt.
+# Asserted as SHA equality over the real files rather than as an absence of two
+# variable names in the function body.
+r48 "R48.14 — D8: it leaves \$DIFF_ARTIFACT_PATH and \$COMMIT_RANGE_PATH byte-identical" \
+  h6_diff_untouched=yes h7_range_untouched=yes
+r48 "R48.15 — its atomic write leaves no scratch file behind" h13_scratch=0
+r48_mode "R48.15b — and the artifact it publishes is 0600" h8_mode
+# 74 vs 2 is the wiring-bug / bad-argument split the fence documents: a range
+# that does not parse reached here only by BYPASSING read_fixer_range's own
+# 40-hex gate, which must halt rather than be handed back to the caller.
+r48 "R48.16 — an unparseable range halts 74; an argument this fence will not act on is 2" \
+  h9_equal_range_rc=74 h10_malformed_range_rc=74 h11_unknown_phase_rc=2 h12_bad_iteration_rc=2
+
+# --- D2, and the carrier the APPLIED arm owes -------------------------------
+r48 "R48.17 — the D2 arity gates refuse a four-argument track and a three-argument promote" \
+  i1_track_four_arg_rc=2 i2_track_bad_phase_rc=2 \
+  i3_promote_three_arg_rc=2 i4_promote_bad_phase_rc=2
+r48 "R48.18 — the APPLIED arm writes the phase-keyed carrier, at the one point both heads are proven" \
+  j1_applied_rc=0
+r48_same "R48.18b — and its bytes are the range the fixer actually produced" j3_carrier j_want_carrier
+# ABSENCE is the short-circuit (AC #3). It is structural rather than a branch
+# someone can forget to write -- but only while a four-argument call cannot
+# quietly write `fixer-range--iter2.txt` instead.
+r48 "R48.19 — the unapplied arm writes NO carrier, and no empty-phase carrier name is reachable" \
+  j2_refused_rc=0 j4_unapplied_carrier=none j5_empty_phase_name=none
+r48 "R48.20 — an unnamable REVIEW_ITERATION halts 74 rather than defaulting pass 2 onto pass 1's artifact" \
+  j6_unnamable_iteration_rc=74
+
+# --- the wire format the controller and workflow.js both compute -------------
+r48 "R48.21 — the postfix roster, its expected count and its per-phase slugs are the shared wire format" \
+  'k1_roster=postfix-correctness|review_pr.postfix.correctness' k2_expected=1 \
+  k3_slug_phase1=postfix-correctness-phase1 k4_slug_phase2=postfix-correctness-phase2 \
+  k5_slug_bad_phase_rc=2
+r48_same "R48.21b — and the two phases resolve to child directories that cannot collide" k6_child_dir k_want_child_dir
+# Every bind gate runs BEFORE the nonce mint, so a wiring regression burns no
+# nonce and creates no child directory a later dispatch would then refuse as
+# pre-existing residue.
+r48 "R48.22 — bind_postfix refuses an unknown phase, a relative run dir and an unreadable contract, all before the mint" \
+  k7_bind_bad_phase_rc=2 k8_bind_relative_rc=2 k9_bind_bad_contract_rc=2 \
+  k10_mint_before_gate=none
+rm -rf "$R48_TMP"
+
+echo
+echo "== R49: the post-fix pass's off switch, and where its two steps sit (#655) =="
+# The off switch is `--no-ci-fix`'s shape INCLUDING its persistence, and the
+# persistence is the half that matters: steps 5p and 6p are fresh shells (#427),
+# so a fence reading `${POST_FIX_REVIEW_PHASE:-1}` would answer with the
+# documented default on every invocation and `--no-post-fix-review` would be a
+# flag that parses, prints and does nothing.
+assert_grep "$REVIEW_PR" '^argument-hint:.*--no-post-fix-review' \
+  "R49.1 — --no-post-fix-review is declared in argument-hint"
+assert_grep "$REVIEW_PR" 'POST_FIX_REVIEW_PHASE=0' \
+  "R49.2 — the token is parsed to a 0/1 decision"
+assert_grep "$REVIEW_PR" 'post-fix-review-phase\.txt' \
+  "R49.3 — the decision is PERSISTED, not left in a variable a fresh fence cannot see"
+assert_grep "$REVIEW_PR" 'post_fix_review_phase_unreadable' \
+  "R49.4 — an unreadable record halts by name rather than defaulting the pass ON"
+# The two consuming fences must READ the record. `${POST_FIX_REVIEW_PHASE:-1}`
+# anywhere is the defect itself, so it is asserted absent.
+assert_no_grep "$REVIEW_PR" 'if \[ "\$\{POST_FIX_REVIEW_PHASE:-1\}" ' \
+  "R49.5 — no fence defaults the phase from an unbound variable"
+assert_grep "$REVIEW_PR" '\(skipped: --no-post-fix-review\)' \
+  "R49.6 — Step 7 renders the off-switch skip as its own row, so a suppressed pass is visible"
+assert_grep "$REVIEW_PR" '\(skipped: no applied fixer commit\)' \
+  "R49.7 — and the no-applied-commit short-circuit renders as a DIFFERENT row"
+
+# Order, read off the file rather than asserted as prose: 5p reviews the Phase 1
+# fixer's commits and must therefore precede Phase 2 (which rewrites from
+# there), and 6p must precede the 6a push that publishes what it reviewed.
+R49_ORDER="$(python3 -I -B - "$REVIEW_PR" <<'PY'
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+marks = {
+    "5p": "\n5p. **Post-fix review",
+    "phase2": "\n6. **Phase 2 — Mandatory Simplify Pass",
+    "6p": "\n6p. **Post-fix review",
+    "6a": "\n6a. **Post-fixer push",
+}
+at = {}
+for name, needle in marks.items():
+    index = text.find(needle)
+    if index < 0:
+        print("MISSING:" + name)
+        raise SystemExit(0)
+    at[name] = index
+if at["5p"] < at["phase2"] and at["6p"] < at["6a"]:
+    print("OK")
+else:
+    print("ORDER:" + " ".join("%s=%d" % (k, v) for k, v in sorted(at.items(), key=lambda r: r[1])))
+PY
+)" || R49_ORDER="PROBE-FAILED"
+if [ "$R49_ORDER" = OK ]; then
+  echo "  PASS  R49.8 — 5p precedes the Phase 2 section and 6p precedes the 6a post-fixer push"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R49.8 — the post-fix steps are out of order: $R49_ORDER"
   FAIL=$((FAIL + 1))
 fi
 
