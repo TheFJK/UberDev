@@ -65,7 +65,7 @@ def rejected_tree(mutate, needle):
 brain_rel="plugins/uberdev/skills/brainstorm/SKILL.md"
 brain=(root/brain_rel).read_text()
 deleted=re.sub(r'^\s*"brainstorm\.research\.codebase"[^\n]*\n?', '', brain, count=1, flags=re.M)
-rejected({brain_rel:deleted},"expected 43")
+rejected({brain_rel:deleted},"expected 44")
 
 invalid_workflow=brain.replace(
     '"allowed_workflows":["solve","turbo"]',
