@@ -780,9 +780,367 @@ print(json.dumps(paths,separators=(',',':')),end='')
 PY
 )" || return 2
 }
+# review_build_postfix_scope PHASE RANGE -- the post-fix reviewer's OWN scope.
+#
+# Writes exactly one artifact: $RESEARCH_DIR_ABS/postfix-diff-<phase>-iter<N>.md,
+# holding `git diff <before>..<after>` inside the untrusted-input envelope the
+# child reads it through. On success it sets two globals for the calling fence,
+# the same shape review_refresh_phase1_scope uses for CHANGED_PATHS_JSON,
+# because a fence cannot read both a value and an exit status off stdout:
+#
+#   REVIEW_POSTFIX_DIFF_PATH        what it wrote
+#   REVIEW_POSTFIX_DIFF_SUMMARISED  `true` | `false`
+#
+# WHY THIS IS A SECOND SCOPE BUILDER AND NOT A CALL INTO THE FIRST.
+# review_refresh_phase1_scope replace_private()s BOTH $DIFF_ARTIFACT_PATH and
+# $COMMIT_RANGE_PATH in place, and those are the exact bytes the NEXT fixer's
+# prepare-authority receipt digest-pins: `commit_range_sha256` is a declared
+# input on review_pr.fix.phase1 and on review_pr.fix.phase2 alike. Re-running it
+# between Phase 1 and Phase 2 merely to obtain a diff would break the Phase 2
+# authority receipt, and it raises SystemExit(2) on an empty path set besides.
+# So this function names NEITHER of those two paths as a write target. That is
+# an invariant rather than a preference, and it is test-locked as one.
+#
+# The summarisation flag is REPORTED, not swallowed. A GREEN run whose post-fix
+# pass read a 40-line summary instead of the diff has to be able to say so; a
+# fallback that hides the degradation is a swallowed error.
+#
+# rc 2 = the caller named something this fence will not act on: a phase outside
+# {phase1, phase2}, or an iteration it cannot key the artifact on.
+# rc 74 = the artifact did not reach disk. A range that does not parse lands
+# here rather than on rc 2 ON PURPOSE: by the time this fence runs, the range
+# has already been read back through review_fleet_read_fixer_range's own 40-hex
+# gate, so an unparseable one means that reader was bypassed -- a wiring bug
+# that must halt, not an argument the caller can be asked to correct.
+#
+# THE HEREDOC BELOW SITS INSIDE A `$( )` CAPTURE, so every `'` and every
+# backtick in it must BALANCE -- an apostrophe in a python comment is enough to
+# break it. Every helper in this file is loaded by CARVING its bytes out and
+# eval()ing them (lib/review-fleet-args.sh review_fleet_load_fence_library,
+# which carves rather than sources because typeset -f re-emits heredocs
+# unparseably on disjoint bash versions, #471), and bash 3.2 -- stock
+# /bin/bash on macOS, where these fences actually run -- rescans a
+# command-substitution body for quotes and backticks WITHOUT honouring the
+# quoted heredoc delimiter inside it. An odd one parses as an unterminated
+# quote, the eval fails, and the helper is left silently UNDEFINED until a
+# fence calls it many relays downstream. bash 5 and zsh accept the same bytes
+# and report nothing, so `bash -n` on PATH cannot see this: check with
+# `/bin/bash -n lib/review-fences.sh`. review_write_postfix_aggregate below
+# dodges the whole class by leaving its python as the function's LAST command
+# instead of capturing it; do that here too if this ever needs a lone quote.
+review_build_postfix_scope() {
+  [ "$#" -eq 2 ] || return 2
+  local postfix_phase="${@:1:1}" postfix_range="${@:2:1}" postfix_target postfix_summarised
+  case "$postfix_phase" in phase1 | phase2) : ;; *) return 2 ;; esac
+  # AC #7 again: no `:-1` default. An iteration this fence cannot name is a
+  # refusal, because a defaulted one silently rebinds pass 2 onto pass 1's
+  # artifact and every downstream equality still passes.
+  case "${REVIEW_ITERATION:-}" in '' | *[!0-9]*) return 2 ;; esac
+  [ -n "${RESEARCH_DIR_ABS:-}" ] && [ -n "${WORKTREE_ROOT:-}" ] || return 2
+  postfix_target="$RESEARCH_DIR_ABS/postfix-diff-${postfix_phase}-iter${REVIEW_ITERATION}.md"
+  postfix_summarised="$(python3 -I -B - "$WORKTREE_ROOT" "$postfix_range" "$postfix_target" <<'PY'
+import os,re,subprocess,sys,tempfile
+root,commit_range,target=sys.argv[1:]
+MAX_DIFF_LINES=2000
+MAX_DIFF_BYTES=8*1024*1024
+MAX_WRAPPED_DIFF_BYTES=16*1024*1024
+matched=re.fullmatch(r'([0-9a-f]{40})\.\.([0-9a-f]{40})',commit_range)
+if matched is None: raise SystemExit(2)
+before,after=matched.group(1),matched.group(2)
+if before==after: raise SystemExit(2)
+if not os.path.isabs(target): raise SystemExit(2)
+# The carrier writer already proved this ancestry with both heads in hand.
+# Re-asserting it here is not distrust of that proof: this argument reached the
+# fence as a scalar, and a range whose halves are unrelated would otherwise be
+# diffed as a two-sided comparison and reviewed as if it were one commit.
+# (No apostrophe on "carrier" -- see the bash 3.2 note above this function.)
+subprocess.run(['git','-C',root,'merge-base','--is-ancestor',before,after],check=True)
+def escape_untrusted_diff_payload(payload):
+    return payload.replace(b'&',b'&amp;').replace(b'<',b'&lt;')
+def wrap_untrusted_diff(payload):
+    escaped=escape_untrusted_diff_payload(payload)
+    opening=b'<external-untrusted-input source="postfix-diff">'
+    closing=b'</external-untrusted-input>'
+    wrapped=opening+b'\n'+escaped+closing+b'\n'
+    if wrapped.count(opening)!=1 or wrapped.count(closing)!=1: raise ValueError()
+    return wrapped
+def build_diff_summary():
+    summary=['[diff summarized: full binary diff exceeded the 2000-line, 8-MiB raw, or 16-MiB wrapped review artifact limit]']
+    summary_bytes=len((summary[0]+'\n').encode())
+    summary_wrapped_bytes=len(wrap_untrusted_diff((summary[0]+'\n').encode()))
+    omission_reserve=128
+    stats=subprocess.Popen(['git','-C',root,'diff','--numstat','--no-renames',f'{before}..{after}'],
+                           stdout=subprocess.PIPE,text=True,encoding='utf-8',errors='strict')
+    omitted=0
+    for line in stats.stdout:
+        fields=line.rstrip('\n').split('\t',2)
+        if len(fields)!=3: raise SystemExit(2)
+        added,deleted,changed=fields
+        detail='binary change' if added==deleted=='-' else f'{added} additions, {deleted} deletions'
+        row=f'{changed} — {detail}'
+        encoded=(row+'\n').encode()
+        escaped_size=len(escape_untrusted_diff_payload(encoded))
+        if (summary_bytes+len(encoded)>MAX_DIFF_BYTES
+                or summary_wrapped_bytes+escaped_size+omission_reserve>MAX_WRAPPED_DIFF_BYTES):
+            omitted+=1
+            continue
+        summary.append(row)
+        summary_bytes+=len(encoded)
+        summary_wrapped_bytes+=escaped_size
+    if stats.wait()!=0: raise SystemExit(2)
+    if omitted: summary.append(f'[{omitted} additional file summaries omitted to preserve the artifact limit]')
+    return ('\n'.join(summary)+'\n').encode()
+def select_bounded_wrapped_diff(payload,summary_factory):
+    wrapped=wrap_untrusted_diff(payload)
+    if len(wrapped)<=MAX_WRAPPED_DIFF_BYTES: return wrapped
+    wrapped=wrap_untrusted_diff(summary_factory())
+    if len(wrapped)>MAX_WRAPPED_DIFF_BYTES: raise ValueError()
+    return wrapped
+process=subprocess.Popen(['git','-C',root,'diff','--binary','--no-ext-diff',f'{before}..{after}'],stdout=subprocess.PIPE)
+diff_buffer=bytearray(); diff_lines=0; summarized=False
+while True:
+    chunk=process.stdout.read(65536)
+    if not chunk: break
+    diff_buffer.extend(chunk); diff_lines+=chunk.count(b'\n')
+    if len(diff_buffer)>MAX_DIFF_BYTES or diff_lines>MAX_DIFF_LINES:
+        summarized=True; process.kill(); break
+process.stdout.close(); process.wait()
+if not summarized and process.returncode!=0: raise SystemExit(2)
+diff=build_diff_summary() if summarized else bytes(diff_buffer)
+wrapped_diff=select_bounded_wrapped_diff(diff,(lambda: diff) if summarized else build_diff_summary)
+def replace_private(destination,payload):
+    parent=os.path.dirname(destination) or '.'
+    fd,tmp=tempfile.mkstemp(prefix='.review-postfix-scope.',dir=parent)
+    try:
+        if os.name!='nt': os.fchmod(fd,0o600)
+        with os.fdopen(fd,'wb') as stream:
+            stream.write(payload); stream.flush(); os.fsync(stream.fileno())
+        os.replace(tmp,destination)
+    finally:
+        try: os.unlink(tmp)
+        except FileNotFoundError: pass
+replace_private(target,wrapped_diff)
+with open(target,'rb') as stream:
+    if stream.read(len(wrapped_diff)+1)!=wrapped_diff: raise SystemExit(2)
+print('true' if summarized else 'false',end='')
+PY
+)" || return 74
+  case "$postfix_summarised" in true | false) : ;; *) return 74 ;; esac
+  REVIEW_POSTFIX_DIFF_PATH="$postfix_target"
+  REVIEW_POSTFIX_DIFF_SUMMARISED="$postfix_summarised"
+}
+# review_write_postfix_aggregate PHASE ITER RESULT_PATH
+#
+# Transcribes one VALIDATED post-fix child result into the command-owned
+# `postfix-aggregate` envelope at $RESEARCH_DIR_ABS/postfix-<phase>-iter<N>.md,
+# and prints the counts the calling fence needs for its sidecar:
+#
+#   {"by_severity":{"blocker":B,"suggestion":S},"findings_count":N}
+#
+# so the fence never has to re-parse the document it just wrote.
+#
+# SEVERITY IS TRANSCRIBED, NEVER RE-SEVERITISED. shared/phase1-reviewer-output-v1.md
+# fixes the child's vocabulary at `blocker | suggestion` and admits nothing
+# else, so mapping a `suggestion` up to `major` would be this fence inventing a
+# judgement the reviewer did not make. A row carrying any other severity is a
+# malformed child return -- rc 2, which the caller records as `status: blocked`
+# -- and it is never coerced into one of the two.
+#
+# TWO DISTINCT FAILURE RCs, because the caller must tell them apart:
+#   rc 2  the child result is absent, unreadable or malformed. Advisory: the
+#         caller publishes a `blocked` sidecar and the run continues.
+#   rc 74 the aggregate did not reach disk. A finding that reached no sink is a
+#         swallowed error, so this one halts.
+#
+# The write mirrors the ci-refused-synthetic writer byte for byte in discipline:
+# exclusive create under `umask 077`, an lstat gate that refuses a symlink, a
+# hard link, a foreign owner, a non-empty file or a mode other than 0600, an
+# O_NOFOLLOW open, a device+inode identity re-check between the open descriptor
+# and the path, a full-length os.write, an fsync, and a re-read proving the
+# first 128 bytes carry the envelope marker findings-to-issues looks for.
+#
+# The rendered JSON escapes the envelope's own close marker as
+# `\u003c/external-untrusted-input>` -- lib/report_primitives.py canonical_json
+# does the same, for the same reason: `summary` and `detail` are reviewer prose,
+# and prose that could close the envelope early could smuggle a second
+# structural trailer past the consumer. Decoding the JSON restores the text.
+#
+# THE PYTHON BELOW IS A PLAIN COMMAND, NOT A `$( )` CAPTURE, and that is a
+# correctness requirement rather than a style choice. Every helper in this file
+# is loaded by CARVING its bytes out and eval()ing them
+# (lib/review-fleet-args.sh review_fleet_load_fence_library, which carves rather
+# than sources because typeset -f re-emits heredocs unparseably on disjoint bash
+# versions, #471). bash 3.2 -- stock /bin/bash on macOS, which is where these
+# fences actually run -- RESCANS a command-substitution body for backticks and
+# single quotes WITHOUT honouring the quoted heredoc delimiter inside it. This
+# grammar carries seven backticks and an odd number of bare `'` characters (the
+# YAML doubled-apostrophe rule), so wrapped in `$( )` it parses as an
+# unterminated quote: the eval fails, and the helper is left silently UNDEFINED
+# until a fence calls it many relays downstream. bash 5 and zsh accept the same
+# bytes and `bash -n` reports nothing on either, which is why this is written
+# down rather than noticed. Leaving the python as the function's LAST command
+# makes its stdout the function's stdout and its rc the function's rc, and the
+# rescan never happens. Verify with `/bin/bash -n`, never with `bash -n`.
+review_write_postfix_aggregate() {
+  [ "$#" -eq 3 ] || return 2
+  local postfix_phase="${@:1:1}" postfix_iter="${@:2:1}" postfix_result="${@:3:1}"
+  local postfix_target
+  case "$postfix_phase" in phase1 | phase2) : ;; *) return 2 ;; esac
+  case "$postfix_iter" in '' | *[!0-9]*) return 2 ;; esac
+  [ -n "${RESEARCH_DIR_ABS:-}" ] || return 2
+  [ -r "$postfix_result" ] || return 2
+  postfix_target="$RESEARCH_DIR_ABS/postfix-${postfix_phase}-iter${postfix_iter}.md"
+  ( umask 077; set -C; : >"$postfix_target" ) || return 74
+  python3 -I -B - "$postfix_target" "$postfix_result" <<'PY'
+import json,os,re,stat,sys
+target,result=sys.argv[1:]
+MAX_FIELD=8192
+MAX_RESULT_BYTES=1048576
+EDGE='review_pr.postfix.correctness'
+CLOSE='</external-untrusted-input>'
+OPEN='<external-untrusted-input source="postfix-aggregate">'
+# The child's own YAML grammar, transcribed from the canonical boundary in
+# lib/child-dispatch.sh (uberdev_child_validate_phase1_review_result). The
+# caller has already run that boundary and hands us the VALIDATED copy it
+# published; re-parsing here is what turns those bytes into rows, and parsing
+# them under any looser grammar than the one that admitted them would let a
+# shape the validator refused reach the aggregate.
+def scalar(raw):
+ if not raw or raw.strip()!=raw or any(ord(char)<32 or ord(char)==127 for char in raw): raise ValueError()
+ def checked(value):
+  if (not isinstance(value,str) or not value or value.strip()!=value
+      or any(ord(char)<32 or ord(char)==127 for char in value)): raise ValueError()
+  return value
+ if raw.startswith('"'): return checked(json.loads(raw))
+ if raw.startswith("'"):
+  if len(raw)<2 or not raw.endswith("'"): raise ValueError()
+  inner=raw[1:-1]; value=''; index=0
+  while index<len(inner):
+   if inner[index]=="'":
+    if index+1>=len(inner) or inner[index+1]!="'": raise ValueError()
+    value+="'"; index+=2
+   else:
+    value+=inner[index]; index+=1
+  return checked(value)
+ if raw[0] in '-?:,[]{}#&*!|>@`' or ': ' in raw or ' #' in raw: raise ValueError()
+ if re.fullmatch(r'(?i:null|true|false|~|[-+]?(?:0|[1-9][0-9_]*)(?:\.[0-9_]+)?(?:e[-+]?[0-9]+)?|[-+]?\.(?:inf|nan))',raw): raise ValueError()
+ return checked(raw)
+def parse_reviewer(content):
+ match=re.fullmatch(r'\s*```yaml[ \t]*\r?\n(.*?)\r?\n```[ \t]*\s*',content,re.S)
+ if match is None: raise ValueError()
+ verdict=None; confidence=None; findings_mode=None; findings=[]; current=None
+ for line in match.group(1).splitlines():
+  if not line.strip(): continue
+  top=re.fullmatch(r'(verdict|confidence):[ \t]*(\S(?:.*\S)?)',line)
+  if top:
+   key,value=top.groups(); value=scalar(value)
+   if key=='verdict':
+    if verdict is not None or value not in {'APPROVE','REVISIONS_REQUIRED','REJECT'}: raise ValueError()
+    verdict=value
+   else:
+    if confidence is not None or value not in {'low','medium','high'}: raise ValueError()
+    confidence=value
+   continue
+  found=re.fullmatch(r'findings:[ \t]*(\[\])?',line)
+  if found:
+   if findings_mode is not None: raise ValueError()
+   findings_mode='empty' if found.group(1) else 'rows'
+   continue
+  severity=re.fullmatch(r'  - severity:[ \t]*(blocker|suggestion)',line)
+  if severity and findings_mode=='rows':
+   if current is not None: findings.append(current)
+   current={'severity':severity.group(1)}
+   continue
+  field=re.fullmatch(r'    (location|summary|detail):[ \t]*(\S(?:.*\S)?)',line)
+  if field and findings_mode=='rows' and current is not None:
+   key,value=field.groups(); value=scalar(value)
+   if key in current: raise ValueError()
+   current[key]=value
+   continue
+  raise ValueError()
+ if current is not None: findings.append(current)
+ if verdict is None or confidence is None or findings_mode is None: raise ValueError()
+ if findings_mode=='empty' and findings: raise ValueError()
+ if findings_mode=='rows' and not findings: raise ValueError()
+ for finding in findings:
+  if set(finding)!={'severity','location','summary','detail'}: raise ValueError()
+  if re.fullmatch(r'.+:[1-9][0-9]*',finding['location']) is None: raise ValueError()
+ blockers=[finding for finding in findings if finding['severity']=='blocker']
+ if (verdict=='APPROVE')==bool(blockers): raise ValueError()
+ return findings
+try:
+ entry=os.lstat(result)
+ if (stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode)
+         or entry.st_size>MAX_RESULT_BYTES): raise ValueError()
+ with open(result,'rb') as stream:
+  raw_result=stream.read(MAX_RESULT_BYTES+1)
+ if len(raw_result)>MAX_RESULT_BYTES: raise ValueError()
+ rows=[]
+ counts={'blocker':0,'suggestion':0}
+ for finding in parse_reviewer(raw_result.decode('utf-8')):
+  severity=finding['severity']
+  if severity not in counts: raise ValueError()
+  location=finding['location']; summary=finding['summary']; rationale=finding['detail']
+  if any(len(value)>MAX_FIELD for value in (location,summary,rationale)): raise ValueError()
+  counts[severity]+=1
+  rows.append({'agent_name':'code-reviewer','disposition':'DEFERRED','location':location,
+               'rationale':rationale,'severity':severity,'source_edges':[EDGE],
+               'summary':summary,'tier':'BLOCKER' if severity=='blocker' else None})
+except (OSError,UnicodeError,ValueError):
+ # LEAVE NO HALF-MADE ARTIFACT. The caller created the target empty and
+ # exclusively before invoking us, so a rc-2 return would otherwise strand a
+ # zero-byte postfix-<phase>-iter<N>.md on disk -- a document with no envelope
+ # marker, which findings-to-issues refuses, and which a Step 7 renderer would
+ # read as "the pass ran and found nothing" rather than "the pass is blocked".
+ # Only the exact empty regular file we were handed is removed; a symlink, a
+ # hard-linked path or anything with bytes in it is left strictly alone.
+ try:
+  leftover=os.lstat(target)
+  if stat.S_ISREG(leftover.st_mode) and leftover.st_size==0 and leftover.st_nlink==1:
+   os.unlink(target)
+ except OSError: pass
+ raise SystemExit(2)
+body=''.join(
+    '- '+json.dumps(row,sort_keys=True,separators=(',',':'),ensure_ascii=True).replace(CLOSE,'\\u003c/external-untrusted-input>')+'\n'
+    for row in rows)
+payload=(OPEN+'\n'+body+CLOSE+'\n').encode('utf-8')
+try:
+ entry=os.lstat(target); uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
+ if (stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1
+         or (uid is not None and entry.st_uid!=uid) or entry.st_size!=0
+         or (os.name!='nt' and stat.S_IMODE(entry.st_mode)!=0o600)):
+  raise OSError()
+ descriptor=os.open(target,os.O_WRONLY|getattr(os,'O_NOFOLLOW',0))
+ try:
+  opened=os.fstat(descriptor); current=os.lstat(target)
+  if (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino): raise OSError()
+  if os.write(descriptor,payload)!=len(payload): raise OSError()
+  os.fsync(descriptor)
+ finally:
+  os.close(descriptor)
+ with open(target,'rb') as stream:
+  if not stream.read(128).startswith(OPEN.encode('utf-8')): raise OSError()
+except OSError:
+ raise SystemExit(74)
+print(json.dumps({'by_severity':counts,'findings_count':len(rows)},sort_keys=True,separators=(',',':')),end='')
+PY
+}
 review_track_validated_fixer_head() {
-  local child_status="${@:1:1}" before="${@:2:1}" after="${@:3:1}" declared_tip="${@:4:1}" commit_count residue_receipt
-  [ "$#" -ge 3 ] || return 2
+  local child_status="${@:1:1}" before="${@:2:1}" after="${@:3:1}" declared_tip="${@:4:1}" phase="${@:5:1}" commit_count residue_receipt
+  # `-eq 5`, NOT `-ge 5`, and the tightening from `-ge 3` is load-bearing rather
+  # than tidying (#655). This function WRITES the post-fix commit-range carrier
+  # below, and carrier ABSENCE is the whole zero-dispatch short-circuit: no
+  # file means no applied commit. Under `-ge` a four-argument call from a site
+  # someone forgot to update would pass silently with `phase` bound to the
+  # empty string and write `fixer-range--iter1.txt` -- a name the post-fix
+  # fences never look for -- so the short-circuit would report "nothing was
+  # applied" about a run that applied a commit. A hard equality converts that
+  # silent no-op into a loud `return 2` at the un-updated call site.
+  # review_promote_validated_fixer_outcome is this function's only production
+  # caller and always supplies five; `declared_tip` is the empty string on the
+  # unapplied arms, which the `[ -z "$declared_tip" ]` check below expects.
+  [ "$#" -eq 5 ] || return 2
+  case "$phase" in phase1 | phase2) : ;; *) return 2 ;; esac
   residue_receipt="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-residue --working-dir "$WORKTREE_ROOT" --evidence-dir "$RESEARCH_DIR_ABS")" || { echo "error: MUTATED_BLOCKED — fixer returned residual repository state" >&2; return 79; }
   [ "$residue_receipt" = '{"status":"clean"}' ] || { echo "error: MUTATED_BLOCKED — fixer residue receipt is malformed" >&2; return 79; }
   [[ "$before" =~ ^[0-9a-f]{40}$ && "$after" =~ ^[0-9a-f]{40}$ ]] || return 2
@@ -816,6 +1174,36 @@ review_track_validated_fixer_head() {
       # prove it authorised is exactly what the gate downstream must refuse.
       review_fleet_write_reviewed_head \
         "$RESEARCH_DIR_ABS/reviewed-head.txt" "$after" || return 74
+      # The post-fix pass's commit range, written at the ONE point where BOTH
+      # heads have already been proven -- `before != after`, `declared_tip ==
+      # after`, `merge-base --is-ancestor`, and `rev-list --count == 1`, all
+      # four above. FIXER_HEAD_BEFORE has no other on-disk carrier on the routed
+      # transport, and every fence is a fresh shell (#427/#418), so a later
+      # fence that needed the range would have to RE-DERIVE it and would
+      # re-derive it without those proofs. Fresh-shell handoffs are found, never
+      # recomputed.
+      #
+      # It is written on the APPLIED arm ONLY. The NO_FIXES_NEEDED / REFUSED arm
+      # writes nothing, so a no-op fixer leaves no carrier and the post-fix
+      # fences dispatch nothing -- absence IS the short-circuit, structural
+      # rather than a branch someone can forget to write. That reading is only
+      # sound because this writer FAILS CLOSED (`|| return 74`): "no file" can
+      # then mean "no applied commit" and nothing else.
+      #
+      # AC #7: the name is keyed on REVIEW_ITERATION, and an iteration this
+      # fence cannot name is a REFUSAL, never a `:-1` default. Defaulting is the
+      # stale-counter class RFC 0001 records -- a Phase 3 re-entry would rebind
+      # pass 2 onto pass 1's artifact name and freeze the previous iteration's
+      # evidence with every equality still passing.
+      case "${REVIEW_ITERATION:-}" in
+        '' | *[!0-9]*)
+          echo "error: MUTATED_BLOCKED — no REVIEW_ITERATION reached this fence; review_fleet_load_ci_counters must run before a fixer outcome is promoted" >&2
+          return 74
+          ;;
+      esac
+      review_fleet_write_fixer_range \
+        "$RESEARCH_DIR_ABS/fixer-range-${phase}-iter${REVIEW_ITERATION}.txt" \
+        "$before" "$after" || return 74
       ;;
     NO_FIXES_NEEDED|REFUSED)
       [ -z "$declared_tip" ] && [ "$before" = "$after" ] || return 75
@@ -824,8 +1212,16 @@ review_track_validated_fixer_head() {
   esac
 }
 review_promote_validated_fixer_outcome() {
-  [ "$#" -eq 3 ] || return 2
-  local outcome="${@:1:1}" before="${@:2:1}" after="${@:3:1}" parsed child_status declared_tip extra
+  # FOUR positionals since #655: the trailing `phase` names WHICH fixer this
+  # outcome belongs to, and it is forwarded to review_track_validated_fixer_head
+  # so the commit-range carrier it writes carries the phase in its name. The
+  # four call sites are Phase 1 routed, Phase 1 Workflow (5w.2), Phase 2 routed
+  # and Phase 2 Workflow (6bw); a hook wired at only two of them silently
+  # no-ops under UBERDEV_CARRIER_BACKEND=workflow, and the hard arity equality
+  # here is what converts that silent no-op into a loud refusal.
+  [ "$#" -eq 4 ] || return 2
+  local outcome="${@:1:1}" before="${@:2:1}" after="${@:3:1}" phase="${@:4:1}" parsed child_status declared_tip extra
+  case "$phase" in phase1 | phase2) : ;; *) return 2 ;; esac
   parsed="$(python3 -I -B -c 'import json,re,sys
 value=json.loads(sys.argv[1])
 base={"status","declared_tip","status_sha256","result_sha256","disposition_sha256","applied_content_sha256","commit"}
@@ -845,7 +1241,7 @@ if (status=="APPLIED") != (re.fullmatch(r"[0-9a-f]{40}",tip) is not None) or (st
 print(status+"\t"+tip,end="")' "$outcome")" || return 74
   IFS=$'\t' read -r child_status declared_tip extra <<<"$parsed"
   [ -z "${extra:-}" ] || return 74
-  review_track_validated_fixer_head "$child_status" "$before" "$after" "$declared_tip"
+  review_track_validated_fixer_head "$child_status" "$before" "$after" "$declared_tip" "$phase"
 }
 review_clear_ci_run_selection() {
   CI_RUN_ID=
