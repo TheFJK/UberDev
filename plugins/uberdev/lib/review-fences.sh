@@ -1604,8 +1604,11 @@ review_validate_trust_anchor() {
 # the designed common path -- have already published the sidecar and the dispatch
 # record, and the fence must stop WITHOUT emitting. In the fence those arms were
 # `return 0` in tail position; through a function they need a value the caller can
-# tell apart from "proceed", so they return 3. Neither 2 (bad usage / prologue
-# failure) nor 74 (this pass halts) can collide with it. The caller's arm is four
+# tell apart from "proceed", so they return 3. That value is reserved: every
+# failure arm below returns 2 (bad usage / prologue failure) or 74 (this pass
+# halts), and the ONE arm that forwards a callee's own rc collapses a 3 onto 74
+# before returning, so no failure path can forge the sentinel — by construction,
+# not by enumerating what today's callees happen to return. The caller's arm is four
 # lines and is the only new control flow this refactor introduces:
 #
 #     review_postfix_prepare_dispatch "$POSTFIX_PHASE" ... || {
@@ -1683,6 +1686,16 @@ review_postfix_prepare_dispatch() {
   # merely to obtain a diff would break the Phase 2 authority receipt.
   review_build_postfix_scope "$POSTFIX_PHASE" "$POSTFIX_RANGE" || {
     POSTFIX_SCOPE_RC=$?
+    # 3 is THIS function's CLEAN sentinel, so a FAILING callee may never hand it
+    # back: the caller maps 3 to `return 0`, so a scope failure that returned 3
+    # would be read as "the sidecar and the dispatch record are already
+    # published, stop without emitting" — and the pass would end rc 0 having
+    # published neither. `review_build_postfix_scope` returns only 0, 2 or 74
+    # today, but this is an unbounded pass-through, so that is a property of one
+    # callee's current implementation rather than of this channel. Collapse the
+    # collision onto 74 (this pass halts) so the sentinel is unforgeable BY
+    # CONSTRUCTION instead of by enumerating the codes a callee happens to use.
+    [ "$POSTFIX_SCOPE_RC" -ne 3 ] || POSTFIX_SCOPE_RC=74
     echo "error: /uberdev:review-pr — could not build the $POSTFIX_PHASE post-fix review scope (rc $POSTFIX_SCOPE_RC)" >&2
     return "$POSTFIX_SCOPE_RC"
   }
