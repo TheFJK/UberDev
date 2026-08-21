@@ -39,7 +39,7 @@ UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-scou
 |---|---|
 | **`/solve <issue#>`** | Runs an autonomous solver per issue as a worktree-isolated agent in the session's Workflow runtime (watch with `/workflows`). Tier-aware: trivial issues skip design; medium gets a parallel research fan-out → spec → plan → implement chain. Detached transports remain available via `--backend=`. |
 | **`/turbo <issue#>`** | Unattended `/solve`. Same pipeline, but the brainstorm phase auto-accepts the lead agent's recommendation and Q&A is resolved against the research bundle. Use when you trust the recommendation and want issue → PR with no babysitting. |
-| **`/turbox <issue#>`** | Unattended `/turbo` in **standard mode**: this session orchestrates the fleet through the `Task` tool instead of the Workflow runtime, so the implementation phase runs **waves of parallel implementers over disjoint file sets** — which the Workflow lane's leaf agents structurally cannot do. Research, design and delivery fan out across issues too. Parallel-issue cap **3**. Costs session context; buys wall-clock. (RFC 0020) |
+| **`/turbox <issue#>`** | Unattended `/turbo` in **standard mode**: this session orchestrates the fleet through the `Task` tool instead of the Workflow runtime, so the implementation phase runs **waves of parallel implementers over disjoint file sets** — which the Workflow lane's leaf agents structurally cannot do. Design and delivery fan out across issues too. Parallel-issue cap **3**. Costs session context; buys wall-clock. (RFC 0020) |
 | **`/issue <description>`** | Creates a well-investigated, deduped, label-validated GitHub issue from a one-line ask. 2-scout fanout (codebase + triage) runs in <30 s, with conventional-commit titling and template-by-type. |
 | **`/review-pr [<PR#>]`** | Comprehensive PR review using specialized agents in cap-controlled dispatch-before-wait waves — code review, simplifier, silent-failure hunter, type-design analyzer, comment analyzer, test analyzer. With more than one PR open it first offers (interactively, once) to combine them all onto a single review branch and run the pipeline once over the combined result — cheaper by a factor of N, at the cost of per-PR revert granularity and per-PR finding attribution. `--consolidate` accepts without asking; `--no-consolidate` declines permanently and wins over `--consolidate`. Never offered under `--turbo`, without a TTY, or on a chained `finish-branch` run. |
 | **`/merge [<PR#> \| --all]`** | Lands an approved PR into the integration branch — autopilot. Bare invocation auto-discovers scope: single PR for the current branch, or all eligible open PRs against `integration_branch`. Ordering, per-PR strategy, conflict resolution (one parallel agent per conflicted file), and local sync, all unattended. |
@@ -251,8 +251,8 @@ fields; only a fan-out-capable orchestrator can honour them.
 /turbox 355 356 357
   └── lib/solve-launcher.sh --standard   validate -> triage -> claim -> emit plan   (one Bash call)
   └── this session, following skills/turbox-fleet/SKILL.md
-        Phase 2  research    [355×4 lenses │ 356×3 │ 357×3]   ← ONE message, 10 agents
-        Phase 3  design      spec ×3 → review ×3 → plan ×3 → plan-review ×3
+        Phase 2  research    [355 security]   ← risk-gated; 356 and 357 skip Phase 2
+        Phase 3  design      design-planner ×3 → plan-review ×3
         Phase 4  wave 1      [355.t1 355.t2 355.t3 │ 356.t1 356.t2 │ 357.t1]  ← ONE message
                              controller stages + commits per task; implementers never run git
         Phase 5  gate        per-task reviewers in parallel, bounded fix ladder
@@ -432,7 +432,7 @@ UberDev ships these so all commands work standalone — **no `superpowers`, `pr-
 | Agents | `code-reviewer`, `comment-analyzer`, `pr-test-analyzer`, `silent-failure-hunter`, `type-design-analyzer` | from [`pr-review-toolkit`](https://github.com/anthropics/claude-plugins-official) (Apache 2.0) |
 | Agents | `code-simplifier` | from [`code-simplifier`](https://github.com/anthropics/claude-plugins-official) (Apache 2.0) — the same agent is also distributed inside `pr-review-toolkit`; our copy is byte-identical to the standalone `code-simplifier` plugin's blob at the commit `vendor.json` pins |
 | Shared contracts | `finding-confidence-rubric-v1` (the 0–100 finding-confidence scale + false-positive catalogue) | adapted from [`code-review`](https://github.com/anthropics/claude-plugins-official) (Apache 2.0) |
-| Agents | `plan-reviewer`, `spec-writer`, `spec-reviewer`, `spec-reviser`, `plan-writer`, `research-codebase`, `research-patterns`, `research-prior-art`, `research-constraints`, `research-security`, `research-test-coverage`, `codebase-scout`, `triage-scout`, `conflict-resolver` | UberDev original |
+| Agents | `plan-reviewer`, `spec-writer`, `spec-reviewer`, `spec-reviser`, `plan-writer`, `design-planner`, `research-codebase`, `research-patterns`, `research-prior-art`, `research-constraints`, `research-security`, `research-test-coverage`, `codebase-scout`, `triage-scout`, `conflict-resolver` | UberDev original |
 | Commands | `/uberdev:review-pr`, `/uberdev:simplify` | adapted; `review-pr` defaults to **parallel** fanout (divergence from upstream) |
 
 Bundled upstream license texts in `plugins/uberdev/licenses/`.
