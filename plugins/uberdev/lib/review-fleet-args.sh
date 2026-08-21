@@ -782,8 +782,20 @@ REVIEW_FLEET_POSTFIX_TOTAL_CAP=2
 # ONE body behind the four public dispatch-decision names below. The verify pair
 # and the post-fix pair were byte-identical apart from the noun inside two
 # diagnostic strings, so the noun is a parameter and everything else is stated
-# once; the four public names stay as thin wrappers, which keeps every call
-# site, every return code and every emitted message exactly as it was.
+# once, and the four public names stay as thin wrappers over it.
+#
+# What the wrappers PRESERVE: the four public names and their arities, so no
+# call site moved; the `0`/`1` domain, closed on both sides; and the answer for
+# every record the writer can produce -- it always newline-terminates, so a
+# well-formed record still reads back rc 0 with the same byte on stdout.
+#
+# What the shared reader deliberately CHANGED, in both directions: it no longer
+# returns on the `read` builtin's status; it judges the recorded CONTENT. So a
+# zero-byte file now NAMES itself on stderr where the old body returned a bare
+# rc 2, and a final line missing its newline but carrying a valid `0`/`1` is now
+# ACCEPTED rc 0 where the old body refused it -- also in silence. Those were one
+# silent-failure bug with two faces. The `read` line below carries the reasoning
+# and the cost, and is the ONLY place either is stated; do not restate it here.
 _review_fleet_write_dispatch_decision() {
   [ "$#" -eq 2 ] || return 2
   # `target`, never `path` -- see review_fleet_write_ci_state: zsh ties the
