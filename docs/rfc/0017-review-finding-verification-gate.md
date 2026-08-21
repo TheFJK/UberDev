@@ -260,3 +260,113 @@ changes shape.
   refuses to guess about. Only the two-member `verdict` vocabulary is marked;
   the reason vocabulary is held by executable equality asserts in
   `tests/code-fixer-contract.test.sh` and `tests/child-dispatch.test.sh`.
+
+---
+
+## Amendment (2026-08-20, #655) — the post-fix review pass, and the §9 deferrals it does not take
+
+> **Supersedes nothing.** §§1-9 are unchanged and still govern the verification
+> gate. This amendment records a NEIGHBOURING pass built on the same fleet
+> machinery, so a reader who finds the two side by side is not left to infer
+> which of §9's deferrals it took, which of §5.2's rules it inherits, and which
+> predicates it deliberately left alone.
+> Status of this amendment: **Accepted, implemented.**
+
+### What was added
+
+A tenth `review-fleet` stage, `postfix`, dispatching ONE `code-reviewer` over a
+validated `code-fixer`'s OWN commit range on the edge
+`review_pr.postfix.correctness`, once per applied phase. No new agent card and
+no `model-routing-v1.json` entry: the child is the existing `code-reviewer`
+role. It is advisory — a post-fix blocker reaches `findings-to-issues` through
+the same single Phase 2.5 dispatch every other deferred row uses, and no new
+halt path and no fixer re-entry were added.
+
+### The two §9 deferrals this does NOT take
+
+- **"Model tiering / a cheap verifier" stays deferred, and stays Unreachable.**
+  Nothing here routes a cheaper model. Cheapness is bounded structurally —
+  **scope × lens count × agent count**, projected and refused by name BEFORE the
+  nonce is minted: one commit range rather than the PR diff, a one-row roster
+  rather than a lens family, and a declared ceiling the fleet script enforces
+  itself. The dispatch omits `model` entirely, as RFC 0012 §5 requires of every
+  workflow `agent()` call and as every other judgment path in that script
+  already does. §9's row is therefore untouched, not quietly satisfied: naming a
+  route still fails `route_unenforceable`.
+- **"Phase 2 findings" stays deferred.** The post-fix pass runs after BOTH
+  fixers, but that is not the deferred work. §9 defers extending *this gate* —
+  verification of reviewer findings — to Phase 2 findings, and the post-fix pass
+  verifies no finding at all. It reads committed bytes.
+
+### Why the gate's own predicates are untouched
+
+`_eligible_verification_rows` and `_validate_disposition` are unchanged, and
+that is a domain argument rather than a scoping preference. Both range over
+`finding × disposition`: a row exists, a disposition was recorded for it, and
+the predicate decides which pairs are admissible. The post-fix pass ranges over
+`git diff BEFORE..AFTER` — bytes that exist because a fixer wrote them, with no
+finding and no disposition on either side. It is an ADDED path beside the gate,
+not a widened predicate inside it. Concretely: `PHASE_CONTRIBUTORS` keeps
+exactly its two members, and a future `PHASE_CONTRIBUTORS["postfix"]` is the
+change this reasoning forbids.
+
+### The verifier-shaped edge, and why it gets its own frozenset
+
+`WORKFLOW_POSTFIX_EDGE_IDS` is a frozenset of its own for the same reason
+`WORKFLOW_VERIFIER_EDGE_IDS` is one (§2): `WORKFLOW_REVIEWER_EDGE_IDS` is
+DERIVED from `PHASE_CONTRIBUTORS`, so folding a new edge into it silently makes
+that child an aggregate contributor every `_validate_aggregate` call then
+demands a verdict from. The post-fix child is verifier-shaped — one result, one
+status, no aggregate contribution — so it takes the verifier's shape, not the
+reviewer's.
+
+It is admitted at **both** gates: the mint side (`WORKFLOW_BOUND_EDGE_IDS`) and
+the capture side (`capture_bound_child`). Widening only the mint side produces a
+binding the capture verb refuses *after the nonce has been burnt* — a failure
+that costs a real dispatch to discover. The next edge that needs a binding will
+find this reasoning next to the frozensets that encode it, which is the point of
+recording it here rather than in a commit message.
+
+### The residual gap, stated plainly
+
+No trust predicate reads `phases.postfix`. A pass that ends `status: "blocked"`
+— an unavailable child, or a return that failed validation — is an rc-0
+continuation, so a run whose fixer commits were never reviewed emits the
+IDENTICAL GREEN as a run whose fixer commits were reviewed and found clean. The
+predicate cannot tell silence from cleanliness.
+
+**§5.2's "fail toward keeping" is NOT the precedent for that, and must not be
+cited as one.** That rule preserves a finding that ALREADY EXISTS when its
+verifier is unavailable — the row survives, and the artifact says why. Here
+there is no finding to preserve; there is only silence, and silence is being
+rendered as a pass. The two situations differ in exactly the quantity that makes
+§5.2 safe.
+
+It is not a regression — before #655 those commits were reviewed by nobody at
+all — and it was left open deliberately. The cheapest known close is to route a
+blocked pass into `findings-to-issues` as a single deferred row, exempting the
+`off-switch` and `no-applied-commit` reasons, which are operator intent and
+absence of work rather than lost evidence. **The severity that row would carry
+is deliberately NOT decided here**: a blocker would hard-gate every run whose
+reviewer child flaked, and a lower tier may not survive the routing arms. That
+choice needs its own change.
+
+Two consequences are pinned rather than left to inference. The GREEN / YELLOW /
+RED formula gains no term — a post-fix blocker already turns the trail RED
+through the shipped Phase 2.5 `by_severity.blocker == 0` conjunct and,
+independently, through `halted == false` — so §7's asymmetry argument is
+unaffected and this is not the BREAKING trust-trail contract change RFC 0002
+describes. And `phases.postfix` carries the INVERSE legacy-absence policy to
+`phases.phase2_5`'s: absent means `unknown`, never `STALE` and never zero,
+precisely because no predicate reads it yet and a later one must not inherit
+`absent == 0`.
+
+### Known limit, in §8's spirit
+
+Green CI proves the wiring, not the efficacy. The suite proves the stage
+dispatches, the ceiling refuses by name, the arity equality catches an
+un-updated transport, the aggregate binds as an optional Phase 2.5 input and a
+blocked pass renders as blocked. No test proves a post-fix reviewer finds a real
+fixer-introduced defect; every assertion against the command file is a text
+assertion. This is the same limit §8.3 states for the gate itself, and it is
+recorded here so the two are not read as differently evidenced.

@@ -4688,6 +4688,301 @@ for verb, argv in (
     parsed = cli.parse_args(argv)
     assert parsed.command == verb, parsed
 
+# === #655: the post-fix reviewer edge, proved on BOTH binding gates ==========
+#
+# `review_pr.postfix.correctness` is minted by bind_workflow_launch (which
+# reads WORKFLOW_BOUND_EDGE_IDS) and consumed by capture_bound_child (which
+# keys on a SEPARATE union). Two `assert edge in SET` lines cannot see the
+# failure that matters here: widening only the MINT side satisfies both of them
+# and still produces a binding the capture verb refuses -- after the single-use
+# nonce has already been burnt, so the run cannot retry. That is the trap
+# WORKFLOW_VERIFIER_EDGE_IDS' own comment was written to warn about, and the
+# only proof that binds the pair is to MINT on the new edge and feed THAT
+# binding to the capture verb.
+#
+# So every claim below is EXECUTED, and the two one-sided MUTANTS are what make
+# the execution a discriminator rather than a demonstration: each patches ONE
+# gate of an independently-loaded copy of the module and shows this block reds.
+# Measured on 3654f0fb -- whose helper has no WORKFLOW_POSTFIX_EDGE_IDS at all
+# -- the block reds at its first set assertion below, with `AttributeError: no
+# attribute 'WORKFLOW_POSTFIX_EDGE_IDS'`, and never reaches the mint. On
+# a468e0b6, the commit this block was added on top of, both gates were already
+# widened and the block passes outright. Neither tree is therefore the proof of
+# discrimination -- the two mutants below are.
+
+POSTFIX_EDGE = "review_pr.postfix.correctness"
+POSTFIX_NONCE = "b7" * 32
+assert re.fullmatch(r"[0-9a-f]{64}", POSTFIX_NONCE)
+assert POSTFIX_NONCE != WORKFLOW_NONCE
+
+# 1. Its OWN single-member frozenset, folded into no other roster. Joining
+#    WORKFLOW_REVIEWER_EDGE_IDS is the silent failure this separation exists to
+#    prevent: that set is DERIVED from PHASE_CONTRIBUTORS, so the post-fix child
+#    would become a contributor every _validate_aggregate call then demands a
+#    verdict from -- a child that contributes to no aggregate at all.
+assert module.WORKFLOW_POSTFIX_EDGE_IDS == frozenset((POSTFIX_EDGE,)), (
+    module.WORKFLOW_POSTFIX_EDGE_IDS
+)
+for foreign_roster in (
+    module.WORKFLOW_REVIEWER_EDGE_IDS,
+    module.WORKFLOW_VERIFIER_EDGE_IDS,
+    module.WORKFLOW_FIXER_EDGE_IDS,
+    module.WORKFLOW_PERSISTENCE_EDGE_IDS,
+    module.WORKFLOW_CI_EDGE_IDS,
+):
+    assert POSTFIX_EDGE not in foreign_roster, foreign_roster
+# The mint side as a SET claim. It is the weak half deliberately: step 2 is the
+# execution of it, and the mutants below prove the set claim alone is not what
+# is carrying this block.
+assert module.WORKFLOW_POSTFIX_EDGE_IDS <= module.WORKFLOW_BOUND_EDGE_IDS
+
+
+def load_contract_copy(name):
+    """A second, independently-loaded copy of the module under test.
+
+    Registering in sys.modules BEFORE exec_module is load-bearing, not
+    housekeeping: the module defines frozen dataclasses, and
+    `dataclasses._is_type` resolves `cls.__module__` through sys.modules, so
+    omitting it kills the import inside @dataclass -- nowhere this block could
+    interpret, and on 3.14 it is an AttributeError rather than an ImportError.
+    Mirrors the registration the suite header already performs for `module`.
+    """
+    copy_spec = importlib.util.spec_from_file_location(name, helper_path)
+    assert copy_spec is not None and copy_spec.loader is not None
+    copy_module = importlib.util.module_from_spec(copy_spec)
+    sys.modules[copy_spec.name] = copy_module
+    copy_spec.loader.exec_module(copy_module)
+    return copy_module
+
+
+with scratch_dir("code-fixer-postfix-") as temporary:
+    postfix_child = os.path.join(
+        temporary, "children", "postfix-correctness-phase1-iter01")
+    os.makedirs(postfix_child)
+    POSTFIX_RESULT = os.path.join(postfix_child, "result.md")
+    POSTFIX_STATUS = os.path.join(postfix_child, "status.json")
+    POSTFIX_RESULT_BYTES = b"## Findings\n\nnone\n"
+    with open(POSTFIX_RESULT, "wb") as handle:
+        handle.write(POSTFIX_RESULT_BYTES)
+
+    def postfix_mint(active, edge_id=POSTFIX_EDGE):
+        return active.bind_workflow_launch(
+            edge_id=edge_id,
+            instance_id="postfix-correctness-phase1-iter01",
+            run_nonce=POSTFIX_NONCE, result_path=POSTFIX_RESULT,
+            status_path=POSTFIX_STATUS, working_dir=temporary,
+        )
+
+    def postfix_publish_status(binding):
+        # The result is already on disk, so the status is published SECOND --
+        # the write order capture_bound_child enforces (#645). Nothing in the
+        # document names the edge, which is why one status file serves every
+        # roster edge below.
+        document = {
+            "backend": "workflow", "state": "completed", "exit_code": 0,
+            "run_nonce": POSTFIX_NONCE,
+            "workspace_mode": binding["workspace_mode"],
+            "worktree": binding["worktree"], "branch": binding["branch"],
+            "result": binding["result_path"],
+        }
+        payload = json.dumps(
+            document, sort_keys=True, separators=(",", ":")).encode()
+        with open(POSTFIX_STATUS, "wb") as status_handle:
+            status_handle.write(payload)
+        return payload
+
+    def postfix_expected_capture(binding, status_bytes):
+        # The two paths come from the BINDING, not from the strings passed in:
+        # the mint canonicalises them, and a scratch tree under $TMPDIR is
+        # exactly where that matters (/var -> /private/var on macOS). Both
+        # digests are recomputed here from the bytes this test wrote, so the
+        # capture is compared against evidence rather than against itself.
+        return {
+            "edge_id": binding["edge_id"],
+            "instance_id": "postfix-correctness-phase1-iter01",
+            "status_path": binding["status_path"],
+            "status_sha256": hashlib.sha256(status_bytes).hexdigest(),
+            "result_path": binding["result_path"],
+            "result_sha256": hashlib.sha256(POSTFIX_RESULT_BYTES).hexdigest(),
+        }
+
+    # 2. THE PAIR PROOF: mint on the new edge, then capture THAT SAME binding.
+    postfix_binding = postfix_mint(module)
+    assert postfix_binding["edge_id"] == POSTFIX_EDGE, postfix_binding
+    postfix_status_bytes = postfix_publish_status(postfix_binding)
+    postfix_captured = module.capture_bound_child(
+        launch_binding=module._canonical_json(postfix_binding),
+        edge_id=POSTFIX_EDGE)
+    assert postfix_captured == postfix_expected_capture(
+        postfix_binding, postfix_status_bytes), postfix_captured
+
+    # 3. MUTANT A -- THE MINT-ONLY TREE, which is the trap itself.
+    #    Narrowing WORKFLOW_POSTFIX_EDGE_IDS on a fresh copy narrows only the
+    #    CAPTURE gate, because WORKFLOW_BOUND_EDGE_IDS is a union computed at
+    #    import time and therefore already holds the edge. That is exactly the
+    #    tree where somebody widened the mint and forgot the capture.
+    postfix_mint_only = load_contract_copy("code_fixer_contract_655_mint_only")
+    postfix_mint_only.WORKFLOW_POSTFIX_EDGE_IDS = frozenset()
+    assert POSTFIX_EDGE in postfix_mint_only.WORKFLOW_BOUND_EDGE_IDS, (
+        "mutant A no longer isolates the capture gate: WORKFLOW_BOUND_EDGE_IDS "
+        "has stopped being an import-time snapshot, so this row can no longer "
+        "tell the two gates apart. Rebuild the mutant, do not relax the row."
+    )
+    postfix_mutant_binding = postfix_mint(postfix_mint_only)
+    assert postfix_mutant_binding == postfix_binding, postfix_mutant_binding
+    try:
+        # NOT expect_contract_reason: a separately-loaded copy raises its OWN
+        # ContractFailure class, which `module.ContractFailure` does not catch.
+        postfix_mint_only.capture_bound_child(
+            launch_binding=postfix_mint_only._canonical_json(
+                postfix_mutant_binding),
+            edge_id=POSTFIX_EDGE)
+    except postfix_mint_only.ContractFailure as error:
+        assert str(error) == "bound_child_edge_unsupported", error
+    else:
+        raise AssertionError(
+            "the mint-only mutant was NOT detected: this block would pass on a "
+            "tree where only WORKFLOW_BOUND_EDGE_IDS was widened, which is the "
+            "exact failure it exists to catch"
+        )
+
+    # 4. MUTANT B -- the capture-only tree. Narrowing the mint snapshot leaves
+    #    the capture gate wide, and the refusal moves to the mint. Both
+    #    assertions matter: the second attributes the refusal to the mint gate
+    #    and to nothing else.
+    postfix_capture_only = load_contract_copy(
+        "code_fixer_contract_655_capture_only")
+    postfix_capture_only.WORKFLOW_BOUND_EDGE_IDS = (
+        postfix_capture_only.WORKFLOW_BOUND_EDGE_IDS
+        - postfix_capture_only.WORKFLOW_POSTFIX_EDGE_IDS
+    )
+    assert POSTFIX_EDGE in postfix_capture_only.WORKFLOW_POSTFIX_EDGE_IDS
+    try:
+        postfix_mint(postfix_capture_only)
+    except postfix_capture_only.ContractFailure as error:
+        assert str(error) == "launch_binding_invalid", error
+    else:
+        raise AssertionError(
+            "the capture-only mutant was NOT detected: this block would pass "
+            "on a tree where the mint gate never learned the edge"
+        )
+    assert postfix_capture_only.capture_bound_child(
+        launch_binding=postfix_capture_only._canonical_json(postfix_binding),
+        edge_id=POSTFIX_EDGE) == postfix_captured
+
+    # 5. The pair invariant over the WHOLE mintable roster, EXECUTED rather
+    #    than re-spelled. Re-typing `REVIEWER | VERIFIER | POSTFIX` into an
+    #    assertion here would be a copy of the capture gate, and a copy passes
+    #    on mutant A above. Minting and capturing every edge cannot: an
+    #    eleventh edge widened on one side only reds here even if nobody writes
+    #    an edge-specific row for it.
+    postfix_roster = sorted(
+        module.WORKFLOW_BOUND_EDGE_IDS - module.WORKFLOW_FIXER_EDGE_IDS)
+    assert POSTFIX_EDGE in postfix_roster, postfix_roster
+    for roster_edge in postfix_roster:
+        roster_binding = postfix_mint(module, edge_id=roster_edge)
+        roster_status_bytes = postfix_publish_status(roster_binding)
+        assert module.capture_bound_child(
+            launch_binding=module._canonical_json(roster_binding),
+            edge_id=roster_edge
+        ) == postfix_expected_capture(roster_binding, roster_status_bytes), roster_edge
+    # ...and the fixer deny-list still bites, driven on a REAL binding rather
+    # than on the edge string alone. `capture_bound_child:8281` is a DENY list,
+    # not a third gate: a postfix edge must not be added to it.
+    for denied_edge in sorted(module.WORKFLOW_FIXER_EDGE_IDS):
+        expect_contract_reason(
+            lambda e=denied_edge: module.capture_bound_child(
+                launch_binding=module._canonical_json(postfix_binding),
+                edge_id=e),
+            "bound_child_edge_unsupported",
+        )
+
+# 6. The machinery this change must NOT have moved.
+#    The FIRST line is the one that catches a future PHASE_CONTRIBUTORS
+#    ["postfix"]: measured, adding that key reds the key-set equality while the
+#    derived-roster equality below still holds. It has to be the key set that
+#    carries this, because WORKFLOW_REVIEWER_EDGE_IDS spells phase1 and phase2
+#    explicitly -- a third key never reaches it. What a third key DOES reach is
+#    the `phase in PHASE_CONTRIBUTORS` gate every aggregate verb shares, which
+#    would start admitting "postfix" as an aggregate phase of its own.
+#    The derived-roster equality is instead what catches a RE-SPELT
+#    WORKFLOW_REVIEWER_EDGE_IDS: it holds only while that set is exactly the
+#    union of the two contributor rosters, so a hand-typed copy that has
+#    drifted from the table reds it. (The one drift it does not get to see is
+#    the post-fix edge folded in -- step 1's foreign-roster loop reds first.)
+assert set(module.PHASE_CONTRIBUTORS) == {"phase1", "phase2"}, (
+    module.PHASE_CONTRIBUTORS
+)
+assert module.WORKFLOW_REVIEWER_EDGE_IDS == frozenset(
+    module.PHASE_CONTRIBUTORS["phase1"] + module.PHASE_CONTRIBUTORS["phase2"]
+), module.WORKFLOW_REVIEWER_EDGE_IDS
+assert POSTFIX_EDGE not in module.WORKFLOW_REVIEWER_EDGE_IDS
+assert not (module.WORKFLOW_CI_EDGE_IDS & module.WORKFLOW_BOUND_EDGE_IDS)
+
+# 7. The two predicates the design forbids widening, EXECUTED over their own
+#    domains. Both range over `finding x disposition`; the post-fix pass ranges
+#    over `git diff BEFORE..AFTER`, so it is an ADDED path, not a widened
+#    predicate -- and transcribing either function's source into an assertion
+#    would prove only that somebody copied it correctly.
+POSTFIX_ELIGIBILITY = (
+    ("blocker", "SKIPPED", True),
+    ("blocker", "REFUSED", True),
+    ("blocker", "APPLIED", False),
+    ("suggestion", "SKIPPED", False),
+    ("suggestion", "APPLIED", False),
+)
+assert module._eligible_verification_rows(
+    {"findings": [
+        {"severity": severity} for severity, _, _ in POSTFIX_ELIGIBILITY]},
+    {"findings_disposition": [
+        {"disposition": disposition}
+        for _, disposition, _ in POSTFIX_ELIGIBILITY]},
+    tuple(range(len(POSTFIX_ELIGIBILITY))),
+) == [
+    (index, {"severity": row[0]})
+    for index, row in enumerate(POSTFIX_ELIGIBILITY) if row[2]
+], "the verification roster is no longer exactly blocker-and-not-APPLIED"
+
+POSTFIX_AUTHORITY = {
+    "phase": "phase1",
+    "findings_sha256": "0" * 64,
+    "finding_keys": [
+        {"finding_index": 1, "location": "src/a.py:1",
+         "summary_sha256": "1" * 64},
+    ],
+}
+
+
+def postfix_disposition_document(disposition, behavior_tag):
+    return {
+        "schema_version": 1,
+        "phase": "phase1",
+        "aggregate_sha256": "0" * 64,
+        "findings_disposition": [{
+            "finding_index": 1, "location": "src/a.py:1",
+            "summary_sha256": "1" * 64, "disposition": disposition,
+            "behavior_tag": behavior_tag, "reason": "fixture",
+        }],
+    }
+
+
+assert module._validate_disposition(
+    postfix_disposition_document("SKIPPED", "n/a"), POSTFIX_AUTHORITY) == ()
+assert module._validate_disposition(
+    postfix_disposition_document("REFUSED", "n/a"), POSTFIX_AUTHORITY) == ()
+assert module._validate_disposition(
+    postfix_disposition_document("APPLIED", "change"), POSTFIX_AUTHORITY
+) == ("src/a.py",)
+# DEFERRED is the post-fix ROW's inline disposition (agents/findings-to-issues.md
+# Step 3). It must NOT have leaked into the FIXER's vocabulary: a fixer claiming
+# DEFERRED would be asserting a routing decision it does not own, and the three
+# published values are what publish_disposition and every reader agree on.
+expect_contract_reason(
+    lambda: module._validate_disposition(
+        postfix_disposition_document("DEFERRED", "n/a"), POSTFIX_AUTHORITY),
+    "disposition_schema_invalid",
+)
+
 # === #381 STEP 2: fix / simplify / defer get a workflow-shaped capture ========
 #
 # Blocker A. capture_review_terminal and capture_standalone_terminal load a

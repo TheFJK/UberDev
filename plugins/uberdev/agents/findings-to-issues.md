@@ -23,8 +23,8 @@ the immutable `carrier.workflow`, `carrier.issue_num`, and `edge_id` from the
 validated `<uberdev-handoff-json>`; these fields, not `pr_number`, select
 standalone versus PR mode.
 
-`review_pr.defer.findings` has this exact six-field input contract, plus one
-OPTIONAL seventh field:
+`review_pr.defer.findings` has this exact six-field input contract, plus three
+OPTIONAL fields:
 
 - `phase1_path` — post-impl-review aggregate path, or an empty string.
 - `phase2_path` — simplify aggregate path, or an empty string.
@@ -35,6 +35,25 @@ OPTIONAL seventh field:
 - `verification_path` *(optional)* — the Phase 1 verification sidecar
   (`phase1-verification.json`, RFC 0017 / #431), or absent. When absent,
   behave exactly as before: no row is excluded on verification grounds.
+- `postfix_phase1_path` *(optional)* — the Phase 1 post-fix review aggregate
+  (`postfix-phase1-iter<N>.md`, `postfix-aggregate` envelope, #655), or absent.
+- `postfix_phase2_path` *(optional)* — the Phase 2 post-fix review aggregate
+  (`postfix-phase2-iter<N>.md`, same envelope), or absent.
+
+The two post-fix paths use the **same conditional-bind shape as
+`verification_path`**, on the same `review_pr.defer.findings` edge and the same
+SINGLE Phase 2.5 dispatch — the controller binds each only when that phase's
+post-fix pass actually produced an aggregate. Binding them costs no additional
+dispatch, which is the whole reason they are optional inputs on this edge
+rather than a second call. Absent means that phase dispatched no post-fix child
+(no applied fixer commit, or the off-switch); when both are absent, behave
+exactly as before.
+
+They are **supplements, not substitutes**: an otherwise-absent input is never
+made valid by a post-fix path, so the "both aggregate path inputs are absent →
+`input-malformed`" rule below is unchanged. By construction that combination
+cannot arise — a post-fix aggregate exists only where a fixer applied commits,
+which required a non-empty Phase 1 or Phase 2 aggregate to have existed first.
 
 `review_pr.ci.defer_refusal` has this exact three-field input contract:
 
@@ -150,16 +169,19 @@ Explicit forbidden patterns:
    `phase2_disposition_path` as empty strings. Verify `working_dir` resolves to
    an absolute path at the current git worktree root
    (`git -C "$working_dir" rev-parse --is-inside-work-tree` plus
-   `--show-toplevel`). For each non-empty `phase*_path`, verify the file exists,
+   `--show-toplevel`). For each non-empty aggregate path input — `phase1_path`,
+   `phase2_path`, and the optional `postfix_phase1_path` /
+   `postfix_phase2_path` — verify the file exists,
    resolves beneath `$working_dir/.uberdev/research/<RUN_ID>/`, and its first
    128 bytes contain the literal string
    `<external-untrusted-input source="post-impl-review-aggregate">` (or
    `simplify-aggregate` for phase 2, `ci-refused-synthetic` for the CI-REFUSED
-   variant, `uberscan-aggregate` for `/uberscan`, `testers-aggregate` for
+   variant, `postfix-aggregate` for either post-fix path,
+   `uberscan-aggregate` for `/uberscan`, `testers-aggregate` for
    `/uberdev:testers`, or `uberthink-aggregate` for `/uberthink`). All non-empty
    aggregate paths must share that exact parent; derive `run_id` from it and
    validate `^[0-9]{8}-[0-9]{6}-[a-f0-9]+$`. The accepted-source allow-list is
-   the closed set `{post-impl-review-aggregate, simplify-aggregate, ci-refused-synthetic, uberscan-aggregate, ubersimplify-aggregate, testers-aggregate, uberthink-aggregate}`.
+   the closed set `{post-impl-review-aggregate, simplify-aggregate, ci-refused-synthetic, uberscan-aggregate, ubersimplify-aggregate, testers-aggregate, uberthink-aggregate, postfix-aggregate}`.
    For the two review sources, verify the bytes between the envelope markers are
    exact compact sorted JSON schema v2 before interpreting prose; Markdown-table
    and YAML fallbacks are malformed for those sources. The `/ubersimplify`
@@ -168,8 +190,22 @@ Explicit forbidden patterns:
    `/uberdev:testers` adversarial QA squad files its `verified: true` persona
    findings under `testers-aggregate` (`skills/testers-pipeline/report.py`).
    The `/uberthink` ideation engine files its top-ranked design candidate(s)
-   under `uberthink-aggregate`. If validation fails or both aggregate path
-   inputs are absent, return `status: REFUSED` with
+   under `uberthink-aggregate`.
+
+   `postfix-aggregate` is **not** one of the two review sources. Like
+   `ci-refused-synthetic` and the four legacy fleet envelopes it is
+   **exempt from the exact-compact-sorted-JSON-schema-v2 requirement** above —
+   that requirement is scoped to `post-impl-review-aggregate` and
+   `simplify-aggregate` only, because only those two are produced by the
+   canonical aggregate encoder. A `postfix-aggregate` document is
+   command-owned: a `/uberdev:review-pr` fence transcribes it from one
+   validated `review_pr.postfix.correctness` child terminal, and it is parsed
+   by the row shape documented in Step 3 instead. Applying the schema-v2 gate
+   to it would refuse every post-fix dispatch and silently file zero issues —
+   the #182 class this allow-list exists to prevent.
+
+   If validation fails or both aggregate path inputs are absent, return
+   `status: REFUSED` with
    `rationale: "input-malformed"`. Present review-v2 documents with exact empty
    `findings` arrays are valid completed inputs, not absent inputs.
 
@@ -294,6 +330,55 @@ Explicit forbidden patterns:
    time, not re-emitted. Aggregate findings contain neither disposition nor
    deferral reason: use the bound disposition row's `disposition` and `reason`.
 
+   **Post-fix aggregate row shape (`postfix-aggregate`, #655).** A
+   `postfix_phase1_path` / `postfix_phase2_path` document is one envelope whose
+   body is one finding row per line, each row the same `- `-prefixed compact
+   sorted JSON object `ci-refused-synthetic` uses:
+
+   ```text
+   - {"agent_name":"code-reviewer","disposition":"DEFERRED","location":"<path>:<line>","rationale":"<bounded>","severity":"blocker|suggestion","source_edges":["review_pr.postfix.correctness"],"summary":"<bounded>","tier":"BLOCKER"|null}
+   ```
+
+   `severity` is the post-fix child's own vocabulary — `blocker` or
+   `suggestion`, the only pair `shared/phase1-reviewer-output-v1.md` admits —
+   transcribed unchanged. The writing fence never re-severitises, so
+   `critical`, `major` and `important` are structurally unproducible on this
+   source and a row carrying any other severity is a malformed document, not a
+   value to coerce into one of the two. `location` is the row's only location
+   authority, exactly as `scope.path:scope.line` is for a review-v2 row;
+   `summary` and `rationale` are context-only prose and are never path, phase
+   or contributor authority. Derive `file_path` and `line` by splitting
+   `location` on its final `:`; take `agent_name` from the row's own field
+   (display-only, as for the legacy variants) and `source_edges` from the row's
+   own array — never from prose. A post-fix aggregate is an aggregate for the
+   snapshot rule above: capture its `(device,inode,size,mtime_ns)` before
+   parsing and re-check that identity immediately before the first GitHub
+   write, exactly as for `phase1_path` and `phase2_path`.
+
+   **A post-fix aggregate carries no disposition artifact, and none binds it.**
+   There is no `postfix-disposition.json`. This step binds a disposition row to
+   an aggregate row by the `(finding_index, location, summary_sha256)` triple
+   **within that phase's own aggregate**, and a postfix row is in neither the
+   Phase 1 nor the Phase 2 aggregate — so it inherits nothing from
+   `phase1_disposition_path` or `phase2_disposition_path`. Reading a
+   neighbouring phase's disposition onto a postfix row would be binding by
+   adjacency, which is the exact swap these identity checks exist to prevent.
+   Each postfix row therefore carries `disposition: "DEFERRED"` inline, the way
+   a `ci-refused-synthetic` row carries `REFUSED` inline. `DEFERRED` is not a
+   new vocabulary member: it is already this step's default when a disposition
+   path is empty (the normal case for the uberscan / uberthink / testers
+   variants) and Step 4 already routes it as issue-eligible. Do **not** invent a
+   fifth disposition value, and do **not** reuse `SKIPPED` — `SKIPPED` asserts
+   that a fixer considered the finding and chose not to act, which is false for
+   a finding no fixer has ever seen. The fixer's own vocabulary stays
+   `APPLIED` / `SKIPPED` / `REFUSED`, unchanged.
+
+   From Step 4 onward postfix rows join the same pipeline as every other row:
+   same `route_by_severity`, same Step 5 cross-contributor dedupe, same Step 6
+   sort / `MAX_NEW` cap / overflow guard, and the same Step 8 fingerprint,
+   marker template and fail-CLOSED dedupe. Nothing about that machinery is
+   special-cased for this source.
+
    A valid review-v2 input whose combined arrays are `findings: []` returns `DONE`
    (`status: DONE`), empty output arrays/counts, and `halted: false`. It performs
    no GitHub writes: do not create the label, issue, or comment. This differs
@@ -348,6 +433,21 @@ Explicit forbidden patterns:
 
    Build a list of rows where `route_by_severity "$severity" "$disposition"` returns 0, carrying the resolved `row_tier` value alongside each row for the downstream branch in Step 8d. Pre-PR-#112 callers that grep'd for the old `is_deferred_critical` symbol will need to update to `route_by_severity` (RFC 0002 §3.3.1).
 
+   **Post-fix rows route on the same two arms, and a `suggestion` files nothing
+   (#655).** A postfix row arrives with `disposition: "DEFERRED"`, so the
+   `APPLIED` suppressor never applies to it and its severity alone decides:
+   `blocker` resolves `row_tier=BLOCKER` and files, `suggestion` returns `1`
+   and files nothing. That second arm is not a new drop path — it is the
+   shipped treatment of every Phase 1 `suggestion` row, recorded under *Halt
+   semantics* as *"Review-v2 `suggestion` rows do not route to issues"*. The
+   post-fix suggestion still reaches durable sinks: it stays in the on-disk
+   `postfix-<phase>-iter<N>.md` aggregate, is counted in that phase's
+   `by_severity.suggestion` sidecar counter, and is rendered in the
+   `/uberdev:review-pr` Step 7 table. It is unfiled, not unrecorded. A post-fix
+   `blocker` that is filed or commented counts into this agent's
+   `by_severity.blocker`, which is what turns the parent's trust signal RED
+   through the shipped conjunct — no new halt path is added for this source.
+
 5. **Cross-contributor dedupe (within this run).** Collapse rows by
    `(file_path, line, sha256(normalised_summary)[:16])`. First occurrence wins;
    merge every subsequent row's `source_edges` into a contributor-ordered,
@@ -360,6 +460,13 @@ Explicit forbidden patterns:
    `normalised_summary` is the finding's summary string: lowercased, whitespace-runs collapsed to single space, leading/trailing whitespace trimmed, code-fence backticks stripped. The normalisation MUST be deterministic — same input always produces same fingerprint, so a recurring run on the same PR maps to the same fingerprint.
 
 6. **Apply MAX_NEW cap.** Sort the deduped list by `(severity_rank desc, file_path asc, line asc)` where `severity_rank(blocker)=3, severity_rank(critical)=2, severity_rank(major)=1`. Take the first `max_new` rows; record the remainder count as `overflow_count`.
+
+   `max_new` is a **single shared cap for the whole dispatch**, and stays `10`
+   for the review variants (RFC 0018 §7). Phase 1, Phase 2 and both post-fix
+   aggregates contribute into one deduped, one sorted list and are capped
+   together; post-fix rows get no separate budget and no priority. A post-fix
+   `blocker` truncated beyond position `max_new` trips exactly the same
+   broken-feature overflow guard below as any other blocker.
 
    **Broken-feature overflow guard (RFC 0002 §3.3.4).** If any truncated row (i.e., any row beyond position `max_new` in the sorted list) has `row_tier ∈ {BLOCKER, CRITICAL}`, set `halted_due_to_overflow=true` and surface it in the return contract. Rationale: a single review pass that produces more than `MAX_NEW=10` deferred blocker/critical findings is broken-feature territory; the user must see the cliff, not a silent floor.
 
@@ -590,6 +697,17 @@ recipe, same 16-hex truncation, same fail-CLOSED dedupe.
 - The explicitly discriminated **legacy fleet variants carry no `source_edges`**;
   they use the variant's own validated `lens` / `agent_name` column instead
   (Step 5's equivalent merge).
+- **A post-fix row carries a one-element `source_edges`** —
+  `["review_pr.postfix.correctness"]` (#655). It is a real edge, so a filed
+  post-fix finding renders `edges=review_pr.postfix.correctness` rather than
+  the empty recorded state the legacy variants fall back to. That single
+  element is what makes the post-fix pass separately attributable end-to-end: a
+  reader of a filed issue can tell a finding raised against the fixer's own
+  commits from one raised in Phase 1 without interpreting prose. If the Step-5
+  dedupe merges a post-fix row into a Phase 1 or Phase 2 row (same path, line
+  and normalised summary), the postfix edge **joins** the kept row's `edges`
+  union after the review contributors — it never replaces them, and the merge
+  never erases it.
 - When neither exists, emit `edges=` with an empty value. An
   **empty `edges=` is a recorded state**, never a licence to guess.
 - **NEVER derive `edges` from `summary` or `detail`** prose — the same

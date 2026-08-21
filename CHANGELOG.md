@@ -4,6 +4,98 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added - `/review-pr` reviews each code-fixer's own commits before the phase moves on (#655)
+
+The code a `code-fixer` child wrote was the only code on the branch nobody read
+before the trust signal was emitted. Phase 1 reviews the diff as it arrived, the
+fixer then rewrites parts of it, and Phase 2 simplifies from there; the Phase 2
+fixer then applies its own commit and Phase 2.5 files against a tree no reviewer
+re-read. Both fixers are agents editing code, and their output reached the trust
+trail on the strength of the finding they were handed rather than of any review
+of what they wrote in response to it.
+
+A tenth `review-fleet` stage, `postfix`, now dispatches ONE
+`uberdev:code-reviewer` over each validated fixer's own commit range
+(`BEFORE..AFTER`), on the new `review_pr.postfix.correctness` edge, as new steps
+**5p** (after the Phase 1 fixer) and **6p** (after the Phase 2 fixer). The two
+steps sit deliberately outside the `a`/`b`/`c` series: `6b` already names three
+different things in `commands/review-pr.md` — the Phase 2 fixer dispatch, the
+Phase 2.5 sub-phase, and (as `6b.0`) the Phase 1 verification gate — so a fourth
+`6b` would have been uncitable.
+
+- **Cheap by scope, lens count and agent count — never by a cheaper model.** The
+  roster is ONE row, not a lens family: a second reviewer over a one-commit diff
+  is a second opinion on the same bytes rather than a second angle on them.
+  `REVIEW_FLEET_POSTFIX_LENS_COUNT` (1) and `REVIEW_FLEET_POSTFIX_TOTAL_CAP` (2)
+  are projected and refused BY NAME (`bad_postfix_count`) in
+  `skills/review-fleet/workflow.js` before a nonce is minted, so an out-of-range
+  fanout costs zero dispatches. Worst case is +2 agents per run; the common case
+  — neither fixer applied anything — is +0. Model tiering is NOT how the cost is
+  bounded and cannot be: RFC 0017 §9 records it *Unreachable*
+  (`route_unenforceable` since #381) and RFC 0012 §5 binds every workflow
+  `agent()` call to omit `model`, so the postfix dispatch omits it too.
+- **Wired at all four promote call sites.**
+  `review_promote_validated_fixer_outcome` takes `phase` as a MANDATORY fourth
+  positional — Phase 1 routed, Phase 1 Workflow, Phase 2 routed, Phase 2
+  Workflow — and the hard arity equality turns a transport left un-updated into
+  a loud refusal instead of a silent no-op under
+  `UBERDEV_CARRIER_BACKEND=workflow`.
+- **Advisory only: no new halt path, no fixer re-entry.** A post-fix finding is
+  transcribed into a `postfix-aggregate` envelope — the eighth member of
+  `findings-to-issues`' closed source set — and joins the SAME single Phase 2.5
+  dispatch as every other deferred row, carrying `disposition: "DEFERRED"`
+  inline. There is no `postfix-disposition.json`: a postfix row is in neither
+  phase's aggregate, and binding a neighbouring phase's disposition to it would
+  be binding by proximity. The child's severity vocabulary is
+  `{blocker, suggestion}` — the only pair `shared/phase1-reviewer-output-v1.md`
+  admits — and a `suggestion` files nothing, exactly as every Phase 1
+  `suggestion` row already does.
+- **Off-switch `--no-post-fix-review`**, recorded to
+  `post-fix-review-phase.txt` in the run directory and RE-READ by steps 5p/6p,
+  because each fence is a fresh shell and the variable is not the decision. An
+  unreadable record halts `post_fix_review_phase_unreadable` rather than
+  defaulting the pass ON: a fence that cannot tell what the operator asked for
+  must not answer for them.
+
+### Changed - the trust-trail predicate is UNCHANGED, and that is a decision (#655)
+
+**This is explicitly NOT the BREAKING trust-trail contract change RFC 0002
+describes, and it owes no BREAKING callout.** The GREEN / YELLOW / RED formula
+gains no term. A post-fix blocker is filed by the same single Phase 2.5
+`findings-to-issues` dispatch as every other deferred blocker, so it raises
+`by_severity.blocker`, and GREEN and YELLOW both already require
+`by_severity.blocker == 0`; if that filing halts the sub-phase, the independent
+`halted == false` conjunct fails as well. Two independent paths to RED that
+already ship — a new conjunct would be a second spelling of a gate that already
+fires. No existing schema field changes shape, and `trust-trail-evaluator` needs
+no change.
+
+The audit JSON gains one ADDITIVE, non-predicate block, `phases.postfix`, whose
+`phase1` and `phase2` members are the sidecars steps 5p/6p published, copied
+verbatim rather than recomputed, so the audit and the run directory cannot
+disagree about what the pass did. Its legacy-absence policy is deliberately the
+INVERSE of `phases.phase2_5`'s: because no predicate reads it, an absent block is
+**`unknown`** — never `STALE`, and never zero. Reading absence as zero would let
+a later change that does wire it into a predicate report every pre-#655 trail as
+"the fixer commits were reviewed and were clean".
+
+**Two residuals, recorded rather than softened.** (1) No predicate reads
+`phases.postfix`, so a `status: "blocked"` pass — an unavailable or malformed
+child, which is an rc-0 continuation — emits the IDENTICAL GREEN as a pass that
+ran and found nothing: the predicate cannot tell silence from cleanliness. That
+is not a regression (before #655 nobody reviewed those commits at all, and a
+GREEN was emitted over them unconditionally), and it is NOT excused by RFC
+0017's *"fail toward keeping"* — that rule preserves a finding that already
+exists when its verifier is unavailable, and an unavailable post-fix reviewer
+produces no finding to preserve. What ships instead is visibility in four
+places: the sidecar's `status`/`reason`, the `phases.postfix` block, the Step 7
+row, and a `REVIEW_POSTFIX_BLOCKED=<phase>` line on stderr. (2) No test in this
+change proves a post-fix reviewer finds a real fixer-introduced defect. Every
+assertion against `commands/review-pr.md` is a text assertion — green CI proves
+the wiring, not the efficacy.
+
 ## [0.51.6] — 2026-08-20
 
 ### Fixed - a retried reviewer that died mid-run could overwrite a completed one's result

@@ -1101,7 +1101,9 @@
         "pr_number": "integer"
       },
       "optional_inputs": {
-        "verification_path": "optional_path"
+        "verification_path": "optional_path",
+        "postfix_phase1_path": "optional_path",
+        "postfix_phase2_path": "optional_path"
       }
     },
     "review_pr.ci.classify": {
@@ -1241,6 +1243,33 @@
         "claude_md_paths": "optional_path_array",
         "format_retry": "boolean",
         "format_example_path": "path"
+      }
+    },
+    "review_pr.postfix.correctness": {
+      "kind": "provider",
+      "source": "plugins/uberdev/commands/review-pr.md",
+      "role": "code-reviewer",
+      "phase": "postfix_correctness",
+      "cardinality": "one_per_applied_fixer_phase_per_review_iteration",
+      "required": false,
+      "risk_scope": "subtask",
+      "output_contract": "phase1-reviewer-v1",
+      "retry": {
+        "format": 1
+      },
+      "allowed_workflows": [
+        "review-pr"
+      ],
+      "required_inputs": {
+        "commit_range_path": "path",
+        "diff_path": "path",
+        "phase": "bounded_text",
+        "working_dir": "directory"
+      },
+      "optional_inputs": {
+        "claude_md_paths": "optional_path_array",
+        "format_example_path": "path",
+        "format_retry": "boolean"
       }
     }
   }

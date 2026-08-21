@@ -692,9 +692,13 @@
         "working_dir": "directory"
       },
       "optional_inputs": [
+        "postfix_phase1_path",
+        "postfix_phase2_path",
         "verification_path"
       ],
       "optional_input_types": {
+        "postfix_phase1_path": "optional_path",
+        "postfix_phase2_path": "optional_path",
         "verification_path": "optional_path"
       },
       "allowed_workflows": [
@@ -775,6 +779,37 @@
       ],
       "risk_scope": "run",
       "risk_argument": null
+    },
+    {
+      "edge_id": "review_pr.postfix.correctness",
+      "source": "plugins/uberdev/commands/review-pr.md",
+      "required_inputs": [
+        "commit_range_path",
+        "diff_path",
+        "phase",
+        "working_dir"
+      ],
+      "required_input_types": {
+        "commit_range_path": "path",
+        "diff_path": "path",
+        "phase": "bounded_text",
+        "working_dir": "directory"
+      },
+      "optional_inputs": [
+        "claude_md_paths",
+        "format_example_path",
+        "format_retry"
+      ],
+      "optional_input_types": {
+        "claude_md_paths": "optional_path_array",
+        "format_example_path": "path",
+        "format_retry": "boolean"
+      },
+      "allowed_workflows": [
+        "review-pr"
+      ],
+      "risk_scope": "subtask",
+      "risk_argument": "subtask"
     },
     {
       "edge_id": "review_pr.review.comments",

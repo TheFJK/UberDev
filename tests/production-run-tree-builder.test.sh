@@ -125,8 +125,11 @@ PY
 
 CONTRACT_COUNT="$(python3 -I -B -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["contracts"]))' "$CONTRACT")"
 EXPECTED_COUNT="$(python3 -I -B -c 'import json,sys; print(sum(len(row["allowed_workflows"]) for row in json.load(open(sys.argv[1]))["contracts"]))' "$CONTRACT")"
-[ "$CONTRACT_COUNT" -eq 43 ]
-[ "$EXPECTED_COUNT" -eq 106 ]
+# 43 -> 44 contracts and 106 -> 107 workflow cases: #655 added the single
+# review-pr-only edge review_pr.postfix.correctness. Both stay literals so a
+# contract that vanishes from the fixture cannot quietly shrink the drive.
+[ "$CONTRACT_COUNT" -eq 44 ]
+[ "$EXPECTED_COUNT" -eq 107 ]
 
 RUNTIME="$TMP/runtime"
 apply_case_fixture "$CONTRACT" "$RUNTIME" >"$TMP/cases.tsv"

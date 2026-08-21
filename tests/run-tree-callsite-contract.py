@@ -29,6 +29,12 @@ ROW_KEYS = {"inputs", "optional_inputs", "allowed_workflows", "risk_scope", "ris
 WORKFLOWS = {"review-pr", "simplify", "solve", "turbo"}
 FORMAT_INPUTS = {"format_example_path", "format_retry"}
 TYPE_MAP_KEYS = {"required_input_types", "optional_input_types"}
+# The closed count of source-declared provider callsites. Deliberately a literal
+# and not a len() over anything derived: its whole job is to catch a declaration
+# that silently disappeared from one of SOURCE_FILES. Declared once so the source
+# side and the fixture side cannot drift apart from each other.
+# 43 -> 44: #655 added review_pr.postfix.correctness to commands/review-pr.md.
+EXPECTED_CONTRACT_COUNT = 44
 INPUT_TYPES = {
     "boolean",
     "bounded_text",
@@ -123,8 +129,11 @@ def collect_sources(root: Path, overrides: dict[str, str] | None = None) -> list
             if edge in merged:
                 fail(f"duplicate source edge: {edge}")
             merged[edge] = row
-    if declared_count != 43 or len(merged) != 43:
-        fail(f"source contract count: expected 43, got {declared_count} declared/{len(merged)} unique")
+    if declared_count != EXPECTED_CONTRACT_COUNT or len(merged) != EXPECTED_CONTRACT_COUNT:
+        fail(
+            f"source contract count: expected {EXPECTED_CONTRACT_COUNT}, "
+            f"got {declared_count} declared/{len(merged)} unique"
+        )
     return [merged[edge] for edge in sorted(merged)]
 
 
@@ -140,7 +149,7 @@ def _typed_fixture(rows: list[dict[str, Any]], fixture_path: Path) -> list[dict[
     if not isinstance(fixture, dict) or fixture.get("schema_version") != 1 or fixture.get("pending_edges") != []:
         fail("invalid fixture envelope")
     contracts = fixture.get("contracts")
-    if not isinstance(contracts, list) or len(contracts) != 43:
+    if not isinstance(contracts, list) or len(contracts) != EXPECTED_CONTRACT_COUNT:
         fail("invalid fixture contracts")
     source_rows: list[dict[str, Any]] = []
     for item in contracts:

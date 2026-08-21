@@ -731,6 +731,7 @@ provider_edges={
  'review_pr.ci.fix_code','review_pr.ci.rebase','review_pr.ci.defer_refusal',
  'review_pr.ci.resolve_conflict','simplify.fix.phase2',
  'review_pr.verify.finding',
+ 'review_pr.postfix.correctness',
 }
 assert set(edges)==structural_edges|provider_edges
 assert all(edges[edge_id].get('kind')=='skill' for edge_id in structural_edges)

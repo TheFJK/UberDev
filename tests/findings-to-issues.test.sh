@@ -494,13 +494,19 @@ echo "### Suite 15: ACCEPTED_SOURCES SSOT (#198)"
 # in the allow-list → findings-to-issues silently files ZERO issues.
 
 LIB_DIR="$REPO_ROOT/plugins/uberdev/lib"
-# The canonical 7-set, sorted (used as the byte-equality oracle for checks 1+2).
+# The canonical 8-set, sorted (used as the byte-equality oracle for checks 1+2).
+# `postfix-aggregate` (#655) is the eighth: the /uberdev:review-pr command fence
+# `review_write_postfix_aggregate` envelopes one post-fix reviewer child's
+# findings under it, and Step 1's closed allow-list has to admit it or every
+# post-fix dispatch refuses `input-malformed` and files ZERO issues — the #182
+# class this whole suite exists to prevent.
 EXPECTED_SOURCES_SORTED=$(printf '%s\n' \
   post-impl-review-aggregate simplify-aggregate ci-refused-synthetic \
   uberscan-aggregate ubersimplify-aggregate testers-aggregate uberthink-aggregate \
+  postfix-aggregate \
   | LC_ALL=C sort)
 
-# S15.1 — Python frozenset is importable + has exactly the 7 members.
+# S15.1 — Python frozenset is importable + has exactly the 8 members.
 # Capture stderr (NOT 2>/dev/null) so an import/syntax error in report_primitives.py
 # surfaces in the FAIL message instead of being swallowed — fitting for the very
 # anti-silent-failure fix this suite guards.
@@ -514,7 +520,7 @@ S15_PY_ERR="$(mktemp)"
 # no-op on Linux/macOS where output is already LF) — #268 CI.
 PY_SOURCES_SORTED=$( (cd "$LIB_DIR" && python3 -c "from report_primitives import ACCEPTED_SOURCES; print('\n'.join(sorted(ACCEPTED_SOURCES)))") 2>"$S15_PY_ERR" | tr -d '\r')
 if [[ "$PY_SOURCES_SORTED" == "$EXPECTED_SOURCES_SORTED" ]]; then
-  echo "  PASS  S15.1 ACCEPTED_SOURCES frozenset imports with the 7 expected members"; PASS=$((PASS+1))
+  echo "  PASS  S15.1 ACCEPTED_SOURCES frozenset imports with the 8 expected members"; PASS=$((PASS+1))
 else
   echo "  FAIL  S15.1 ACCEPTED_SOURCES frozenset mismatch"
   echo "        expected: $(echo "$EXPECTED_SOURCES_SORTED" | tr '\n' ' ')"
@@ -965,6 +971,143 @@ else
   echo "  PASS  S21.12 — the meta trailer does not emit conf= (reserved for #431)"
   PASS=$((PASS + 1))
 fi
+
+### Suite 22: post-fix aggregate routing (#655) ----------
+echo
+echo "### Suite 22: post-fix aggregate routing (#655)"
+# S15 above proves `postfix-aggregate` is an ACCEPTED source. Acceptance alone
+# files nothing: #182 was an accepted-source hole, but the same zero-issues
+# outcome is reachable from any of four later gates — the path never reaching
+# the ONE Phase 2.5 dispatch, the Step 1 byte gate demanding a schema-v2
+# document this source does not produce, a row bound to a disposition that
+# does not exist, or a severity that routes to no tier. Each row below pins one
+# of those, so an aggregate the fence wrote is provably still routable end to
+# end rather than merely admitted at the door.
+#
+# Every row was measured against `git show 3654f0fb:` of the same file: all of
+# the #655 rows match zero times there and once here, and the two "unchanged"
+# rows at the end match exactly once in BOTH. A row that matched the base file
+# would be locking prose this change did not add.
+
+# --- the two optional inputs ride the existing single dispatch ---------------
+assert_in_section "$AGENT_MD" '^## Inputs' '^## Tools authorised' \
+  'postfix_phase1_path.*[*][(]optional[)][*]' \
+  'S22.1 — postfix_phase1_path is declared OPTIONAL on review_pr.defer.findings'
+assert_in_section "$AGENT_MD" '^## Inputs' '^## Tools authorised' \
+  'postfix_phase2_path.*[*][(]optional[)][*]' \
+  'S22.2 — postfix_phase2_path is declared OPTIONAL on review_pr.defer.findings'
+# The shape is copied from `verification_path`, not invented: that is what makes
+# "no second dispatch" a consequence rather than a promise.
+assert_in_section "$AGENT_MD" '^## Inputs' '^## Tools authorised' \
+  'same conditional-bind shape as' \
+  'S22.3 — the two paths use verification_path'"'"'s conditional-bind shape'
+assert_in_section "$AGENT_MD" '^## Inputs' '^## Tools authorised' \
+  'SINGLE Phase 2.5 dispatch' \
+  'S22.3b — they bind on the SINGLE Phase 2.5 dispatch, not a second call'
+# A supplement cannot make an otherwise-absent input valid, so the shipped
+# both-absent refusal is untouched — the arm that would have turned an optional
+# path into a way to dispatch with no aggregate at all.
+assert_in_section "$AGENT_MD" '^## Inputs' '^## Tools authorised' \
+  'supplements, not substitutes' \
+  'S22.4 — the post-fix paths are supplements, never substitutes'
+assert_in_section "$AGENT_MD" '^## Inputs' '^## Tools authorised' \
+  'input-malformed.* rule below is unchanged' \
+  'S22.4b — the both-aggregates-absent input-malformed rule is unchanged'
+
+# --- Step 1: the byte gate admits the envelope this source actually writes ---
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'postfix-aggregate. for either post-fix path' \
+  'S22.5 — Step 1 accepts the postfix-aggregate envelope on either post-fix path'
+# The exemption is the #182-class arm: applying the schema-v2 gate to a
+# command-owned document no canonical encoder produced refuses EVERY post-fix
+# dispatch, and a refusal at Step 1 files zero issues without halting anything.
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'exempt from the exact-compact-sorted-JSON-schema-v2 requirement' \
+  'S22.6 — postfix-aggregate is exempt from the schema-v2 byte gate'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'refuse every post-fix dispatch and silently file zero issues' \
+  'S22.6b — Step 1 records WHY the exemption exists (#182 class)'
+
+# --- Step 3: the row shape, and the disposition it carries inline ------------
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  '"disposition":"DEFERRED"' \
+  'S22.7 — the post-fix row template carries disposition DEFERRED inline'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  '"source_edges":\["review_pr.postfix.correctness"\]' \
+  'S22.8 — the row template carries the one-element source_edges array'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  '"severity":"blocker[|]suggestion"' \
+  'S22.9 — the row severity vocabulary is exactly blocker|suggestion'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'are structurally unproducible on this' \
+  'S22.9b — critical/major/important are unproducible on this source, not coerced'
+# Binding by adjacency is the swap the (finding_index, location, summary_sha256)
+# triple exists to prevent: a postfix row is in NEITHER phase aggregate, so
+# there is no row for a disposition document to bind it to.
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'carries no disposition artifact, and none binds it' \
+  'S22.10 — a post-fix aggregate binds to no disposition document'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'no .postfix-disposition.json.' \
+  'S22.10b — there is no postfix-disposition.json to bind'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'phase1_disposition_path. or .phase2_disposition_path' \
+  'S22.10c — a postfix row inherits nothing from either phase disposition path'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'carries .disposition: "DEFERRED". inline' \
+  'S22.11 — each postfix row carries DEFERRED inline, as ci-refused-synthetic does'
+# DEFERRED is reused, not minted; SKIPPED is refused BY NAME because it asserts
+# a fixer considered the finding, which is false for one no fixer has seen.
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'do [*][*]not[*][*] reuse .SKIPPED.' \
+  'S22.11b — SKIPPED is refused by name for post-fix rows'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  '.APPLIED. / .SKIPPED. / .REFUSED., unchanged' \
+  'S22.11c — the fixer disposition vocabulary is unchanged'
+
+# --- Step 4 / Step 6: same routing, same single cap --------------------------
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'row_tier=BLOCKER. and files' \
+  'S22.12 — a post-fix blocker resolves row_tier=BLOCKER and files'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'single shared cap for the whole dispatch[*][*], and stays .10.' \
+  'S22.13 — max_new is one shared cap for the whole dispatch and stays 10'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'post-fix rows get no separate budget' \
+  'S22.13b — post-fix rows get no separate budget and no priority'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'the same Step 8 fingerprint' \
+  'S22.14 — post-fix rows reuse the shipped Step 8 fingerprint/marker/dedupe'
+
+# --- the trailer renders the edge, and the dedupe merge never erases it ------
+assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
+  'A post-fix row carries a one-element .source_edges.' \
+  'S22.15 — the body-shape contract names the one-element source_edges'
+assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
+  'edges=review_pr.postfix.correctness' \
+  'S22.15b — a filed post-fix finding renders edges=review_pr.postfix.correctness'
+assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
+  'postfix edge [*][*]joins[*][*] the kept row' \
+  'S22.16 — on a Step-5 merge the postfix edge JOINS the kept row'"'"'s edges'
+assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
+  'it never replaces them' \
+  'S22.16b — the merge never replaces or erases the review contributors'
+
+# --- what this change must NOT have moved ------------------------------------
+#
+# These two are the ONLY rows in this suite that also match the base file, and
+# deliberately so: they assert the shipped recipe and the shipped cap did not
+# gain a post-fix variant. Counted rather than merely present — a SECOND copy
+# of the fingerprint recipe, minted "for this source", is the drift this repo
+# has shipped before, and a presence grep is blind to it.
+assert_count "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'printf .%s:%s:%s. "[$]file_path" "[$]line" "[$]normalised_summary" [|] sha256sum' \
+  1 \
+  'S22.17 — exactly ONE sha256(path:line:normalised_summary) recipe, no post-fix variant'
+assert_count "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'more than .MAX_NEW=10. deferred blocker/critical findings' \
+  1 \
+  'S22.18 — the MAX_NEW=10 broken-feature overflow threshold is unchanged'
 
 echo
 echo "## Summary"
