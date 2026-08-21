@@ -35,6 +35,35 @@
 # clean AND the mutant is dirty. A one-sided "the mutant fails" row passes
 # vacuously on a broken manifest, which is the exact shape this issue is about.
 #
+# WHAT #649 ADDED. C1-C7 every one of them READ A DECLARED ENTRY, so the set they
+# validate is the set the manifest already names: a substrate that ships with no
+# entry at all is invisible to all seven. /turbox (RFC 0020) shipped exactly that
+# way — the calling session dispatches its whole fleet through the Task tool, it
+# never sources lib/child-dispatch.sh, so it mints no handoff and leaves no edge
+# here to notice its absence.
+#
+#   C8  ENUMERATE the dispatch substrates reachable from the run tree own
+#       root_edge source (lib/solve-launcher.sh) and red when one is neither the
+#       governed routed-child substrate nor declared in does_not_govern[]. The
+#       universe is read out of the LAUNCHER bytes, never out of the manifest,
+#       which is the whole point: a universe sourced from the manifest can only
+#       ever contain what the manifest already declared. Row Z16 is the
+#       anti-vacuity half — a fixture substrate spliced into the launcher source
+#       and declared nowhere MUST red C8, or the enumeration is decorative.
+#   C9  for a declared substrate whose source is prose rather than a script,
+#       agent_kinds and dispatch_sites are derived from that source the way C1
+#       and C5 derive the fleet ones. An agent identifier counts only when
+#       plugins/uberdev/agents/<stem>.md exists, which is what keeps the label
+#       `uberdev:active` and the command `uberdev:orchestrator` out of the set.
+#
+# THE BOUNDARY C8 DOES NOT CROSS, stated so nobody reads it as more than it is.
+# Its universe is the lanes this run tree can reach FROM ITS OWN ROOT, which is
+# the solve/turbo/turbox family. The other shipped Workflow fleets — review-fleet,
+# scan-fleet, goal-pipeline, testers-pipeline, uberthink-pipeline — are rooted
+# elsewhere and are not enumerated here, so C8 says nothing about them either
+# way. Widening the universe to a fleet means deriving its agent_kinds by
+# EXECUTING it under the harness the way C1 does, not by adding its path.
+#
 # GIT-BASH PORTABLE: grep + node only (no python3/PyYAML/mktemp, no temp files,
 # no digests, no PATH stubs). Runs on BOTH the ubuntu and windows shape-check
 # jobs, so it needs no windows-skip-list entry.
@@ -50,8 +79,14 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HARNESS="$REPO_ROOT/tests/_workflow_harness.js"
 WORKFLOW="$REPO_ROOT/plugins/uberdev/skills/solve-fleet/workflow.js"
 MANIFEST="$REPO_ROOT/plugins/uberdev/policy/solve-run-tree-v1.json"
+# The manifest own root_edge source, and therefore C8 universe: every lane the
+# run tree can reach starts by this file naming the lane surface it validates
+# before it emits anything. The comparator cross-checks the path below against
+# edges[root_edge_id].source so a rotted root cannot leave C8 enumerating a file
+# the tree no longer starts at.
+LAUNCHER="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
 
-for f in "$HARNESS" "$WORKFLOW" "$MANIFEST"; do
+for f in "$HARNESS" "$WORKFLOW" "$MANIFEST" "$LAUNCHER"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
 command -v node >/dev/null 2>&1 || {
@@ -90,16 +125,24 @@ var vm = require("vm");
 var WORKFLOW = process.argv[2];
 var MANIFEST = process.argv[3];
 var SITES = parseInt(process.argv[4], 10);
+var LAUNCHER = process.argv[5];
 
 var srcBase = fs.readFileSync(WORKFLOW, "utf8");
 var tree = JSON.parse(fs.readFileSync(MANIFEST, "utf8"));
+var launcherBase = fs.readFileSync(LAUNCHER, "utf8");
 
-var slashed = WORKFLOW.split("\\").join("/");
 var ANCHOR = "plugins/uberdev/";
-var at = slashed.indexOf(ANCHOR);
-if (at < 0) { throw new Error("workflow path is not under " + ANCHOR + ": " + WORKFLOW); }
-var SRC_REL = slashed.slice(at);
-var REPO_PREFIX = slashed.slice(0, at);
+function relOf(p, what) {
+  var slashed = p.split("\\").join("/");
+  var at = slashed.indexOf(ANCHOR);
+  if (at < 0) { throw new Error(what + " path is not under " + ANCHOR + ": " + p); }
+  return { rel: slashed.slice(at), prefix: slashed.slice(0, at) };
+}
+var WF = relOf(WORKFLOW, "workflow");
+var SRC_REL = WF.rel;
+var REPO_PREFIX = WF.prefix;
+var MANIFEST_REL = relOf(MANIFEST, "manifest").rel;
+var LAUNCHER_REL = relOf(LAUNCHER, "launcher").rel;
 
 var rows = [];
 function row(ok, label) {
@@ -235,6 +278,145 @@ function liveKinds(record) {
   record.agentCalls.forEach(function (c) { seen[kindOf(c.label)] = 1; });
   return Object.keys(seen).sort();
 }
+
+// ---------------------------------------------------------------------------
+// THE ENUMERATOR (#649). C1-C7 all start from a declared entry, so their
+// universe IS the declared set and an entirely absent substrate is invisible to
+// them. This block builds the universe from the OTHER side: the launcher bytes
+// plus the filesystem. Nothing below reads the manifest, which is what lets the
+// comparator name a substrate the manifest never mentions.
+//
+// EXTENSION-BLIND ON PURPOSE. The path pattern matches whatever literal the
+// launcher wrote, so an extension-less surface (every shipped hook, lib/rl-curl)
+// is enumerated exactly like a .sh one. A universe filtered by *.sh would skip
+// them and go quietly green — the same vacuity this file exists to prevent.
+// ---------------------------------------------------------------------------
+
+// Every shipped agent card, by stem. An `uberdev:<stem>` token in a prose
+// surface is a DISPATCH only when plugins/uberdev/agents/<stem>.md exists: that
+// one filter is what keeps the LABEL `uberdev:active`, the COMMAND
+// `uberdev:turbox` and the SKILL `uberdev:orchestrator` out of an agent set they
+// have no business in, without a hand-maintained denylist that would rot.
+var CARDS = {};
+(function () {
+  var dir = REPO_PREFIX + ANCHOR + "agents";
+  fs.readdirSync(dir).forEach(function (n) {
+    if (n.length > 3 && n.slice(-3) === ".md") { CARDS[n.slice(0, -3)] = 1; }
+  });
+  if (Object.keys(CARDS).length === 0) {
+    throw new Error("no agent cards discovered under " + dir + " — the card filter would admit every token");
+  }
+})();
+
+// A host built-in has no card and can never be discovered from agents/, so the
+// one the fleets actually use is named here. It is a dispatchable KIND for the
+// C9 derivation and deliberately NOT a classification marker: lib/goal-state.sh
+// writes the phrase "general-purpose command" in a comment, and a marker that
+// broad would classify a state helper as a solver fleet.
+var BUILTIN_KINDS = ["general-purpose"];
+
+function normKind(s) { return String(s).split("-").join("_"); }
+
+// stem -> how many times this source tells the controller to dispatch it.
+function agentMentions(body) {
+  var counts = {};
+  var re = /uberdev:([a-z0-9-]+)/g;
+  var m;
+  while ((m = re.exec(body)) !== null) {
+    if (CARDS[m[1]]) { counts[m[1]] = (counts[m[1]] || 0) + 1; }
+  }
+  BUILTIN_KINDS.forEach(function (k) {
+    var hits = body.match(new RegExp(k, "g"));
+    if (hits) { counts[k] = (counts[k] || 0) + hits.length; }
+  });
+  return counts;
+}
+
+var RE_ROUTED = /child-dispatch\.sh|uberdev_dispatch_child|uberdev_create_child_handoff/;
+var RE_WORKFLOW_NATIVE = /(?:await|return) agent\(/;
+var RE_SESSION_TASK = /Task\(|subagent_type/;
+
+// Which substrate a surface belongs to, decided by its own bytes.
+//
+// EXECUTABLE EVIDENCE OUTRANKS PROSE, and this order is load-bearing rather than
+// arbitrary. RE_ROUTED matches a bare filename, which every one of its current
+// hits in this repo is — three COMMENTS, in lib/solve-launcher.sh:1540,
+// lib/dispatch.sh:1248 and skills/review-fleet/workflow.js:843. Tested first it
+// would rule a Workflow fleet governed for mentioning the adapter it does not
+// use, and the first draft of row Z16 passed vacuously for exactly that reason:
+// the fixture substrate spliced into the launcher was classified routed off a
+// comment and skipped. So a surface that CALLS agent() is workflow-native
+// however much prose it also carries, and the adapter mention only decides the
+// surfaces that show no dispatch call of their own.
+function classify(body) {
+  if (RE_WORKFLOW_NATIVE.test(body)) { return "workflow-native"; }
+  var cardNamed = Object.keys(agentMentions(body)).filter(function (k) { return CARDS[k]; });
+  if (RE_SESSION_TASK.test(body) || cardNamed.length > 0) { return "session-task-fanout"; }
+  if (RE_ROUTED.test(body)) { return "routed-child-dispatch"; }
+  return null;
+}
+
+// Every source the manifest carries an edge for. scope.governs.note says it
+// plainly — "Every edge in `edges` is a child dispatched through the routed
+// adapter" — so carrying an edge IS the act of governing a surface, and it is a
+// positive commitment C3 and tests/run-tree-callsite-contract.test.sh already
+// police. Silence can never buy the same exemption, which is the whole point.
+function edgeSourceSet(t) {
+  var out = {};
+  var edges = isObj(t) && isObj(t.edges) ? t.edges : {};
+  Object.keys(edges).forEach(function (id) {
+    var e = edges[id];
+    if (isObj(e) && isStr(e.source)) { out[e.source] = 1; }
+  });
+  return out;
+}
+
+var PATH_RE = /(?:lib|skills|commands|agents|hooks|policy|shared)\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*/g;
+var bodyCache = {};
+function bodyOf(rel) {
+  if (!Object.prototype.hasOwnProperty.call(bodyCache, rel)) {
+    bodyCache[rel] = fs.readFileSync(REPO_PREFIX + rel, "utf8");
+  }
+  return bodyCache[rel];
+}
+
+function enumerateSubstrates(lsrc, edgeSrc) {
+  var seen = {};
+  var out = [];
+  var m;
+  PATH_RE.lastIndex = 0;
+  while ((m = PATH_RE.exec(lsrc)) !== null) {
+    var rel = ANCHOR + m[0];
+    if (seen[rel]) { continue; }
+    seen[rel] = 1;
+    // A policy document declares substrates; it is not one. Left in, the
+    // manifest would classify as routed off its own adapter field.
+    if (rel === MANIFEST_REL) { continue; }
+    var st = null;
+    try { st = fs.statSync(REPO_PREFIX + rel); } catch (err) { st = null; }
+    if (!st || !st.isFile()) { continue; }
+    var fam = classify(bodyOf(rel));
+    // No dispatch call of its own, but the manifest carries edges for it: that
+    // is the routed substrate by definition, and it keeps the launcher itself
+    // enumerated off its root edge rather than off a comment that could be
+    // reworded tomorrow.
+    if (fam === null && edgeSrc[rel]) { fam = "routed-child-dispatch"; }
+    if (fam === null) { continue; }
+    out.push({ source: rel, family: fam });
+  }
+  out.sort(function (a, b) { return a.source < b.source ? -1 : (a.source > b.source ? 1 : 0); });
+  return out;
+}
+
+// A RATCHET, like EXECUTED_KIND_FLOOR, and deliberately BELOW today count of 4.
+// Three of the four are structural — lib/solve-launcher.sh (its root edge), the
+// solve fleet script (its agent() calls) and the turbox skill (its agent cards).
+// The fourth, lib/dispatch.sh, is enumerated off a single comment mentioning the
+// adapter, so pinning the floor at 4 would red this file on an unrelated comment
+// edit. Below 3 the enumeration has lost a structural member, which means a
+// pattern rotted — and a shrunken universe reports every substrate left in it as
+// declared: green, and blind.
+var SUBSTRATE_FLOOR = 3;
 
 // ---------------------------------------------------------------------------
 // The rules. Each returns an array of violation strings; check() is their
@@ -380,10 +562,67 @@ function rC5(t, sites) {
     : ["dispatch_sites=" + JSON.stringify(E.dispatch_sites) + " but the source has " + sites + " dispatch site(s)"];
 }
 
-function check(t, live, sites) {
+// C8 — COMPLETENESS. The only rule here whose universe is not the manifest.
+// Two self-checks come first, because a completeness rule that has gone blind
+// reports perfect coverage: the floor catches a rotted pattern, and the
+// known-positive catches an enumeration that can no longer see even the
+// substrate does_not_govern[] already declares.
+function rC8(t, lsrc) {
+  var e = [];
+  var found = enumerateSubstrates(lsrc, edgeSourceSet(t));
+  if (found.length < SUBSTRATE_FLOOR) {
+    e.push("the launcher enumeration yielded only " + found.length + " dispatch substrate(s), below the floor of "
+      + SUBSTRATE_FLOOR + " — a pattern has rotted and C8 would certify by blindness");
+  }
+  var sawFleet = found.filter(function (s) { return s.source === SRC_REL; }).length > 0;
+  if (!sawFleet) {
+    e.push("the enumeration cannot see " + SRC_REL + ", which does_not_govern[] ALREADY declares — the predicate is broken, so its silence about every other substrate means nothing");
+  }
+  var declared = {};
+  (entriesOf(t) || []).forEach(function (x) { if (isObj(x) && isStr(x.source)) { declared[x.source] = 1; } });
+  found.forEach(function (s) {
+    if (s.family === "routed-child-dispatch") { return; }
+    if (declared[s.source]) { return; }
+    e.push("UNDECLARED SUBSTRATE " + s.source + " (" + s.family + ") is reachable from "
+      + LAUNCHER_REL + " and no scope.does_not_govern entry names it");
+  });
+  return e;
+}
+
+// C9 — the C1/C5 pair for a substrate whose source is PROSE. There is no script
+// to execute, so the evidence is the set of shipped-agent identifiers the source
+// names and how many times it names them. Every mention in such a source is a
+// dispatch instruction; a rung added or removed moves both numbers.
+function rC9(t, lsrc) {
+  var e = [];
+  var bySource = {};
+  (entriesOf(t) || []).forEach(function (x) { if (isObj(x) && isStr(x.source)) { bySource[x.source] = x; } });
+  enumerateSubstrates(lsrc, edgeSourceSet(t)).forEach(function (s) {
+    if (s.family !== "session-task-fanout") { return; }
+    var E = bySource[s.source];
+    if (!E) { return; }  // rC8 owns the undeclared case; do not report it twice.
+    var counts = agentMentions(bodyOf(s.source));
+    var wantKinds = Object.keys(counts).map(normKind).sort();
+    var wantSites = 0;
+    Object.keys(counts).forEach(function (k) { wantSites += counts[k]; });
+    var gotKinds = Array.isArray(E.agent_kinds) ? E.agent_kinds.slice().sort() : [];
+    if (gotKinds.join(",") !== wantKinds.join(",")) {
+      e.push(s.source + " declares agent_kinds [" + gotKinds.join(",")
+        + "] but its source names [" + wantKinds.join(",") + "]");
+    }
+    if (E.dispatch_sites !== wantSites) {
+      e.push(s.source + " declares dispatch_sites=" + JSON.stringify(E.dispatch_sites)
+        + " but its source carries " + wantSites + " dispatch mention(s)");
+    }
+  });
+  return e;
+}
+
+function check(t, live, sites, lsrc) {
   return [].concat(
     rGoverns(t), rEntryShape(t), rC6(t),
-    rC1(t, live), rC2(t), rC3(t), rC4(live), rC5(t, sites)
+    rC1(t, live), rC2(t), rC3(t), rC4(live), rC5(t, sites),
+    rC8(t, lsrc), rC9(t, lsrc)
   );
 }
 
@@ -432,7 +671,7 @@ function copyTree() { return JSON.parse(JSON.stringify(tree)); }
   // passes vacuously on a manifest that fails for everything — which is exactly
   // the shape this issue is about.
   // ------------------------------------------------------------------------
-  var baseErrs = check(tree, LIVE, SITES);
+  var baseErrs = check(tree, LIVE, SITES, launcherBase);
 
   function differential(label, applied, notApplied, mutErrs) {
     var why = [];
@@ -450,7 +689,7 @@ function copyTree() { return JSON.parse(JSON.stringify(tree)); }
   var errs9 = [];
   if (mutSrc !== srcBase) {
     var recMut = await runFixture(mutSrc);
-    errs9 = check(tree, liveKinds(recMut), SITES);
+    errs9 = check(tree, liveKinds(recMut), SITES, launcherBase);
   }
   differential("Z9 renaming a label in the EXECUTED script reds the comparator",
     mutSrc !== srcBase,
@@ -463,7 +702,7 @@ function copyTree() { return JSON.parse(JSON.stringify(tree)); }
   if (applied10) E10.agent_kinds.splice(0, 1);
   differential("Z10 deleting a declared agent kind reds the comparator",
     applied10, "there is no declaration to shrink",
-    applied10 ? check(t10, LIVE, SITES) : []);
+    applied10 ? check(t10, LIVE, SITES, launcherBase) : []);
 
   var t11 = copyTree();
   var E11 = entryFor(t11, SRC_REL);
@@ -471,7 +710,7 @@ function copyTree() { return JSON.parse(JSON.stringify(tree)); }
   if (applied11) E11.agent_kinds.push("invented_kind");
   differential("Z11 declaring a kind the fleet never dispatches reds the comparator",
     applied11, "there is no declaration to extend",
-    applied11 ? check(t11, LIVE, SITES) : []);
+    applied11 ? check(t11, LIVE, SITES, launcherBase) : []);
 
   var t12 = copyTree();
   var E12 = entryFor(t12, SRC_REL);
@@ -479,14 +718,66 @@ function copyTree() { return JSON.parse(JSON.stringify(tree)); }
   if (applied12) E12.dispatch_sites = SITES + 1;
   differential("Z12 drifting the dispatch_sites backstop reds the comparator",
     applied12, "there is no entry to drift",
-    applied12 ? check(t12, LIVE, SITES) : []);
+    applied12 ? check(t12, LIVE, SITES, launcherBase) : []);
+
+  var FOUND = enumerateSubstrates(launcherBase, edgeSourceSet(tree));
+  var e13 = rC8(tree, launcherBase);
+  row(e13.length === 0, "Z13 C8: every dispatch substrate reachable from " + LAUNCHER_REL
+      + " is governed or declared ("
+      + FOUND.map(function (s) { return s.source + "=" + s.family; }).join(" ") + ")" + tail(e13));
+
+  var e14 = rC9(tree, launcherBase);
+  row(e14.length === 0, "Z14 C9: each declared prose substrate agent_kinds and dispatch_sites are derived from its own source" + tail(e14));
+
+  // The C8 universe is only the run tree universe while the file it is read
+  // from is still the tree root. Anchoring it here means a re-rooted manifest
+  // reds instead of quietly leaving C8 enumerating a retired entrypoint.
+  var rootEdges = isObj(tree.edges) ? tree.edges : {};
+  var rootEdge = isObj(rootEdges[tree.root_edge_id]) ? rootEdges[tree.root_edge_id] : null;
+  var rootSrc = rootEdge ? rootEdge.source : null;
+  var e15 = rootSrc === LAUNCHER_REL ? []
+    : ["root_edge_id " + JSON.stringify(tree.root_edge_id) + " is sourced from "
+       + JSON.stringify(rootSrc) + ", not " + LAUNCHER_REL];
+  row(e15.length === 0, "Z15 the C8 universe is read from the run tree own root_edge source" + tail(e15));
+
+  // ------------------------------------------------------------------------
+  // Z16 — THE ANTI-VACUITY ROW for C8. Everything above this point could hold
+  // on an enumerator that returns the declared set and nothing else. This one
+  // cannot: it splices a path into a COPY of the launcher source naming a real
+  // dispatch substrate that does_not_govern[] does not declare, and demands the
+  // comparator notice. The fixture is a shipped Workflow fleet outside this
+  // manifest scope, so it is undeclared for a real reason rather than a
+  // synthetic one, and the three guards on applied16 refuse to let the row
+  // count if it ever goes missing, becomes enumerated, or becomes declared.
+  // ------------------------------------------------------------------------
+  var FIXTURE_REL = ANCHOR + "skills/review-fleet/workflow.js";
+  var alreadySeen = FOUND.filter(function (s) { return s.source === FIXTURE_REL; }).length > 0;
+  var applied16 = fs.existsSync(REPO_PREFIX + FIXTURE_REL) && !alreadySeen && !entryFor(tree, FIXTURE_REL);
+  var lsrcMut = launcherBase + "\n# scope-test fixture lane surface: " + FIXTURE_REL.slice(ANCHOR.length) + "\n";
+  differential("Z16 a dispatch substrate the launcher reaches and nobody declares reds C8",
+    applied16,
+    "the fixture substrate " + FIXTURE_REL + " is missing from disk, already enumerated, or already declared, so splicing it in would prove nothing",
+    applied16 ? check(tree, LIVE, SITES, lsrcMut) : []);
+
+  var t17 = copyTree();
+  var TURBOX_REL = ANCHOR + "skills/turbox-fleet/SKILL.md";
+  var d17 = entriesOf(t17) || [];
+  var idx17 = -1;
+  for (var i17 = 0; i17 < d17.length; i17++) {
+    if (isObj(d17[i17]) && d17[i17].source === TURBOX_REL) { idx17 = i17; }
+  }
+  var applied17 = idx17 >= 0;
+  if (applied17) { d17.splice(idx17, 1); }
+  differential("Z17 deleting the /turbox declaration reds C8",
+    applied17, "does_not_govern[] carries no entry sourced from " + TURBOX_REL,
+    applied17 ? check(t17, LIVE, SITES, launcherBase) : []);
 
   process.stdout.write(rows.join("\n") + "\n");
 })().catch(function (e) {
   process.stderr.write("comparator threw: " + ((e && e.stack) ? e.stack : String(e)) + "\n");
   process.exit(1);
 });
-' "$HARNESS" "$WORKFLOW" "$MANIFEST" "$SITES")"
+' "$HARNESS" "$WORKFLOW" "$MANIFEST" "$SITES" "$LAUNCHER")"
 NODE_RC=$?
 [ "$NODE_RC" -eq 0 ] || {
   echo "FATAL: the node comparator threw (rc=$NODE_RC) — see the stderr above" >&2
@@ -505,8 +796,12 @@ while IFS= read -r line; do
   esac
 done <<<"$ROWS"
 
-[ "$ROW_COUNT" -ge 13 ] || {
-  echo "FATAL: the comparator emitted $ROW_COUNT row(s), expected at least 13 (Z0-Z12)" >&2
+# EXACTLY, not at least. Every row() call above is unconditional, so the count is
+# deterministic — and a `-ge` floor cannot tell "a row was deleted" from "a row
+# was added", which is how Z13-Z17 could be landed while Z0-Z12 quietly stopped
+# running. Same predicate, same reason, as E70 in tests/solve-run-tree.test.sh.
+[ "$ROW_COUNT" -eq 18 ] || {
+  echo "FATAL: the comparator emitted $ROW_COUNT row(s), expected exactly 18 (Z0-Z17)" >&2
   exit 2
 }
 
