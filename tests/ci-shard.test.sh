@@ -299,7 +299,17 @@ else
 
   # Polarity: with no plan the SAME harness must run every row. This is the
   # standalone case ci-wiring W12.3 depends on, asserted here at the routing seam.
-  S8_ALL="$(bash -e "$WORK/s8.sh" 2>&1 || true)"
+  #
+  # THE UNSET IS EXPLICIT, and it has to be. This fixture runs INSIDE a shard,
+  # where UBERDEV_SHARD_PLAN is exported by the planning step -- so a subshell
+  # that merely declines to set it inherits the real plan, which holds none of
+  # the synthetic names below and skips all six. It passed locally for the only
+  # reason such a row ever does: the variable happened not to exist in the
+  # author's shell.
+  S8_ALL="$(
+    unset UBERDEV_SHARD_PLAN UBERDEV_SHARD UBERDEV_SHARDS
+    bash -e "$WORK/s8.sh" 2>&1 || true
+  )"
   S8_N="$(printf '%s\n' "$S8_ALL" | grep -c '^--- RUN ')"
   [ "$S8_N" = "6" ] && ok "S8: with no plan set, all six run (the standalone case)" \
     || bad "S8: an unset plan ran $S8_N of 6 — the default is not fail-open"
