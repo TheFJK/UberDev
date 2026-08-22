@@ -1,0 +1,144 @@
+# tests/ci-shard-weights.tsv — measured per-fixture wall seconds, the input
+# to the LPT bin-pack in tests/ci-shard-plan.py.
+#
+# Source: the ubuntu shape-checks job of GitHub Actions run 32583260063
+# (2026-08-22), timed from the `--- RUN` markers the run_one harness emits.
+# Windows and macOS are not separately measured; the RELATIVE ordering is
+# what the pack needs, and it holds across the three runners.
+#
+# These are HINTS, never a gate. A fixture missing from this file is packed
+# at DEFAULT_WEIGHT and still runs — the plan's completeness is asserted
+# against the workflow's own list by tests/ci-wiring.test.sh W13, not
+# against this file. Refresh it when the balance drifts; nothing breaks if
+# it goes stale, the shards just even out less well.
+#
+# seconds<TAB>fixture
+116	agent-dispatch.test.sh
+3	aliases.test.sh
+1	atomic-move.test.sh
+1	audit-fixups.test.sh
+11	brainstorm-child-inputs.test.sh
+1	bump-version.test.sh
+1	child-contract-v2.test.sh
+5	child-dispatch-receipts.test.sh
+33	child-dispatch.test.sh
+3	child-inputs.test.sh
+27	child-wait.test.sh
+1	ci-wiring.test.sh
+1	cluster-pipeline.test.sh
+1	cluster.test.sh
+31	code-fixer-contract.test.sh
+1	code-fixer-dispatch.test.sh
+10	command-workspace.test.sh
+1	config-override.test.sh
+6	contract-markers.test.sh
+6	convention-citation.test.sh
+6	crossplatform-shell-wrappers.test.sh
+1	dev-pipeline.test.sh
+1	dev.test.sh
+11	dispatch-background.test.sh
+20	dispatch-child-worktree-teardown.test.sh
+1	dispatch-fallback.test.sh
+1	dispatch-prompt-no-bare-slash.test.sh
+1	dispatch-routing-parity.test.sh
+1	dispatch-wezterm.test.sh
+2	docs-accuracy.test.sh
+8	epipe-guard.test.sh
+1	exit-floor.test.sh
+1	find-polluter.test.sh
+1	findings-to-issues.test.sh
+1	finish-branch-auto-chain.test.sh
+1	finish-branch.test.sh
+1	ghostty-dispatch-no-instance-leak.test.sh
+2	goal-batch-barrier.test.sh
+1	goal-dispatch-helpers.test.sh
+2	goal-state-sidecar.test.sh
+2	goal-verdict-receipt.test.sh
+3	goal-version-bump.test.sh
+5	goal-workflow.test.sh
+7	goal.test.sh
+1	install.test.sh
+1	issue-causal-fanout.test.sh
+1	leaf-worker-contract.test.sh
+1	lib-assert-count.test.sh
+76	live-semaphore.test.sh
+11	merge-discovery-resilience.test.sh
+3	merge.test.sh
+6	model-routing-config.test.sh
+1	model-routing.test.sh
+204	orchestrator-child-inputs.test.sh
+1	orchestrator-phase-0-bg-detection.test.sh
+1	orchestrator-phase-6-doc.test.sh
+1	orchestrator-phase1-shortcircuit.test.sh
+5	orchestrator-plan-flatten.test.sh
+1	plan-writer-routing.test.sh
+6	post-impl-review.test.sh
+8	premerge-findings.test.sh
+1	premerge-phase5.test.sh
+1	premerge.test.sh
+83	prkit-generate.test.sh
+1	prkit-manifest.test.sh
+1	prkit-publish.test.sh
+1	prkit-rewrite.test.sh
+75	prkit-verify.test.sh
+30	production-run-tree-builder.test.sh
+28	review-child-handoff.test.sh
+65	review-child-inputs.test.sh
+3	review-pr-consolidate.test.sh
+8	review-pr-entry.test.sh
+46	review-pr-phase3-ci.test.sh
+25	review-pr-workflow.test.sh
+25	review-pr.test.sh
+5	review-precision.test.sh
+32	route-context.test.sh
+1	route-unsupported.test.sh
+1	routed-provider-bypass.test.sh
+13	run-manifest.test.sh
+1	run-tree-callsite-contract.test.sh
+2	scan-fleet-workflow.test.sh
+8	schema-property-reads.test.sh
+34	sdd-child-inputs.test.sh
+1	sdd-routed-lifecycle.test.sh
+2	sdd-wave-contract.test.sh
+1	secret-scan.test.sh
+15	simplify-standalone-flow.test.sh
+15	simplify.test.sh
+1	skill-renderer-awk-collision.test.sh
+1	solve-claim.test.sh
+1	solve-effort-flag.test.sh
+17	solve-fleet-workflow.test.sh
+5	solve-routing.test.sh
+1	solve-run-tree-scope.test.sh
+10	solve-run-tree.test.sh
+7	solve-triage.test.sh
+1	spec-reviewer-plan-aware.test.sh
+4	status.test.sh
+1	test-harness-source-guards.test.sh
+1	testers-agent-contract.test.sh
+2	testers-pipeline.test.sh
+1	testers-rate-limit-audit.test.sh
+2	testers-rate-limit-wrapper.test.sh
+1	testers-workflow.test.sh
+1	trust-trail-base-identity.test.sh
+1	trust-trail-evaluator.test.sh
+1	turbo-flow.test.sh
+2	turbox-fleet-runtime.test.sh
+1	turbox-fleet.test.sh
+1	uberscan-chunk.test.sh
+1	uberscan-report.test.sh
+1	uberscan.test.sh
+1	ubersimplify-aggregate.test.sh
+1	ubersimplify.test.sh
+1	uberthink-report.test.sh
+3	uberthink-workflow.test.sh
+1	uberthink.test.sh
+1	using-git-worktrees.test.sh
+12	vendor-drift.test.sh
+5	vendor-provenance.test.sh
+1	workflow-args.test.sh
+2	workflow-scripts.test.sh
+1	zsh tests/finish-branch-zsh.test.sh
+1	zsh tests/goal-pipeline-zsh.test.sh
+1	zsh tests/goal-state-zsh.test.sh
+1	zsh tests/merge-pipeline-zsh.test.sh
+1	zsh tests/solve-pipeline-zsh.test.sh

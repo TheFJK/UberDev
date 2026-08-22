@@ -120,8 +120,18 @@ if [ ! -d "$REPO_ROOT/tests" ]; then
   echo "  ABORT — tests/ directory missing: $REPO_ROOT/tests"; exit 99
 fi
 
-LINUX_TIMEOUT_MINUTES=40
-WINDOWS_TIMEOUT_MINUTES=30
+# Both were sized for a job that ran the WHOLE suite. Each job is now a shard of
+# it (six on Linux and Windows, two on macOS), so the same ceilings would be a
+# 10x licence to hang rather than a guard. Twelve is roughly 3x the packed
+# ~219s a Linux shard carries -- headroom for runner variance, not for a hang.
+LINUX_TIMEOUT_MINUTES=12
+WINDOWS_TIMEOUT_MINUTES=12
+# How many shards each job's matrix declares. W13 reads these back out of the
+# workflow rather than trusting them, so a matrix widened without updating this
+# file is a failure and not a silently half-run suite.
+LINUX_SHARDS=6
+WINDOWS_SHARDS=6
+MACOS_SHARDS=2
 linux_job_block=$(awk '
   /^  shape-checks:[[:space:]]*$/ { in_job=1; next }
   in_job && /^  [[:alnum:]_-]+:[[:space:]]*$/ { exit }
@@ -238,9 +248,14 @@ else
   FAIL=$((FAIL+1))
 fi
 
-# W5 — the complete Linux matrix exhausted the 30-minute budget even though
-# its final suite reported 91/0 immediately before cancellation. Preserve a
-# bounded ten-minute recovery margin without falling back to Actions' default.
+# W5 — the Linux job's hang guard, resized for a shard.
+#
+# The 40-minute ceiling this replaces was evidence-based for a job that ran all
+# ~130 fixtures sequentially: the complete matrix exhausted a 30-minute budget
+# even though its final suite reported 91/0 immediately before cancellation.
+# That job no longer exists. Each shard carries ~219s of measured work, so the
+# old number is not conservative, it is inert -- a guard that cannot fire before
+# the run is long dead is not a guard.
 linux_timeout_rows=$(printf '%s\n' "$linux_job_block" \
   | sed -n 's/^    timeout-minutes:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p')
 if [ "$linux_timeout_rows" = "$LINUX_TIMEOUT_MINUTES" ]; then
@@ -252,9 +267,12 @@ else
   FAIL=$((FAIL+1))
 fi
 
-# W6 — the exhaustive native Windows portability shard needs measured runtime
-# headroom; retain a bounded hang guard without falling back to Actions'
-# 360-minute default or weakening the Linux/macOS job-specific guards.
+# W6 — the Windows job's hang guard, resized for the same reason as W5.
+#
+# Windows keeps the largest relative margin of the three: Git Bash process
+# spawning is the slowest runner and its 19-minute measured total is the least
+# precisely attributed per fixture, so its shards are the ones most likely to
+# come in over the pack's estimate.
 windows_timeout_rows=$(printf '%s\n' "$windows_job_block" \
   | sed -n 's/^    timeout-minutes:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p')
 if [ "$windows_timeout_rows" = "$WINDOWS_TIMEOUT_MINUTES" ]; then
@@ -821,6 +839,132 @@ else
   echo "         linux/windows differ: $w12_d_win"
   echo "         Keep one spelling of run_one + the failure tail in all three run: blocks."
   FAIL=$((FAIL+1))
+fi
+
+# ---------------------------------------------------------------------------
+# W13 — a sharded job must still run the whole list.
+#
+# W1-W4 above prove the WORKFLOW names every fixture. Once the jobs are sharded
+# that is no longer the same claim as "every fixture RUNS": the workflow can name
+# all 128 while the six shards between them execute 127, and every row above
+# stays green. A test that silently stops running is the failure this file exists
+# to refuse, so the new seam gets the same treatment as the old one.
+#
+# Executed, not read. The pack is recomputed here by invoking the SAME scripts
+# CI invokes -- tests/ci-job-fixtures.sh for the list, tests/ci-shard-plan.py for
+# the split -- because a transcription of the packing rule into this file would
+# be the uncompared-copy class W12.4 is about, and both copies would agree with
+# each other while disagreeing with CI.
+#
+#   W13.0  the shard counts in this file match the matrices in the workflow
+#   W13.1  union of a job's shards == that job's wired list  (nothing dropped)
+#   W13.2  the shards are pairwise disjoint                  (nothing doubled)
+#   W13.3  polarity: a plan that DROPS a fixture must be caught by W13.1
+# ---------------------------------------------------------------------------
+W13_FIXTURES="$REPO_ROOT/tests/ci-job-fixtures.sh"
+W13_PLAN="$REPO_ROOT/tests/ci-shard-plan.py"
+
+# `<job-key>|<declared shards>` — the same three specs W13.0 verifies against the
+# workflow before W13.1/W13.2 trust them.
+W13_JOB_SPECS="shape-checks|$LINUX_SHARDS
+supervision-smoke-macos|$MACOS_SHARDS
+shape-checks-windows|$WINDOWS_SHARDS"
+
+# matrix_shards_of <workflow> <job-key> -> the shard count that job's matrix
+# declares, or the empty string. Reads the `shard: [1, 2, ...]` row inside the
+# job block, so a matrix removed or widened is visible here rather than assumed.
+matrix_shards_of() {
+  awk -v JOB="$2" '
+    $0 ~ ("^  " JOB ":[[:space:]]*$") { in_job = 1; next }
+    in_job && /^  [[:alnum:]_-]+:[[:space:]]*$/ { exit }
+    in_job && /^[[:space:]]+shard:[[:space:]]*\[/ {
+      n = gsub(/,/, ",") + 1
+      print n
+      exit
+    }
+  ' "$1"
+}
+
+if [ ! -x "$W13_FIXTURES" ] || [ ! -r "$W13_PLAN" ]; then
+  echo "  FAIL  W13 the shard scripts are missing: $W13_FIXTURES / $W13_PLAN"
+  FAIL=$((FAIL+1))
+elif ! command -v python3 >/dev/null 2>&1; then
+  # Not a skip. This row proves no test was dropped; standing it down on a runner
+  # without python3 would be the vacuous-green shape W10 bans outright.
+  echo "  FAIL  W13 python3 is required to recompute the shard pack"
+  FAIL=$((FAIL+1))
+else
+  w13_ok=1
+  w13_detail=''
+  while IFS= read -r w13_spec; do
+    [ -n "$w13_spec" ] || continue
+    w13_job=${w13_spec%%|*}
+    w13_want=${w13_spec#*|}
+
+    # W13.0 — the declared count must match the workflow's own matrix.
+    w13_got="$(matrix_shards_of "$WORKFLOW" "$w13_job")"
+    if [ "$w13_got" != "$w13_want" ]; then
+      w13_ok=0
+      w13_detail="${w13_detail}${w13_detail:+; }$w13_job matrix declares '${w13_got:-<none>}', this file expects $w13_want"
+      continue
+    fi
+
+    w13_wired="$("$W13_FIXTURES" "$w13_job" "$WORKFLOW" | LC_ALL=C sort)" || {
+      w13_ok=0
+      w13_detail="${w13_detail}${w13_detail:+; }$w13_job: could not extract its fixture list"
+      continue
+    }
+
+    # Recompute every shard and concatenate. `sort` WITHOUT -u, so a fixture
+    # landing in two shards survives into the comparison instead of being
+    # deduplicated into a false match — W13.2 is only meaningful if the union is
+    # counted with multiplicity.
+    w13_union=''
+    w13_shard=1
+    while [ "$w13_shard" -le "$w13_want" ]; do
+      w13_part="$("$W13_FIXTURES" "$w13_job" "$WORKFLOW" \
+        | python3 -I -B "$W13_PLAN" --shards "$w13_want" --shard "$w13_shard")" || {
+          w13_ok=0
+          w13_detail="${w13_detail}${w13_detail:+; }$w13_job shard $w13_shard: plan failed"
+          break
+        }
+      w13_union="${w13_union}${w13_part}
+"
+      w13_shard=$((w13_shard + 1))
+    done
+
+    w13_union_sorted="$(printf '%s' "$w13_union" | grep -v '^$' | LC_ALL=C sort)"
+    if [ "$w13_union_sorted" != "$w13_wired" ]; then
+      w13_ok=0
+      w13_missing="$(comm -23 <(printf '%s\n' "$w13_wired") <(printf '%s\n' "$w13_union_sorted" | LC_ALL=C sort -u) | tr '\n' ' ')"
+      w13_dup="$(printf '%s\n' "$w13_union_sorted" | uniq -d | tr '\n' ' ')"
+      w13_detail="${w13_detail}${w13_detail:+; }$w13_job: dropped='${w13_missing% }' duplicated='${w13_dup% }'"
+    fi
+  done <<EOF
+$W13_JOB_SPECS
+EOF
+
+  if [ "$w13_ok" = 1 ]; then
+    echo "  PASS  W13.1/W13.2 every sharded job's shards cover its wired list exactly once"
+    PASS=$((PASS+1))
+  else
+    echo "  FAIL  W13 a sharded job does not run its whole list: $w13_detail"
+    FAIL=$((FAIL+1))
+  fi
+
+  # W13.3 — polarity. W13.1 compares two lists that are BOTH derived from the
+  # same extractor, so it would pass just as happily if the pack were a no-op
+  # that returned everything to every shard. Drive a plan that deliberately drops
+  # one fixture through the SAME comparison and require it to be caught.
+  w13_ctl_wired="$("$W13_FIXTURES" shape-checks "$WORKFLOW" | LC_ALL=C sort)"
+  w13_ctl_union="$(printf '%s\n' "$w13_ctl_wired" | tail -n +2 | LC_ALL=C sort)"
+  if [ "$w13_ctl_union" != "$w13_ctl_wired" ]; then
+    echo "  PASS  W13.3 the comparison catches a plan that drops a fixture"
+    PASS=$((PASS+1))
+  else
+    echo "  FAIL  W13.3 the union comparison cannot tell a dropped fixture from a complete plan"
+    FAIL=$((FAIL+1))
+  fi
 fi
 
 # ---------------------------------------------------------------------------

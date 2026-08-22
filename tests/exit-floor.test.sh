@@ -236,7 +236,19 @@ floor_state() {
 }
 
 macos_block="$(awk '/^  supervision-smoke-macos:/,/^  shape-checks-windows:/' "$WORKFLOW")"
-macos_fixtures="$(sed -n 's|.*bash tests/\([A-Za-z0-9._-]*\.test\.sh\).*|\1|p' <<<"$macos_block")"
+# COMMENT-STRIPPED BEFORE THE MATCH. This block carries the prose that documents
+# its own harness, and that prose quotes invocation shapes -- so an unstripped
+# scan reads a fixture out of a SENTENCE. It did: a comment reading "so
+# `bash tests/x.test.sh` yields ..." was counted as a ninth macOS fixture and
+# reported as missing, on a job that wires eight.
+#
+# The other direction is worse and is the reason this is a strip rather than a
+# blocklist. `# dropped for speed: bash tests/dispatch-wezterm.test.sh` beside a
+# deleted invocation would make E6 certify a fixture that no longer runs -- the
+# forgeable-declaration shape ci-wiring W11 drives a mutation against. E6.3 below
+# pins both directions.
+macos_block_code="$(printf '%s\n' "$macos_block" | grep -v '^[[:space:]]*#')"
+macos_fixtures="$(sed -n 's|.*bash tests/\([A-Za-z0-9._-]*\.test\.sh\).*|\1|p' <<<"$macos_block_code")"
 
 e6_seen=0
 e6_bad=""
@@ -305,14 +317,38 @@ else
 fi
 
 echo
+# E6.3 — polarity for the comment strip, both directions, through the SAME
+# extraction E6.0/E6.1 use. Without this the strip is an unverified claim: a
+# regex that stopped matching entirely would also produce "no phantom".
+e63_err=''
+e63_forged="$(printf '%s\n        # dropped for speed: bash tests/phantom-fixture.test.sh\n' "$macos_block" \
+  | grep -v '^[[:space:]]*#' \
+  | sed -n 's|.*bash tests/\([A-Za-z0-9._-]*\.test\.sh\).*|\1|p' \
+  | grep -c 'phantom-fixture.test.sh')"
+e63_real="$(printf '%s\n' "$macos_block_code" \
+  | sed -n 's|.*bash tests/\([A-Za-z0-9._-]*\.test\.sh\).*|\1|p' \
+  | grep -c 'atomic-move.test.sh')"
+if [ "$e63_forged" != "0" ]; then
+  e63_err='a commented invocation still counts as wiring'
+elif [ "$e63_real" = "0" ]; then
+  e63_err='the strip ate a REAL invocation — atomic-move.test.sh vanished'
+fi
+if [ -z "$e63_err" ]; then
+  echo "  PASS  E6.3 the scan reads invocations, not comments claiming them"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  E6.3 $e63_err"
+  FAIL=$((FAIL + 1))
+fi
+
 echo "==================================================================="
 echo "  PASS=$PASS  FAIL=$FAIL"
 echo "==================================================================="
 
 # Executed-row floor. "Zero failures" is not the claim "the rows ran"; this
 # file exists precisely because that difference is what shipped a green macOS
-# job. E1-E5 plus E6.0/E6.1/E6.2 are eight unconditional rows.
-EXPECTED_ROWS=8
+# job. E1-E5 plus E6.0/E6.1/E6.2/E6.3 are nine unconditional rows.
+EXPECTED_ROWS=9
 if [ "$((PASS + FAIL))" -ne "$EXPECTED_ROWS" ]; then
   echo "FATAL: executed $((PASS + FAIL)) rows, expected $EXPECTED_ROWS — this file asserted less than it claims" >&2
   exit 1

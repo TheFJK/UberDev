@@ -32,8 +32,27 @@ permissions:
 
 jobs:
   shape-checks:
-    name: shape-checks
+    name: shape-checks ${{ matrix.shard }}/6
     runs-on: ubuntu-latest
+    # SHARDED SIX WAYS. The block below is one sequential loop over ~130
+    # fixtures, and its cost distribution is extremely skewed: measured on run
+    # 32587359768, the slowest five fixtures are 44% of the wall time and the
+    # slowest single one is 16%. A round-robin or alphabetical split would leave
+    # one shard carrying most of the suite, so the split is a weight-aware
+    # bin-pack -- see tests/ci-shard-plan.py.
+    #
+    # Six, not more: the pack's makespan floors at the cost of the single
+    # slowest fixture (~204s), which an eighth shard cannot divide. Six lands
+    # every shard at ~219s with the fixtures evenly distributed around it.
+    #
+    # fail-fast is OFF. A red shard must not cancel the other five: the whole
+    # point of de-chaining (#628) was that a job report the complete result
+    # rather than "nothing failed before it stopped", and cancelling siblings
+    # reintroduces exactly that at the job level.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     # Routed lifecycle, semaphore-race, and provider-contract fixtures made the
     # complete Linux suite exhaust its 30-minute budget even though the final
     # suite reported 91/0 only 89 ms before cancellation. Forty minutes retains
@@ -41,7 +60,13 @@ jobs:
     # ci-wiring.test.sh locks that exact budget so it cannot silently regress.
     # Caps the default 360-min budget so a hung test from a fork PR can't burn
     # the public-repo Actions allowance. Bump if the suite legitimately grows.
-    timeout-minutes: 40
+    #
+    # Twelve, down from forty, because a SHARD is not the suite: the pack puts
+    # ~219s of measured work in each. Twelve keeps roughly a 3x margin over that
+    # for runner variance while restoring a hang guard worth having -- a
+    # forty-minute ceiling on a four-minute shard is not a guard, it is a
+    # sixteen-fold licence to hang.
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -64,6 +89,15 @@ jobs:
         # `--no-install-recommends` to trim CI runtime (the fixture only
         # needs the zsh binary, not the recommends graph).
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
+      - name: Plan shard ${{ matrix.shard }} of 6
+        # Writes UBERDEV_SHARD_PLAN / UBERDEV_SHARD / UBERDEV_SHARDS for the step
+        # below. Reads the job's own fixture list back out of this file, so the
+        # `run_one` lines stay the single source of truth and no manifest can
+        # drift from them. Exits non-zero rather than emitting an empty plan --
+        # the harness treats an absent plan as "run everything", which is the
+        # right default when it is extracted and run standalone and the wrong
+        # one when a pack has broken.
+        run: bash tests/ci-shard-env.sh shape-checks 6 "${{ matrix.shard }}" >> "$GITHUB_ENV"
       - name: Run shape-check tests
         # SYNC: this list MUST match the windows-latest job below, PLUS the
         # ubuntu-only Unix-runtime fixtures the Windows job intentionally skips:
@@ -101,9 +135,52 @@ jobs:
           # job could only ever report "nothing failed before it stopped". run_one calls
           # every fixture, accumulates the failures, and the tail exits non-zero naming
           # them. tests/ci-wiring.test.sh W12 locks the shape AND runs this harness.
+          #
+          # SHARDED. UBERDEV_SHARD_PLAN carries this shard's fixture basenames,
+          # space-separated, from the plan step above. The list below stays complete and
+          # in declaration order in EVERY shard -- it is the single source of truth the
+          # plan step reads back out of this file, so a sharded job and an unsharded one
+          # cannot disagree about what the suite contains.
+          #
+          # UNSET means run everything, deliberately: W12.3 extracts this harness and
+          # executes it standalone against synthetic fixtures that belong to no plan, and
+          # for a test runner the safe default is to run MORE than asked, never less.
+          # That default is not how a broken pack arrives here -- tests/ci-shard-env.sh
+          # exits non-zero rather than emitting an empty plan, so the job dies at the
+          # planning step instead of silently running the whole suite six times.
           fail=0
           failed=""
           run_one() {
+            if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
+              # Keyed on the argument that IS a fixture path, found by scanning.
+              # Neither the first nor the last argument works: the interpreter
+              # varies (`bash`, `zsh`, `env MSYSTEM=MSYS bash`) and three Windows
+              # rows pass a trailing flag (`tests/run-manifest.test.sh
+              # --artifact-publication-only`), so keying on the last argument
+              # silently dropped exactly those three.
+              #
+              # And NOT `${*##*/}`: that applies the strip to EACH positional and
+              # then joins, so `bash tests/x.test.sh` yields `bash x.test.sh`,
+              # matches no plan entry, skips every fixture, and reports a green job
+              # that ran nothing.
+              #
+              # No match means RUN, which is how W12.3's synthetic fixtures
+              # (`bash <tmpdir>/a.sh`) survive the filter. Both of these bugs were
+              # caught by S8 in tests/ci-shard.test.sh, which drives this function
+              # with real argv rather than re-implementing its logic.
+              run_one_fixture=""
+              for run_one_arg in "$@"; do
+                case "$run_one_arg" in
+                  tests/*.test.sh|tests/*.test.py) run_one_fixture="${run_one_arg##*/}" ;;
+                esac
+              done
+              if [ -n "$run_one_fixture" ]; then
+                case " ${UBERDEV_SHARD_PLAN} " in
+                  *" ${run_one_fixture} "*) : ;;
+                  *) echo "--- SKIP $* (shard ${UBERDEV_SHARD:-?}/${UBERDEV_SHARDS:-?})"; return 0 ;;
+                esac
+              fi
+            fi
             echo "--- RUN  $*"
             if "$@"; then
               echo "--- PASS $*"
@@ -115,6 +192,7 @@ jobs:
             fi
           }
           run_one bash tests/ci-wiring.test.sh
+          run_one bash tests/ci-shard.test.sh
           run_one bash tests/turbo-flow.test.sh
           run_one bash tests/issue-causal-fanout.test.sh
           run_one bash tests/post-impl-review.test.sh
@@ -249,13 +327,31 @@ jobs:
           echo "=== every test file in this block ran and passed"
 
   supervision-smoke-macos:
-    name: supervision-smoke-macos
+    name: supervision-smoke-macos ${{ matrix.shard }}/2
     runs-on: macos-latest
-    timeout-minutes: 15
+    # Two, not six: this job runs eight fixtures and one of them
+    # (agent-dispatch) is over half its measured cost, so the pack floors there.
+    # A third shard would add a job that finishes instantly and change no
+    # deadline. Without this split macOS becomes the critical path the moment
+    # the other two jobs are sharded.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install GNU timeout
         run: brew install coreutils
+      - name: Plan shard ${{ matrix.shard }} of 2
+        # Writes UBERDEV_SHARD_PLAN / UBERDEV_SHARD / UBERDEV_SHARDS for the step
+        # below. Reads the job's own fixture list back out of this file, so the
+        # `run_one` lines stay the single source of truth and no manifest can
+        # drift from them. Exits non-zero rather than emitting an empty plan --
+        # the harness treats an absent plan as "run everything", which is the
+        # right default when it is extracted and run standalone and the wrong
+        # one when a pack has broken.
+        run: bash tests/ci-shard-env.sh supervision-smoke-macos 2 "${{ matrix.shard }}" >> "$GITHUB_ENV"
       - name: Run focused supervision smoke tests
         # The two dispatch-* fixtures below also run on ubuntu and Windows, but
         # only here do their preflight-arm rows discriminate: the resolver tries
@@ -272,9 +368,52 @@ jobs:
           # job could only ever report "nothing failed before it stopped". run_one calls
           # every fixture, accumulates the failures, and the tail exits non-zero naming
           # them. tests/ci-wiring.test.sh W12 locks the shape AND runs this harness.
+          #
+          # SHARDED. UBERDEV_SHARD_PLAN carries this shard's fixture basenames,
+          # space-separated, from the plan step above. The list below stays complete and
+          # in declaration order in EVERY shard -- it is the single source of truth the
+          # plan step reads back out of this file, so a sharded job and an unsharded one
+          # cannot disagree about what the suite contains.
+          #
+          # UNSET means run everything, deliberately: W12.3 extracts this harness and
+          # executes it standalone against synthetic fixtures that belong to no plan, and
+          # for a test runner the safe default is to run MORE than asked, never less.
+          # That default is not how a broken pack arrives here -- tests/ci-shard-env.sh
+          # exits non-zero rather than emitting an empty plan, so the job dies at the
+          # planning step instead of silently running the whole suite six times.
           fail=0
           failed=""
           run_one() {
+            if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
+              # Keyed on the argument that IS a fixture path, found by scanning.
+              # Neither the first nor the last argument works: the interpreter
+              # varies (`bash`, `zsh`, `env MSYSTEM=MSYS bash`) and three Windows
+              # rows pass a trailing flag (`tests/run-manifest.test.sh
+              # --artifact-publication-only`), so keying on the last argument
+              # silently dropped exactly those three.
+              #
+              # And NOT `${*##*/}`: that applies the strip to EACH positional and
+              # then joins, so `bash tests/x.test.sh` yields `bash x.test.sh`,
+              # matches no plan entry, skips every fixture, and reports a green job
+              # that ran nothing.
+              #
+              # No match means RUN, which is how W12.3's synthetic fixtures
+              # (`bash <tmpdir>/a.sh`) survive the filter. Both of these bugs were
+              # caught by S8 in tests/ci-shard.test.sh, which drives this function
+              # with real argv rather than re-implementing its logic.
+              run_one_fixture=""
+              for run_one_arg in "$@"; do
+                case "$run_one_arg" in
+                  tests/*.test.sh|tests/*.test.py) run_one_fixture="${run_one_arg##*/}" ;;
+                esac
+              done
+              if [ -n "$run_one_fixture" ]; then
+                case " ${UBERDEV_SHARD_PLAN} " in
+                  *" ${run_one_fixture} "*) : ;;
+                  *) echo "--- SKIP $* (shard ${UBERDEV_SHARD:-?}/${UBERDEV_SHARDS:-?})"; return 0 ;;
+                esac
+              fi
+            fi
             echo "--- RUN  $*"
             if "$@"; then
               echo "--- PASS $*"
@@ -300,19 +439,41 @@ jobs:
           echo "=== every test file in this block ran and passed"
 
   shape-checks-windows:
-    name: shape-checks-windows
+    name: shape-checks-windows ${{ matrix.shard }}/6
     runs-on: windows-latest
+    # Sharded on the same pack as ubuntu. This job runs a SUBSET (the
+    # windows-skip-list below is excluded), so its shards are the ubuntu pack
+    # restricted to that subset -- the weights are the same relative ordering on
+    # every runner, which is all the pack needs.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     # Proves the shape-check harness and routed dispatch lifecycle are portable
     # on native Windows/Git Bash. The exhaustive portability shard's measured
     # runtime outgrew the prior ceiling; thirty minutes provides runner-variance
     # headroom while preserving a meaningful hang guard.
-    timeout-minutes: 30
+    #
+    # Twelve, down from thirty, for the reason the Linux job gives: a shard is
+    # not the suite. Windows keeps the larger relative margin of the two -- Git
+    # Bash process spawning is the slowest of the three runners and its measured
+    # 19-minute total is the least precisely attributed.
+    timeout-minutes: 12
     defaults:
       run:
         # Force every `run:` step into Git Bash, not PowerShell or cmd.
         shell: bash
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Plan shard ${{ matrix.shard }} of 6
+        # Writes UBERDEV_SHARD_PLAN / UBERDEV_SHARD / UBERDEV_SHARDS for the step
+        # below. Reads the job's own fixture list back out of this file, so the
+        # `run_one` lines stay the single source of truth and no manifest can
+        # drift from them. Exits non-zero rather than emitting an empty plan --
+        # the harness treats an absent plan as "run everything", which is the
+        # right default when it is extracted and run standalone and the wrong
+        # one when a pack has broken.
+        run: bash tests/ci-shard-env.sh shape-checks-windows 6 "${{ matrix.shard }}" >> "$GITHUB_ENV"
       - name: Run shape-check tests
         # This list MUST match the ubuntu-latest job above MINUS the ubuntu-only
         # Unix-runtime fixtures, which are intentionally skipped here because Git
@@ -513,9 +674,52 @@ jobs:
           # job could only ever report "nothing failed before it stopped". run_one calls
           # every fixture, accumulates the failures, and the tail exits non-zero naming
           # them. tests/ci-wiring.test.sh W12 locks the shape AND runs this harness.
+          #
+          # SHARDED. UBERDEV_SHARD_PLAN carries this shard's fixture basenames,
+          # space-separated, from the plan step above. The list below stays complete and
+          # in declaration order in EVERY shard -- it is the single source of truth the
+          # plan step reads back out of this file, so a sharded job and an unsharded one
+          # cannot disagree about what the suite contains.
+          #
+          # UNSET means run everything, deliberately: W12.3 extracts this harness and
+          # executes it standalone against synthetic fixtures that belong to no plan, and
+          # for a test runner the safe default is to run MORE than asked, never less.
+          # That default is not how a broken pack arrives here -- tests/ci-shard-env.sh
+          # exits non-zero rather than emitting an empty plan, so the job dies at the
+          # planning step instead of silently running the whole suite six times.
           fail=0
           failed=""
           run_one() {
+            if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
+              # Keyed on the argument that IS a fixture path, found by scanning.
+              # Neither the first nor the last argument works: the interpreter
+              # varies (`bash`, `zsh`, `env MSYSTEM=MSYS bash`) and three Windows
+              # rows pass a trailing flag (`tests/run-manifest.test.sh
+              # --artifact-publication-only`), so keying on the last argument
+              # silently dropped exactly those three.
+              #
+              # And NOT `${*##*/}`: that applies the strip to EACH positional and
+              # then joins, so `bash tests/x.test.sh` yields `bash x.test.sh`,
+              # matches no plan entry, skips every fixture, and reports a green job
+              # that ran nothing.
+              #
+              # No match means RUN, which is how W12.3's synthetic fixtures
+              # (`bash <tmpdir>/a.sh`) survive the filter. Both of these bugs were
+              # caught by S8 in tests/ci-shard.test.sh, which drives this function
+              # with real argv rather than re-implementing its logic.
+              run_one_fixture=""
+              for run_one_arg in "$@"; do
+                case "$run_one_arg" in
+                  tests/*.test.sh|tests/*.test.py) run_one_fixture="${run_one_arg##*/}" ;;
+                esac
+              done
+              if [ -n "$run_one_fixture" ]; then
+                case " ${UBERDEV_SHARD_PLAN} " in
+                  *" ${run_one_fixture} "*) : ;;
+                  *) echo "--- SKIP $* (shard ${UBERDEV_SHARD:-?}/${UBERDEV_SHARDS:-?})"; return 0 ;;
+                esac
+              fi
+            fi
             echo "--- RUN  $*"
             if "$@"; then
               echo "--- PASS $*"
@@ -527,6 +731,7 @@ jobs:
             fi
           }
           run_one bash tests/ci-wiring.test.sh
+          run_one bash tests/ci-shard.test.sh
           run_one bash tests/run-manifest.test.sh --artifact-publication-only
           run_one bash tests/turbo-flow.test.sh
           run_one bash tests/issue-causal-fanout.test.sh
