@@ -254,6 +254,89 @@ assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
 assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
   'gh issue list .*--search.*\$FP|gh issue list .*--search.*fingerprint=' 'D4 dedupe queries fingerprint in:body'
 
+# --- #722: grouping is by FILE, and the two fingerprint recipes are counted --
+#
+# The filer used to open one issue per finding row; it now opens one per owning
+# FILE, with per-finding identity preserved inside the container. Two recipes
+# now coexist, so G2 COUNTS the container one: a second, per-caller variant is
+# the drift this repo has shipped before, and a presence grep is blind to it
+# (same reasoning as S22.17, which counts the member recipe).
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'Group by owning file' 'G1 agent groups deduped rows into file groups before filing'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'one issue per FILE, never one per finding' 'G1b the grouping step states the granularity rule'
+assert_count "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'printf .%s:%s. "[$]finding_marker_slug" "[$]file_path" [|] sha256sum' \
+  1 \
+  'G2 exactly ONE container-fingerprint recipe (slug:path), no per-caller variant'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'max_new. counts FILES, not rows' 'G3 the MAX_NEW cap counts files'
+# G4's tier set is written with a U+2208 in the agent doc. `.{1,6}` spans it in
+# both a UTF-8 locale (2 chars) and the C locale the windows job can run in
+# (4 bytes) — a literal would match under one and not the other.
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'If any truncated group .*group_tier .{1,6}\{BLOCKER, CRITICAL\}' \
+  'G4 the overflow guard reads the GROUP tier, not a row tier'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'MAXIMUM tier in the group' 'G5 group_tier is the max, so a blocker is never downgraded'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'one entry per member' 'G6 skipped_closed stays row-granular for the blocker bound'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'body-size-budget' 'G7 an over-long grouped body degrades loudly, never silently'
+assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
+  '<!-- uberdev-finding-index v=1 count=[{]member_count[}] fingerprints=' \
+  'G8 the per-member index marker template is declared'
+assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
+  '## Findings [(][{]member_count[}][)]' 'G9 the body enumerates every finding in the file'
+assert_in_section "$AGENT_MD" '^## Comment body shape' '^## Return contract' \
+  'recurring ones included' 'G10 the comment renders every member, not only the new ones'
+
+# --- #722 plan-review rows: the three deviations the plan review MANDATED ----
+#
+# These are not in plan.md. The pre-implementation review returned
+# REVISIONS_REQUIRED against it with no reviser on this lane, so its findings
+# are the review's output and win where they contradict the plan. Each row
+# below locks one of them, so the deviation is a contract rather than an
+# unexplained diff.
+#
+# G11 — AC 4 ('overflow reporting states files deferred') is not satisfied by
+# the two windows the plan's steps name: three bullets OUTSIDE them still
+# counted in rows, and a truncation reported in the wrong unit reads as smaller
+# than it was.
+# Whole-file grep, matching the shape B6/B7 above use: `## Failure-mode summary`
+# is the LAST section, and a BSD awk range whose end anchor is at EOF is
+# unreliable. Each phrase below is unique to its bullet in the agent doc, so a
+# file-wide match is still a match on the bullet this row means.
+assert_grep "$AGENT_MD" \
+  'files deferred, never rows' \
+  'G11 the failure-mode overflow bullet reports FILES deferred (AC 4)'
+assert_grep "$AGENT_MD" \
+  'skip the whole FILE GROUP that body belonged to' \
+  'G11b a secret-scan hit costs the whole file group, and the bullet says so'
+assert_grep "$AGENT_MD" \
+  'at least one truncated FILE GROUP had tier BLOCKER or CRITICAL' \
+  'G11c the halt-semantics bullet counts truncated GROUPS, not rows'
+# G12 — AC 2 wants line + summary + failure scenario for EVERY finding. The
+# body-size budget drops prose fences, so a member whose summary lived only
+# inside its fence would degrade to a bare line number. The summary therefore
+# lives in the member heading, which the budget never drops.
+assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
+  '### [{]n[}][.].*[{]summary_first_120_chars[}]' \
+  'G12 every member heading carries its own summary (AC 2 survives degradation)'
+assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
+  'the summary is in the HEADING' \
+  'G12b the body shape records WHY the summary is not fence-only'
+# G13 — the meta trailer is machine authority for per-lens precision:
+# tools/eval/review-precision.py counts one row per ISSUE, once per edge it
+# names. A group-wide edges= would charge one member's false positive to every
+# lens that was right about a different line in the same file.
+assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
+  'primary member alone' \
+  'G13 edges= binds to the primary member, not the group'
+assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
+  'Grouping does NOT widen .edges' \
+  'G13b the trailer records that grouping does not widen its attribution'
+
 ### Suite 3: Label-provision idempotency ----------
 echo
 echo "### Suite 3: Label-provision idempotency"
@@ -408,10 +491,18 @@ assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
   'Broken-feature overflow guard|broken-feature overflow|broken_feature_overflow' \
   'T6.1 — Process step 6 documents the broken-feature overflow guard (RFC 0002 §3.3.4)'
 
-# T6.2 — guard fires when a truncated row is BLOCKER or CRITICAL tier
+# T6.2 — guard fires when a truncated FILE GROUP is BLOCKER or CRITICAL tier.
+# UPDATED, not deleted (#722 AC 6): the guard itself is unchanged and its
+# MAX_NEW=10 threshold has not moved — only the unit it counts did, from rows
+# to file groups, because the cap now admits whole files. Keeping the old
+# row-worded pattern would have gone on passing off Step 9's prose while the
+# guard it claims to cover said something else. The pattern is also tightened
+# onto ONE sentence: the old `truncated.*(row|group).*BLOCKER` form survived a
+# mutation that renamed the guard's unit, because `group_tier` further along
+# the same line satisfied the middle term on its own.
 assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
-  'truncated.*row.*BLOCKER|truncated.*row.*CRITICAL|BLOCKER.*CRITICAL.*truncated' \
-  'T6.2 — overflow guard fires on truncated BLOCKER/CRITICAL tier rows (constraints [hard])'
+  'any truncated group.*(BLOCKER|CRITICAL)' \
+  'T6.2 — overflow guard fires on truncated BLOCKER/CRITICAL tier GROUPS (constraints [hard])'
 
 # T6.3 — halted_due_to_overflow == true implies halted == true
 assert_in_section "$AGENT_MD" '^## Return contract' '^## Refusal triggers' \
@@ -960,7 +1051,7 @@ for field in 'Origin' 'Agent' 'File' 'Severity' 'Disposition' 'Tier'; do
 done
 assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
   '\*\*File:\*\* .[{]file_path[}]:[{]line[}].' \
-  'S21.2 — **File:** template is still `{file_path}:{line}`'
+  'S21.2 — **File:** template is still `{file_path}:{line}` (now the primary member)'
 # S21.3 is the operational form of "the fingerprint is unchanged": a test has no
 # copy of the pre-#432 bytes, so it locks the exact marker template AND the exact
 # recipe substring instead. Either one drifting is the regression.
@@ -992,6 +1083,20 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# S21.5b (#722) — the index marker is the line after the META TRAILER, never
+# between the trailer and the fingerprint marker: the miner reads that PAIR
+# positionally, so anything wedged between them strips provenance.
+INDEX_LINE="$(awk 'index($0, "<!-- uberdev-finding-meta v=1 slug=") == 1 { getline nxt; print nxt; exit }' "$AGENT_MD")"
+if grep -qE '^<!-- uberdev-finding-index ' <<<"$INDEX_LINE"; then
+  echo "  PASS  S21.5b — the member index follows the meta trailer"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S21.5b — the member index follows the meta trailer"
+  echo "        file: $AGENT_MD"
+  echo "        line following the meta trailer: ${INDEX_LINE:-<none>}"
+  FAIL=$((FAIL + 1))
+fi
+
 assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
   'contributor-ordered union of the kept row' \
   'S21.6 — edges reproduces the contributor-ordered union incl. merged rows'
@@ -1018,6 +1123,14 @@ assert_in_section "$AGENT_MD" '^## Sanitiser steps' '^## Comment body shape' \
 assert_in_section "$AGENT_MD" '^## Sanitiser steps' '^## Comment body shape' \
   '<!-- uberdev-finding-meta' \
   'S21.8d — sanitiser step 4 also names the meta-trailer literal'
+# The member index is refusable input like the other three markers (#722): a
+# forged one would let hostile finding prose mark itself already-recorded.
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  '<!-- uberdev-finding-index' \
+  'S21.8e — step 8e also refuses a forged member index'
+assert_in_section "$AGENT_MD" '^## Sanitiser steps' '^## Comment body shape' \
+  '<!-- uberdev-finding-index' \
+  'S21.8f — sanitiser step 4 also names the member-index literal'
 
 # --- verdict labels (the ground-truth half) ---
 assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \

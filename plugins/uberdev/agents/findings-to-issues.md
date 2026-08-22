@@ -558,30 +558,76 @@ Explicit forbidden patterns:
 5. **Cross-contributor dedupe (within this run).** Collapse rows by
    `(file_path, line, sha256(normalised_summary)[:16])`. First occurrence wins;
    merge every subsequent row's `source_edges` into a contributor-ordered,
-   unique `also_flagged_by[]` array on the kept row (rendered as the
-   `**Also flagged by:**` line in the issue body — see Issue body shape below).
+   unique `also_flagged_by[]` array on the kept row (rendered into the
+   `**Also flagged by:**` line in the issue body — see Issue body shape
+   below, where grouping widens that display line to the whole group's
+   union while the machine-authority trailer stays bound to one member).
    Explicit legacy variants perform the equivalent merge from their validated
    `lens` / `agent_name` columns. Never infer contributor identity from
    `summary` or `detail`.
 
    `normalised_summary` is the finding's summary string: lowercased, whitespace-runs collapsed to single space, leading/trailing whitespace trimmed, code-fence backticks stripped. The normalisation MUST be deterministic — same input always produces same fingerprint, so a recurring run on the same PR maps to the same fingerprint.
 
-6. **Apply MAX_NEW cap.** Sort the deduped list by `(severity_rank desc, file_path asc, line asc)` where `severity_rank(blocker)=3, severity_rank(critical)=2, severity_rank(major)=1, severity_rank(suggestion)=0`. Take the first `max_new` rows; record the remainder count as `overflow_count`.
+5.5. **Group by owning file (#722).** Collapse the deduped row list into
+   **file groups**, one per distinct `file_path`. This is the step that decides
+   issue granularity, and it decides it the way the fixer half of the same
+   pipeline already does: one issue per FILE, never one per finding
+   (`lib/premerge-findings.py::_fix_waves`). It is **unconditional** — a file
+   with one finding is a group of one — because a threshold would need a second
+   fingerprint recipe, and a file that crossed the threshold between two runs
+   would then compute a different key and open a second issue.
 
-   `suggestion` ranks **below** every other tier, so a `/premerge` dispatch that
-   overflows `max_new` truncates its cleanup rows first and never displaces a
-   blocker. That ordering is the whole reason the suggestion tier can share one
-   cap with the others instead of needing a budget of its own: the cap can only
-   ever cost the least important rows.
+   Each group carries:
+
+   - `file_path` — the group key.
+   - `members[]` — the group's rows, ordered by
+     `(severity_rank desc, line asc)` with `severity_rank(blocker)=3,
+     severity_rank(critical)=2, severity_rank(major)=1,
+     severity_rank(suggestion)=0`. The first element is the group's
+     **primary member**.
+   - `group_tier` — the primary member's `row_tier`. Because the members are
+     sorted severity-first, it is by construction the MAXIMUM tier in the group,
+     so a file carrying one blocker among suggestions is a BLOCKER-tier group.
+     Never take a minimum, an average, or the first row's tier in arrival
+     order: any of those silently downgrades a blocker, and
+     `lib/goal-phase3.sh` selects `/goal` recursion targets by a
+     `**Tier:** BLOCKER|CRITICAL` body line it would then never see.
+
+   Group order is by first appearance of the `file_path` in the deduped list,
+   so a re-run over the same findings groups them the same way. Sorting the
+   groups by name instead would reorder the whole plan when one filename
+   changes.
+
+6. **Apply MAX_NEW cap.** Sort the **file groups** from Step 5.5 by
+   `(group_tier_rank desc, file_path asc)` where `group_tier_rank(BLOCKER)=3,
+   group_tier_rank(CRITICAL)=2, group_tier_rank(MAJOR)=1,
+   group_tier_rank(SUGGESTION)=0`. Take the first `max_new` groups; record the
+   remainder as `overflow_count`.
+
+   **`max_new` counts FILES, not rows (#722).** The cap can therefore no longer
+   truncate a file's findings halfway: a file is either filed with every one of
+   its findings or deferred whole. `overflow_count` is a count of deferred
+   FILES and every operator-facing rendering of it says "files", never "rows" —
+   a number labelled with the wrong unit is how a truncation gets read as
+   smaller than it was.
+
+   `SUGGESTION` ranks **below** every other tier, so a `/premerge` dispatch that
+   overflows `max_new` truncates its cleanup-only files first and never
+   displaces a file carrying a blocker. That ordering is the whole reason the
+   suggestion tier can share one cap with the others instead of needing a
+   budget of its own: the cap can only ever cost the least important files. A
+   file mixing a blocker with cleanup rows ranks at BLOCKER, so grouping never
+   lets a cleanup row drag a blocker under the cap with it.
 
    `max_new` is a **single shared cap for the whole dispatch**, and stays `10`
    for the review variants (RFC 0018 §7). Phase 1, Phase 2 and both post-fix
-   aggregates contribute into one deduped, one sorted list and are capped
-   together; post-fix rows get no separate budget and no priority. A post-fix
-   `blocker` truncated beyond position `max_new` trips exactly the same
-   broken-feature overflow guard below as any other blocker.
+   aggregates contribute into one deduped list, are grouped once by owning file
+   in Step 5.5, and are capped together; post-fix rows get no separate budget
+   and no priority. A post-fix `blocker` whose file group falls beyond position
+   `max_new` trips exactly the same broken-feature overflow guard below as any
+   other blocker.
 
-   **Broken-feature overflow guard (RFC 0002 §3.3.4).** If any truncated row (i.e., any row beyond position `max_new` in the sorted list) has `row_tier ∈ {BLOCKER, CRITICAL}`, set `halted_due_to_overflow=true` and surface it in the return contract. Rationale: a single review pass that produces more than `MAX_NEW=10` deferred blocker/critical findings is broken-feature territory; the user must see the cliff, not a silent floor.
+   **Broken-feature overflow guard (RFC 0002 §3.3.4).** If any truncated group (i.e., any group beyond position `max_new` in the sorted list) has `group_tier ∈ {BLOCKER, CRITICAL}`, set `halted_due_to_overflow=true` and surface it in the return contract. Rationale: a single review pass that produces more than `MAX_NEW=10` deferred blocker/critical findings is broken-feature territory; the user must see the cliff, not a silent floor.
 
 7. **Provision label (fail-soft).** Run:
 
@@ -623,11 +669,28 @@ Explicit forbidden patterns:
    at `max_new=10` that floor is 70 calls' worth of budget against three label
    writes plus at most twenty issue writes.
 
-8. **Per-finding loop (write phase).** For each row in the capped list, in deterministic order. Sleep 1 second between iterations to stay polite to the API:
+8. **Per-file loop (write phase).** For each **group** in the capped list, in
+   deterministic order. Sleep 1 second between iterations to stay polite to the
+   API:
 
-   a. Compute fingerprint: `FP=$(printf '%s:%s:%s' "$file_path" "$line" "$normalised_summary" | sha256sum | awk '{print substr($1,1,16)}')`.
+   a. Compute the two fingerprints. The **container** fingerprint is the
+      issue's identity and is keyed on the file alone:
+      `FP=$(printf '%s:%s' "$finding_marker_slug" "$file_path" | sha256sum | awk '{print substr($1,1,16)}')`.
+      Then, for each member of the group, its own per-finding identity, using
+      the unchanged recipe:
+      `MEMBER_FP=$(printf '%s:%s:%s' "$file_path" "$line" "$normalised_summary" | sha256sum | awk '{print substr($1,1,16)}')`.
 
-   b. Dedupe lookup (fail-CLOSED): capture stderr alongside stdout so the diagnostic survives on failure — `MATCH=$(gh issue list --label "${finding_label:-review-pr-finding}" --state all --search "$FP in:body" --json number,state,url,body --limit 5 2>&1)`; capture `rc=$?`. If `rc != 0` OR `MATCH` does not parse as JSON (validate via `printf '%s' "$MATCH" | jq empty 2>/dev/null`), append `{file: $file_path:$line, reason: "gh issue list rc=$rc — $(printf '%s' "$MATCH" | head -c 200)"}` to `blocked_by_dedupe[]` and continue to next row — NEVER create the issue on lookup failure. The `--label "${finding_label:-review-pr-finding}"` filter narrows to issues this agent created; the `--search "$FP in:body"` then matches the fingerprint substring. After the search returns, verify the exact HTML-comment marker `<!-- uberdev:${finding_marker_slug:-review-pr}-finding fingerprint=$FP -->` is present in the matched issue's `body` field via local exact-string check before treating it as a dedupe hit (belt-and-braces against GH search tokenisation gaps).
+      **The container key deliberately omits `line` and the summary.** Both
+      drift under the pipeline's own edits — a fix that shifts a line by one
+      re-keys every finding below it — which is why the cross-run dedupe this
+      recipe funds has historically failed to fire. A path is the only input
+      present in every producer contract that survives the edits the pipeline
+      makes. The slug is in the material because the same path is legitimately
+      filed by different fleets under different labels, and a shared 16-hex key
+      across labels would make one fleet's issue look like another's dedupe hit.
+      The member recipe is unchanged and stays the per-finding authority.
+
+   b. Dedupe lookup (fail-CLOSED): capture stderr alongside stdout so the diagnostic survives on failure — `MATCH=$(gh issue list --label "${finding_label:-review-pr-finding}" --state all --search "$FP in:body" --json number,state,url,body --limit 5 2>&1)`; capture `rc=$?`. If `rc != 0` OR `MATCH` does not parse as JSON (validate via `printf '%s' "$MATCH" | jq empty 2>/dev/null`), append `{file: $file_path:$line, reason: "gh issue list rc=$rc — $(printf '%s' "$MATCH" | head -c 200)"}` — `$line` being the primary member's — to `blocked_by_dedupe[]` and continue to the next GROUP (#722) — NEVER create the issue on lookup failure. The `--label "${finding_label:-review-pr-finding}"` filter narrows to issues this agent created; the `--search "$FP in:body"` then matches the fingerprint substring. After the search returns, verify the exact HTML-comment marker `<!-- uberdev:${finding_marker_slug:-review-pr}-finding fingerprint=$FP -->` is present in the matched issue's `body` field via local exact-string check before treating it as a dedupe hit (belt-and-braces against GH search tokenisation gaps).
 
    c. Parse match: if `MATCH` is non-empty JSON array, extract the first element's `state` and `number`.
 
@@ -718,16 +781,81 @@ Explicit forbidden patterns:
       esac
       ```
 
-      The `assignee_args` array is passed to `gh issue create` as `"${assignee_args[@]}"` (empty array = no `--assignee` flag — `gh` does not error on omitted flags). Its value is a **bare login, never `@login`** — see the comment above the binding; an `@`-prefixed login makes `gh` exit 1 and files no issue at all. Per-row tier carries through; never assume a run is single-tier.
+      The `assignee_args` array is passed to `gh issue create` as `"${assignee_args[@]}"` (empty array = no `--assignee` flag — `gh` does not error on omitted flags). Its value is a **bare login, never `@login`** — see the comment above the binding; an `@`-prefixed login makes `gh` exit 1 and files no issue at all. Per-GROUP tier carries through — `row_tier` here is the group's `group_tier`, the primary member's (#722) — and never assume a run is single-tier.
 
    d. **State branching:** every `gh issue create` / `gh issue comment` invocation MUST capture combined stderr+stdout into `CREATE_OUTPUT` and the exit code into `rc`. Step 8f's classifier reads both as preconditions — without this capture the truncation + transient/permanent classification in 8f silently classifies every failure as permanent. Shape: `CREATE_OUTPUT=$(gh issue create ... 2>&1); rc=$?` (or the analogous form for `gh issue comment`).
-      - `state == "open"`: build comment body (see Comment body shape below); pipe through `uberdev_run_secret_scan_stdin` — on non-zero exit append to `blocked_by_dedupe[]` with `reason: "secret-scan-hit"` and continue; otherwise `CREATE_OUTPUT=$(gh issue comment "$number" --body-file - 2>&1); rc=$?` from the sanitised tempfile. Append `{url, file, fingerprint}` to `commented_urls[]`.
-      - `state == "closed"`: skip (user resolved). Append `{url, file, fingerprint}` to `skipped_closed[]`.
-      - No match: build issue body (see Issue body shape below — tier-aware via `mention_line` / `backref_line` from c.5); secret-scan; `CREATE_OUTPUT=$(gh issue create --label "${finding_label:-review-pr-finding}" "${assignee_args[@]}" --title "$AUTO_TITLE" --body-file - 2>&1); rc=$?` from the sanitised tempfile (title format: `[finding] $file_path:$line — $summary_first_60_chars`). Append `{url, file, fingerprint, tier: $row_tier}` to `created_urls[]`.
+      - `state == "open"`: build the comment body (see Comment body shape
+        below), rendering **every** member of the group and marking each `new`
+        or `recurring` against the `fingerprints=` list in the matched issue's
+        `body` field. Every member is rendered, including the recurring ones —
+        the run's blocker accounting is a count of findings written, and a
+        comment that mentioned only the new members would drop the recurring
+        ones out of that count. Pipe through `uberdev_run_secret_scan_stdin` —
+        on non-zero exit append to `blocked_by_dedupe[]` with
+        `reason: "secret-scan-hit"` and continue; otherwise
+        `CREATE_OUTPUT=$(gh issue comment "$number" --body-file - 2>&1); rc=$?`
+        from the sanitised tempfile. Append
+        `{url, file, fingerprint, tier: $group_tier, findings: <N>}` to
+        `commented_urls[]`, where `file` is `$file_path:$primary_line` and
+        `fingerprint` is the container fingerprint.
+      - `state == "closed"`: skip the whole group (user resolved). Append
+        **one entry per member** to `skipped_closed[]` —
+        `{url, file: "$file_path:$line", fingerprint: <member_fp>, tier: <member_tier>}`
+        — never one entry for the group. The blocker accounting downstream
+        counts `skipped_closed[]` entries carrying `tier: "BLOCKER"` one for
+        one against the number of blockers the fixer deferred, so collapsing a
+        file's three closed blockers into a single entry makes that bound fail
+        and refuses the parent run.
+      - No match: build the issue body (see Issue body shape below — tier-aware
+        via `mention_line` / `backref_line` from c.5, driven by `group_tier`);
+        secret-scan;
+        `CREATE_OUTPUT=$(gh issue create --label "${finding_label:-review-pr-finding}" "${assignee_args[@]}" --title "$AUTO_TITLE" --body-file - 2>&1); rc=$?`
+        from the sanitised tempfile. The title is file-scoped: with two or more
+        members it is `[finding] $file_path — $member_count findings`; with
+        exactly one it is `[finding] $file_path — $summary_first_60_chars`. The
+        path leads in both shapes, so the backlog reads as a list of files
+        needing work. Append
+        `{url, file, fingerprint, tier: $group_tier, findings: <N>}` to
+        `created_urls[]`, with `file` and `fingerprint` as in the comment arm.
 
-   e. Refusal carve-out: if the finding's `summary` (post-normalisation) contains ANY of the literal strings `<!-- uberdev:${finding_marker_slug:-review-pr}-finding fingerprint=`, `<!-- uberdev-finding-meta` or `<!-- uberdev-scope`, append `{file: $file_path:$line, reason: "finding-contains-fingerprint-marker"}` to `blocked_by_dedupe[]` and skip — the first literal prevents attacker-controlled finding text from collapsing into a fake existing-issue match; the second prevents it from forging a lens attribution into the precision corpus (RFC 0018 §2.1); the third prevents it from forging the triage scope declaration and pricing its own issue (#614). One reason string covers all three: the class is marker forgery.
+   e. Refusal carve-out, applied **per member**: if a member's `summary`
+      (post-normalisation) contains ANY of the literal strings
+      `<!-- uberdev:${finding_marker_slug:-review-pr}-finding fingerprint=`,
+      `<!-- uberdev-finding-meta`, `<!-- uberdev-finding-index` or
+      `<!-- uberdev-scope`, append
+      `{file: $file_path:$line, reason: "finding-contains-fingerprint-marker"}`
+      to `blocked_by_dedupe[]` and drop **that member** from the group — never
+      the whole file, or one hostile row would suppress every honest finding
+      beside it. If every member is dropped, skip the group entirely and make no
+      GitHub write for it. One reason string covers all four literals: the class
+      is marker forgery. The first prevents attacker-controlled finding text
+      from collapsing into a fake existing-issue match; the second prevents it
+      from forging a lens attribution into the precision corpus (RFC 0018 §2.1);
+      the third prevents it from forging the per-member index and marking its own
+      finding as already-recorded; the fourth prevents it from forging the triage
+      scope declaration and pricing its own issue (#614).
 
-   f. Write-failure handling with transient/permanent classifier (O4 — design decision D9): if `gh issue create` or `gh issue comment` returns non-zero, capture combined stderr+stdout into `CREATE_OUTPUT`, truncate to 200 chars BEFORE the regex classifier (security Note B — bounds attacker-influenced stderr substring), then classify the failure (see bash block below for the literal trigger regex). Append the typed entry to `blocked_by_dedupe[]`, set `status: DONE_WITH_CONCERNS`, and continue to next row — NEVER retry within the same run.
+   e.5. **Body-size budget (#722).** Grouping is what makes an over-long body
+      reachable: a single finding's detail is bounded at 16 KiB, so four members
+      can exceed GitHub's 65536-byte issue-body limit and `gh issue create`
+      would reject the request outright — losing every finding in the file, not
+      just the overflowing one. Assemble the body, then measure it. While it
+      exceeds **60000 characters**, drop the four-backtick `finding` prose fence
+      of the LOWEST-ranked member that still has one, replacing it with the
+      single line `_(detail omitted: body size budget)_`; that member keeps its
+      `###` heading — which carries its location, tier, disposition AND its
+      summary for exactly this reason — stays in the `fingerprints=` index and
+      still counts in `by_severity`. Only the failure-scenario prose is lost, and
+      the replacement line says so in the body where the reader will see it. If
+      the body still exceeds 60000 characters with every prose fence dropped,
+      omit trailing members entirely, lowest rank first: an omitted member is NOT
+      in the index, NOT counted in `by_severity`, and gets its own
+      `{file: $file_path:$line, reason: "body-size-budget"}` entry in
+      `blocked_by_dedupe[]` — which sets `status: DONE_WITH_CONCERNS`, so the
+      operator sees the loss. Never omit the header block or any of the four
+      trailing markers.
+
+   f. Write-failure handling with transient/permanent classifier (O4 — design decision D9): if `gh issue create` or `gh issue comment` returns non-zero, capture combined stderr+stdout into `CREATE_OUTPUT`, truncate to 200 chars BEFORE the regex classifier (security Note B — bounds attacker-influenced stderr substring), then classify the failure (see bash block below for the literal trigger regex). Append the typed entry to `blocked_by_dedupe[]`, set `status: DONE_WITH_CONCERNS`, and continue to the next GROUP (#722) — NEVER retry within the same run.
 
       ```bash
         if [ "$rc" -ne 0 ]; then
@@ -753,7 +881,7 @@ Explicit forbidden patterns:
 
    **`halted` field (RFC 0002 §3.3.3 / §3.3.4).** Set `halted: true` iff EITHER condition holds:
    - `by_severity.blocker > 0` (any blocker-tier row was filed or commented this run), OR
-   - `halted_due_to_overflow == true` (Step 6 broken-feature overflow guard fired — `overflow_count > 0` AND at least one truncated row was tier BLOCKER or CRITICAL).
+   - `halted_due_to_overflow == true` (Step 6 broken-feature overflow guard fired — `overflow_count > 0` AND at least one truncated FILE GROUP was tier BLOCKER or CRITICAL, #722).
 
    Otherwise `halted: false`. The `halted` value is the load-bearing signal the parent `/uberdev:review-pr` (Step 7) and `/uberdev:simplify` (Phase 3.5) read to decide whether to emit the RED trust-trail outcome and trigger AskUserQuestion. **This intentionally inverts the pre-v0.26.0 non-blocking contract** (the prior never-halt rule that kept this sub-phase strictly advisory); see RFC 0002 §3.3.5 for the rationale.
 
@@ -771,11 +899,19 @@ Explicit forbidden patterns:
 {backref_line — "Blocks: #N" for BLOCKER/CRITICAL, "Related: PR #N" for MAJOR; omitted entirely when pr_number is 0}
 {source_line — "**Source:** <source_ref>" when pr_number is 0 AND source_ref non-empty; omitted otherwise}
 
+**Also flagged by:** lens-1, lens-2     ← every other lens in the GROUP's contributor union (display-only)
+
+## Findings ({member_count})
+
+### {n}. `{file_path}:{line}` — {severity} / {row_tier} / {disposition} ({disposition_reason}) — {summary_first_120_chars}
+
+Lenses: {comma-joined source_edges for this member}
+
 ````finding
-{sanitised finding prose}
+{sanitised finding prose for this member}
 ````
 
-**Also flagged by:** lens-1, lens-2     ← only present on cross-lens merge (Q2 dedupe)
+{… one `###` section per member, in group order, {n} starting at 1 …}
 
 ---
 *To resolve: address the finding in code and close this issue. Future `/uberdev:review-pr` runs see `state==closed` for this fingerprint and skip. Before closing, apply `finding:true-positive` if it was a real defect or `finding:false-positive` if it was not — that label is the eval ground truth (RFC 0018).*
@@ -783,12 +919,48 @@ Explicit forbidden patterns:
 <!-- uberdev-scope v=1 files={file_path} -->
 <!-- uberdev:{finding_marker_slug}-finding fingerprint={16-char-hex} -->
 <!-- uberdev-finding-meta v=1 slug={finding_marker_slug} edges={comma-joined edges} severity={severity} tier={BLOCKER|CRITICAL|MAJOR} -->
+<!-- uberdev-finding-index v=1 count={member_count} fingerprints={comma-joined 16-hex member fingerprints} -->
 ```
 
-**The `<!-- uberdev-scope -->` block (#614).** One finding is one file, and this
-agent already knows which one — it is the same `{file_path}` the `**File:**`
-line renders, with the `:{line}` suffix dropped. Declaring it turns the largest
-cost decision in `/solve` from a guess into a fact: `lib/solve_triage.py` reads
+**Why the header block did not change shape (#722).** Three shipped readers
+locate a field by scanning for the FIRST line carrying its prefix:
+`lib/goal-phase3.sh` selects `/goal` recursion targets by matching
+`**Tier:** BLOCKER|CRITICAL` in the body, and `tools/eval/review-precision.py`
+reads `**File:**`, `**Severity:**` and `**Tier:**` the same way. So the header
+block stays exactly one line per field, and it describes the group's **primary
+member** — the highest-`severity_rank`, lowest-`line` member, which is by
+construction the one whose tier equals `group_tier`. The per-member sections
+below deliberately use `###` headings and a plain `Lenses:` line instead of
+`**Field:**` prefixes, so no member can shadow a container field. `**Agent:**`
+renders the primary member's contributor-ordered display name and
+`**Also flagged by:**` the rest of the group's union.
+
+Each member's `###` heading carries its `{file_path}:{line}`, its tier and its
+`{summary_first_120_chars}` — the summary is in the HEADING, not only inside
+the prose fence, because the body-size budget in step 8e.5 drops fences and a
+member whose summary lived only in its fence would degrade into a bare line
+number. Every member therefore keeps a line and a summary no matter how far
+the budget degrades it.
+
+**The `<!-- uberdev-finding-index -->` line (#722).** It is the per-finding
+identity the file-level container has to preserve, and it is what makes a
+re-run's comment able to say which findings are new. `fingerprints` is the
+comma-joined, no-spaces list of `sha256(path:line:normalised_summary)[:16]`
+values for exactly the members the body accounts for, in rendered order;
+`count` is their number. Emit it as the line immediately AFTER the meta
+trailer, never between the fingerprint marker and that trailer — the precision
+miner reads those two positionally. Its prefix is chosen to diverge from both
+existing marker scans well before either ends: the miner matches
+`<!-- uberdev-finding-meta ` and `<!-- uberdev:`, and this line matches
+neither. Like the other three markers it is refusable input, not decoration:
+step 8e drops any member whose prose contains its literal.
+
+**The `<!-- uberdev-scope -->` block (#614).** One issue is one file — that was
+already true per finding, and grouping (#722) makes it true per ISSUE — and this
+agent already knows which one: it is the same `{file_path}` the `**File:**`
+line renders, with the `:{line}` suffix dropped, and it is the group key.
+Declaring it turns the largest cost decision in `/solve` from a guess into a
+fact: `lib/solve_triage.py` reads
 the block and sizes the solver fleet off it, and falls back to scraping paths
 out of the prose only when it is absent. That fallback is what this agent's own
 output used to defeat — a finding body is a wall of `path:line` evidence, so
@@ -824,8 +996,22 @@ recipe, same 16-hex truncation, same fail-CLOSED dedupe.
 
 - `edges` is the **contributor-ordered union of the kept row's `source_edges`
   and the `source_edges` of every row merged into it by the Step-5
-  cross-contributor dedupe** — exactly the set rendered above as `**Agent:**`
-  plus `**Also flagged by:**`. Comma-joined, no spaces.
+  cross-contributor dedupe**, computed for the group's **primary member alone**
+  — never for the group. Comma-joined, no spaces.
+- **Grouping does NOT widen `edges` (#722).** Before grouping the trailer named
+  exactly the lenses that produced the one finding the issue was about, so the
+  issue's single `finding:true-positive` / `finding:false-positive` verdict
+  belonged to all of them. `tools/eval/review-precision.py` still counts one row
+  per ISSUE and then counts that row once per edge it names, so a group-wide
+  union would charge one member's false positive to every lens that was right
+  about a different line in the same file. The trailer therefore stays bound to
+  the primary member — the same member the header block describes — and the
+  per-member `Lenses:` lines carry each other member's edges for a human
+  reader. Under grouping the trailer and the display fields routinely disagree,
+  and that is the intended reading of the `**Agent:**`-stays-display-only rule
+  below, not a violation of it. Attributing the whole file to every lens is
+  what #719 has to solve with a per-finding verdict; widening `edges` here
+  would only make the corpus confidently wrong in the meantime.
 - The explicitly discriminated **legacy fleet variants carry no `source_edges`**;
   they use the variant's own validated `lens` / `agent_name` column instead
   (Step 5's equivalent merge).
@@ -855,28 +1041,36 @@ recipe, same 16-hex truncation, same fail-CLOSED dedupe.
 1. Replace `@` immediately before a username-like word (`[A-Za-z][A-Za-z0-9_-]{0,38}`) with `ⓐ` (U+24B6 — Unicode lookalike). Prevents notification spam.
 2. Replace `#` immediately before a digit-only token (`[0-9]+`) with `＃` (U+FF03 — fullwidth). Prevents cross-reference back-links.
 3. The wrapper around the finding prose uses **four** backticks (` ```` `). The literal three-backtick sequence inside the prose is left as-is — the four-backtick wrapper neutralises it without escaping. No further escape needed.
-4. If the (normalised) finding contains the literal `<!-- uberdev:${finding_marker_slug:-review-pr}-finding fingerprint=`, the literal `<!-- uberdev-finding-meta` or the literal `<!-- uberdev-scope`, the finding is REFUSED for that row only (process step 8e). Prevents forgery of any of the three markers — the fingerprint marker forges a dedupe hit, the meta trailer forges a lens attribution (RFC 0018 §2.1), and the scope block forges the triage file count that sizes the solver fleet (#614). The scope block needs its OWN rule and does not inherit the fence's protection: step 3 leaves a bare three-backtick run unescaped, and a **four**-backtick run in the prose closes the wrapper outright, after which any marker the prose carries sits in the body proper exactly as a producer-authored one would.
+4. If the (normalised) finding contains the literal `<!-- uberdev:${finding_marker_slug:-review-pr}-finding fingerprint=`, the literal `<!-- uberdev-finding-meta`, the literal `<!-- uberdev-finding-index` or the literal `<!-- uberdev-scope`, the finding is REFUSED for that MEMBER only (process step 8e) — its file's other findings are still filed. Prevents forgery of any of the four markers — the fingerprint marker forges a dedupe hit, the meta trailer forges a lens attribution (RFC 0018 §2.1), the member index forges a per-finding identity so a hostile row reads as already-recorded (#722), and the scope block forges the triage file count that sizes the solver fleet (#614). The scope block needs its OWN rule and does not inherit the fence's protection: step 3 leaves a bare three-backtick run unescaped, and a **four**-backtick run in the prose closes the wrapper outright, after which any marker the prose carries sits in the body proper exactly as a producer-authored one would.
 
 ## Comment body shape (state==open branch)
 
 When an existing open issue is found, the agent appends a comment (not a new issue body). The comment body inserts only:
 
 ```text
-Also flagged on commit [`{pr_commit_sha}`](https://github.com/{repo_slug}/commit/{pr_commit_sha}) {origin_context — "(PR #N)" when pr_number is positive, "(<source_ref>)" when pr_number is 0} at `{file_path}:{line}`.
+Also flagged on commit [`{pr_commit_sha}`](https://github.com/{repo_slug}/commit/{pr_commit_sha}) {origin_context — "(PR #N)" when pr_number is positive, "(<source_ref>)" when pr_number is 0}.
 
-Agent: {agent_name} — Severity: {severity} (Phase {1|2}) — Disposition: {disposition}
+{member_count} finding(s) on `{file_path}` — {new_count} new since this issue was filed:
+
+- **new** `{file_path}:{line}` — {severity} — {summary_first_120_chars}
+- recurring `{file_path}:{line}` — {severity} — {summary_first_120_chars}
 ```
 
-The original issue body is NOT modified; the fingerprint marker stays in the issue body where it was first written.
+Every member is listed, recurring ones included. `new` versus `recurring` is
+decided by testing the member's fingerprint against the `fingerprints=` list in
+the ORIGINAL issue body — the only copy the Step 8b lookup fetches, and the one
+this agent never modifies — so "new" means "new since this issue was filed",
+which is exactly what the line says. The original issue body is NOT modified;
+the fingerprint marker and the index stay where they were first written.
 
 ## Return contract (YAML, emitted as the final lines of the agent's reply)
 
 ```yaml
 status: DONE | DONE_WITH_CONCERNS | REFUSED
 created_urls:
-  - { url: "https://github.com/.../issues/123", file: "src/foo.ts:42", fingerprint: "abc1234567890def", tier: "BLOCKER" }
+  - { url: "https://github.com/.../issues/123", file: "src/foo.ts:42", fingerprint: "abc1234567890def", tier: "BLOCKER", findings: 3 }
 commented_urls:
-  - { url: "https://github.com/.../issues/120", file: "src/bar.ts:7", fingerprint: "deadbeefcafebabe", tier: "CRITICAL" }
+  - { url: "https://github.com/.../issues/120", file: "src/bar.ts:7", fingerprint: "deadbeefcafebabe", tier: "CRITICAL", findings: 2 }
 skipped_closed:
   - { url: "https://github.com/.../issues/99", file: "src/baz.ts:1", fingerprint: "0123456789abcdef", tier: "MAJOR" }
 blocked_by_dedupe:
@@ -899,8 +1093,29 @@ Empty arrays are emitted as `[]`. `rationale` is empty string `""` on non-REFUSE
 
 **Field semantics (RFC 0002 §3.3.3):**
 - `tier` (per-URL field on `created_urls` / `commented_urls` / `skipped_closed`) — one of `{BLOCKER, CRITICAL, MAJOR, SUGGESTION}`; lets `/review-pr` Step 7 group filed issues by tier in the user-visible summary and the audit JSON `phases.phase2_5.by_severity` block. `SUGGESTION` is reachable only from a `premerge.defer.findings` dispatch (RFC 0021 §5); every other caller's tier set is unchanged.
-- `by_severity.{blocker|critical|major|suggestion}` — count of rows actually written this run (`len(created_urls) + len(commented_urls)` per tier; excludes `skipped_closed` and `blocked_by_dedupe`). `by_severity.suggestion` is always `0` for callers whose origin derivation emits no `suggestion_tier` key and therefore leaves `SUGGESTION_TIER_ENABLED` closed, so a consumer that reads only the first three keys sees exactly what it saw before.
-- `halted_due_to_overflow` — true iff Step 6's broken-feature guard fired (some truncated row was BLOCKER or CRITICAL tier).
+- `by_severity.{blocker|critical|major|suggestion}` — count of FINDINGS
+  actually written this run, summed across every created and commented issue
+  (excludes `skipped_closed` and `blocked_by_dedupe`). It counts findings, not
+  issues, and that is load-bearing rather than cosmetic: the parent's
+  persistence validator asserts
+  `by_severity.blocker + <skipped_closed entries at BLOCKER tier> >= <deferred blockers>`,
+  so counting one per grouped issue would make three blockers in one file
+  account for one and refuse an ordinary run. `by_severity.suggestion` is
+  always `0` for callers whose origin derivation emits no `suggestion_tier`
+  key and therefore leaves `SUGGESTION_TIER_ENABLED` closed, so a consumer that
+  reads only the first three keys sees exactly what it saw before.
+- `overflow_count` — count of FILES beyond `max_new` that were not filed this
+  run (#722). It counted rows before grouping; it counts files now, and every
+  rendering of it must say so. Because a file is filed whole or deferred whole,
+  the cap can no longer truncate one file's findings halfway. The one shipped
+  rendering still carrying the old unit is `commands/review-pr.md`'s Step 7
+  summary row, which is outside the file set #722 declares and is therefore a
+  known follow-up, not a satisfied requirement.
+- `findings` (per-URL field on `created_urls` / `commented_urls`) — how many
+  findings that issue's body accounts for. `tier` on those two arrays is the
+  GROUP tier; on `skipped_closed[]`, which stays one entry per member, `tier`
+  is that member's own.
+- `halted_due_to_overflow` — true iff Step 6's broken-feature guard fired (some truncated FILE GROUP was BLOCKER or CRITICAL tier, #722).
 - `halted` — load-bearing signal for the parent's GREEN/YELLOW/RED predicate; set per Step 9 rule.
 - **Implication**: `halted_due_to_overflow == true` implies `halted == true` — the overflow guard never fires in isolation; it always trips the higher-level halt. (RFC 0002 §3.3.5.)
 - `author_lookup_failed` — true iff the `gh pr view <pr_number> --json author --jq .author.login` lookup at Step 8c.5 failed (non-zero rc, non-PR context, or argv-integer regex guard rejected). Downstream consumers see the same empty-string `PR_AUTHOR` fallback (mention_line=""; assignee_args=()) as before; the new field surfaces the typed cause so `/review-pr` Step 7 can render `[author-lookup failed — issues still filed silently]` when applicable.
@@ -920,13 +1135,13 @@ Return `status: REFUSED` with the matching rationale string when:
 - `gh issue list` rc != 0 → append to `blocked_by_dedupe[]`, continue, set `DONE_WITH_CONCERNS`. Never write the issue on lookup failure (fail-CLOSED dedupe).
 - `gh issue create` / `gh issue comment` rc != 0 → append to `blocked_by_dedupe[]`, continue, set `DONE_WITH_CONCERNS`. No retry within run.
 - `gh label create --force` rc != 0 → emit one stderr warning, continue, set `label_provisioned: "fail-soft-skipped"`.
-- Secret-scan hit on candidate body → append to `blocked_by_dedupe[]` with `reason: "secret-scan-hit"`, skip the row, set `DONE_WITH_CONCERNS`. Body is NEVER written even partially.
-- `MAX_NEW=10` exceeded → process first 10, set `overflow_count` to the remainder, set `DONE_WITH_CONCERNS`. **Broken-feature overflow guard (RFC 0002 §3.3.4):** if any truncated row is BLOCKER/CRITICAL tier, additionally set `halted_due_to_overflow=true` AND `halted=true` — the parent halts and surfaces the cliff to the user. Pure-MAJOR overflow does not halt (silent truncation as before).
+- Secret-scan hit on candidate body → append to `blocked_by_dedupe[]` with `reason: "secret-scan-hit"`, skip the whole FILE GROUP that body belonged to (#722), set `DONE_WITH_CONCERNS`. Body is NEVER written even partially. The unit moved with the write: one body now carries every finding in one file, so a hit costs that file's issue and the `blocked_by_dedupe[]` entry names the primary member's `$file_path:$line`.
+- `MAX_NEW=10` exceeded → process the first 10 FILE GROUPS, set `overflow_count` to the remaining GROUP count — files deferred, never rows (#722) — and set `DONE_WITH_CONCERNS`. **Broken-feature overflow guard (RFC 0002 §3.3.4):** if any truncated group is BLOCKER/CRITICAL tier, additionally set `halted_due_to_overflow=true` AND `halted=true` — the parent halts and surfaces the cliff to the user. Pure-MAJOR overflow does not halt (silent truncation as before).
 
 **Halt semantics (RFC 0002 §3.3.5 — supersedes the pre-v0.26.0 "NEVER halts" clause).** A well-formed `DONE` or `DONE_WITH_CONCERNS` result halts the parent run iff the return contract has `halted: true`. The child-owned `halted` field records finding-driven policy stops and is set only when:
 
 - a `BLOCKER`-tier row was filed or commented this run (`by_severity.blocker > 0`), OR
-- the broken-feature overflow guard fired (`halted_due_to_overflow == true` — `overflow_count > 0` AND at least one truncated row had tier BLOCKER or CRITICAL).
+- the broken-feature overflow guard fired (`halted_due_to_overflow == true` — `overflow_count > 0` AND at least one truncated FILE GROUP had tier BLOCKER or CRITICAL, #722).
 
 Legacy `MAJOR`-tier rows (mapped from an explicit legacy variant's `major` or
 `important`) NEVER halt the parent; they file silently and the parent emits
@@ -934,9 +1149,10 @@ GREEN as before. `SUGGESTION`-tier rows never halt either, and for a stronger
 reason: the severity that produced them is *defined* as "real, worth doing, not
 worth holding the stack for" (RFC 0021 §4), so a halt on one would contradict
 its own definition. They also never trip the broken-feature overflow guard —
-that guard is scoped to `{BLOCKER, CRITICAL}` and `severity_rank(suggestion)=0`
-puts them last in the sort, so they are the first rows a cap truncates and the
-truncation is by design rather than a cliff. Review-v2 `suggestion` rows do not
+that guard is scoped to `{BLOCKER, CRITICAL}`, and a cleanup-only file ranks at
+`group_tier_rank(SUGGESTION)=0` because its members rank at
+`severity_rank(suggestion)=0` inside it, so it sorts last and is the first FILE
+a cap truncates; the truncation is by design rather than a cliff. Review-v2 `suggestion` rows do not
 route to issues for any caller whose origin derivation emits no
 `suggestion_tier` key, leaving `SUGGESTION_TIER_ENABLED` closed — which today
 means every caller except `/uberdev:premerge`.
