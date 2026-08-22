@@ -240,6 +240,8 @@ jobs:
           run_one bash tests/schema-property-reads.test.sh
           run_one bash tests/vendor-provenance.test.sh
           run_one bash tests/vendor-drift.test.sh
+          run_one bash tests/premerge.test.sh
+          run_one bash tests/premerge-findings.test.sh
           if [ "$fail" -ne 0 ]; then
             echo "=== $fail test file(s) FAILED: $failed"
             exit 1
@@ -487,6 +489,11 @@ jobs:
 #                                         SKILL.md bash fence — the Git-Bash
 #                                         path-translation class, same reason as
 #                                         turbox-fleet-runtime.test.sh)
+#   - premerge-findings.test.sh          (executes python3 against mktemp -d
+#                                         trees and reads the module's stable
+#                                         refusal tokens; the portable shape
+#                                         gates live in premerge.test.sh, which
+#                                         DOES run on both jobs)
 # === END ci-wiring windows-skip-list ===
         # review-child-handoff and run-manifest use bounded native-Windows
         # modes for carrier/path serialization and captured publication retry;
@@ -586,6 +593,7 @@ jobs:
           run_one bash tests/epipe-guard.test.sh
           run_one bash tests/contract-markers.test.sh
           run_one bash tests/schema-property-reads.test.sh
+          run_one bash tests/premerge.test.sh
           if [ "$fail" -ne 0 ]; then
             echo "=== $fail test file(s) FAILED: $failed"
             exit 1

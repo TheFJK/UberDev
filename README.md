@@ -4,7 +4,7 @@
 
 **Personal Claude Code marketplace — opinionated GitHub-workflow slash commands.**
 
-[![Version](https://img.shields.io/badge/version-0.52.0-blue)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.53.0-blue)](./CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8B5CF6)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Repo Agnostic](https://img.shields.io/badge/repo--agnostic-yes-success)](#configuration)
@@ -43,6 +43,7 @@ UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-scou
 | **`/issue <description>`** | Creates a well-investigated, deduped, label-validated GitHub issue from a one-line ask. 2-scout fanout (codebase + triage) runs in <30 s, with conventional-commit titling and template-by-type. |
 | **`/review-pr [<PR#>]`** | Comprehensive PR review using specialized agents in cap-controlled dispatch-before-wait waves — code review, simplifier, silent-failure hunter, type-design analyzer, comment analyzer, test analyzer. With more than one PR open it first offers (interactively, once) to combine them all onto a single review branch and run the pipeline once over the combined result — cheaper by a factor of N, at the cost of per-PR revert granularity and per-PR finding attribution. `--consolidate` accepts without asking; `--no-consolidate` declines permanently and wins over `--consolidate`. Never offered under `--turbo`, without a TTY, or on a chained `finish-branch` run. |
 | **`/merge [<PR#> \| --all]`** | Lands an approved PR into the integration branch — autopilot. Bare invocation auto-discovers scope: single PR for the current branch, or all eligible open PRs against `integration_branch`. Ordering, per-PR strategy, conflict resolution (one parallel agent per conflicted file), and local sync, all unattended. |
+| **`/premerge [<level>]`** | Pre-merge stack gate. Packs **every** open non-draft PR onto one integration branch and opens ONE `chore(stack): land #A #B` PR, then reviews the *combination* with the built-in `/code-review` (default `xhigh`) — which is the only place the cross-PR defect classes are visible at all: two PRs resolving the same next version, two PRs adding the same helper, one PR's rename defeating another's guard. Correctness blockers go to dispatched fixer agents; cleanup findings are filed as `premerge-finding` issues. The three simplify lenses run **last and only on a clean stack**. Bumps the version once for the whole stack. **Always parks the PR — never merges.** (RFC 0021) |
 | **`/dev <idea>`** | Prototype fast lane. Decomposes a free-text idea, builds it via parallel `Task()` subagents in-session, runs one light review, opens a PR labelled `prototype`, and auto-files a harden issue. Deliberately skips spec/plan and full `/review-pr`. Honors `--no-pr` / `--no-issue`. |
 | **`/testers`** | Read-only adversarial QA audit squad — 6 personas + 2 monitors over 3 waves; auto-detects web/api/native target; files verified findings as GitHub issues. |
 | **`/uberdev:cluster`** | Repo-wide issue similarity analyzer + fold-into-lead consolidator (RFC 0010). |
@@ -72,7 +73,7 @@ Then in Claude Code:
 /uberdev:issue trivial typo in README install step   # smoke-test
 ```
 
-The fourteen short-form aliases (`/issue`, `/solve`, `/turbo`, `/turbox`, `/simplify`, `/review-pr`, `/merge`, `/dev`, `/testers`, `/ubergoal`, `/uberscan`, `/ubersimplify`, `/uberthink`, `/ubercluster`) are auto-installed on first session and refreshed on plugin upgrade — `jq` is not required, and if a short name collides with an existing file the session context reports which alias was skipped. The first-run notice confirms "installs 14 aliases". Opt out with `auto_install_aliases: false` in `.claude/uberdev.local.md` or `UBERDEV_NO_AUTO_ALIAS=1`.
+The fifteen short-form aliases (`/issue`, `/solve`, `/turbo`, `/turbox`, `/simplify`, `/review-pr`, `/merge`, `/premerge`, `/dev`, `/testers`, `/ubergoal`, `/uberscan`, `/ubersimplify`, `/uberthink`, `/ubercluster`) are auto-installed on first session and refreshed on plugin upgrade — `jq` is not required, and if a short name collides with an existing file the session context reports which alias was skipped. The first-run notice confirms "installs 15 aliases". Opt out with `auto_install_aliases: false` in `.claude/uberdev.local.md` or `UBERDEV_NO_AUTO_ALIAS=1`.
 
 > **Why a bootstrap script?** Upstream Claude Code has a bug where `/plugin install` populates the cache but does not write `enabledPlugins` in `~/.claude/settings.json` — so `/uberdev:*` commands silently 404. `install.sh` does the install **and** jq-patches `enabledPlugins`. Idempotent. Requires `jq`.
 >
@@ -322,6 +323,57 @@ Or per-invocation: `--integration-branch=develop`.
 
 ---
 
+## `/premerge` — the pre-merge stack gate
+
+`/premerge` packs **every** open non-draft PR onto one integration branch, opens a
+single `chore(stack): land #A #B …` PR, and reviews *that* — because the defects
+that actually bite at landing time are cross-PR by construction and structurally
+invisible to any per-PR review:
+
+- two PRs cut from one base both bump to the **same** next version; git
+  auto-merges the identical edit and one intended release disappears silently;
+- two PRs add the same helper under different names, and each review sees a
+  reasonable new helper;
+- one PR's rename defeats a guard another PR just added, because
+  `git diff --name-only` collapses renames.
+
+```
+/premerge                 # every open non-draft PR, reviewed at xhigh
+/premerge max             # same, with the reviewer's agent fan-out + verify votes
+/premerge --dry-run       # print the pack plan and stop
+```
+
+**Six phases.**
+
+| Phase | What |
+|---|---|
+| 0 PACK | `lib/review-consolidate.sh` — dependency-ordered sequential merge, conflict handback, ancestry gate, typed exclusions, one supersession comment per original, `Closes #N` carried onto the stack PR |
+| 1 REVIEW | the **built-in** `code-review` skill against the stack PR — not uberdev's seven-agent fanout |
+| 2 TRIAGE | correctness blockers → dispatched fixer agents (one per file, disjoint files per wave, agents never touch git) → one commit → push → **one** re-review. Cleanup findings → `findings-to-issues` at the new `SUGGESTION` tier, labelled `premerge-finding` |
+| 3 CLEAN GATE | blockers cleared **and** CI green **and** not conflicting. Fails closed on unreadable evidence |
+| 4 SIMPLIFY | the three lenses — **last, and only on a clean stack**. Applies only behaviour-preserving findings |
+| 5 BUMP + PARK | one `bump-version.sh` for the whole stack, push, stop |
+
+**Effort levels are not a ladder.** The built-in reviewer resolves *model × level*
+to a cell, and the cells differ in kind. On Opus-family models `xhigh` runs its
+ten angles **inline, with no subagents and no verify pass**, so findings carry no
+`verdict`; `max` is the cell that fans out to agents *and* votes. `/premerge`
+works under both and reports `CATEGORY_BACKED` — how many severities were
+machine-checked rather than judged — so you can see which regime a run was in.
+
+**It never merges.** Not on green CI, not on an approving review, not under any
+flag. It ends at a pushed, open, bumped, parked PR. Landing is `/merge`.
+
+**It emits no trust trail**, so `/merge`'s PATH_2 will not accept a `/premerge`
+run as review evidence — that trail claims the seven-lens fanout, the
+finding-verification gate and the CI-health phase all ran, and here none did. Run
+`/review-pr <stack-pr>` on the parked PR when you want one; the two compose in
+that order.
+
+Design rationale and full topology in [`docs/rfc/0021-premerge-stack-integration.md`](./docs/rfc/0021-premerge-stack-integration.md).
+
+---
+
 ## `/issue` — investigation-first issue creation
 
 Pipeline: classify → 2-scout fanout (`codebase-scout` + `triage-scout`, parallel in one turn — dedup against closed issues, label/scope validation against `gh label list` and commitlint) → draft → user-confirm → create → print `Next step: /solve N`. Median wall-clock under 30 seconds.
@@ -381,7 +433,7 @@ goal:
 |---|---|---|
 | `UBERDEV_FANOUT_SOLVE_BG` | `fanout_concurrency.solve_bg` | Cap on parallel solvers dispatched by `/turbo`; int [1, 50], default 6 |
 | `SOLVE_AUTO` | `solve_auto` | When `1`/`true`, resolves the permission bypass pair `--dangerously-skip-permissions --permission-mode bypassPermissions` (post-#241 the AUTO tier was collapsed into this bypass; on the default `workflow` backend the solvers inherit the session's permission tier instead — see above) |
-| `UBERDEV_NO_AUTO_ALIAS` | `auto_install_aliases` | When `1`/`true` (env) or `false` (file), suppresses session-start auto-install of `/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`, `/dev`, `/testers`, `/ubergoal`, `/uberscan`, `/ubersimplify`, `/uberthink`, `/ubercluster` forwarders |
+| `UBERDEV_NO_AUTO_ALIAS` | `auto_install_aliases` | When `1`/`true` (env) or `false` (file), suppresses session-start auto-install of `/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`, `/premerge`, `/dev`, `/testers`, `/ubergoal`, `/uberscan`, `/ubersimplify`, `/uberthink`, `/ubercluster` forwarders |
 | `UBERDEV_INTEGRATION_BRANCH` | `integration_branch` | `/merge` target branch |
 | `UBERDEV_PR_BASE_BRANCH` | `pr_base_branch` | Base branch new PRs target (`gh pr create --base`) and the pre-push secret-scan range base; default unset → the origin default branch. Set to a parent PR's branch to open a stacked PR |
 | `UBERDEV_GOAL_MAX_CYCLES` | `goal.max_cycles` | `/uberdev:goal` hard cycle ceiling; int [1, 20], default 5 |
@@ -392,7 +444,7 @@ Precedence: CLI flag > env var > `.claude/uberdev.local.md` > default. Missing f
 
 ## Short-form aliases
 
-Plugin commands are addressed as `/uberdev:<command>` by default — the `uberdev:` prefix is required by Claude Code's plugin manifest. Auto-install drops fourteen forwarders into `~/.claude/commands/`:
+Plugin commands are addressed as `/uberdev:<command>` by default — the `uberdev:` prefix is required by Claude Code's plugin manifest. Auto-install drops fifteen forwarders into `~/.claude/commands/`:
 
 | Short form | Canonical |
 |---|---|
@@ -402,6 +454,7 @@ Plugin commands are addressed as `/uberdev:<command>` by default — the `uberde
 | `/simplify` | `/uberdev:simplify` |
 | `/review-pr` | `/uberdev:review-pr` |
 | `/merge` | `/uberdev:merge` |
+| `/premerge` | `/uberdev:premerge` |
 | `/dev` | `/uberdev:dev` |
 | `/testers` | `/uberdev:testers` |
 | `/ubergoal` | `/uberdev:goal` |

@@ -353,6 +353,11 @@
       "origin": "uberdev"
     },
     {
+      "id": "skills/premerge-pipeline",
+      "path": "skills/premerge-pipeline",
+      "origin": "uberdev"
+    },
+    {
       "id": "skills/receiving-code-review",
       "path": "skills/receiving-code-review",
       "origin": "third-party",
@@ -712,7 +717,7 @@
         },
         {
           "path": "references/configuration.md",
-          "sha256": "99114d37bd43c4a055bb39ab13bfc5939521a5b7cac9e5b7bf9210ab3b9a5ffc"
+          "sha256": "a8bc7ce955d7145bc972a0e6fc3e3b038f7d9e44349e3eed3e170adf51e73762"
         },
         {
           "path": "references/copilot-tools.md",
@@ -950,7 +955,7 @@
       "files": [
         {
           "path": "code-simplifier.md",
-          "sha256": "5789b72bdac2f9c078a8d5ac67e48c648319e5346524e466ac9a1acd11e52769"
+          "sha256": "2466ad36cf7796fabfdfa1b7182749893ef51f6d951951bb0aa2981bf36a248b"
         }
       ]
     },

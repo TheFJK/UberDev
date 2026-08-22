@@ -31,6 +31,7 @@ turbox|turbox|["Bash", "Read", "Glob", "Grep", "Task", "Write"]
 simplify|simplify|["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Workflow", "Write"]
 review-pr|review-pr|["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Workflow", "Write"]
 merge|merge|["Bash", "Glob", "Grep", "Read", "Task"]
+premerge|premerge|["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Task", "Write"]
 dev|dev|["Bash", "Read", "Edit", "Write", "Task"]
 testers|testers|["Bash", "Read", "Write", "Task", "Workflow"]
 ubergoal|goal|["Bash", "Read", "Task", "Workflow"]
@@ -238,7 +239,7 @@ aliases_sync_main() {
     done
     UBERDEV_ALIAS_NOTICE="${UBERDEV_ALIAS_NOTICE} — use /uberdev:<name>, or rename the existing file and run /uberdev:install-aliases."
   elif [ "$FIRST_RUN" = "1" ]; then
-    UBERDEV_ALIAS_NOTICE="uberdev: installed ${#INSTALLED_LIST[@]} short-form aliases (/issue, /solve, /turbo, /turbox, /simplify, /review-pr, /merge, /dev, /testers, /ubergoal, /uberscan, /ubersimplify, /uberthink, /ubercluster). Opt out with UBERDEV_NO_AUTO_ALIAS=1."
+    UBERDEV_ALIAS_NOTICE="uberdev: installed ${#INSTALLED_LIST[@]} short-form aliases (/issue, /solve, /turbo, /turbox, /simplify, /review-pr, /merge, /premerge, /dev, /testers, /ubergoal, /uberscan, /ubersimplify, /uberthink, /ubercluster). Opt out with UBERDEV_NO_AUTO_ALIAS=1."
   fi
   return 0
 }
