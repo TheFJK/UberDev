@@ -4,6 +4,149 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.54.0] — 2026-08-22
+
+Turns `/premerge`'s review→fix→gate line into a bounded convergence loop, repairs
+red CI inside it, and makes the simplify phase both reachable and verified.
+MINOR: four new flags, one new library verb, two amendments to RFC 0021.
+
+### Changed — `/premerge` fixes until green instead of parking on the first survivor
+
+Phases 1→2→3 were a straight line: one review, one set of fixer waves, exactly
+one re-review, then a clean gate. RFC 0021 §8 refused a loop outright, for a real
+reason — *"the third automatic attempt is where a fixer starts 'fixing' the test
+instead of the code."* The refusal named the hazard correctly and the remedy
+incorrectly. A counter of one does not stop a fixer disposed to weaken a test; it
+does reliably stop a loop that was converging, parking the stack with a live
+blocker in it. And because the gate is also what unlocks Phase 4, that same stop
+took the not-green branch and skipped the simplify pass entirely — so on any stack
+that needed real work, the three lenses **silently never ran** and the run still
+reported success.
+
+What now bounds the loop is evidence rather than a countdown:
+
+- `STOP_NO_PROGRESS` — an attempt changed neither the blocker set nor the CI reason;
+- `STOP_REGRESSED` — our own fixes grew the blocker set;
+- `--converge=<n>` (1–6, default 3, **refused not clamped**) is the runaway
+  backstop behind those two, with `--no-converge` as its `=1` spelling.
+
+Blocker identity across re-reviews is a fingerprint over path plus a folded
+summary, deliberately **not** `file:line`: every fix moves lines, and a
+location-keyed identity reports each survivor as brand new, sees infinite
+progress, and never stops. It is deliberately not the `file:line:summary`
+fingerprint `findings-to-issues` computes either — same width, different question.
+
+### Added — red CI is repaired, not just observed
+
+Nothing in the pipeline had ever been pointed at a red build. The gate could see
+`ci=red` and the run's only response was to stop. The failing log is now fetched,
+enveloped with its `sha256`, and classified by `uberdev:ci-failure-classifier`;
+`code_bug`/`env_drift` route to `uberdev:ci-code-fixer`, `stale_base` to
+`uberdev:ci-rebase-handler`, `flaky` to one `gh run rerun`. `billing_quota` and
+`platform_outage` are named as non-loopable and stop the run — no number of
+attempts fixes a billing problem, and looping on one burns the budget and then
+reports the wrong thing. Suppress the repair alone with `--no-ci-fix`; the probe
+and the classification still run.
+
+### Added — Phase 4c VERIFY, and the revert rule
+
+Phase 4 is the last thing to touch the branch and every gate in the run was
+computed before it, so a refactor that reddened the suite shipped inside a stack
+whose summary said `clean gate green` — and Phase 5's `chore(release)` commit then
+attested to code nothing had verified. VERIFY re-probes CI and re-gates the
+simplify commit on its own SHA. Since simplify is optional polish, its failure
+mode is **undo**: with no attempts left, the polish commit is reverted rather than
+handed to a human at 3am. The revert never reaches the fix commits. Opt out with
+`--no-post-simplify-review`.
+
+### Fixed — the clean gate never returned green under zsh
+
+`/premerge`'s fences run through `/bin/zsh`, which does **not** word-split an
+unquoted scalar. Phase 3 built its arguments as a string and expanded them
+unquoted, so `assert-green` received one giant `argv[1]`, argparse exited 2, and
+the fence's fail-closed default recorded `not_green / gate_unreadable` — on every
+attempt, including a perfectly clean stack. Shipped in v0.53.0 behind the
+plugin's only `# shellcheck disable=SC2086` waiver, which was the tell. The gate
+now accumulates an argv list with `set --`, verified green under both shells.
+
+Under the old single-shot pipeline this meant the simplify pass never ran. Under
+a loop it would have meant no run could ever converge, so the fix is load-bearing
+for everything else in this release.
+
+### Fixed — two defects in the shipped Phase 4
+
+- Phase 4 promised to file its un-applied lens findings and **no producer
+  existed**: `plan` requires a `failure_scenario` that a `code-simplifier` lens
+  never emits, so the promise silently did nothing. There is now a `defer` verb
+  that translates the lens return shape (`detail` → `failure_scenario`, lens name
+  prefixed onto the summary) and encodes it. A lens finding always files as a
+  `suggestion` regardless of what the lens called it — filing one as a blocker
+  would halt a run over a refactor suggestion.
+- "Preserves behaviour" was a sentence in a prompt with nothing checking it.
+  Fixer agents now return a `behavior: preserve | change | n/a` disposition and a
+  `change` on an applied row refuses the wave-set.
+
+### Fixed — the gate could answer for code that no longer existed
+
+A refused `plan` (a >64-finding review, a duplicate location, any schema refusal)
+exits **before** writing anything, leaving the previous attempt's
+`classified.json` on disk looking perfectly fresh. `plan` now stamps the reviewed
+`head_sha` and `assert-green --head-sha` refuses on a mismatch. Per-attempt
+evidence (`classified-NN.json`, `fix-waves-NN.json`, `gate-NN.json`,
+`converge.jsonl`) is preserved instead of overwritten.
+
+### Fixed — the CI settle race (RFC 0021 §9, first open question)
+
+A push restarts checks and `test.yml` fires on both `push` and `pull_request`
+with nothing cancelling the loser, so for ~10–30s `gh pr checks` reports no checks
+at all — which the gate read as green. Under a loop that stops being an edge case:
+every attempt ends in a push. `assert-green --after-push` turns `no_checks` into
+`ci=no_checks_after_push`, which routes to `WAIT_CI` — a re-probe that does **not**
+consume a fix attempt, bounded so a check that never settles ends the run not
+green rather than passing. Conditioned on the repo actually having workflows, so a
+repo with no CI is not made to wait for a verdict that will never come.
+
+### Fixed — three ways the loop could stop on the wrong answer
+
+Found by executing the loop rather than reading it:
+
+- **A converging attempt read as a regression.** `STOP_REGRESSED` compared raw
+  blocker counts, but the built-in reviewer's output is capped and ranked
+  most-severe-first — clearing the top blockers routinely surfaces ones the cap
+  had cut. Fixing one blocker and surfacing two stopped the loop and told the
+  operator the machine had made the stack worse. The predicate is now "new
+  blockers appeared **and** we cleared none".
+- **Two blockers sharing a summary counted as one.** The fingerprint is
+  line-independent by design, so two distinct blockers in one file reported with
+  the same summary collide. Compared as a *set* they collapsed to one element,
+  so fixing one left the set unchanged and the loop answered `STOP_NO_PROGRESS`
+  on an attempt that had removed a real blocker. Comparison is now a multiset.
+- **A failed mergeability probe passed the gate.** The fence maps a failed
+  `gh pr view` onto `UNKNOWN`, and `UNKNOWN` contributed no gate reason — the one
+  unreadable-evidence state the gate answered green on. It is now a waitable
+  reason: re-probed without spending a repair, bounded, and never a pass.
+
+Also: two line-less findings in one file used to refuse the whole document
+(`line` is optional in both reviewer contracts), and under a loop that refusal
+was unrecoverable — `plan` exits before writing, the gate reads a missing
+artifact, and `converge` aborts. Uniqueness now falls back to the fingerprint
+when there is no line, so genuine duplicates still collide and distinct findings
+do not.
+
+### Added — nothing the run could not fix is lost
+
+A surviving blocker used to be printed in the summary and lost when the terminal
+scrolled — and the encoder pinned every row to `suggestion`, so there was no way
+to file one even in principle. The new `defer` verb is the missing producer;
+`agents/findings-to-issues.md` needed no change, because `severity_rank(blocker)=3`
+already sorts a blocker above every cleanup row so a `max_new` overflow cannot
+displace it. Blockers the loop stopped on now file at `BLOCKER` tier with a
+`Blocks: #<stack-pr>` backref, alongside the suggestions and the un-applied lens
+findings. Suggestions accumulate as a fingerprint-deduped union across attempts —
+one the reviewer stops repeating is unmentioned, not resolved — and are filed
+once, after the loop settles, because per-attempt filing would create duplicates
+and trip the agent's own inode re-check.
+
 ## [0.53.0] — 2026-08-21
 
 Adds `/premerge`, the pre-merge stack gate (RFC 0021). MINOR: a new command, a
