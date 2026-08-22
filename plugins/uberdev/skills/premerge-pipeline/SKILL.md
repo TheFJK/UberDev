@@ -1,6 +1,6 @@
 ---
 name: premerge-pipeline
-description: Use when /uberdev:premerge is invoked. Six-phase pre-merge stack gate — packs every open non-draft PR onto one integration branch via lib/review-consolidate.sh, reviews the combined result with the BUILT-IN code-review skill, dispatches fixer agents at the correctness blockers, files the cleanup findings as GitHub issues, gates on a clean stack, runs the three simplify lenses, bumps the version, and parks the stack PR. Never merges anything.
+description: Use when /uberdev:premerge is invoked. Six-phase pre-merge stack gate — packs every open non-draft PR onto one integration branch via lib/review-consolidate.sh, reviews the combined result with the BUILT-IN code-review skill, then loops review→fix→re-review autonomously until the stack is green or repairing provably stops working, repairing red CI along the way; once green it runs the three simplify lenses, verifies the polish did no harm, files everything it could not fix as GitHub issues, bumps the version, and parks the stack PR. Never merges anything.
 model: inherit
 ---
 
@@ -27,13 +27,58 @@ a combined branch. So `/premerge` reviews the combination.
 |---|---|---|
 | 0 | **PACK** — combine every open non-draft PR onto one branch, open ONE stack PR | branch + PR + one comment per original |
 | 1 | **REVIEW** — the built-in `code-review` skill over the stack PR | nothing |
-| 2 | **TRIAGE** — blockers to dispatched fixers, everything else to GitHub issues | one commit + issues |
-| 3 | **CLEAN GATE** — blockers cleared, CI green, no conflicts | nothing |
-| 4 | **SIMPLIFY** — the three lenses, then apply the behaviour-preserving ones | one commit |
-| 5 | **BUMP + PARK** — one version bump for the whole stack, push, stop | one commit + push |
+| 2 | **TRIAGE** — blockers to dispatched fixers | one commit per attempt |
+| 3 | **CLEAN GATE + CONVERGE** — gate; if not green, repair and go round again | one commit per repair |
+| 4 | **SIMPLIFY + VERIFY** — the three lenses, then prove the polish did no harm | one commit |
+| 5 | **BUMP + PARK** — issues for what is left, one version bump, push, stop | one commit + issues + push |
+
+**Phases 1→2→3 are a loop, not a line.** The gate's not-green branch routes each
+failing term at something that can repair it — a fixer wave at a blocker, a CI
+classifier at a red build, a base merge at a conflict — and re-enters Phase 1.
+The loop stops on green, or the moment repairing stops working. It is bounded by
+evidence first (`STOP_NO_PROGRESS`, `STOP_REGRESSED`) and by a counter only as a
+runaway backstop. See `## Phase 3b — CONVERGE`.
+
+## The order within one attempt
+
+This ordering is load-bearing and it is not the obvious one. Read it before
+editing any phase in the loop.
+
+```
+attempt N   REVIEW at HEAD_N  ->  TRIAGE (stamps HEAD_N)  ->  GATE (HEAD is still HEAD_N)
+                                                               |
+                                    green -> Phase 4           |
+                                                               v
+                                                          CONVERGE
+                                                               |
+                                              CONTINUE -> REPAIR -> commit + push
+                                                               |            (HEAD_N+1)
+                                                               v
+                                                          attempt N+1
+```
+
+**The gate runs BEFORE the repair, not after it.** Put the fixers first and the
+loop deadlocks on its own safety check: `plan` stamps the SHA the review looked
+at, the fix commit moves `HEAD`, and the gate — comparing the evidence against
+the *new* `HEAD` — reports `stale_evidence`, which is a `STOP_UNREADABLE`. Every
+attempt that actually fixed something would abort the loop, and only the attempts
+that changed nothing would survive to try again. Exactly backwards.
+
+Two properties fall out of the order above, and both are worth having:
+
+- **Every fix commit is followed by a review and a gate.** `CONVERGE` decides
+  before the repair, so a repair only happens on a `CONTINUE`, and a `CONTINUE`
+  always leads to another Phase 1. Nothing this loop writes reaches Phase 4
+  unreviewed. The pre-loop design was reaching for exactly this and could only
+  afford one re-review.
+- **One review per attempt, not two.** The "re-review" the pre-loop pipeline ran
+  by hand *is* the next attempt's Phase 1.
 
 **Phase 4 runs LAST and only on a clean stack.** Polishing code that still carries
 a known correctness bug is wasted work, and the refactor diff buries the bug.
+And because Phase 4 is the last thing to touch the branch, it is the one phase
+whose output nothing else would check — so it checks itself (`### 4c — VERIFY`)
+and un-does itself if it did harm.
 
 ## The one rule that outranks every other line in this file
 
@@ -68,7 +113,25 @@ PREMERGE_CI_SETTLE_SECS  = 45             # see `## The CI settle window` below
 PREMERGE_BRANCH_PREFIX   = chore/stack-
 PREMERGE_AGGREGATE_SOURCE= premerge-aggregate
 PREMERGE_VERSION_MANIFEST = plugins/uberdev/.claude-plugin/plugin.json
+PREMERGE_CONVERGE_DEFAULT= 3              # REPAIR rounds, --converge dials it
+PREMERGE_REPAIR_CEILING  = 6              # the runaway backstop --converge cannot pass
+PREMERGE_WAIT_CI_CEILING = 8              # WAIT_CI re-probes before the loop calls CI dead
+PREMERGE_RERUN_FLAKY_CAP = 1              # `gh run rerun` attempts per flaky verdict
 ```
+
+`PREMERGE_REPAIR_CEILING` and `PREMERGE_WAIT_CI_CEILING` are **declared in
+`lib/premerge-findings.py`** (`CONVERGE_REPAIR_CEILING`, `CONVERGE_WAIT_CI_CEILING`)
+and restated here for the reader. The library is the enforcer — it refuses an
+out-of-range `--max-repairs` rather than clamping it, so these two numbers being
+prose does not make them advisory.
+
+**The budget counts REPAIRS, not reviews.** N repairs cost N+1 reviews: the last
+review is the one that verifies the last repair, which is what keeps anything the
+loop writes from shipping ungated. So `--converge=1` buys one fix wave-set and
+one re-review — exactly the pre-loop pipeline — and the default `3` buys three
+repair rounds across four reviews. Counting reviews instead would quietly make
+`--converge=1` mean "gate once, repair nothing", under a flag documented as
+reproducing the old behaviour.
 
 `PREMERGE_VERSION_MANIFEST` is a path **inside the repo being packed**, and its
 presence there is the whole test for "does this repo carry UberDev's version
@@ -95,6 +158,22 @@ Parsed once, in Phase 0's first fence, from `$ARGUMENTS` only.
 | `--no-bump` | `PREMERGE_BUMP=0` | `1` |
 | `--no-ci-gate` | `PREMERGE_CI_GATE=0` | `1` |
 | `--dry-run` | `PREMERGE_DRY_RUN=1` | `0` |
+| `--converge=<n>` | `PREMERGE_CONVERGE` (repair rounds) | `3` |
+| `--no-converge` | `PREMERGE_CONVERGE=1` | — |
+| `--no-ci-fix` | `PREMERGE_CI_FIX=0` | `1` |
+| `--no-post-simplify-review` | `PREMERGE_POST_SIMPLIFY_REVIEW=0` | `1` |
+
+`--converge=<n>` accepts `1`..`PREMERGE_REPAIR_CEILING` **repair rounds**;
+anything else is a refusal, not a clamp. `--converge=1` and `--no-converge` are
+the same request — one fix wave-set and one re-review, the pre-loop behaviour —
+and both are spelled because one reads as a dial position and the other as a
+mode.
+
+`--no-ci-fix` leaves the CI **probe** and the **classify** step running, exactly
+as `/review-pr`'s flag of the same name does: the gate still reports what CI said
+and the run summary still names the failure class. It suppresses only the
+repair. A flag that blinded the gate as well would be a different, much worse
+flag.
 
 An unrecognised bare token is a **refusal**, not a silently-ignored word: the most
 likely unrecognised token is a mistyped level (`xhgih`), and silently running at
@@ -148,6 +227,9 @@ PREMERGE_BUMP=1
 PREMERGE_CI_GATE=1
 PREMERGE_DRY_RUN=0
 PREMERGE_LEVEL_SEEN=0
+PREMERGE_CONVERGE=3
+PREMERGE_CI_FIX=1
+PREMERGE_POST_SIMPLIFY_REVIEW=1
 # `while IFS= read -r` over a newline-split scalar, never `for t in $ARGUMENTS`:
 # zsh does not word-split an unquoted scalar, so the `for` form runs ONCE over
 # the whole string and every token after the first is silently lost. This repo
@@ -168,10 +250,30 @@ while IFS= read -r PREMERGE_TOKEN; do
     --no-bump)     PREMERGE_BUMP=0 ;;
     --no-ci-gate)  PREMERGE_CI_GATE=0 ;;
     --dry-run)     PREMERGE_DRY_RUN=1 ;;
+    --no-converge) PREMERGE_CONVERGE=1 ;;
+    --no-ci-fix)   PREMERGE_CI_FIX=0 ;;
+    --no-post-simplify-review) PREMERGE_POST_SIMPLIFY_REVIEW=0 ;;
+    --converge=*)
+      # Refused, never clamped. `--converge=99` from an operator who wants the
+      # loop to keep going is a request this command cannot honour, and quietly
+      # running 6 attempts while they believe 99 are coming is the silent
+      # substitution every other refusal in this fence exists to prevent.
+      PREMERGE_CONVERGE_ARG="${PREMERGE_TOKEN#--converge=}"
+      case "$PREMERGE_CONVERGE_ARG" in
+        ''|*[!0-9]*)
+          printf 'error: /premerge --converge needs a number, got %s\n' "$PREMERGE_CONVERGE_ARG" >&2
+          exit 2 ;;
+      esac
+      if [ "$PREMERGE_CONVERGE_ARG" -lt 1 ] || [ "$PREMERGE_CONVERGE_ARG" -gt 6 ]; then
+        printf 'error: /premerge --converge must be 1..6 repair rounds (PREMERGE_REPAIR_CEILING), got %s\n' \
+          "$PREMERGE_CONVERGE_ARG" >&2
+        exit 2
+      fi
+      PREMERGE_CONVERGE="$PREMERGE_CONVERGE_ARG" ;;
     low|medium|high|xhigh|max)
       PREMERGE_LEVEL="$PREMERGE_TOKEN"; PREMERGE_LEVEL_SEEN=1 ;;
     *)
-      printf 'error: /premerge does not recognise the argument %s. Levels are low|medium|high|xhigh|max; flags are --no-simplify --no-issues --no-bump --no-ci-gate --dry-run.\n' \
+      printf 'error: /premerge does not recognise the argument %s. Levels are low|medium|high|xhigh|max; flags are --converge=N --no-converge --no-simplify --no-issues --no-bump --no-ci-gate --no-ci-fix --no-post-simplify-review --dry-run.\n' \
         "$PREMERGE_TOKEN" >&2
       exit 2
       ;;
@@ -275,9 +377,13 @@ jq -n \
   --argjson ci_gate "$PREMERGE_CI_GATE" \
   --argjson dry_run "$PREMERGE_DRY_RUN" \
   --argjson count "$PREMERGE_COUNT" \
+  --argjson converge "$PREMERGE_CONVERGE" \
+  --argjson ci_fix "$PREMERGE_CI_FIX" \
+  --argjson post_simplify "$PREMERGE_POST_SIMPLIFY_REVIEW" \
   '{schema_version:1,run_id:$run_id,level:$level,level_explicit:($level_seen==1),repo_root:$root,
     simplify:($simplify==1),issues:($issues==1),bump:($bump==1),ci_gate:($ci_gate==1),
-    dry_run:($dry_run==1),discovered:$count}' \
+    dry_run:($dry_run==1),discovered:$count,converge_repairs:$converge,
+    ci_fix:($ci_fix==1),post_simplify_review:($post_simplify==1)}' \
   >"$PREMERGE_RUN_DIR/run.json" || exit 2
 
 printf 'PREMERGE SCAN RUN_ID=%s COUNT=%s LEVEL=%s DRY_RUN=%s\n' \
@@ -559,29 +665,59 @@ would silently become a no-op exactly where it was supposed to help.
 
 ## Phase 2 — TRIAGE
 
+Phase 2 runs **once per attempt**. `PREMERGE_ATTEMPT` is the 1-based attempt
+counter the orchestrator prefixes onto every fence in the loop; it starts at 1 and
+is advanced only by `## Phase 3b — CONVERGE`.
+
 ```bash uberdev-executable origin=premerge-triage
 set -u
 UBERDEV_PREMERGE_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
 RUN_ID="${RUN_ID:?RUN_ID must be prefixed onto this fence by the orchestrator}"
+PREMERGE_ATTEMPT="${PREMERGE_ATTEMPT:?PREMERGE_ATTEMPT must be prefixed onto this fence by the orchestrator}"
 PREMERGE_ROOT="$(git rev-parse --show-toplevel)" || exit 2
 PREMERGE_RUN_DIR="$PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
+# The SHA this review actually looked at, stamped into the evidence so the gate
+# can refuse to answer for code that has moved on. Read from the working tree,
+# not from `gh`: a `gh pr view` round-trip can report a HEAD the local branch has
+# not caught up to, and the fixers edit the local branch.
+PREMERGE_HEAD_SHA="$(git rev-parse HEAD)" || exit 2
 python3 -I -B "$UBERDEV_PREMERGE_PLUGIN_ROOT/lib/premerge-findings.py" plan \
   --input "$PREMERGE_RUN_DIR/review-input.json" \
   --out-dir "$PREMERGE_RUN_DIR" \
+  --attempt "$PREMERGE_ATTEMPT" \
+  --head-sha "$PREMERGE_HEAD_SHA" \
+  --carry-prior \
   --max-per-wave 8 || exit 74
 ```
 
 The fence prints one line:
 
 ```
-PREMERGE_TRIAGE TOTAL=<n> BLOCKER=<n> SUGGESTION=<n> WAVES=<n> CATEGORY_BACKED=<n>
+PREMERGE_TRIAGE TOTAL=<n> BLOCKER=<n> SUGGESTION=<n> WAVES=<n> CATEGORY_BACKED=<n> ATTEMPT=<n> CARRIED=<n>
 ```
+
+`--carry-prior` is why `CARRIED` exists. Blockers are things the loop is actively
+removing, so only the latest review's blocker set means anything. **Suggestions
+are never fixed by the loop** — so a suggestion the reviewer raised on attempt 1
+and did not repeat on attempt 3 is not resolved, it is unmentioned, and filing
+only the last pass's list would silently drop it. The aggregate is the union
+across attempts, deduped by fingerprint.
+
+**A refused `plan` is a hard stop for the attempt, never a fall-through.** It
+exits 74 *before writing anything*, which leaves the previous attempt's
+`classified.json` on disk looking perfectly fresh. Falling through to the gate
+there would gate on evidence about code that no longer exists — which is exactly
+why `plan` stamps `head_sha` and the gate checks it.
 
 `CATEGORY_BACKED` is how many severities were machine-checked rather than judged.
 **Report it in the run summary.** It is the operator's only signal for how much of
 the split rests on a contract and how much on a reading.
 
-### 2a — Fix the blockers
+### 2a — The fixer-wave mechanism
+
+> **Dispatched from `### 3c`, after the gate has declared this attempt not green
+> — never here.** See `## The order within one attempt`. This section defines the
+> mechanism; Phase 3c is the only caller.
 
 For each wave in `fix-waves.json`, dispatch **one `Task` agent per file in that
 wave, all in a single message**, and wait for the wave before starting the next.
@@ -604,6 +740,10 @@ Rules:
   * If a finding is wrong, already handled, or would change intended behaviour
     beyond what it describes, skip it and say why. A skipped finding is a
     reported outcome, not a failure.
+  * Do NOT weaken, delete, skip or relax a test, an assertion or a guard in
+    order to make a finding go away. If the honest reading is that the TEST is
+    wrong, say so and skip — that is a real answer and the run records it.
+    Making the evidence stop complaining is not fixing the bug.
 
 <external-untrusted-input source="code-review-finding">
 [the finding objects for this file, verbatim from classified.json]
@@ -624,9 +764,32 @@ agents never touch git:
 ```bash uberdev-executable origin=premerge-fix-commit
 set -u
 RUN_ID="${RUN_ID:?RUN_ID must be prefixed onto this fence by the orchestrator}"
+PREMERGE_ATTEMPT="${PREMERGE_ATTEMPT:?PREMERGE_ATTEMPT must be prefixed onto this fence by the orchestrator}"
 PREMERGE_ROOT="$(git rev-parse --show-toplevel)" || exit 2
 PREMERGE_RUN_DIR="$PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
 PREMERGE_BRANCH="$(cat "$PREMERGE_RUN_DIR/combine-branch.txt")"
+PREMERGE_ATTEMPT_PAD="$(printf '%02d' "$PREMERGE_ATTEMPT")"
+
+# ---- the ordering guard --------------------------------------------------
+# This attempt's gate must ALREADY have run and ALREADY have said not_green.
+# That is what makes `## The order within one attempt` structural rather than a
+# convention: a controller that dispatches the fixers before the gate cannot get
+# past this fence, and the failure it would otherwise cause is a silent one —
+# `plan` stamps the reviewed SHA, this commit moves HEAD, and the gate then reads
+# `stale_evidence` and stops the loop on exactly the attempts that worked.
+PREMERGE_GATE_FILE="$PREMERGE_RUN_DIR/gate-$PREMERGE_ATTEMPT_PAD.json"
+if [ ! -s "$PREMERGE_GATE_FILE" ]; then
+  printf 'error: no gate verdict for attempt %s; the gate runs BEFORE the fixers (see "## The order within one attempt")\n' \
+    "$PREMERGE_ATTEMPT" >&2
+  exit 2
+fi
+PREMERGE_GATE_SAID="$(jq -r '.verdict' <"$PREMERGE_GATE_FILE")" || exit 2
+if [ "$PREMERGE_GATE_SAID" != "not_green" ]; then
+  printf 'error: attempt %s gate said %s; there is nothing for a fixer wave to repair\n' \
+    "$PREMERGE_ATTEMPT" "$PREMERGE_GATE_SAID" >&2
+  exit 2
+fi
+
 # Refuse to commit from anywhere but the stack branch. A fence is a fresh shell
 # and cannot assume the checkout did not move under it.
 PREMERGE_HEAD_BRANCH="$(git symbolic-ref -q --short HEAD)" || PREMERGE_HEAD_BRANCH=""
@@ -649,22 +812,41 @@ if [ -n "$PREMERGE_UNTRACKED" ]; then
   exit 2
 fi
 git add -u || exit 2
-git commit -m "fix(premerge): address code-review blockers on the stack" >/dev/null || exit 2
+# The attempt number is IN the subject line on purpose. A stack that took three
+# attempts should say so in its own history — that is the record an operator
+# reads to decide whether the loop earned its keep on this run.
+git commit -m "fix(premerge): address code-review blockers on the stack (attempt $PREMERGE_ATTEMPT)" >/dev/null || exit 2
 git push origin "$PREMERGE_BRANCH" >/dev/null 2>&1 || exit 2
-printf 'PREMERGE FIX COMMIT=%s\n' "$(git rev-parse HEAD)" >&2
+printf 'PREMERGE FIX COMMIT=%s ATTEMPT=%s\n' "$(git rev-parse HEAD)" "$PREMERGE_ATTEMPT" >&2
 ```
 
-Then **re-run Phase 1 and the Phase 2 triage fence once** against the updated
-stack PR, and write the result to `review-input.json` again. That second pass is
-what produces the `classified.json` the clean gate reads — gating on the *first*
-pass's blocker list would report a stack as dirty after its blockers were fixed,
-and gating on nothing would report it clean without evidence. **One re-review, not
-a loop**: if blockers survive a re-review, that is a finding about the fix, and a
-human should see it rather than a third automatic attempt.
+Once the commit fence has run, **the attempt ends**: the loop returns to Phase 1,
+which reviews what the fix actually produced. Gating on the pre-fix review would
+report a stack as dirty after its blockers were fixed; gating on nothing would
+report it clean without evidence.
+
+> **This is where RFC 0021 originally stopped**, with one re-review and no loop,
+> because *"the third automatic attempt is where a fixer starts 'fixing' the test
+> instead of the code."* That hazard is real and it is now guarded directly — by
+> the sentence in the fixer prompt above, and by `STOP_NO_PROGRESS` /
+> `STOP_REGRESSED`, which notice the attempt that achieved nothing rather than
+> assuming attempt three will be the bad one. RFC 0021 Amendment A1 records the
+> supersession.
 
 ### 2b — File the suggestions
 
-Skipped when `--no-issues`. Otherwise dispatch **one** `Task` agent:
+**Runs after the loop settles, not inside it** — Phase 5, once. Two reasons, both
+mechanical:
+
+- `agents/findings-to-issues.md` fingerprints an issue as `file:line:summary`, and
+  a fix that shifts a line by one gives the same suggestion a new fingerprint. Per
+  attempt filing therefore creates *duplicates*, not comments.
+- That agent snapshots the aggregate's `(device, inode, size, mtime)` before
+  parsing and re-checks it before its first GitHub write. `plan` publishes through
+  `os.replace`, which changes the inode — so a re-plan while a dispatch is in
+  flight makes the agent refuse `input-malformed`.
+
+The dispatch itself, when it runs:
 
 - `subagent_type: uberdev:findings-to-issues`
 - Inputs: `aggregate_path` = `$PREMERGE_RUN_DIR/suggestions-aggregate.md`,
@@ -688,10 +870,18 @@ for; a halt on one would contradict the severity rule that produced it.
 set -u
 UBERDEV_PREMERGE_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
 RUN_ID="${RUN_ID:?RUN_ID must be prefixed onto this fence by the orchestrator}"
+PREMERGE_ATTEMPT="${PREMERGE_ATTEMPT:?PREMERGE_ATTEMPT must be prefixed onto this fence by the orchestrator}"
+# 1 when this attempt pushed to the stack branch. Drives --after-push, which is
+# what stops the settle-window race from reading as green. Defaulting it to 0
+# would make the SAFE answer the one you get by forgetting, so it is required.
+PREMERGE_PUSHED="${PREMERGE_PUSHED:?PREMERGE_PUSHED must be prefixed onto this fence by the orchestrator}"
 PREMERGE_ROOT="$(git rev-parse --show-toplevel)" || exit 2
 PREMERGE_RUN_DIR="$PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
 PREMERGE_PR="$(jq -r '.combined_pr' <"$PREMERGE_RUN_DIR/manifest.json")" || exit 2
 PREMERGE_CI_GATE="$(jq -r 'if .ci_gate then "1" else "0" end' <"$PREMERGE_RUN_DIR/run.json")" || exit 2
+PREMERGE_ATTEMPT_PAD="$(printf '%02d' "$PREMERGE_ATTEMPT")"
+PREMERGE_CLASSIFIED="$PREMERGE_RUN_DIR/classified-$PREMERGE_ATTEMPT_PAD.json"
+PREMERGE_HEAD_SHA="$(git rev-parse HEAD)" || exit 2
 
 # ---- CI state -------------------------------------------------------------
 # Field names matter: gh 2.83+ projects `state` and `bucket`, NOT the older
@@ -713,42 +903,284 @@ fi
 PREMERGE_MERGEABLE="$(gh pr view "$PREMERGE_PR" --json mergeable -q .mergeable 2>/dev/null)" || PREMERGE_MERGEABLE=UNKNOWN
 case "$PREMERGE_MERGEABLE" in MERGEABLE|CONFLICTING|UNKNOWN) : ;; *) PREMERGE_MERGEABLE=UNKNOWN ;; esac
 
-PREMERGE_GATE_ARGS="--classified $PREMERGE_RUN_DIR/classified.json --ci-state $PREMERGE_CI --mergeable $PREMERGE_MERGEABLE"
-[ "$PREMERGE_CI_GATE" = "1" ] && PREMERGE_GATE_ARGS="$PREMERGE_GATE_ARGS --require-ci"
-# shellcheck disable=SC2086
-python3 -I -B "$UBERDEV_PREMERGE_PLUGIN_ROOT/lib/premerge-findings.py" assert-green $PREMERGE_GATE_ARGS
+# An argv LIST, never a string.
+#
+# This fence runs through /bin/zsh, and zsh does not word-split an unquoted
+# scalar expansion. `assert-green $PREMERGE_GATE_ARGS` therefore hands argparse
+# ONE giant argv element, argparse exits 2, and the fail-closed default below
+# pins every gate to `not_green / gate_unreadable` — including a perfectly clean
+# stack. STOP_GREEN becomes unreachable, Phase 4 never runs, and the loop burns
+# its whole repair budget before reporting a stop it did not earn: the exact
+# defect this whole design exists to remove, delivered by its own gate.
+#
+# `set --` behaves identically in bash and zsh. The `# shellcheck disable=SC2086`
+# that used to sit here was the tell — it was the only SC2086 waiver in the
+# plugin, and it was waiving a real bug.
+set -- --classified "$PREMERGE_CLASSIFIED" \
+       --ci-state "$PREMERGE_CI" \
+       --mergeable "$PREMERGE_MERGEABLE" \
+       --head-sha "$PREMERGE_HEAD_SHA"
+[ "$PREMERGE_CI_GATE" = "1" ] && set -- "$@" --require-ci
+# `--after-push` turns `no_checks` into a wait rather than a pass. That is right
+# for a repo whose checks have not started yet and WRONG for a repo that has no
+# checks at all — there the loop would wait out its whole ceiling and then report
+# unreadable CI on a repo that was never going to answer. So the flag is
+# conditioned on the repo actually having workflows, which is a fact about the
+# tree and not a guess about timing.
+PREMERGE_HAS_WORKFLOWS=0
+if [ -d "$PREMERGE_ROOT/.github/workflows" ]; then
+  PREMERGE_WORKFLOW_COUNT="$(find "$PREMERGE_ROOT/.github/workflows" -maxdepth 1 -type f -name '*.y*ml' | grep -c .)"
+  [ "$PREMERGE_WORKFLOW_COUNT" -gt 0 ] && PREMERGE_HAS_WORKFLOWS=1
+fi
+if [ "$PREMERGE_PUSHED" = "1" ] && [ "$PREMERGE_HAS_WORKFLOWS" = "1" ]; then
+  set -- "$@" --after-push
+fi
+PREMERGE_GATE_LINE="$(python3 -I -B "$UBERDEV_PREMERGE_PLUGIN_ROOT/lib/premerge-findings.py" assert-green "$@")"
 PREMERGE_GATE_RC=$?
-printf 'PREMERGE GATE RC=%s CI=%s MERGEABLE=%s\n' "$PREMERGE_GATE_RC" "$PREMERGE_CI" "$PREMERGE_MERGEABLE" >&2
+
+# Persist the verdict. The gate used to exist only as a stderr line, and this
+# fence still ends `exit 0` — so a caller reading the FENCE's status sees success
+# on every outcome. Phase 3b reads this file, and a file it cannot read is a
+# refusal there rather than a shrug here.
+PREMERGE_GATE_VERDICT=not_green
+PREMERGE_GATE_REASONS=gate_unreadable
+case "$PREMERGE_GATE_LINE" in
+  'PREMERGE_GATE VERDICT=green REASONS=none')
+    PREMERGE_GATE_VERDICT=green; PREMERGE_GATE_REASONS=none ;;
+  'PREMERGE_GATE VERDICT=not_green REASONS='*)
+    PREMERGE_GATE_REASONS="${PREMERGE_GATE_LINE#PREMERGE_GATE VERDICT=not_green REASONS=}" ;;
+esac
+# A non-verdict exit (74 — unreadable or malformed evidence) keeps the
+# fail-closed defaults above no matter what landed on stdout.
+[ "$PREMERGE_GATE_RC" = "0" ] || [ "$PREMERGE_GATE_RC" = "1" ] || {
+  PREMERGE_GATE_VERDICT=not_green; PREMERGE_GATE_REASONS=gate_unreadable
+}
+
+jq -n \
+  --arg verdict "$PREMERGE_GATE_VERDICT" \
+  --arg reasons "$PREMERGE_GATE_REASONS" \
+  --arg ci "$PREMERGE_CI" \
+  --arg mergeable "$PREMERGE_MERGEABLE" \
+  --arg head_sha "$PREMERGE_HEAD_SHA" \
+  --argjson attempt "$PREMERGE_ATTEMPT" \
+  --argjson rc "$PREMERGE_GATE_RC" \
+  '{schema_version:1,attempt:$attempt,verdict:$verdict,reasons:$reasons,ci:$ci,
+    mergeable:$mergeable,head_sha:$head_sha,rc:$rc}' \
+  >"$PREMERGE_RUN_DIR/gate-$PREMERGE_ATTEMPT_PAD.json" || exit 2
+
+printf 'PREMERGE GATE ATTEMPT=%s RC=%s VERDICT=%s CI=%s MERGEABLE=%s REASONS=%s\n' \
+  "$PREMERGE_ATTEMPT" "$PREMERGE_GATE_RC" "$PREMERGE_GATE_VERDICT" \
+  "$PREMERGE_CI" "$PREMERGE_MERGEABLE" "$PREMERGE_GATE_REASONS" >&2
 exit 0
 ```
 
 ### The CI settle window
 
 A push restarts checks, and `test.yml` fires on both `push` and `pull_request`
-with nothing cancelling the loser. For roughly the first 10–30 seconds after
-Phase 2a's push, `gh pr checks` legitimately reports **no checks at all** — which
-this gate would read as `no_checks`, i.e. green. That is a premature pass on a
-build that has not started.
+with nothing cancelling the loser. For roughly the first 10–30 seconds after a
+push, `gh pr checks` legitimately reports **no checks at all** — which the gate
+would otherwise read as `no_checks`, i.e. green. That is a premature pass on a
+build that has not started, and under a loop it stops being an edge case:
+**every attempt ends in a push.**
 
-So when Phase 2a pushed anything, **wait for the checks to appear before running
-this fence**, and re-probe rather than accepting the first answer. `pending` is a
-"come back later" state, not a verdict — poll it out, do not gate on it.
+`--after-push` is the structural fix RFC 0021 §9 deferred. When the attempt
+pushed, `no_checks` becomes the reason `ci=no_checks_after_push` instead of a
+pass, and Phase 3b routes it to `WAIT_CI` — which re-probes without consuming an
+attempt. `pending` is a "come back later" state, not a verdict; it is polled out,
+never gated on.
 
-### What the verdict means
+`PREMERGE_WAIT_CI_CEILING` bounds the waiting. A check that never settles is not
+a reason to loop forever, and after that many re-probes the loop calls the
+evidence unreadable and stops — which is a *not-green* stop, never a pass.
 
-- `RC=0` → clean. Proceed to Phase 4.
-- `RC=1` → not clean. The `PREMERGE_GATE VERDICT=not_green REASONS=…` line names
-  every failing term. **Skip Phase 4 entirely**, go to Phase 5, and say plainly in
-  the summary that the simplify pass did not run and why. Do not partially
-  simplify, and do not re-run the fix loop a third time.
-- Any other exit → the gate could not read its evidence. Treat exactly as `RC=1`.
-  A gate that answers "green" when it could not read its inputs is not a gate.
+---
+
+## Phase 3b — CONVERGE
+
+The gate's not-green branch. This is the phase that makes `/premerge` finish the
+job instead of parking a stack with a live blocker in it.
+
+```bash uberdev-executable origin=premerge-converge
+set -u
+UBERDEV_PREMERGE_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
+RUN_ID="${RUN_ID:?RUN_ID must be prefixed onto this fence by the orchestrator}"
+PREMERGE_ATTEMPT="${PREMERGE_ATTEMPT:?PREMERGE_ATTEMPT must be prefixed onto this fence by the orchestrator}"
+# How many WAIT_CI re-probes this attempt has already spent. Carried across
+# fences by the orchestrator because a fence is a fresh shell and a counter that
+# reset every time would never reach its ceiling.
+PREMERGE_WAIT_PASSES="${PREMERGE_WAIT_PASSES:-0}"
+PREMERGE_ROOT="$(git rev-parse --show-toplevel)"
+PREMERGE_RUN_DIR="$PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
+PREMERGE_ATTEMPT_PAD="$(printf '%02d' "$PREMERGE_ATTEMPT")"
+PREMERGE_GATE_FILE="$PREMERGE_RUN_DIR/gate-$PREMERGE_ATTEMPT_PAD.json"
+PREMERGE_MAX_REPAIRS="$(jq -r '.converge_repairs' <"$PREMERGE_RUN_DIR/run.json")" || exit 2
+PREMERGE_VERDICT="$(jq -r '.verdict' <"$PREMERGE_GATE_FILE")" || exit 2
+PREMERGE_REASONS="$(jq -r '.reasons' <"$PREMERGE_GATE_FILE")" || exit 2
+
+python3 -I -B "$UBERDEV_PREMERGE_PLUGIN_ROOT/lib/premerge-findings.py" converge \
+  --run-dir "$PREMERGE_RUN_DIR" \
+  --attempt "$PREMERGE_ATTEMPT" \
+  --max-repairs "$PREMERGE_MAX_REPAIRS" \
+  --verdict "$PREMERGE_VERDICT" \
+  --reasons "$PREMERGE_REASONS" \
+  --wait-passes "$PREMERGE_WAIT_PASSES"
+PREMERGE_CONVERGE_RC=$?
+[ "$PREMERGE_CONVERGE_RC" = "0" ] || [ "$PREMERGE_CONVERGE_RC" = "1" ] || exit 74
+exit 0
+```
+
+The fence prints one line and appends one row to `converge.jsonl`:
+
+```
+PREMERGE_CONVERGE ATTEMPT=<n> DECISION=<D> BLOCKERS=<n> PREV=<n|-> FIXED=<n> NEW=<n> WAIT=<n> MAXREPAIRS=<n> REASONS=<csv>
+```
+
+**Branch on `DECISION=`, never on the exit status.** `STOP_GREEN` — the outcome
+the whole loop exists to reach — exits **1**, because 1 means "stop" and 0 means
+"go round again". A controller that reads non-zero as failure will report every
+successfully converged stack as a broken one.
+
+### The decision table
+
+| `DECISION` | What it means | Next |
+|---|---|---|
+| `STOP_GREEN` | the gate passed | **Phase 4** |
+| `WAIT_CI` | nothing to fix; the build has not answered yet | re-probe Phase 3 — **does not consume an attempt** |
+| `CONTINUE` | something is still fixable and the last attempt changed something | repair (3c) → Phase 1 at attempt+1 |
+| `STOP_NO_PROGRESS` | an attempt changed neither the blockers nor the CI reason | **Phase 5, not green** |
+| `STOP_REGRESSED` | our own fixes grew the blocker set | **Phase 5, not green** |
+| `STOP_EXHAUSTED` | the runaway backstop | **Phase 5, not green** |
+| `STOP_UNREADABLE` | stale evidence, or CI that never settled | **Phase 5, not green** |
+
+`STOP_NO_PROGRESS` and `STOP_REGRESSED` are the ones that matter. A counter alone
+would stop a loop that was converging perfectly well *and* let three useless
+attempts run; these two stop the moment repairing stops working, and they are
+computed from blocker **fingerprints**, not from prose.
+
+**Why a fingerprint and not `file:line`.** A fix moves lines — including in other
+findings' hunks — so an identity keyed on the line reports every survivor as
+brand new. The loop would see infinite progress and never stop. `lib/premerge-findings.py`
+hashes `path` + a case-folded, punctuation-stripped `summary` instead, which is
+stable across exactly the edits the loop makes. It is deliberately **not** the
+fingerprint `findings-to-issues` computes — that one is `file:line:summary`
+because an issue is about a location. Same width, different question.
+
+### 3c — Repair, by reason
+
+On `CONTINUE`, route every failing term at something that can fix it, commit, push,
+and re-enter Phase 1 at attempt+1. A term with no route is a `STOP_UNREADABLE`,
+not a shrug.
+
+**This is the only caller of `### 2a`.** The fixer waves are defined there and
+dispatched here, after the gate — the ordering in
+`## The order within one attempt` is what keeps the staleness check from firing
+on every attempt that succeeded.
+
+| Gate reason | Repair | Consumes an attempt? |
+|---|---|---|
+| `blockers_remaining=<n>` | the Phase 2a fixer waves | yes |
+| `ci=red` | classify, then route — see below | yes |
+| `mergeable=CONFLICTING` | the **controller** merges `origin/<base>` into the stack branch and resolves | yes |
+| `ci=pending` / `ci=unknown` / `ci=no_checks_after_push` | re-probe | no (`WAIT_CI`) |
+| `stale_evidence` | never repaired — the evidence was about code that moved | stops the loop |
+
+`mergeable=CONFLICTING` is repaired by bringing the **base into the stack**, which
+is the same primitive `lib/review-consolidate.sh` used to build the branch in the
+first place, and the exact opposite of landing. It is controller-owned because it
+is a git write on the branch every commit fence asserts against.
+
+#### Repairing red CI
+
+Skipped when `--no-ci-fix`, which suppresses the repair only — the probe and the
+classification still run, so the summary still names the failure class.
+
+1. Fetch the failing log: `gh run view <run-id> --log-failed`, bounded, and wrap
+   it in `<external-untrusted-input source="github-actions-log-pr-<N>-run-<id>">`
+   … `</external-untrusted-input>` with its `sha256`. The agent **refuses**
+   `input-malformed` when the envelope identity does not match, and it must
+   receive the log *inline* — its contract forbids a log pathname in the handoff.
+2. Dispatch one `Task`, `subagent_type: uberdev:ci-failure-classifier`, with
+   `pr_number`, `run_id`, `head_sha`, `log_content`, `log_sha256`.
+3. Route its `failure_class`:
+
+| Class | Route | Consumes an attempt? |
+|---|---|---|
+| `code_bug` | one `uberdev:ci-code-fixer` at the `signal_anchor` | yes |
+| `env_drift` | one `uberdev:ci-code-fixer` at the `signal_anchor` | yes |
+| `stale_base` | one `uberdev:ci-rebase-handler` | yes |
+| `flaky` | `gh run rerun --failed <run-id>`, at most `PREMERGE_RERUN_FLAKY_CAP` times | no |
+| `billing_quota` | none — stop | stops the loop |
+| `platform_outage` | none — stop | stops the loop |
+| anything else, or `AMBIGUOUS` | none — stop | stops the loop |
+
+`billing_quota` and `platform_outage` are **not** code problems and no number of
+attempts will fix them; looping on either burns the budget and then reports
+exhaustion, which describes the wrong thing. Stop and name it.
+
+**None of those three agents PUSHES, and none of them may.** Their contracts
+forbid every remote-writing git verb; `ci-rebase-handler` was demoted to a
+preparer for exactly this reason.
+
+But two of them **do** run git locally, and that changes who commits:
+
+| Agent | Local git | Who publishes it |
+|---|---|---|
+| `ci-failure-classifier` | none — read-only | — |
+| `ci-code-fixer` | `git add` + `git commit`; returns the SHA | the controller pushes |
+| `ci-rebase-handler` | `git fetch` + `git rebase`; rewrites the branch | the controller pushes **with `--force-with-lease`** |
+
+So a CI repair does **not** go through the Phase 2a commit fence. That fence
+runs `git add -u` and refuses an empty tree, and after `ci-code-fixer` has
+already committed there is nothing left to add — it would report
+`COMMIT=none REASON=no-edits` and the repair would look like a no-op.
+
+The CI-repair arm therefore owns its own publication:
+
+- **`code_bug` / `env_drift`.** The agent commits locally. Assert `HEAD` is the
+  stack branch, then `git push origin <branch>`.
+- **`stale_base`.** Capture the lease SHA **before dispatch** —
+  `git rev-parse refs/remotes/origin/<branch>` — because a rebase rewrites
+  history and a bare push would be rejected. After the agent returns, push with
+  `--force-with-lease=<branch>:<captured-sha>`. The lease SHA is the
+  controller's and never enters the agent's context, which is what makes
+  "the agent pushed anyway" detectable rather than silent.
+
+**`Letting a fixer agent run git` in `## Common Mistakes` is about the Phase 2a
+and Phase 4b wave agents**, which are `general-purpose` and are told outright not
+to touch git. The three CI agents are a different contract with a different
+authorisation, and conflating the two is how a CI repair silently does nothing.
+
+---
+
+## When the loop stops not-green
+
+Every `STOP_*` other than `STOP_GREEN` lands here.
+
+- **Skip Phase 4 entirely.** Polishing a stack with a known live blocker is the
+  wasted work Phase 4's placement exists to avoid, and the refactor diff would
+  bury the blocker from whoever reads the PR next.
+- **File the survivors.** The blockers the loop could not clear go through
+  `findings-to-issues` at **BLOCKER** tier with a `Blocks: #<stack-pr>` backref,
+  alongside the suggestions. Before the loop, a surviving blocker was printed in
+  the summary and then lost the moment the terminal scrolled; a thing the machine
+  could not fix is precisely the thing that must outlive the run.
+- **Say which stop it was.** `STOP_NO_PROGRESS` ("three fixers achieved nothing")
+  and `STOP_EXHAUSTED` ("it was still converging when the budget ran out") call
+  for opposite next moves from the operator, and a summary that says only "not
+  green" tells them neither.
 
 ---
 
 ## Phase 4 — SIMPLIFY
 
-Skipped when `--no-simplify` or when Phase 3 did not return `RC=0`.
+Skipped when `--no-simplify`, or when Phase 3b's decision was anything other than
+`STOP_GREEN`.
+
+**Under the loop this phase actually runs.** Before it, Phase 4 was gated on a
+single-shot gate that a surviving blocker or a red build left not-green — so on
+any stack that needed fixing at all, the simplify pass silently never happened
+and the run still reported success. The loop is what makes a green gate reachable,
+and a green gate is what unlocks this phase.
 
 ### 4a — The three lenses
 
@@ -771,24 +1203,178 @@ in `agents/code-simplifier.md` `## Return contract`.
 ### 4b — Apply the behaviour-preserving findings
 
 Merge the three lens results by `(path, line)` in roster order (Reuse, Quality,
-Efficiency), then apply them with the **same wave mechanism as Phase 2a** — one
+Efficiency) — severity is `blocker` if **any** lens said so, and a location two
+lenses both hit joins their text as `<Lens>: <text> | <Lens>: <text>`. A location
+repeated *within one lens* is malformed input, not a merge.
+
+Then apply them with the **same wave mechanism as Phase 2a** — one
 `general-purpose` agent per file, disjoint files per wave, agents never touch git
-— with one changed rule stated in the prompt:
+— with one changed rule and one added return field:
 
 > **A simplify finding may only be applied if it preserves behaviour.** If the
 > honest fix would change what the code does, skip it and say so. Behaviour
 > changes belong in a reviewed PR, not in a polish pass on a stack about to land.
 
+```
+outcomes:
+  - rank: <the finding's rank>
+    outcome: fixed | skipped | no_change_needed
+    behavior: preserve | change | n/a
+    reason: <one line>
+```
+
+**`behavior: change` on a `fixed` row is a contradiction and the controller
+refuses the whole wave-set on it**, reverting nothing and applying nothing from
+that agent. Without that check "preserves behaviour" is a sentence in a prompt
+and nothing more — which is all it was before. `/uberdev:simplify` gets this for
+free from `uberdev:code-fixer`'s machine-enforced disposition; `/premerge` cannot
+reuse that path (its routed edge does not admit a `premerge` carrier, and it
+needs the `Workflow` tool this command deliberately does not grant), so it
+enforces the same rule at its own seam.
+
 Commit once, as `refactor(premerge): apply simplify lenses to the stack`, using
 the same branch assertion and untracked-file refusal as the Phase 2a commit
 fence. Push.
 
-Lens findings that were **not** applied go to `findings-to-issues` on the same
-terms as Phase 2b, unless `--no-issues`.
+### 4b-defer — the lens findings that were not applied
+
+Write every merged lens finding the wave did **not** apply to
+`$PREMERGE_RUN_DIR/lens-deferred.json`, as a JSON array in the
+`code-simplifier` return shape:
+
+```json
+[ { "location": "lib/foo.sh:42", "lens": "Reuse",
+    "summary": "…", "detail": "…" } ]
+```
+
+Phase 5 hands that path to `premerge-findings.py defer --lens-findings`, which
+translates it into the aggregate: `detail` becomes the row's `failure_scenario`
+and the lens name is prefixed onto the summary, so the issue says which of the
+three raised it. Every lens row files as a `suggestion` regardless of what the
+lens called it — these are findings the simplify pass *declined to apply*, on a
+stack that had already passed the clean gate, and filing one as a blocker would
+halt a run over a refactor suggestion.
+
+**Do not route them through `plan`.** It is impossible, not merely awkward:
+`plan` reads the built-in reviewer's contract and requires a `failure_scenario`
+that a `code-simplifier` lens never emits.
+
+*(This is a repair. The shipped Phase 4 promised this filing and no producer
+existed for it, so the promise silently did nothing — a claim nobody could
+contradict, which is the exact defect class this pipeline's own library docstring
+is written about.)*
+
+### 4c — VERIFY
+
+**Runs unless `--no-post-simplify-review`.** This is the phase the shipped
+pipeline was missing entirely.
+
+Phase 4 is the last thing to touch the branch, and every gate in the run was
+computed *before* it. So a refactor that reddened the suite, or changed behaviour
+while claiming not to, or introduced a fresh blocker, would ship inside a stack
+whose summary says `clean gate green` — and Phase 5's `chore(release)` commit
+would then attest to code nothing ever verified.
+
+**Run a full attempt cycle at `PREMERGE_ATTEMPT + 1`.** Not just the gate — the
+whole Phase 1 → Phase 2 → Phase 3 sequence, exactly as the loop runs it:
+
+1. `Skill("code-review", "<level> <PREMERGE_PR>")` again, scoped to the refactor.
+2. The **Phase 2 triage fence** at the new attempt index. This is the step that
+   is easy to skip and fatal to skip: `plan` is what stamps `head_sha`, and the
+   simplify commit has already moved `HEAD`. Re-gating without re-stamping
+   compares the pre-simplify evidence against the post-simplify SHA, which is
+   `stale_evidence` **by construction** — so the verify step would fire on every
+   single run and revert every correct, behaviour-preserving polish pass. A
+   self-check that always fails is worse than none: it trains its reader to
+   ignore it.
+3. The **Phase 3 gate fence** at the new attempt index with `PREMERGE_PUSHED=1`.
+   Report the post-simplify CI state as a row of its own in the summary, not as
+   an update to the pre-simplify one — two different SHAs were measured and the
+   operator should see both.
+
+`PREMERGE_ATTEMPT` **stays advanced** for the rest of the run: Phase 5 reads the
+attempt index 4c planned, so its `defer` and its summary describe the tree that
+was actually verified rather than the one before the polish.
+
+**Read the gate verdict from `gate-<NN>.json` directly — do not route this
+through `converge`.** The repair budget may already be spent, and `converge`
+refuses an attempt past it (`bad_attempt`, exit 74), which would turn a
+successful verify into a crash. The branch is:
+
+| Verify outcome | Action |
+|---|---|
+| `verdict=green` | Phase 5. The summary may now honestly say the stack is green **after** simplify |
+| `not_green`, and `PREMERGE_ATTEMPT <= converge_repairs` | re-enter the loop at Phase 3b — the budget still admits this attempt, so `converge` is callable and the refactor is just more code to converge on |
+| `not_green`, and the budget is spent | **revert the simplify commit**, push, and report `simplify=reverted (<reason>)` |
+
+The middle row's condition is the same arithmetic `converge` enforces, checked
+before calling it rather than after being refused by it.
+
+The revert rule is the point. **Simplify is optional polish, so its failure mode
+is `undo`, not `halt`.** A stack that was green before the polish and broken after
+it does not need a human to debug the polish at 3am — it needs the polish gone.
+`git revert --no-edit <simplify-sha>` restores the last state that actually
+passed a gate, and the un-applied findings are already on their way to issues, so
+nothing is lost except a refactor that was not safe to ship.
+
+Never revert past the fix commits. They are the loop's product and they are what
+made the stack green in the first place.
 
 ---
 
 ## Phase 5 — BUMP + PARK
+
+### 5-file — Everything the run could not fix becomes an issue
+
+Skipped when `--no-issues`. Runs **once**, here, after the loop and Phase 4 have
+both settled — see `### 2b` for the two mechanical reasons it cannot run inside
+the loop.
+
+Build the aggregate with the `defer` verb, then dispatch **one** `Task`:
+
+```bash uberdev-executable origin=premerge-defer
+set -u
+UBERDEV_PREMERGE_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
+RUN_ID="${RUN_ID:?RUN_ID must be prefixed onto this fence by the orchestrator}"
+PREMERGE_ATTEMPT="${PREMERGE_ATTEMPT:?PREMERGE_ATTEMPT must be prefixed onto this fence by the orchestrator}"
+# 1 when the loop stopped on anything other than STOP_GREEN, i.e. blockers
+# survived and must outlive the run. Required, not defaulted: forgetting it
+# would silently drop exactly the findings this step exists to preserve.
+PREMERGE_SURVIVORS="${PREMERGE_SURVIVORS:?PREMERGE_SURVIVORS must be prefixed onto this fence by the orchestrator}"
+PREMERGE_ROOT="$(git rev-parse --show-toplevel)"
+PREMERGE_RUN_DIR="$PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
+
+set -- --run-dir "$PREMERGE_RUN_DIR" --attempt "$PREMERGE_ATTEMPT"
+[ "$PREMERGE_SURVIVORS" = "1" ] && set -- "$@" --include-blockers
+# Written by Phase 4b from the merged lens results, in the code-simplifier
+# return shape. Absent when Phase 4 was skipped or applied everything.
+[ -s "$PREMERGE_RUN_DIR/lens-deferred.json" ] && \
+  set -- "$@" --lens-findings "$PREMERGE_RUN_DIR/lens-deferred.json"
+python3 -I -B "$UBERDEV_PREMERGE_PLUGIN_ROOT/lib/premerge-findings.py" defer "$@" || exit 74
+```
+
+It prints one line and writes `deferred-aggregate.md`:
+
+```
+PREMERGE_DEFER TOTAL=<n> BLOCKER=<n> SUGGESTION=<n> PATH=<path>
+```
+
+Then dispatch `subagent_type: uberdev:findings-to-issues` with
+`aggregate_path` = that `PATH`, `edge_id` = `premerge.defer.findings`,
+`carrier.workflow` = `premerge`, `pr_number` = the stack PR, `max_new` = 10.
+
+**The blocker rows are the new thing here, and they needed a producer, not a
+louder promise.** `_encode_aggregate` used to pin every row to `suggestion`, so
+the claim that surviving blockers were filed had nothing behind it — the same
+no-producer defect Phase 4 shipped with. `agents/findings-to-issues.md` was
+already ready for them: `severity_rank(blocker)=3` sorts a blocker above every
+cleanup row so a `max_new` overflow can never displace one, and Step 8d gives it
+the `@author`-mention shape. Only the writer was missing.
+
+A deferred blocker **halts** the parent run in that agent (RFC 0002). That is the
+correct outcome and not a regression: the loop has already stopped not-green, so
+the run is reporting a failure either way, and the halt makes it impossible to
+report one as a success.
 
 ### 5a — One bump for the whole stack
 
@@ -896,16 +1482,31 @@ Print the run summary and **stop**:
   packed        #A #B #C            (base: <base>, branch: chore/stack-<run-id>)
   excluded      #D (conflict_unresolved)
   review        <level> — <n> findings (<n> category-backed)
-  blockers      <n> found / <n> fixed / <n> skipped
-  issues filed  <n> created, <n> commented, <n> deduped
+  converge      <n>/<max> attempts — STOP_GREEN | STOP_NO_PROGRESS | …
+                  attempt 1: <n> blockers, ci=red      → fixed <n>, class=code_bug
+                  attempt 2: <n> blockers, ci=green    → fixed <n>
+  blockers      <n> found / <n> fixed / <n> surviving
+  ci            <state> before simplify / <state> after
   clean gate    green | not_green (<reasons>)
-  simplify      applied <n> / deferred <n> | skipped (<reason>)
+  simplify      applied <n> / deferred <n> | skipped (<reason>) | reverted (<reason>)
+  issues filed  <n> created, <n> commented, <n> deduped  (<n> blocker, <n> suggestion)
   version       v<X.Y.Z> | skipped (<reason>)
 
   <stack PR URL>
 
 Parked. Land it with /merge when you are ready — /premerge does not merge.
 ```
+
+**Report the per-attempt trace, not just the final state.** "3/3 attempts,
+STOP_NO_PROGRESS" and "3/3 attempts, STOP_EXHAUSTED" call for opposite next moves
+— the first says the fixers are stuck and a human should look, the second says
+the loop was still winning and `--converge=5` would probably finish it. A summary
+that collapses both to `not_green` withholds the one thing the operator needs.
+
+The trace is `converge.jsonl` — one row per decision, append-only, in the run
+directory. `CATEGORY_BACKED` still belongs in the review row: it says how much of
+the blocker/suggestion split rested on a machine-checked signal, and under a loop
+that number governs how much of the whole run's work was correctly aimed.
 
 Never offer to merge, never ask whether to merge, never dispatch `/merge`.
 
@@ -916,22 +1517,65 @@ Never offer to merge, never ask whether to merge, never dispatch `/merge`.
 **Merging.** Covered above and worth repeating because every other pipeline in
 this plugin ends somewhere near a merge. This one does not.
 
-**Gating the simplify pass on the FIRST review pass.** After Phase 2a fixes the
-blockers, the first pass's blocker list is stale and describes code that no longer
-exists. Gate on the re-review's `classified.json`.
+**Gating on a stale attempt's evidence.** After a fix lands, an earlier attempt's
+blocker list describes code that no longer exists. Gate on
+`classified-<NN>.json` for the attempt you are in — and pass `--head-sha`, which
+is what catches the nastier version: a `plan` that REFUSED (a >64-finding review,
+a duplicate location) exits before writing anything, so the previous attempt's
+artifact is still sitting there looking perfectly fresh.
 
-**Looping the fix phase.** One fix wave set, one re-review. A blocker that
-survives a fix is information a human needs, not a prompt to try again — the third
-attempt is where a fixer starts "fixing" the test instead of the code.
+**Dispatching the fixers before the gate.** The single most dangerous edit
+anyone will make to this file, because it looks obviously right — find the
+blockers, fix them, then check. It deadlocks the loop: `plan` stamps the SHA the
+review saw, the fix commit moves `HEAD`, and the gate then reports
+`stale_evidence` on every attempt that actually fixed something. The commit fence
+refuses without a `not_green` gate verdict for the attempt, so the mistake fails
+loudly rather than silently converging on nothing. See
+`## The order within one attempt`.
+
+**Bounding the loop with the counter alone.** `--converge=3` is a runaway
+backstop, not the stop condition. The stop conditions are `STOP_NO_PROGRESS` and
+`STOP_REGRESSED`, and deleting them to "simplify" the loop restores exactly the
+hazard RFC 0021 refused a loop over: three attempts that achieve nothing, the
+third of which quietly edits a test.
+
+**Reading `converge`'s exit status as success or failure.** `STOP_GREEN` exits 1.
+1 means "stop", 0 means "go round again". Branch on `DECISION=`.
+
+**Filing issues inside the loop.** `findings-to-issues` fingerprints on
+`file:line:summary`, and every fix moves lines — so per-attempt filing creates
+duplicates rather than comments, and burns the per-dispatch `MAX_NEW` and
+rate-limit budget doing it. It also re-`os.replace`s the aggregate under an
+in-flight dispatch, which that agent refuses as `input-malformed`. File once, at
+Phase 5.
+
+**Letting a fixer edit the test instead of the code.** The named hazard. It is
+guarded in the fixer prompt and by the progress detectors, and both halves are
+load-bearing — a prompt rule with no detector behind it is a suggestion.
+
+**Letting Phase 4 be the last word.** A refactor pushed after the last gate is
+unverified code with a green summary attached. `### 4c — VERIFY` re-probes and
+re-gates it, and reverts the polish rather than parking a stack it broke.
+
+**Reverting past the fix commits.** `4c`'s revert takes out the *simplify* commit
+only. The fix commits are what made the stack green.
 
 **Reading `verdict` as severity.** `PLAUSIBLE` means "the mechanism is real, the
 trigger is uncertain", not "minor". And at `xhigh` on Opus-family models no verify
 pass runs, so a `verdict`-based rule is a no-op precisely where it was meant to
 help.
 
-**Letting a fixer agent run git.** The controller owns every commit. An agent that
-commits produces a commit nobody validated, on a branch whose HEAD other fences
-assert against.
+**Letting a WAVE agent run git.** The Phase 2a and Phase 4b wave agents are
+`general-purpose` and are told outright not to touch git; the controller owns
+their commit. An agent that commits produces a commit nobody validated, on a
+branch whose HEAD other fences assert against.
+
+**Assuming that rule covers the CI agents too.** It does not, and reading it that
+way makes CI repair silently do nothing. `uberdev:ci-code-fixer` commits locally
+by contract and `uberdev:ci-rebase-handler` rewrites the branch, so the Phase 2a
+commit fence finds a clean tree and reports `COMMIT=none REASON=no-edits`. The
+CI arm publishes its own work — see `#### Repairing red CI` — and the rebase arm
+needs the `--force-with-lease` SHA captured *before* dispatch.
 
 **Two agents in one wave sharing a file.** `_fix_waves` groups by path so this
 cannot happen — do not "optimise" it into one-agent-per-finding.
@@ -962,9 +1606,12 @@ completeness proof at all.
 
 This skill mandates no `Workflow` call — its fan-outs are `Task` dispatches and
 its heavy lifting is on-disk shell libraries — so it runs unchanged on platforms
-without the `Workflow` tool. If the `Task` tool is also unavailable, Phase 2a and
-Phase 4 cannot dispatch: run Phase 0, Phase 1 and Phase 3 as written, report the
-findings, and say explicitly that no fixes were applied. **Do not silently apply
-them inline as the controller** — the file-disjointness invariant and the
-one-file-per-agent contract are what make the wave design reviewable, and a
-controller quietly editing everything is not the same run with fewer agents.
+without the `Workflow` tool. If the `Task` tool is also unavailable, Phase 2a,
+Phase 3c and Phase 4 cannot dispatch: run Phase 0, Phase 1 and Phase 3 as
+written, report the findings, and say explicitly that no fixes were applied and
+that **the convergence loop did not run** — a single gate reading is not a
+converged stack, and reporting it as one is the substitution this whole file is
+built to refuse. **Do not silently apply the fixes inline as the controller** —
+the file-disjointness invariant and the one-file-per-agent contract are what make
+the wave design reviewable, and a controller quietly editing everything is not
+the same run with fewer agents.

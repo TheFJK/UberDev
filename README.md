@@ -4,7 +4,7 @@
 
 **Personal Claude Code marketplace — opinionated GitHub-workflow slash commands.**
 
-[![Version](https://img.shields.io/badge/version-0.53.1-blue)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.54.0-blue)](./CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8B5CF6)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Repo Agnostic](https://img.shields.io/badge/repo--agnostic-yes-success)](#configuration)
@@ -43,7 +43,7 @@ UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-scou
 | **`/issue <description>`** | Creates a well-investigated, deduped, label-validated GitHub issue from a one-line ask. 2-scout fanout (codebase + triage) runs in <30 s, with conventional-commit titling and template-by-type. |
 | **`/review-pr [<PR#>]`** | Comprehensive PR review using specialized agents in cap-controlled dispatch-before-wait waves — code review, simplifier, silent-failure hunter, type-design analyzer, comment analyzer, test analyzer. With more than one PR open it first offers (interactively, once) to combine them all onto a single review branch and run the pipeline once over the combined result — cheaper by a factor of N, at the cost of per-PR revert granularity and per-PR finding attribution. `--consolidate` accepts without asking; `--no-consolidate` declines permanently and wins over `--consolidate`. Never offered under `--turbo`, without a TTY, or on a chained `finish-branch` run. |
 | **`/merge [<PR#> \| --all]`** | Lands an approved PR into the integration branch — autopilot. Bare invocation auto-discovers scope: single PR for the current branch, or all eligible open PRs against `integration_branch`. Ordering, per-PR strategy, conflict resolution (one parallel agent per conflicted file), and local sync, all unattended. |
-| **`/premerge [<level>]`** | Pre-merge stack gate. Packs **every** open non-draft PR onto one integration branch and opens ONE `chore(stack): land #A #B` PR, then reviews the *combination* with the built-in `/code-review` (default `xhigh`) — which is the only place the cross-PR defect classes are visible at all: two PRs resolving the same next version, two PRs adding the same helper, one PR's rename defeating another's guard. Correctness blockers go to dispatched fixer agents; cleanup findings are filed as `premerge-finding` issues. The three simplify lenses run **last and only on a clean stack**. Bumps the version once for the whole stack. **Always parks the PR — never merges.** (RFC 0021) |
+| **`/premerge [<level>]`** | Pre-merge stack gate. Packs **every** open non-draft PR onto one integration branch and opens ONE `chore(stack): land #A #B` PR, then reviews the *combination* with the built-in `/code-review` (default `xhigh`) — which is the only place the cross-PR defect classes are visible at all: two PRs resolving the same next version, two PRs adding the same helper, one PR's rename defeating another's guard. Review → fix → re-review is a **bounded convergence loop**: fixer waves at the correctness blockers, `ci-failure-classifier` → `ci-code-fixer` at a red build, a base merge at a conflict, until the stack is green or the evidence says repairing has stopped working. That loop is what makes the three simplify lenses reachable at all — they run **last and only on a green stack**, and before the loop existed a single-shot gate left them silently unreached on any stack that needed fixing. Everything the run could not fix, **surviving blockers included**, is filed as a `premerge-finding` issue. Bumps the version once for the whole stack. **Always parks the PR — never merges.** (RFC 0021) |
 | **`/dev <idea>`** | Prototype fast lane. Decomposes a free-text idea, builds it via parallel `Task()` subagents in-session, runs one light review, opens a PR labelled `prototype`, and auto-files a harden issue. Deliberately skips spec/plan and full `/review-pr`. Honors `--no-pr` / `--no-issue`. |
 | **`/testers`** | Read-only adversarial QA audit squad — 6 personas + 2 monitors over 3 waves; auto-detects web/api/native target; files verified findings as GitHub issues. |
 | **`/uberdev:cluster`** | Repo-wide issue similarity analyzer + fold-into-lead consolidator (RFC 0010). |
@@ -340,6 +340,8 @@ invisible to any per-PR review:
 ```
 /premerge                 # every open non-draft PR, reviewed at xhigh
 /premerge max             # same, with the reviewer's agent fan-out + verify votes
+/premerge --converge=5    # up to five repair rounds instead of three (ceiling 6)
+/premerge --no-converge   # one fix pass, one re-review, then gate once — the pre-loop behaviour
 /premerge --dry-run       # print the pack plan and stop
 ```
 
@@ -349,10 +351,25 @@ invisible to any per-PR review:
 |---|---|
 | 0 PACK | `lib/review-consolidate.sh` — dependency-ordered sequential merge, conflict handback, ancestry gate, typed exclusions, one supersession comment per original, `Closes #N` carried onto the stack PR |
 | 1 REVIEW | the **built-in** `code-review` skill against the stack PR — not uberdev's seven-agent fanout |
-| 2 TRIAGE | correctness blockers → dispatched fixer agents (one per file, disjoint files per wave, agents never touch git) → one commit → push → **one** re-review. Cleanup findings → `findings-to-issues` at the new `SUGGESTION` tier, labelled `premerge-finding` |
-| 3 CLEAN GATE | blockers cleared **and** CI green **and** not conflicting. Fails closed on unreadable evidence |
-| 4 SIMPLIFY | the three lenses — **last, and only on a clean stack**. Applies only behaviour-preserving findings |
-| 5 BUMP + PARK | one `bump-version.sh` for the whole stack, push, stop |
+| 2 TRIAGE | classify the review's findings and plan the fixer waves (one agent per file, disjoint files per wave, agents never touch git). Stamps the reviewed SHA into the evidence. Runs once per attempt; the cleanup findings accumulate as a union deduped by fingerprint across attempts, because a suggestion the reviewer stops repeating is unmentioned, not resolved |
+| 3 CLEAN GATE + CONVERGE | blockers cleared **and** CI green **and** not conflicting; fails closed on unreadable evidence. Not green routes each failing term at something that can repair it — fixer waves at a blocker, `ci-failure-classifier` → `ci-code-fixer` / `ci-rebase-handler` at a red build, a controller-owned base merge at `CONFLICTING` — and re-enters Phase 1. A build that has not answered yet is re-probed without spending an attempt |
+| 4 SIMPLIFY + VERIFY | the three lenses — **last, and only on a green stack**. Applies only behaviour-preserving findings, then re-probes CI and re-gates the polish commit on its own SHA — because Phase 4 is the last thing to touch the branch and every earlier gate was computed before it. A refactor that broke a stack which was green is `git revert`ed, not handed to a human at 3am |
+| 5 BUMP + PARK | everything the run could not fix becomes an issue — surviving blockers at `BLOCKER` tier with a `Blocks: #<stack-pr>` backref, suggestions and un-applied lens findings at `SUGGESTION` — then one `bump-version.sh` for the whole stack, push, stop |
+
+**The counter is a backstop, not the stop condition.** `--converge=<n>` **repair rounds** (default 3,
+ceiling 6, refused rather than clamped outside that range) only bounds a runaway.
+What actually ends the loop is evidence: `STOP_NO_PROGRESS` the moment an attempt
+changes neither the blocker fingerprints nor the CI reason, `STOP_REGRESSED` the
+moment our own fixes grow the blocker set. Those two are the real guard against
+the hazard RFC 0021 originally refused a loop over — the third attempt that quietly
+edits the test instead of the code — because they notice the attempt that achieved
+nothing rather than assuming attempt three will be the bad one. Blocker identity is
+a fingerprint over path plus a normalised summary and deliberately **not**
+`file:line`: every fix moves lines, so a line-keyed identity would report each
+survivor as brand new, see infinite progress and never stop. A blocker that
+survives the loop is filed as a GitHub issue with a `Blocks: #<stack-pr>` backref
+rather than printed into a summary that scrolls away — the one finding the machine
+could not handle is the one that most needs to outlive the run.
 
 **Effort levels are not a ladder.** The built-in reviewer resolves *model × level*
 to a cell, and the cells differ in kind. On Opus-family models `xhigh` runs its

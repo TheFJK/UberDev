@@ -27,7 +27,17 @@
 #   P9   — README carries the TL;DR row and the per-command section
 #   P10  — no trust-trail emission: /premerge must not claim review evidence
 #          /merge's PATH_2 would accept
-#   P11  — repo-agnosticism: Phase 5's bump probes the TARGET repo (not the
+#   P11  — the convergence loop's surfaces (RFC 0021 Amendment A1): the CONVERGE
+#          and VERIFY headings, the repair routing, the CI-repair agents
+#   P11b — every uberdev:<agent> the SKILL dispatches resolves to an agent card
+#          on disk. A typo here is a dispatch that fails at runtime, in the
+#          middle of an autonomous loop, with nobody watching
+#   P12  — the new flags are declared in BOTH the command and the pipeline
+#          skill. One surface knowing about a flag the other refuses is how an
+#          argument-hint starts advertising a refusal
+#   P13  — the loop is bounded: a ceiling is named and the never-merge and
+#          never-loop-forever claims are both stated
+#   P16  — repo-agnosticism: Phase 5's bump probes the TARGET repo (not the
 #          plugin install), passes that root through to bump-version.sh, and
 #          skips with a typed reason elsewhere; Phase 0 publishes the private
 #          ignore policy that keeps the run dir out of a foreign repo's
@@ -84,6 +94,41 @@ assert_fixed() {
   else
     echo "  FAIL  $desc"; FAIL=$((FAIL + 1))
   fi
+}
+
+# SKILL.md holds executable fences AND the prose that documents them, so a
+# whole-file grep for a flag is satisfied by the paragraph EXPLAINING the flag
+# even after the fence that passes it is gone. Every assertion about what the
+# pipeline actually RUNS is made against this extraction instead.
+#
+# Pure bash state machine, not awk: a single-quoted awk program with a column
+# reference is rewritten by the skill renderer before awk ever parses it (P2b),
+# and this file is where that hazard is documented.
+extract_fences() {
+  local source_file="$1" target_file="$2" inside=0 raw
+  : >"$target_file"
+  while IFS= read -r raw; do
+    case "$raw" in
+      # Only at column 0, and only when NOT already inside a fence. An opener
+      # quoted as an example inside another block would otherwise start
+      # capturing prose — and prose is precisely what these assertions exist to
+      # tell apart from executable content.
+      '```bash uberdev-executable'*)
+        [ "$inside" = "1" ] || inside=1
+        continue ;;
+      '```'*)
+        [ "$inside" = "1" ] && inside=0
+        continue ;;
+    esac
+    [ "$inside" = "1" ] && printf '%s\n' "$raw" >>"$target_file"
+  done <"$source_file"
+  # An unterminated fence would silently swallow the rest of the file.
+  if [ "$inside" = "1" ]; then
+    echo "  FAIL  extract_fences: unterminated fence in $source_file"
+    FAIL=$((FAIL + 1))
+    return 1
+  fi
+  return 0
 }
 
 assert_count_fixed() {
@@ -234,8 +279,146 @@ for f in "$CMD" "$SKILL"; do
   assert_no_grep "$f" '^[^#]*Reviewed-by:' "P10: $base emits no Reviewed-by trailer"
 done
 
+echo "== P11: the convergence loop's surfaces =="
+assert_grep "$SKILL" '^## Phase 3b — CONVERGE$' "P11: the CONVERGE phase heading"
+assert_grep "$SKILL" '^### 4c — VERIFY$' "P11: the post-simplify VERIFY heading"
+assert_grep "$SKILL" '^### 3c — Repair, by reason$' "P11: the repair routing heading"
+assert_fixed "$SKILL" 'subagent_type: uberdev:ci-failure-classifier' "P11: red CI is classified before it is repaired"
+assert_fixed "$SKILL" 'uberdev:ci-code-fixer' "P11: the code_bug/env_drift arm names its fixer"
+assert_fixed "$SKILL" 'uberdev:ci-rebase-handler' "P11: the stale_base arm names its handler"
+# The two classes no number of attempts can fix. Looping on either burns the
+# budget and then reports exhaustion, which describes the wrong thing entirely.
+assert_fixed "$SKILL" 'billing_quota' "P11: billing_quota is named as a non-loopable class"
+assert_fixed "$SKILL" 'platform_outage' "P11: platform_outage is named as a non-loopable class"
+echo "== P11c: what the pipeline actually RUNS, read from the fences only =="
+FENCES="$(mktemp)"
+trap 'rm -f "$FENCES"' EXIT
+extract_fences "$SKILL" "$FENCES" || :
+# Anti-vacuity: an extraction that silently produced nothing would make every
+# row below pass over an empty file.
+FENCE_LINES="$(grep -c . "$FENCES")"
+if [ "$FENCE_LINES" -ge 100 ]; then
+  echo "  PASS  P11c: extracted $FENCE_LINES lines of executable fence"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  P11c: fence extraction yielded only $FENCE_LINES lines — every row below is vacuous"; FAIL=$((FAIL + 1))
+fi
+assert_fixed "$FENCES" 'premerge-findings.py" converge' "P11c: a fence calls the converge verb"
+assert_fixed "$FENCES" '--carry-prior' "P11c: a fence carries prior suggestions into the aggregate"
+assert_fixed "$FENCES" '--attempt "$PREMERGE_ATTEMPT"' "P11c: a fence scopes the plan to the attempt"
+# The settle-window race (RFC 0021 §9) becomes load-bearing under a loop: every
+# attempt ends in a push, so `no_checks` reading as green is not an edge case.
+# These two must be PASSED, not merely explained — the paragraph explaining a
+# flag survives the deletion of the fence that passes it.
+assert_fixed "$FENCES" 'set -- "$@" --after-push' "P11c: a fence tells the gate the attempt pushed"
+assert_fixed "$FENCES" '--head-sha "$PREMERGE_HEAD_SHA"' "P11c: a fence tells the gate which SHA the evidence describes"
+assert_fixed "$FENCES" '--wait-passes "$PREMERGE_WAIT_PASSES"' "P11c: a fence carries the WAIT_CI counter across the fence boundary"
+# The ordering guard. Fixers dispatched BEFORE the gate deadlock the loop: plan
+# stamps the reviewed SHA, the fix commit moves HEAD, and the gate then reports
+# stale_evidence on every attempt that actually worked. The commit fence refuses
+# without a not_green verdict for the attempt, which is what makes the ordering
+# structural instead of a convention someone can quietly invert.
+assert_fixed "$FENCES" 'gate-$PREMERGE_ATTEMPT_PAD.json' "P11c: a fence keys evidence to the attempt it belongs to"
+assert_fixed "$FENCES" 'the gate runs BEFORE the fixers' "P11c: the fix commit refuses without a gate verdict for its attempt"
+assert_fixed "$FENCES" 'PREMERGE_GATE_SAID" != "not_green"' "P11c: the fix commit refuses when the gate did not ask for a repair"
+# The PREDICATE, not just its message. The two rows above match the printf text
+# and the verdict comparison, so neutralising the file-existence test (`if false`,
+# or dropping the `!`) left all of them green — the guard was only half-locked.
+assert_fixed "$FENCES" '[ ! -s "$PREMERGE_GATE_FILE" ]' "P11c: the missing-gate-file predicate itself is locked"
+assert_grep "$SKILL" '^## The order within one attempt$' "P11c: the load-bearing ordering is written down, not inferred"
+
+echo "== P11b: every dispatched agent resolves to a card on disk =="
+# EVERY `uberdev:<name>` the file mentions, not only the `subagent_type:` ones.
+# Two of the five agents this pipeline dispatches — ci-code-fixer and
+# ci-rebase-handler — are named in the 3c routing table without that prefix, so a
+# subagent_type-only scan checked three of five and reported success. A rename or
+# a typo in the routing table would then surface as a failed Task dispatch
+# mid-loop, on a stale_base CI failure, unattended.
+P11B_MISSING=""
+P11B_SEEN=0
+while IFS= read -r P11B_NAME; do
+  [ -n "$P11B_NAME" ] || continue
+  P11B_SEEN=$((P11B_SEEN + 1))
+  if [ ! -r "$REPO_ROOT/plugins/uberdev/agents/$P11B_NAME.md" ]; then
+    P11B_MISSING="$P11B_MISSING $P11B_NAME"
+  fi
+done <<EOF_P11B
+$(grep -oE 'uberdev:[a-z0-9-]+' "$SKILL" | sed 's/.*uberdev://' | sort -u \
+  | grep -vE '^(premerge|premerge-pipeline|simplify|review-pr|merge|goal|solve|turbo|turbox|issue|dev|testers|cluster|uberscan|ubersimplify|uberthink|code-review)$')
+EOF_P11B
+if [ "$P11B_SEEN" -lt 5 ]; then
+  echo "  FAIL  P11b: only $P11B_SEEN agent names found, expected >=5 — this row is vacuous"; FAIL=$((FAIL + 1))
+elif [ -n "$P11B_MISSING" ]; then
+  echo "  FAIL  P11b: dispatched agents with no card:$P11B_MISSING"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  P11b: all $P11B_SEEN dispatched uberdev agents resolve"; PASS=$((PASS + 1))
+fi
+
+echo "== P12: the new flags are declared on BOTH surfaces =="
+# A flag the command advertises and the skill's ONE parse site refuses is an
+# argument-hint that documents a refusal. Both files, every flag.
+for P12_FLAG in --converge --no-converge --no-ci-fix --no-post-simplify-review; do
+  assert_fixed "$CMD" "$P12_FLAG" "P12: commands/premerge.md documents $P12_FLAG"
+done
+# Against the parse ARMS, not the flag name, and not the whole SKILL. Two layers
+# of vacuity to get past here: the paragraph that EXPLAINS a flag survives the
+# deletion of the arm that accepts it, and so does the refusal message inside the
+# very same fence, which lists every flag by name. Only the `case` arm makes the
+# invocation work, so the `)` is what the assertion has to see.
+for P12_ARM in '--converge=*)' '--no-converge)' '--no-ci-fix)' '--no-post-simplify-review)'; do
+  assert_fixed "$FENCES" "$P12_ARM" "P12: a SKILL fence has a parse arm for ${P12_ARM%)}"
+done
+# The parse site stays singular. A second `case` arm for a level or a flag
+# somewhere else in the file is how two spellings of one option drift apart.
+assert_count_fixed "$SKILL" 'this fence is the ONLY parse site' 1 "P12: the argument parse site is still declared singular"
+
+echo "== P13: the loop is bounded, and says so =="
+assert_fixed "$LIB" 'CONVERGE_REPAIR_CEILING' "P13: the library declares a runaway ceiling"
+# The budget counts REPAIRS. Counting reviews makes --converge=1 buy zero
+# repairs, under a flag documented as reproducing the pre-loop behaviour.
+assert_fixed "$LIB" 'attempt > max_repairs' "P13: the backstop is spent only PAST the repair budget"
+assert_fixed "$LIB" 'CONVERGE_WAIT_CI_CEILING' "P13: the library bounds CI waiting too"
+assert_fixed "$LIB" 'sub.add_parser("converge"' "P13: the converge verb is registered"
+assert_fixed "$LIB" 'CONVERGE_DECISIONS' "P13: the decision vocabulary is a declared set"
+assert_fixed "$SKILL" 'STOP_NO_PROGRESS' "P13: the SKILL names the evidence-based stop"
+assert_fixed "$SKILL" 'STOP_REGRESSED' "P13: the SKILL names the regression stop"
+# The whole point of the amendment: the counter is the backstop, not the rule.
+# If a future edit deletes the progress detectors and leaves only the counter,
+# this row is what notices.
+assert_grep "$SKILL" 'runaway backstop' "P13: the counter is described as a backstop, not the stop condition"
+
+echo "== P14: the three promises that used to have no producer =="
+assert_fixed "$LIB" 'sub.add_parser("defer"' "P14: the defer verb is registered"
+assert_fixed "$FENCES" 'premerge-findings.py" defer' "P14: a fence actually calls it"
+assert_fixed "$FENCES" '[ "$PREMERGE_SURVIVORS" = "1" ] && set -- "$@" --include-blockers' "P14: surviving blockers reach the aggregate, on the condition that names them"
+assert_fixed "$FENCES" '--lens-findings' "P14: un-applied lens findings reach the aggregate"
+assert_fixed "$SKILL" 'lens-deferred.json' "P14: Phase 4b names the file it must write"
+# 4c re-gating without re-stamping compares pre-simplify evidence against the
+# post-simplify SHA — stale_evidence by construction, so the verify step would
+# fire on every run and revert every correct polish pass.
+assert_fixed "$SKILL" 'The **Phase 2 triage fence** at the new attempt index' "P14: 4c re-stamps the evidence before re-gating"
+assert_fixed "$SKILL" 'do not route this' "P14: 4c does not crash on a spent repair budget"
+# The CI agents DO run git locally; conflating them with the wave agents makes a
+# CI repair silently no-op through a commit fence that finds a clean tree.
+assert_fixed "$SKILL" '--force-with-lease' "P14: the rebase arm publishes under a lease"
+assert_grep "$SKILL" 'Assuming that rule covers the CI agents too' "P14: the wave-agent git rule is scoped away from the CI agents"
+
+echo "== P15: the gate builds an argv LIST, not a string =="
+# The fences run through /bin/zsh, which does NOT word-split an unquoted scalar.
+# `assert-green $ARGS` hands argparse one giant argv element, argparse exits 2,
+# and the fail-closed default pins EVERY gate to not_green/gate_unreadable —
+# including a clean stack. STOP_GREEN becomes unreachable and the loop can never
+# finish. This shipped in v0.53.0 behind the plugin's only SC2086 waiver.
+assert_fixed "$FENCES" 'set -- --classified "$PREMERGE_CLASSIFIED"' "P15: the gate accumulates argv with set --"
+assert_fixed "$FENCES" 'assert-green "$@"' "P15: the gate passes the list, quoted"
+# Anchored past a leading `#`, and to a directive line that is ONLY the
+# directive: the fence explains this hazard at length in comments, and an
+# assertion that cannot tell the warning from the bug would force the
+# explanation out — which is how the lesson gets lost the next time.
+assert_no_grep "$FENCES" '^[^#]*assert-green \$PREMERGE_GATE_ARGS' "P15: no unquoted-scalar argument splatting survives"
+assert_no_grep "$FENCES" '^[[:space:]]*# shellcheck disable=SC2086[[:space:]]*$' "P15: the SC2086 waiver that hid it is gone"
+assert_fixed "$SKILL" 'zsh does not word-split an unquoted scalar' "P15: and the reason is written down (anti-vacuity)"
 # --- fence extraction --------------------------------------------------------
-# Every P11 row below asserts against a FENCE BODY, never against the whole file.
+# Every P16 row below asserts against a FENCE BODY, never against the whole file.
 # The first draft of this section did the latter and was worthless: each row was
 # satisfiable by the surrounding prose, so a SKILL.md that had stopped bumping
 # altogether still passed 6/6. Prose is not the program.
@@ -268,15 +451,15 @@ assert_not_in() {
   fi
 }
 
-echo "== P11: repo-agnostic Phase 5 =="
+echo "== P16: repo-agnostic Phase 5 =="
 # Pre-flight: an empty fence body would make every assert_not_in below vacuously
 # green, which is the failure mode this whole section exists to avoid.
 for pair in "bump:$BUMP_FENCE" "apply:$APPLY_FENCE" "scan:$SCAN_FENCE"; do
   if [ -z "${pair#*:}" ]; then
-    echo "  FAIL  P11: fence '${pair%%:*}' extracted empty — the origin tag moved or renamed"
+    echo "  FAIL  P16: fence '${pair%%:*}' extracted empty — the origin tag moved or renamed"
     FAIL=$((FAIL + 1))
   else
-    echo "  PASS  P11: fence '${pair%%:*}' extracted non-empty"; PASS=$((PASS + 1))
+    echo "  PASS  P16: fence '${pair%%:*}' extracted non-empty"; PASS=$((PASS + 1))
   fi
 done
 
@@ -285,21 +468,21 @@ done
 # by the plugin install, which is present in every repo by definition. Forbid the
 # CLASS (any test of a path under the plugin root), not one variable spelling.
 assert_not_in "$BUMP_FENCE" '\[ ! -[refdxs].*PLUGIN_ROOT' \
-  "P11: the bump gate does not decide on a path under the plugin install"
+  "P16: the bump gate does not decide on a path under the plugin install"
 assert_not_in "$APPLY_FENCE" '\[ ! -[refdxs].*PLUGIN_ROOT' \
-  "P11: the apply fence does not decide on a path under the plugin install"
+  "P16: the apply fence does not decide on a path under the plugin install"
 assert_in "$BUMP_FENCE" '[ ! -f "$PREMERGE_ROOT/$PREMERGE_VERSION_MANIFEST" ]' \
-  "P11: the bump gate probes the target repo's version manifest"
+  "P16: the bump gate probes the target repo's version manifest"
 assert_in "$BUMP_FENCE" 'REASON=no-version-ratchet' \
-  "P11: a repo without the ratchet is SKIPPED with a typed reason, not failed"
+  "P16: a repo without the ratchet is SKIPPED with a typed reason, not failed"
 
 # bump-version.sh resolves its target by walking up from its own on-disk location,
 # which under a marketplace install is the plugin cache and not any repo. Passing
 # --repo-root is what makes the call correct in the UberDev checkout too.
 assert_in "$APPLY_FENCE" 'lib/bump-version.sh' \
-  "P11: the apply fence still invokes bump-version.sh (anti-vacuity)"
+  "P16: the apply fence still invokes bump-version.sh (anti-vacuity)"
 assert_in "$APPLY_FENCE" '--repo-root "$PREMERGE_ROOT"' \
-  "P11: bump-version.sh is told which repo to bump"
+  "P16: bump-version.sh is told which repo to bump"
 
 # The duplicated probe must sit ABOVE the PREMERGE_NEXT requirement. A run that
 # skipped 5a never produced a BUMP_CLASS, so PREMERGE_NEXT is unset — a probe
@@ -307,11 +490,11 @@ assert_in "$APPLY_FENCE" '--repo-root "$PREMERGE_ROOT"' \
 APPLY_PROBE_LN="$(grep -nF -e 'PREMERGE_VERSION_MANIFEST=' <<<"$APPLY_FENCE" | head -1 | cut -d: -f1)"
 APPLY_NEXT_LN="$(grep -nF -e 'PREMERGE_NEXT:?' <<<"$APPLY_FENCE" | head -1 | cut -d: -f1)"
 if [ -z "$APPLY_PROBE_LN" ] || [ -z "$APPLY_NEXT_LN" ]; then
-  echo "  FAIL  P11: apply fence is missing the probe or the PREMERGE_NEXT requirement"; FAIL=$((FAIL + 1))
+  echo "  FAIL  P16: apply fence is missing the probe or the PREMERGE_NEXT requirement"; FAIL=$((FAIL + 1))
 elif [ "$APPLY_PROBE_LN" -lt "$APPLY_NEXT_LN" ]; then
-  echo "  PASS  P11: the apply-fence probe is reachable (precedes PREMERGE_NEXT:?)"; PASS=$((PASS + 1))
+  echo "  PASS  P16: the apply-fence probe is reachable (precedes PREMERGE_NEXT:?)"; PASS=$((PASS + 1))
 else
-  echo "  FAIL  P11: the apply-fence probe sits below PREMERGE_NEXT:? and can never fire"; FAIL=$((FAIL + 1))
+  echo "  FAIL  P16: the apply-fence probe sits below PREMERGE_NEXT:? and can never fire"; FAIL=$((FAIL + 1))
 fi
 
 # ONE decision literal, shared with /goal's own ratchet probe. Compare the
@@ -323,45 +506,45 @@ FENCE_MANIFESTS="$(sed -n "s/^PREMERGE_VERSION_MANIFEST='\([^']*\)'.*/\1/p" "$SK
 FENCE_COUNT="$(grep -c . <<<"$FENCE_MANIFESTS")"
 FENCE_UNIQ="$(sort -u <<<"$FENCE_MANIFESTS" | grep -c .)"
 if [ -z "$GOAL_MANIFEST" ]; then
-  echo "  FAIL  P11: could not read _UBERDEV_GOAL_VERSION_MANIFEST from goal-state.sh"; FAIL=$((FAIL + 1))
+  echo "  FAIL  P16: could not read _UBERDEV_GOAL_VERSION_MANIFEST from goal-state.sh"; FAIL=$((FAIL + 1))
 elif [ "$FENCE_COUNT" != 2 ]; then
-  echo "  FAIL  P11: expected 2 executable manifest literals (5a + 5a-apply), found $FENCE_COUNT"; FAIL=$((FAIL + 1))
+  echo "  FAIL  P16: expected 2 executable manifest literals (5a + 5a-apply), found $FENCE_COUNT"; FAIL=$((FAIL + 1))
 elif [ "$FENCE_UNIQ" != 1 ]; then
-  echo "  FAIL  P11: the two executable manifest literals disagree:"; sed 's/^/          /' <<<"$FENCE_MANIFESTS"
+  echo "  FAIL  P16: the two executable manifest literals disagree:"; sed 's/^/          /' <<<"$FENCE_MANIFESTS"
   FAIL=$((FAIL + 1))
 elif [ "$FENCE_MANIFESTS" != "$GOAL_MANIFEST"$'\n'"$GOAL_MANIFEST" ]; then
-  echo "  FAIL  P11: executed manifest drift — goal='$GOAL_MANIFEST' premerge='$(sed -n 1p <<<"$FENCE_MANIFESTS")'"
+  echo "  FAIL  P16: executed manifest drift — goal='$GOAL_MANIFEST' premerge='$(sed -n 1p <<<"$FENCE_MANIFESTS")'"
   FAIL=$((FAIL + 1))
 else
-  echo "  PASS  P11: both executed manifest literals agree with /goal"; PASS=$((PASS + 1))
+  echo "  PASS  P16: both executed manifest literals agree with /goal"; PASS=$((PASS + 1))
 fi
 if [ "$DOC_MANIFEST" = "$GOAL_MANIFEST" ]; then
-  echo "  PASS  P11: the Constants row documents the same path it executes"; PASS=$((PASS + 1))
+  echo "  PASS  P16: the Constants row documents the same path it executes"; PASS=$((PASS + 1))
 else
-  echo "  FAIL  P11: Constants row says '$DOC_MANIFEST', code uses '$GOAL_MANIFEST'"; FAIL=$((FAIL + 1))
+  echo "  FAIL  P16: Constants row says '$DOC_MANIFEST', code uses '$GOAL_MANIFEST'"; FAIL=$((FAIL + 1))
 fi
 
-echo "== P11b: the run dir cannot dirty a foreign working tree =="
+echo "== P16b: the run dir cannot dirty a foreign working tree =="
 # Phase 0a creates .uberdev/premerge/<RUN_ID>/ INSIDE the repo being packed, and
 # Phase 0b then refuses to build a combine branch over an unclean tree. This repo
 # survives only because its own .gitignore lists `.uberdev/`.
 assert_in "$SCAN_FENCE" 'PREMERGE_IGNORE_POLICY="$UBERDEV_PREMERGE_ROOT/.uberdev/premerge/.gitignore"' \
-  "P11b: the policy is published inside .uberdev/premerge/"
+  "P16b: the policy is published inside .uberdev/premerge/"
 # NOT at .uberdev/ — that parent is the documented per-repo config root
 # (.uberdev/config.yaml, RFC 0006; .uberdev/config.json, RFC 0007), and a `*` one
 # level up would permanently un-add a repository's own committed config.
 assert_not_in "$SCAN_FENCE" 'PREMERGE_IGNORE_POLICY="[^"]*/\.uberdev/\.gitignore"' \
-  "P11b: the policy does not blanket the repo's .uberdev config root"
+  "P16b: the policy does not blanket the repo's .uberdev config root"
 assert_in "$SCAN_FENCE" 'printf '"'"'*\n'"'"' >"$PREMERGE_IGNORE_POLICY"' \
-  "P11b: the policy body is exactly the catch-all, written to the policy path"
+  "P16b: the policy body is exactly the catch-all, written to the policy path"
 assert_in "$SCAN_FENCE" 'if [ ! -e "$PREMERGE_IGNORE_POLICY" ]' \
-  "P11b: the policy is written no-clobber"
+  "P16b: the policy is written no-clobber"
 # No-clobber means "do not truncate someone else's file"; it does NOT mean the
 # file that already existed does the job. Verify the EFFECT.
 assert_in "$SCAN_FENCE" 'git -C "$UBERDEV_PREMERGE_ROOT" check-ignore -q "$PREMERGE_RUN_DIR"' \
-  "P11b: the run dir's ignored-ness is verified, not assumed"
+  "P16b: the run dir's ignored-ness is verified, not assumed"
 assert_in "$SCAN_FENCE" 'exit 2' \
-  "P11b: a run dir git can still see is a refusal (anti-vacuity)"
+  "P16b: a run dir git can still see is a refusal (anti-vacuity)"
 
 echo ""
 echo "== Summary =="
