@@ -1014,9 +1014,11 @@ fi
 # what stops a future edit from reordering or dropping it.
 #
 # `FILES=<n>` (#722) is the same kind of field and obeys the same rule: it is how
-# many distinct owning files those rows cover, which is how many issues the
-# downstream dispatch opens now that the filer groups by file. It is inserted
-# BEFORE OVERFLOW= so the fence's `${HEAD##* OVERFLOW=}` suffix read stays exact.
+# many distinct owning files those rows cover — the file GROUPS the downstream
+# dispatch considers now that the filer groups by file, of which it opens at most
+# max_new (10) as new issues and folds the rest onto ones that already exist. It
+# is an upper bound on issues, not a count of them. It is inserted BEFORE
+# OVERFLOW= so the fence's `${HEAD##* OVERFLOW=}` suffix read stays exact.
 case "$(cat "$D/defer.txt")" in
   "PREMERGE_DEFER TOTAL=3 BLOCKER=1 SUGGESTION=2 FILES=3 OVERFLOW=0 PATH="*)
     ok "B16: the defer line reports the split, its file count, and OVERFLOW=0 on a normal run" ;;
@@ -1382,7 +1384,7 @@ print(doc["findings"][0]["summary"])
   && ok "B23: an ordinary lens row still carries its display prefix" \
   || bad "B23: the prefix was dropped from a row that fits: '$B23_PFX'"
 
-echo "== B24: overflow is survivable, and a blocker is never the row dropped =="
+echo "== B24: overflow is survivable, and blocker-bearing files are admitted first =="
 # defer used to fail() above MAX_FINDINGS, and the Phase 5 fence is
 # `defer "$@" || exit 74` with no recovery arm — so a long run reached the one
 # step whose purpose is "a thing the machine could not fix must outlive the run"
@@ -1438,9 +1440,9 @@ blockers = sorted(f["scope"]["path"] for f in rows if f["severity"] == "blocker"
 print("rows=%d cap=%d blockers=%d %s" % (len(rows), m.MAX_FINDINGS, len(blockers), ",".join(blockers)))
 ' "$LIB" "$D/deferred-aggregate.md")"
 if [ "$B24_KEPT" = "rows=64 cap=64 blockers=5 lib/BLOCK00.sh,lib/BLOCK01.sh,lib/BLOCK02.sh,lib/BLOCK03.sh,lib/BLOCK04.sh" ]; then
-  ok "B24: every blocker survives the cut even though all five sorted past it"
+  ok "B24: the five blocker-bearing files are admitted first, though all five sorted past the cap"
 else
-  bad "B24: the surviving-findings guarantee broke: $B24_KEPT"
+  bad "B24: blocker-bearing files were not ranked ahead of the cleanup ones: $B24_KEPT"
 fi
 
 echo "== B30: whole files are kept, and the envelope is never left short =="
@@ -1517,9 +1519,50 @@ if [ "$B30_BETA" = "n=25 first=1 last=25" ]; then
 else
   bad "B30: the split file's survivors are not the reviewer's leading run: $B30_BETA"
 fi
+# KEPT ROWS STAY IN THE ROWS' ORIGINAL RELATIVE ORDER — the one property of this
+# cut that is asserted nowhere else, and the one this change made easy to break.
+#
+# `defer` ranks groups blocker-bearing-file-first and sorts blockers to the front
+# of the split file, but that ordering selects WHICH rows survive and must never
+# reach the envelope: findings-to-issues collapses duplicate rows first-occurrence-
+# wins (step 5) and truncates at `max_new` groups, so leaking the ranking here
+# silently re-picks which duplicate is kept and which file is filed.
+#
+# Every other check on this fixture launders the order away — B30_SHAPE and
+# B30_TAIL count with `Counter`, B30_BETA and B24_KEPT `sort()` first — so
+# rebuilding in ranked order instead leaves them byte-identical. This one
+# compares the SEQUENCE, so it does not.
+#
+# The expectation is read off the fixture, not off the implementation: attempt 2's
+# 4 gamma rows lead (defer unions the deferring attempt first), then attempt 1's
+# alpha/beta interleave with beta stopping at 024 where the split file ran out of
+# budget, then alpha's tail, then the blockers `--include-blockers` appended last.
+B30_ORDER="$(python3 -I -B -c '
+import json, sys
+doc = json.loads(open(sys.argv[1], encoding="utf-8").read().splitlines()[1])
+tag = {"lib/gamma.sh": "g", "lib/alpha.sh": "a", "lib/beta.sh": "b",
+       "lib/BLOCK.sh": "B"}
+print(" ".join(tag.get(f["scope"]["path"], "?") + f["summary"].split()[-1]
+               for f in doc["findings"]))
+' "$D/deferred-aggregate.md")"
+B30_WANT="g000 g001 g002 g003"
+B30_WANT="$B30_WANT a000 b000 a001 b001 a002 b002 a003 b003 a004 b004"
+B30_WANT="$B30_WANT a005 b005 a006 b006 a007 b007 a008 b008 a009 b009"
+B30_WANT="$B30_WANT a010 b010 a011 b011 a012 b012 a013 b013 a014 b014"
+B30_WANT="$B30_WANT a015 b015 a016 b016 a017 b017 a018 b018 a019 b019"
+B30_WANT="$B30_WANT a020 b020 a021 b021 a022 b022 a023 b023 a024 b024"
+B30_WANT="$B30_WANT a025 a026 a027 a028 a029"
+B30_WANT="$B30_WANT B00 B01 B02 B03 B04"
+if [ "$B30_ORDER" = "$B30_WANT" ]; then
+  ok "B30: the kept rows reach the envelope in their original relative order, not the ranking's"
+else
+  bad "B30: the admission ranking leaked into the envelope order:
+  got:  $B30_ORDER
+  want: $B30_WANT"
+fi
 case "$(cat "$D/b30.txt")" in
   "PREMERGE_DEFER TOTAL=64 BLOCKER=5 SUGGESTION=59 FILES=4 OVERFLOW=5 PATH="*)
-    ok "B30: the envelope is filled to the cap, and FILES= says how many issues will open" ;;
+    ok "B30: the envelope is filled to the cap, and FILES= counts the file groups the filer will consider" ;;
   *) bad "B30: unexpected defer line: $(cat "$D/b30.txt")" ;;
 esac
 
@@ -1635,6 +1678,108 @@ case "$(cat "$D/b30c.txt")" in
   "PREMERGE_DEFER TOTAL=64 BLOCKER=4 SUGGESTION=60 FILES=3 OVERFLOW=6 PATH="*)
     ok "B30: the envelope holds at MAX_FINDINGS once the boundary file has spent it" ;;
   *) bad "B30: unexpected defer line: $(cat "$D/b30c.txt")" ;;
+esac
+
+echo "== B31: truncation never validates a row it is about to DROP =="
+# `defer` reads its rows straight off disk — this attempt's `suggestions` and
+# `blockers`, plus every earlier attempt's carried suggestions — and nothing has
+# checked them beyond "it is a dict". `_encode_aggregate` is the gate, and it runs
+# AFTER the cut, so it only ever sees rows that were kept.
+#
+# Grouping the rows for the file-atomic cut has to keep it that way. Validate
+# every row's path while grouping and one malformed row in the DISCARDED tail
+# takes the whole envelope down with it: exit 74 through `defer "$@" || exit 74`,
+# a fence with no recovery arm, so a run holding 64 perfectly good findings files
+# NOTHING. That is the maximal-loss trade this whole branch exists to refuse, and
+# it is the same one `_carry_prior_suggestions` declines by name.
+#
+# 70 rows, one file each, the row at index 65 carrying an absolute path — past
+# the cap under the file rule and under the row rule that preceded it, so it is
+# dropped either way and no downstream consumer ever sees it.
+D="$(new_case)"
+python3 -I -B -c '
+import json, sys
+rows = [{"file": "/etc/passwd" if i == 65 else "lib/f%03d.sh" % i, "line": 1,
+         "summary": "sugg %03d" % i, "failure_scenario": "d",
+         "category": "reuse", "severity": "suggestion"} for i in range(70)]
+json.dump({"schema_version": 1, "pr_number": 670, "run_id": sys.argv[2],
+           "blockers": [], "suggestions": rows},
+          open(sys.argv[1] + "/classified-01.json", "w"))
+' "$D" "$RUN_ID"
+if python3 -I -B "$LIB" defer --run-dir "$D" --attempt 1 \
+     >"$D/b31a.txt" 2>"$D/b31a.err"; then
+  ok "B31: a malformed row the cut discards does not cost the 64 rows that fit"
+else
+  RC=$?
+  bad "B31: defer refused (rc=$RC) over a row it was going to throw away: $(cat "$D/b31a.err")"
+fi
+case "$(cat "$D/b31a.txt")" in
+  "PREMERGE_DEFER TOTAL=64 BLOCKER=0 SUGGESTION=64 FILES=64 OVERFLOW=6 PATH="*)
+    ok "B31: the survivors are still filed and the 6 that did not fit are reported" ;;
+  *) bad "B31: unexpected defer line: $(cat "$D/b31a.txt")" ;;
+esac
+
+# The other half of the same property, so the fix cannot be read as "stop
+# validating": `_encode_aggregate` is still the single gate, so a malformed row
+# that SURVIVES the cut refuses exactly as it always did. Same fixture, the bad
+# row moved to index 3 where it is kept.
+D="$(new_case)"
+python3 -I -B -c '
+import json, sys
+rows = [{"file": "/etc/passwd" if i == 3 else "lib/f%03d.sh" % i, "line": 1,
+         "summary": "sugg %03d" % i, "failure_scenario": "d",
+         "category": "reuse", "severity": "suggestion"} for i in range(70)]
+json.dump({"schema_version": 1, "pr_number": 670, "run_id": sys.argv[2],
+           "blockers": [], "suggestions": rows},
+          open(sys.argv[1] + "/classified-01.json", "w"))
+' "$D" "$RUN_ID"
+if python3 -I -B "$LIB" defer --run-dir "$D" --attempt 1 \
+     >/dev/null 2>"$D/b31b.err"; then
+  bad "B31: a malformed row that survived the cut was encoded anyway"
+else
+  RC=$?
+  if [ "$RC" -eq 74 ] && grep -q 'finding_schema_invalid' "$D/b31b.err" \
+     && ! grep -q 'Traceback' "$D/b31b.err"; then
+    ok "B31: a malformed row that survives the cut is still exit 74 with a token"
+  else
+    bad "B31: wrong failure for a kept malformed row (rc=$RC): $(cat "$D/b31b.err")"
+  fi
+fi
+
+# A `file` that is not a string at all is the one value the grouping genuinely
+# cannot pass through: a bare `.get` makes it a dict key and an object or an
+# array raises `TypeError` — exit 1 and a traceback out of a verb contracted to
+# answer `0 encoded | 74 refused`. So such a row gets a key of its own, and that
+# key ranks LAST: it is a blocker here, and a group ranked by blocker-bearing
+# alone would admit it first and lose all 64 filable rows to it. A row with no
+# usable path cannot be filed as an issue at all — dropping it is the whole point.
+D="$(new_case)"
+python3 -I -B -c '
+import json, sys
+rows = [{"file": "lib/f%03d.sh" % i, "line": 1, "summary": "sugg %03d" % i,
+         "failure_scenario": "d", "category": "reuse", "severity": "suggestion"}
+        for i in range(69)]
+json.dump({"schema_version": 1, "pr_number": 670, "run_id": sys.argv[2],
+           "blockers": [{"file": {"path": "lib/z.sh"}, "line": 1,
+                         "summary": "unusable", "failure_scenario": "d",
+                         "fingerprint": "0123456789abcdef", "severity": "blocker"}],
+           "suggestions": rows},
+          open(sys.argv[1] + "/classified-01.json", "w"))
+' "$D" "$RUN_ID"
+if python3 -I -B "$LIB" defer --run-dir "$D" --attempt 1 --include-blockers \
+     >"$D/b31c.txt" 2>"$D/b31c.err"; then
+  ok "B31: an unusable file value is dropped, not raised as an unhashable key"
+else
+  RC=$?
+  bad "B31: defer failed (rc=$RC) on a row whose file is not a string: $(cat "$D/b31c.err")"
+fi
+grep -q 'Traceback' "$D/b31c.err" \
+  && bad "B31: an unusable file value produced a traceback: $(cat "$D/b31c.err")" \
+  || ok "B31: and it produced no traceback on the way"
+case "$(cat "$D/b31c.txt")" in
+  "PREMERGE_DEFER TOTAL=64 BLOCKER=0 SUGGESTION=64 FILES=64 OVERFLOW=6 PATH="*)
+    ok "B31: the unusable row ranks last, so the envelope still fills with filable rows" ;;
+  *) bad "B31: unexpected defer line: $(cat "$D/b31c.txt")" ;;
 esac
 
 echo "== B25: a malformed artifact refuses with a token, never a traceback =="
