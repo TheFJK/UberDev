@@ -4,6 +4,56 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.53.1] — 2026-08-22
+
+### Fixed
+
+- **`/premerge` Phase 5 aborted the run in every repository, including this one.**
+  The apply fence called `lib/bump-version.sh` with no `--repo-root`, and that
+  script resolves its target from its own on-disk location — which lands on a repo
+  root only when it runs out of a source checkout. Under a marketplace install it
+  resolved into the plugin cache, found none of the six version surfaces there and
+  exited 3, so `|| exit 2` killed Phase 5 after pack, review, fix, issues and
+  simplify had all already run. The fence now passes the packed repo's own root.
+
+- **`/premerge` is a general PR-phase gate again.** The version bump is UberDev
+  self-hosting machinery, and its documented "skipped with a reported reason"
+  escape hatch could never fire: it probed `$PLUGIN_ROOT/lib/bump-version.sh`,
+  which ships with every install, so it answered "is uberdev installed" (always
+  yes) rather than "does this repo have a version ratchet". The gate now probes
+  `PREMERGE_VERSION_MANIFEST` in the **target** tree — the same signal `/goal`
+  uses — and a repo without it reports `version skipped (no-version-ratchet)` and
+  parks normally. In this repository the ratchet stays exactly as mandatory as
+  before.
+
+- **`/premerge` no longer dirties the working tree it is about to gate on.**
+  Phase 0a creates `.uberdev/premerge/<RUN_ID>/` inside the packed repo and Phase
+  0b refuses to build a combine branch over an unclean tree, so every repository
+  but this one aborted at the directory `/premerge` had just created — this one
+  survived only because its own `.gitignore` lists `.uberdev/`. Phase 0a now
+  publishes a private, no-clobber `.uberdev/premerge/.gitignore`, as `/review-pr`
+  already does for `<runs_root>/.gitignore`. It is scoped to `premerge/` and
+  deliberately not to `.uberdev/`: that parent is the documented per-repo config
+  root (`.uberdev/config.yaml`, RFC 0006; `.uberdev/config.json`, RFC 0007), and a
+  catch-all one level up would permanently un-add a repository's own committed
+  config. Publication verifies the **effect** with `git check-ignore` rather than
+  trusting no-clobber: a 0-byte policy left by an interrupted run, or a repo's own
+  selective one, used to leave the run directory perfectly visible and surface
+  five fences later as "the working tree is not clean" — naming nothing the
+  operator could act on. That case now refuses at the cause, naming the file.
+
+### Added
+
+- **`tests/premerge-phase5.test.sh`** — behaviour gates that build throwaway git
+  repos and execute the fences **extracted** from `SKILL.md`: the skip, the
+  non-skip, all six surfaces actually moving, the apply-fence probe being
+  reachable with `PREMERGE_NEXT` unset, the cleanliness gate passing with the
+  policy and refusing without it, and the config root staying addable. The shape
+  gates in `tests/premerge.test.sh` are now scoped to fence **bodies** rather than
+  to the whole file — matched against the whole file, every one of them was
+  satisfiable by prose, and a Phase 5 that had stopped bumping altogether passed
+  them all.
+
 ## [0.53.0] — 2026-08-21
 
 Adds `/premerge`, the pre-merge stack gate (RFC 0021). MINOR: a new command, a

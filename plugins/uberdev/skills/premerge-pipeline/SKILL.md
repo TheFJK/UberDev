@@ -67,7 +67,14 @@ PREMERGE_MAX_ISSUES      = 10             # findings-to-issues MAX_NEW, RFC 0018
 PREMERGE_CI_SETTLE_SECS  = 45             # see `## The CI settle window` below
 PREMERGE_BRANCH_PREFIX   = chore/stack-
 PREMERGE_AGGREGATE_SOURCE= premerge-aggregate
+PREMERGE_VERSION_MANIFEST = plugins/uberdev/.claude-plugin/plugin.json
 ```
+
+`PREMERGE_VERSION_MANIFEST` is a path **inside the repo being packed**, and its
+presence there is the whole test for "does this repo carry UberDev's version
+ratchet". `/goal` asks the same question with the same literal
+(`lib/goal-state.sh`, `_UBERDEV_GOAL_VERSION_MANIFEST`), and a row in
+`tests/premerge.test.sh` compares the two rather than trusting them to stay equal.
 
 `PREMERGE_AGGREGATE_SOURCE` has **three** declaration sites that must agree, and a
 row in `tests/premerge.test.sh` asserts they do:
@@ -193,6 +200,40 @@ fi
 # those mechanisms is how a stray reaper deletes a live run's state.
 PREMERGE_RUN_DIR="$UBERDEV_PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
 mkdir -p "$PREMERGE_RUN_DIR" || exit 2
+
+# The run directory lives inside the repository being packed, and Phase 0b then
+# refuses to build a combine branch over an unclean working tree — so without a
+# private ignore policy this fence dirties the tree that the very next phase
+# gates on. THIS repo survives only because its own `.gitignore` lists
+# `.uberdev/`; every other repository aborts at the directory /premerge itself
+# just created. `/review-pr` already solved this for `<runs_root>/.gitignore`.
+#
+# Scoped to `.uberdev/premerge/` and NOT to `.uberdev/`. That parent is the
+# documented per-repo config root — `.uberdev/config.yaml` (RFC 0006, read by
+# skills/testers-pipeline) and `.uberdev/config.json` (RFC 0007) live there — and
+# a `*` one level up would silently un-add a repository's own committed config,
+# for good, in a command that is not supposed to touch it.
+PREMERGE_IGNORE_POLICY="$UBERDEV_PREMERGE_ROOT/.uberdev/premerge/.gitignore"
+if [ ! -e "$PREMERGE_IGNORE_POLICY" ]; then
+  printf '*\n' >"$PREMERGE_IGNORE_POLICY" || exit 2
+fi
+
+# No-clobber is about not truncating someone else's file; it is NOT a guarantee
+# that the file which already existed does what this one would have. A 0-byte
+# residue from an interrupted run, or a repo's own selective policy, leaves the
+# run directory perfectly visible — and the failure then surfaces five fences
+# later as "the working tree is not clean", naming nothing the operator can act
+# on. So verify the EFFECT, not the existence, and refuse here where the cause is
+# still legible.
+if ! git -C "$UBERDEV_PREMERGE_ROOT" check-ignore -q "$PREMERGE_RUN_DIR"; then
+  printf 'error: /premerge keeps its run state in %s, and this repository does not ignore it.\n' \
+    "$PREMERGE_RUN_DIR" >&2
+  printf 'hint: %s exists but does not cover the run directory (a 0-byte file left by an\n' \
+    "$PREMERGE_IGNORE_POLICY" >&2
+  printf '      interrupted run is the usual cause — remove that one file and re-run), or add\n' >&2
+  printf '      %s to the repository ignore stack.\n' '.uberdev/' >&2
+  exit 2
+fi
 
 # Discovery telemetry lands in the run dir first so that a gh outage is
 # DISTINGUISHABLE from "there are no open PRs" — both answer '[]', and reporting
@@ -522,7 +563,7 @@ would silently become a no-op exactly where it was supposed to help.
 set -u
 UBERDEV_PREMERGE_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
 RUN_ID="${RUN_ID:?RUN_ID must be prefixed onto this fence by the orchestrator}"
-PREMERGE_ROOT="$(git rev-parse --show-toplevel)"
+PREMERGE_ROOT="$(git rev-parse --show-toplevel)" || exit 2
 PREMERGE_RUN_DIR="$PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
 python3 -I -B "$UBERDEV_PREMERGE_PLUGIN_ROOT/lib/premerge-findings.py" plan \
   --input "$PREMERGE_RUN_DIR/review-input.json" \
@@ -583,7 +624,7 @@ agents never touch git:
 ```bash uberdev-executable origin=premerge-fix-commit
 set -u
 RUN_ID="${RUN_ID:?RUN_ID must be prefixed onto this fence by the orchestrator}"
-PREMERGE_ROOT="$(git rev-parse --show-toplevel)"
+PREMERGE_ROOT="$(git rev-parse --show-toplevel)" || exit 2
 PREMERGE_RUN_DIR="$PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
 PREMERGE_BRANCH="$(cat "$PREMERGE_RUN_DIR/combine-branch.txt")"
 # Refuse to commit from anywhere but the stack branch. A fence is a fresh shell
@@ -647,7 +688,7 @@ for; a halt on one would contradict the severity rule that produced it.
 set -u
 UBERDEV_PREMERGE_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
 RUN_ID="${RUN_ID:?RUN_ID must be prefixed onto this fence by the orchestrator}"
-PREMERGE_ROOT="$(git rev-parse --show-toplevel)"
+PREMERGE_ROOT="$(git rev-parse --show-toplevel)" || exit 2
 PREMERGE_RUN_DIR="$PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
 PREMERGE_PR="$(jq -r '.combined_pr' <"$PREMERGE_RUN_DIR/manifest.json")" || exit 2
 PREMERGE_CI_GATE="$(jq -r 'if .ci_gate then "1" else "0" end' <"$PREMERGE_RUN_DIR/run.json")" || exit 2
@@ -751,9 +792,18 @@ terms as Phase 2b, unless `--no-issues`.
 
 ### 5a — One bump for the whole stack
 
-Skipped when `--no-bump`, and skipped with a reported reason when the repo has no
-`lib/bump-version.sh` (this step is uberdev-self-hosting machinery, not a
-universal PR-phase step).
+Skipped when `--no-bump`, and skipped with a reported reason when the **repo being
+packed** does not carry `PREMERGE_VERSION_MANIFEST`. Phases 0–4 are a universal
+PR-phase gate; this one step is uberdev-self-hosting machinery, and it is the only
+part of `/premerge` that a foreign repository must be able to opt out of without
+opting out of the command.
+
+**Probe the target repo, never the plugin install.** `lib/bump-version.sh` ships
+with the plugin, so it is present in *every* repository the plugin is installed
+into — a `[ -r ]` on the plugin's copy answers "is uberdev installed", which is
+always yes, and never "does this repo have a version ratchet", which is the
+question. The repo-kind signal is a path in the target tree, and it is the same
+signal `/goal` already uses.
 
 **Why the bump belongs here and nowhere else.** `AGENTS.md` binds the version to
 the *landing commit*, once per stack — and forbids the individual PR authors from
@@ -767,11 +817,11 @@ version and be right.
 set -u
 UBERDEV_PREMERGE_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
 RUN_ID="${RUN_ID:?RUN_ID must be prefixed onto this fence by the orchestrator}"
-PREMERGE_ROOT="$(git rev-parse --show-toplevel)"
+PREMERGE_ROOT="$(git rev-parse --show-toplevel)" || exit 2
 PREMERGE_RUN_DIR="$PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
-PREMERGE_BUMP_SCRIPT="$UBERDEV_PREMERGE_PLUGIN_ROOT/lib/bump-version.sh"
-if [ ! -r "$PREMERGE_BUMP_SCRIPT" ]; then
-  printf 'PREMERGE BUMP=skipped REASON=no-bump-script\n' >&2
+PREMERGE_VERSION_MANIFEST='plugins/uberdev/.claude-plugin/plugin.json'
+if [ ! -f "$PREMERGE_ROOT/$PREMERGE_VERSION_MANIFEST" ]; then
+  printf 'PREMERGE BUMP=skipped REASON=no-version-ratchet\n' >&2
   exit 0
 fi
 PREMERGE_BASE="$(cat "$PREMERGE_RUN_DIR/combine-base.txt")"
@@ -788,18 +838,35 @@ fi
 printf 'PREMERGE BUMP_CLASS=%s\n' "$PREMERGE_CLASS" >&2
 ```
 
-Read the current version from `plugins/uberdev/.claude-plugin/plugin.json`, apply
+Read the current version from `$PREMERGE_ROOT/$PREMERGE_VERSION_MANIFEST`, apply
 `PREMERGE_CLASS`, and run the bump. **Never edit the version surfaces by hand** —
 `bump-version.sh` moves all six together and refuses outright (exit 3) if they
 already disagree, which is a half-bumped repo that needs a human rather than more
-`sed`:
+`sed`.
+
+**`--repo-root` is not optional.** Left off, `bump-version.sh` derives its target
+by walking three directories up from its own location on disk, which lands on a
+repo root only when it is executed out of a source checkout. Under a marketplace
+install it resolves into the plugin cache, finds none of the six surfaces there
+and exits 3 — aborting Phase 5 *in this repository too*, with an error naming a
+path the operator never typed. The probe below is repeated rather than inherited
+because each fence is a fresh shell and none of Phase 5a's variables survive into
+this one, and it is placed **above** the `PREMERGE_NEXT` requirement: a run that
+skipped 5a never produced a `BUMP_CLASS` for the orchestrator to turn into a next
+version, so a probe sitting below that line could only ever be reached in the one
+case it does not cover.
 
 ```bash uberdev-executable origin=premerge-bump-apply
 set -u
 UBERDEV_PREMERGE_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
 RUN_ID="${RUN_ID:?RUN_ID must be prefixed onto this fence by the orchestrator}"
+PREMERGE_ROOT="$(git rev-parse --show-toplevel)" || exit 2
+PREMERGE_VERSION_MANIFEST='plugins/uberdev/.claude-plugin/plugin.json'
+if [ ! -f "$PREMERGE_ROOT/$PREMERGE_VERSION_MANIFEST" ]; then
+  printf 'PREMERGE BUMP=skipped REASON=no-version-ratchet\n' >&2
+  exit 0
+fi
 PREMERGE_NEXT="${PREMERGE_NEXT:?PREMERGE_NEXT must be prefixed onto this fence by the orchestrator}"
-PREMERGE_ROOT="$(git rev-parse --show-toplevel)"
 PREMERGE_RUN_DIR="$PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
 PREMERGE_BRANCH="$(cat "$PREMERGE_RUN_DIR/combine-branch.txt")"
 PREMERGE_HEAD_BRANCH="$(git symbolic-ref -q --short HEAD)" || PREMERGE_HEAD_BRANCH=""
@@ -808,7 +875,8 @@ PREMERGE_HEAD_BRANCH="$(git symbolic-ref -q --short HEAD)" || PREMERGE_HEAD_BRAN
     "$PREMERGE_BRANCH" "${PREMERGE_HEAD_BRANCH:-(detached)}" >&2
   exit 2
 }
-bash "$UBERDEV_PREMERGE_PLUGIN_ROOT/lib/bump-version.sh" "$PREMERGE_NEXT" || exit 2
+bash "$UBERDEV_PREMERGE_PLUGIN_ROOT/lib/bump-version.sh" "$PREMERGE_NEXT" \
+  --repo-root "$PREMERGE_ROOT" || exit 2
 ```
 
 Then replace the CHANGELOG stub with real notes derived from the packed PR titles
@@ -871,6 +939,16 @@ cannot happen — do not "optimise" it into one-agent-per-finding.
 **Treating an empty findings artifact as an absent one.** `findings: []` means the
 reviewer found nothing. A missing `review-input.json` means something broke. If
 those two collapse into one state, every future failure reports as a clean run.
+
+**Answering a repo-kind question with a plugin-kind probe.** `[ -r
+"$PLUGIN_ROOT/lib/<anything>" ]` is true in every repository the plugin is
+installed into. Any guard meant to mean "this repo is not UberDev" must read a
+path under `$PREMERGE_ROOT`, and any guard that cannot fail in normal operation
+is not a guard — it is a comment that costs an `if`.
+
+**Leaving the run directory unignored.** Phases 0a and 0b are five fences apart,
+and the first writes into the tree the second gates on. It looks fine here and
+only here, because this repo's own `.gitignore` covers `.uberdev/`.
 
 **Bumping by hand.** Six surfaces plus two hidden CI ratchet locks
 (`tests/goal.test.sh` G20, `tests/solve-claim.test.sh`). `bump-version.sh` is the

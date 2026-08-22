@@ -27,6 +27,11 @@
 #   P9   — README carries the TL;DR row and the per-command section
 #   P10  — no trust-trail emission: /premerge must not claim review evidence
 #          /merge's PATH_2 would accept
+#   P11  — repo-agnosticism: Phase 5's bump probes the TARGET repo (not the
+#          plugin install), passes that root through to bump-version.sh, and
+#          skips with a typed reason elsewhere; Phase 0 publishes the private
+#          ignore policy that keeps the run dir out of a foreign repo's
+#          cleanliness gate
 
 set -u
 
@@ -43,10 +48,11 @@ SYNC="$REPO_ROOT/plugins/uberdev/lib/aliases-sync.sh"
 VENDOR="$REPO_ROOT/plugins/uberdev/vendor.json"
 RFC="$REPO_ROOT/docs/rfc/0021-premerge-stack-integration.md"
 README="$REPO_ROOT/README.md"
+GOAL_STATE="$REPO_ROOT/plugins/uberdev/lib/goal-state.sh"
 
 # Pre-flight: refuse to run if any asserted-against file is missing. A shape test
 # whose subject vanished must fail loudly, never report zero findings.
-for f in "$CMD" "$SKILL" "$LIB" "$PRIMITIVES" "$F2I" "$SYNC" "$VENDOR" "$RFC" "$README"; do
+for f in "$CMD" "$SKILL" "$LIB" "$PRIMITIVES" "$F2I" "$SYNC" "$VENDOR" "$RFC" "$README" "$GOAL_STATE"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -227,6 +233,135 @@ for f in "$CMD" "$SKILL"; do
   assert_no_grep "$f" 'uberdev-approved' "P10: $base emits no approval label"
   assert_no_grep "$f" '^[^#]*Reviewed-by:' "P10: $base emits no Reviewed-by trailer"
 done
+
+# --- fence extraction --------------------------------------------------------
+# Every P11 row below asserts against a FENCE BODY, never against the whole file.
+# The first draft of this section did the latter and was worthless: each row was
+# satisfiable by the surrounding prose, so a SKILL.md that had stopped bumping
+# altogether still passed 6/6. Prose is not the program.
+fence_body() {  # fence_body FILE ORIGIN_TAG -> body on stdout
+  awk -v tag="$2" '
+    index($0, "```bash uberdev-executable origin=" tag) == 1 { inf = 1; next }
+    inf && index($0, "```") == 1 { exit }
+    inf { print }
+  ' "$1"
+}
+
+BUMP_FENCE="$(fence_body "$SKILL" premerge-bump)"
+APPLY_FENCE="$(fence_body "$SKILL" premerge-bump-apply)"
+SCAN_FENCE="$(fence_body "$SKILL" premerge-scan)"
+
+assert_in() {  # assert_in "<body>" <literal> <desc>
+  local body="$1" literal="$2" desc="$3"
+  if grep -qF -e "$literal" <<<"$body"; then
+    echo "  PASS  $desc"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc"; FAIL=$((FAIL + 1))
+  fi
+}
+assert_not_in() {
+  local body="$1" pattern="$2" desc="$3"
+  if grep -qE -e "$pattern" <<<"$body"; then
+    echo "  FAIL  $desc"; FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  $desc"; PASS=$((PASS + 1))
+  fi
+}
+
+echo "== P11: repo-agnostic Phase 5 =="
+# Pre-flight: an empty fence body would make every assert_not_in below vacuously
+# green, which is the failure mode this whole section exists to avoid.
+for pair in "bump:$BUMP_FENCE" "apply:$APPLY_FENCE" "scan:$SCAN_FENCE"; do
+  if [ -z "${pair#*:}" ]; then
+    echo "  FAIL  P11: fence '${pair%%:*}' extracted empty — the origin tag moved or renamed"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  P11: fence '${pair%%:*}' extracted non-empty"; PASS=$((PASS + 1))
+  fi
+done
+
+# /premerge is a general PR-phase gate; the version ratchet it drives is UberDev
+# SELF-HOSTING machinery. The separation must be decided by the TARGET repo, not
+# by the plugin install, which is present in every repo by definition. Forbid the
+# CLASS (any test of a path under the plugin root), not one variable spelling.
+assert_not_in "$BUMP_FENCE" '\[ ! -[refdxs].*PLUGIN_ROOT' \
+  "P11: the bump gate does not decide on a path under the plugin install"
+assert_not_in "$APPLY_FENCE" '\[ ! -[refdxs].*PLUGIN_ROOT' \
+  "P11: the apply fence does not decide on a path under the plugin install"
+assert_in "$BUMP_FENCE" '[ ! -f "$PREMERGE_ROOT/$PREMERGE_VERSION_MANIFEST" ]' \
+  "P11: the bump gate probes the target repo's version manifest"
+assert_in "$BUMP_FENCE" 'REASON=no-version-ratchet' \
+  "P11: a repo without the ratchet is SKIPPED with a typed reason, not failed"
+
+# bump-version.sh resolves its target by walking up from its own on-disk location,
+# which under a marketplace install is the plugin cache and not any repo. Passing
+# --repo-root is what makes the call correct in the UberDev checkout too.
+assert_in "$APPLY_FENCE" 'lib/bump-version.sh' \
+  "P11: the apply fence still invokes bump-version.sh (anti-vacuity)"
+assert_in "$APPLY_FENCE" '--repo-root "$PREMERGE_ROOT"' \
+  "P11: bump-version.sh is told which repo to bump"
+
+# The duplicated probe must sit ABOVE the PREMERGE_NEXT requirement. A run that
+# skipped 5a never produced a BUMP_CLASS, so PREMERGE_NEXT is unset — a probe
+# below that line dies at `:?` in the one case it was added to cover.
+APPLY_PROBE_LN="$(grep -nF -e 'PREMERGE_VERSION_MANIFEST=' <<<"$APPLY_FENCE" | head -1 | cut -d: -f1)"
+APPLY_NEXT_LN="$(grep -nF -e 'PREMERGE_NEXT:?' <<<"$APPLY_FENCE" | head -1 | cut -d: -f1)"
+if [ -z "$APPLY_PROBE_LN" ] || [ -z "$APPLY_NEXT_LN" ]; then
+  echo "  FAIL  P11: apply fence is missing the probe or the PREMERGE_NEXT requirement"; FAIL=$((FAIL + 1))
+elif [ "$APPLY_PROBE_LN" -lt "$APPLY_NEXT_LN" ]; then
+  echo "  PASS  P11: the apply-fence probe is reachable (precedes PREMERGE_NEXT:?)"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  P11: the apply-fence probe sits below PREMERGE_NEXT:? and can never fire"; FAIL=$((FAIL + 1))
+fi
+
+# ONE decision literal, shared with /goal's own ratchet probe. Compare the
+# EXECUTED copies — the Constants row is documentation and drifting it is
+# harmless, while drifting either fence silently disables the mandatory bump.
+GOAL_MANIFEST="$(sed -n "s/^_UBERDEV_GOAL_VERSION_MANIFEST='\([^']*\)'.*/\1/p" "$GOAL_STATE" | sed -n '1p')"
+DOC_MANIFEST="$(sed -n 's/^PREMERGE_VERSION_MANIFEST[[:space:]]*=[[:space:]]\(.*\)$/\1/p' "$SKILL" | sed -n '1p')"
+FENCE_MANIFESTS="$(sed -n "s/^PREMERGE_VERSION_MANIFEST='\([^']*\)'.*/\1/p" "$SKILL")"
+FENCE_COUNT="$(grep -c . <<<"$FENCE_MANIFESTS")"
+FENCE_UNIQ="$(sort -u <<<"$FENCE_MANIFESTS" | grep -c .)"
+if [ -z "$GOAL_MANIFEST" ]; then
+  echo "  FAIL  P11: could not read _UBERDEV_GOAL_VERSION_MANIFEST from goal-state.sh"; FAIL=$((FAIL + 1))
+elif [ "$FENCE_COUNT" != 2 ]; then
+  echo "  FAIL  P11: expected 2 executable manifest literals (5a + 5a-apply), found $FENCE_COUNT"; FAIL=$((FAIL + 1))
+elif [ "$FENCE_UNIQ" != 1 ]; then
+  echo "  FAIL  P11: the two executable manifest literals disagree:"; sed 's/^/          /' <<<"$FENCE_MANIFESTS"
+  FAIL=$((FAIL + 1))
+elif [ "$FENCE_MANIFESTS" != "$GOAL_MANIFEST"$'\n'"$GOAL_MANIFEST" ]; then
+  echo "  FAIL  P11: executed manifest drift — goal='$GOAL_MANIFEST' premerge='$(sed -n 1p <<<"$FENCE_MANIFESTS")'"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  P11: both executed manifest literals agree with /goal"; PASS=$((PASS + 1))
+fi
+if [ "$DOC_MANIFEST" = "$GOAL_MANIFEST" ]; then
+  echo "  PASS  P11: the Constants row documents the same path it executes"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  P11: Constants row says '$DOC_MANIFEST', code uses '$GOAL_MANIFEST'"; FAIL=$((FAIL + 1))
+fi
+
+echo "== P11b: the run dir cannot dirty a foreign working tree =="
+# Phase 0a creates .uberdev/premerge/<RUN_ID>/ INSIDE the repo being packed, and
+# Phase 0b then refuses to build a combine branch over an unclean tree. This repo
+# survives only because its own .gitignore lists `.uberdev/`.
+assert_in "$SCAN_FENCE" 'PREMERGE_IGNORE_POLICY="$UBERDEV_PREMERGE_ROOT/.uberdev/premerge/.gitignore"' \
+  "P11b: the policy is published inside .uberdev/premerge/"
+# NOT at .uberdev/ — that parent is the documented per-repo config root
+# (.uberdev/config.yaml, RFC 0006; .uberdev/config.json, RFC 0007), and a `*` one
+# level up would permanently un-add a repository's own committed config.
+assert_not_in "$SCAN_FENCE" 'PREMERGE_IGNORE_POLICY="[^"]*/\.uberdev/\.gitignore"' \
+  "P11b: the policy does not blanket the repo's .uberdev config root"
+assert_in "$SCAN_FENCE" 'printf '"'"'*\n'"'"' >"$PREMERGE_IGNORE_POLICY"' \
+  "P11b: the policy body is exactly the catch-all, written to the policy path"
+assert_in "$SCAN_FENCE" 'if [ ! -e "$PREMERGE_IGNORE_POLICY" ]' \
+  "P11b: the policy is written no-clobber"
+# No-clobber means "do not truncate someone else's file"; it does NOT mean the
+# file that already existed does the job. Verify the EFFECT.
+assert_in "$SCAN_FENCE" 'git -C "$UBERDEV_PREMERGE_ROOT" check-ignore -q "$PREMERGE_RUN_DIR"' \
+  "P11b: the run dir's ignored-ness is verified, not assumed"
+assert_in "$SCAN_FENCE" 'exit 2' \
+  "P11b: a run dir git can still see is a refusal (anti-vacuity)"
 
 echo ""
 echo "== Summary =="
