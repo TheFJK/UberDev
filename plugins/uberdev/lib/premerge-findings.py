@@ -655,6 +655,37 @@ def _fix_waves(blockers: "list[dict]", max_per_wave: int) -> "list[list[dict]]":
     return waves
 
 
+def _defer_groups(rows: "list[dict]") -> "list[tuple[str, list[int]]]":
+    """The deferred rows, grouped by owning file, in first-appearance order.
+
+    The same decision `_fix_waves` makes for the FIXER, made for the FILER: the
+    downstream agent now opens one issue per file (#722), so an envelope carrying
+    half of a file's findings produces an issue that reads as complete and is not.
+
+    Groups carry row INDICES rather than the rows themselves, because the caller
+    admits most groups whole and row-fills exactly one of them. A positional key
+    is what lets it rebuild the kept list in the rows' ORIGINAL relative order --
+    the property `cmd_defer` has always promised -- without leaning on dict
+    identity or equality to tell two rows apart.
+
+    Paths go through `_repo_path`, not through a bare `.get`, so the group key is
+    the same normalised string `_encode_aggregate` will write into `scope.path`:
+    two spellings of one file must not become two groups. It also means a row
+    with an unusable path refuses here with the same token it would have refused
+    with one step later, rather than raising an unhashable key type out of a verb
+    contracted to exit 0 or 74.
+    """
+    by_file: "dict[str, list[int]]" = {}
+    order: "list[str]" = []
+    for index, row in enumerate(rows):
+        path = _repo_path(row.get("file"))
+        if path not in by_file:
+            by_file[path] = []
+            order.append(path)
+        by_file[path].append(index)
+    return [(path, by_file[path]) for path in order]
+
+
 # --------------------------------------------------------------------------
 # the deferred-findings envelope handed to agents/findings-to-issues.md
 # --------------------------------------------------------------------------
@@ -1457,10 +1488,17 @@ def cmd_defer(args: argparse.Namespace) -> int:
     # union not at all).
     #
     # So: keep the rows that matter most, say how many did not fit, and exit 0 so
-    # the caller can still dispatch. Blockers first -- a surviving blocker is the
-    # single row this verb exists to preserve, and `findings-to-issues` ranks it
-    # above every cleanup row for the same reason. A blocker is dropped only when
-    # every alternative row is also a blocker.
+    # the caller can still dispatch. Blocker-bearing FILES first -- a surviving
+    # blocker is the single row this verb exists to preserve, and
+    # `findings-to-issues` ranks it above every cleanup row for the same reason.
+    #
+    # The unit is the FILE rather than the row (#722) because that agent now
+    # opens one issue per file, so a cleanup file is displaced before any part of
+    # a blocker file is. What the file unit no longer promises is that a blocker
+    # always survives: blocker-bearing files whose rows together exceed the
+    # envelope now cost each other, where a row cut would have kept every blocker
+    # and dropped only cleanup. That is the price of not filing an issue that
+    # reads as complete and is not, and `OVERFLOW=` reports it either way.
     #
     # NOT silent: `OVERFLOW=<n>` is on the output line, always, and the fence is
     # required to surface it. "Dropped and reported" is a different thing from
@@ -1472,12 +1510,56 @@ def cmd_defer(args: argparse.Namespace) -> int:
     # first-occurrence-wins dedupe sees the same ordering it always did.
     overflow = 0
     if len(rows) > MAX_FINDINGS:
-        by_severity = sorted(
-            range(len(rows)),
-            key=lambda i: 0 if rows[i].get("severity") == "blocker" else 1,
+        groups = _defer_groups(rows)
+        ranked = sorted(
+            range(len(groups)),
+            key=lambda i: (
+                0
+                if any(rows[j].get("severity") == "blocker" for j in groups[i][1])
+                else 1,
+                i,
+            ),
         )
-        keep = set(by_severity[:MAX_FINDINGS])
-        overflow = len(rows) - MAX_FINDINGS
+        # WHOLE FILES WHILE THEY FIT, THEN ONE SPLIT FILE -- NOT A HARD STOP.
+        #
+        # Row-filling the first file that does not fit is what makes file-atomic
+        # truncation affordable. Stop dead at that file instead and a 4-row file,
+        # two 30-row files and a 5-row blocker file -- 69 rows against a 64-row
+        # envelope -- file 39 rows where the row cut this replaces files 64.
+        # Losing 25 more findings to avoid splitting one file is the same
+        # maximal-loss trade the refusal this branch replaced was making, wearing
+        # a better argument.
+        #
+        # So exactly ONE file is ever split, it is the highest-priority file that
+        # did not fit, and no lower-priority file jumps the cut: the fill spends
+        # the rest of the budget, so the `break` is arithmetic rather than policy.
+        # One file bigger than the whole envelope needs no arm of its own -- it is
+        # this same rule with no whole file admitted ahead of it.
+        keep: "set[int]" = set()
+        used = 0
+        for index in ranked:
+            members = groups[index][1]
+            if used + len(members) <= MAX_FINDINGS:
+                keep.update(members)
+                used += len(members)
+                continue
+            room = MAX_FINDINGS - used
+            if room:
+                # Blockers first WITHIN the split file, for the same reason they
+                # come first between files: blockers are appended to `rows` last,
+                # so a plain leading run of a mixed file would keep its cleanup
+                # and drop the one row this verb exists to preserve. This orders
+                # the SELECTION only; the rebuild below restores original order.
+                fill = sorted(
+                    members,
+                    key=lambda j: (
+                        0 if rows[j].get("severity") == "blocker" else 1,
+                        j,
+                    ),
+                )
+                keep.update(fill[:room])
+            break
+        overflow = len(rows) - len(keep)
         rows = [row for index, row in enumerate(rows) if index in keep]
 
     out_path = os.path.join(run_dir, "deferred-aggregate.md")
@@ -1486,13 +1568,18 @@ def cmd_defer(args: argparse.Namespace) -> int:
         _encode_aggregate(rows, document["pr_number"], document["run_id"], allow_blockers=True),
     )
     blockers = sum(1 for r in rows if r.get("severity") == "blocker")
-    # TOTAL/BLOCKER/SUGGESTION count what is IN the file; OVERFLOW counts what did
-    # not fit, so TOTAL+OVERFLOW is everything the run had to file. `PATH=` stays
-    # LAST because a run dir may contain spaces -- a field appended after it makes
-    # the path unparseable, so new fields are inserted before it, never appended.
+    files = len({_repo_path(r.get("file")) for r in rows})
+    # TOTAL/BLOCKER/SUGGESTION count what is IN the file; FILES is how many
+    # distinct owning files those rows cover, which is how many issues the
+    # downstream dispatch will open now that it groups by file; OVERFLOW counts
+    # what did not fit, so TOTAL+OVERFLOW is everything the run had to file.
+    # `PATH=` stays LAST because a run dir may contain spaces -- a field appended
+    # after it makes the path unparseable, so new fields are inserted before it,
+    # never appended. FILES= specifically goes BEFORE OVERFLOW= so the fence's
+    # existing `${HEAD##* OVERFLOW=}` suffix read stays exact.
     print(
-        "PREMERGE_DEFER TOTAL=%d BLOCKER=%d SUGGESTION=%d OVERFLOW=%d PATH=%s"
-        % (len(rows), blockers, len(rows) - blockers, overflow, out_path)
+        "PREMERGE_DEFER TOTAL=%d BLOCKER=%d SUGGESTION=%d FILES=%d OVERFLOW=%d PATH=%s"
+        % (len(rows), blockers, len(rows) - blockers, files, overflow, out_path)
     )
     return 0
 

@@ -1012,9 +1012,14 @@ fi
 # run dir may contain spaces and anything trailing the path makes it unparseable.
 # The Phase 5 fence keys on this token (see B24); pinning the whole prefix here is
 # what stops a future edit from reordering or dropping it.
+#
+# `FILES=<n>` (#722) is the same kind of field and obeys the same rule: it is how
+# many distinct owning files those rows cover, which is how many issues the
+# downstream dispatch opens now that the filer groups by file. It is inserted
+# BEFORE OVERFLOW= so the fence's `${HEAD##* OVERFLOW=}` suffix read stays exact.
 case "$(cat "$D/defer.txt")" in
-  "PREMERGE_DEFER TOTAL=3 BLOCKER=1 SUGGESTION=2 OVERFLOW=0 PATH="*)
-    ok "B16: the defer line reports the split, and OVERFLOW=0 on a normal run" ;;
+  "PREMERGE_DEFER TOTAL=3 BLOCKER=1 SUGGESTION=2 FILES=3 OVERFLOW=0 PATH="*)
+    ok "B16: the defer line reports the split, its file count, and OVERFLOW=0 on a normal run" ;;
   *) bad "B16: unexpected defer line: $(cat "$D/defer.txt")" ;;
 esac
 
@@ -1417,8 +1422,8 @@ else
   bad "B24: defer still refuses on overflow (rc=$?): $(cat "$D/b24.err")"
 fi
 case "$(cat "$D/b24.txt")" in
-  "PREMERGE_DEFER TOTAL=64 BLOCKER=5 SUGGESTION=59 OVERFLOW=8 PATH="*)
-    ok "B24: the line reports what was kept and how many did not fit" ;;
+  "PREMERGE_DEFER TOTAL=64 BLOCKER=5 SUGGESTION=59 FILES=64 OVERFLOW=8 PATH="*)
+    ok "B24: the line reports what was kept, over how many files, and how many did not fit" ;;
   *) bad "B24: unexpected overflow line: $(cat "$D/b24.txt")" ;;
 esac
 [ -s "$D/deferred-aggregate.md" ] && ok "B24: the aggregate is written, so PATH= is dispatchable" \
@@ -1437,6 +1442,135 @@ if [ "$B24_KEPT" = "rows=64 cap=64 blockers=5 lib/BLOCK00.sh,lib/BLOCK01.sh,lib/
 else
   bad "B24: the surviving-findings guarantee broke: $B24_KEPT"
 fi
+
+echo "== B30: whole files are kept, and the envelope is never left short =="
+# #722: the downstream filer now opens ONE issue per file, so an envelope that
+# carries 28 of a file's 30 findings produces an issue that reads as complete and
+# is not. Truncation is therefore FILE-atomic — but only down to the boundary
+# file, which row-fills whatever budget the whole files left over.
+#
+# The row-fill is not a nicety, it is what makes the rule safe to ship. A rule
+# that simply STOPPED admitting at the first file that did not fit would file 39
+# of these 69 rows where today's row cut files 64 — it would lose more than the
+# bug it was written to fix, and `#### When the envelope overflows` exists
+# precisely to refuse that trade. So: whole files while they fit, then exactly
+# one split file, and a truncating run always fills the envelope to MAX_FINDINGS.
+#
+# The fixture interleaves two 30-row files so a row cut provably splits BOTH of
+# them (alpha=28 beta=27) while the file-atomic rule splits only the boundary one
+# (alpha=30 beta=25). The blockers live in a THIRD file appended last, so the
+# blocker-file-first ranking is exercised rather than assumed.
+D="$(new_case)"
+python3 -I -B -c '
+import json, sys
+rows = []
+for i in range(30):
+    rows.append({"file": "lib/alpha.sh", "line": i + 1, "summary": "alpha %03d" % i,
+                 "failure_scenario": "d", "category": "reuse", "severity": "suggestion"})
+    rows.append({"file": "lib/beta.sh", "line": i + 1, "summary": "beta %03d" % i,
+                 "failure_scenario": "d", "category": "reuse", "severity": "suggestion"})
+json.dump({"schema_version": 1, "level": "xhigh", "pr_number": 670,
+           "run_id": sys.argv[2], "findings": rows},
+          open(sys.argv[1] + "/in.json", "w"))
+' "$D" "$RUN_ID"
+plan_at "$D" 1 "$SHA_A" || bad "B30: setup attempt 1 failed: $(cat "$D/err.txt")"
+python3 -I -B -c '
+import json, sys
+rows = [{"file": "lib/gamma.sh", "line": i + 1, "summary": "gamma %03d" % i,
+         "failure_scenario": "d", "category": "reuse", "severity": "suggestion"}
+        for i in range(4)]
+rows += [{"file": "lib/BLOCK.sh", "line": i + 1, "summary": "block %02d" % i,
+          "failure_scenario": "d", "severity": "blocker"} for i in range(5)]
+json.dump({"schema_version": 1, "level": "xhigh", "pr_number": 670,
+           "run_id": sys.argv[2], "findings": rows},
+          open(sys.argv[1] + "/in.json", "w"))
+' "$D" "$RUN_ID"
+plan_at "$D" 2 "$SHA_B" || bad "B30: setup attempt 2 failed: $(cat "$D/err.txt")"
+if python3 -I -B "$LIB" defer --run-dir "$D" --attempt 2 --include-blockers \
+     >"$D/b30.txt" 2>"$D/b30.err"; then
+  ok "B30: 69 deferred rows exit 0 instead of filing nothing"
+else
+  bad "B30: defer refused instead of truncating: $(cat "$D/b30.err")"
+fi
+B30_SHAPE="$(python3 -I -B -c '
+import collections, json, sys
+doc = json.loads(open(sys.argv[1], encoding="utf-8").read().splitlines()[1])
+per_file = collections.Counter(f["scope"]["path"] for f in doc["findings"])
+print(" ".join("%s=%d" % kv for kv in sorted(per_file.items())))
+' "$D/deferred-aggregate.md")"
+if [ "$B30_SHAPE" = "lib/BLOCK.sh=5 lib/alpha.sh=30 lib/beta.sh=25 lib/gamma.sh=4" ]; then
+  ok "B30: only the boundary file is split — a row cut would have split both 30-row files"
+else
+  bad "B30: wrong admission shape: $B30_SHAPE"
+fi
+# The split file keeps a LEADING run of its own rows, in the reviewer's own
+# order, so which half of a file survives is reproducible rather than incidental.
+B30_BETA="$(python3 -I -B -c '
+import json, sys
+doc = json.loads(open(sys.argv[1], encoding="utf-8").read().splitlines()[1])
+lines = sorted(f["scope"]["line"] for f in doc["findings"]
+               if f["scope"]["path"] == "lib/beta.sh")
+print("n=%d first=%d last=%d" % (len(lines), lines[0], lines[-1]))
+' "$D/deferred-aggregate.md")"
+if [ "$B30_BETA" = "n=25 first=1 last=25" ]; then
+  ok "B30: the split file keeps a leading run of its own rows, not an arbitrary subset"
+else
+  bad "B30: the split file's survivors are not the reviewer's leading run: $B30_BETA"
+fi
+case "$(cat "$D/b30.txt")" in
+  "PREMERGE_DEFER TOTAL=64 BLOCKER=5 SUGGESTION=59 FILES=4 OVERFLOW=5 PATH="*)
+    ok "B30: the envelope is filled to the cap, and FILES= says how many issues will open" ;;
+  *) bad "B30: unexpected defer line: $(cat "$D/b30.txt")" ;;
+esac
+
+# ONE file larger than the whole envelope is the case with no whole-file answer:
+# file-atomic there would mean filing NOTHING, the maximal-loss outcome this
+# branch exists to prevent. It splits, and the split keeps every blocker — the
+# row this verb exists to preserve — rather than a leading run that happens to be
+# all cleanup.
+D="$(new_case)"
+python3 -I -B -c '
+import json, sys
+rows = [{"file": "lib/huge.sh", "line": i + 1, "summary": "sugg %03d" % i,
+         "failure_scenario": "d", "category": "reuse", "severity": "suggestion"}
+        for i in range(64)]
+json.dump({"schema_version": 1, "level": "xhigh", "pr_number": 670,
+           "run_id": sys.argv[2], "findings": rows},
+          open(sys.argv[1] + "/in.json", "w"))
+' "$D" "$RUN_ID"
+plan_at "$D" 1 "$SHA_A" || bad "B30: single-file setup 1 failed: $(cat "$D/err.txt")"
+python3 -I -B -c '
+import json, sys
+rows = [{"file": "lib/huge.sh", "line": 100 + i, "summary": "block %03d" % i,
+         "failure_scenario": "d", "severity": "blocker"} for i in range(5)]
+json.dump({"schema_version": 1, "level": "xhigh", "pr_number": 670,
+           "run_id": sys.argv[2], "findings": rows},
+          open(sys.argv[1] + "/in.json", "w"))
+' "$D" "$RUN_ID"
+plan_at "$D" 2 "$SHA_B" || bad "B30: single-file setup 2 failed: $(cat "$D/err.txt")"
+if python3 -I -B "$LIB" defer --run-dir "$D" --attempt 2 --include-blockers \
+     >"$D/b30b.txt" 2>"$D/b30b.err"; then
+  ok "B30: a single oversized file exits 0 rather than refusing"
+else
+  bad "B30: defer refused on a single oversized file: $(cat "$D/b30b.err")"
+fi
+B30_HUGE="$(python3 -I -B -c '
+import json, sys
+doc = json.loads(open(sys.argv[1], encoding="utf-8").read().splitlines()[1])
+rows = doc["findings"]
+print("rows=%d blockers=%d" % (
+    len(rows), sum(1 for f in rows if f["severity"] == "blocker")))
+' "$D/deferred-aggregate.md")"
+if [ "$B30_HUGE" = "rows=64 blockers=5" ]; then
+  ok "B30: the one file that must be split still files 64 rows, and loses no blocker"
+else
+  bad "B30: the split under-filled the envelope or dropped a blocker: $B30_HUGE"
+fi
+case "$(cat "$D/b30b.txt")" in
+  "PREMERGE_DEFER TOTAL=64 BLOCKER=5 SUGGESTION=59 FILES=1 OVERFLOW=5 PATH="*)
+    ok "B30: one file larger than the envelope reports FILES=1, not zero rows" ;;
+  *) bad "B30: single oversized file produced: $(cat "$D/b30b.txt")" ;;
+esac
 
 echo "== B25: a malformed artifact refuses with a token, never a traceback =="
 # The module docstring promises 'every failure exits non-zero with a stable token
