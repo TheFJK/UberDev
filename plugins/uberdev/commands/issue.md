@@ -10,7 +10,9 @@ User's description: $ARGUMENTS
 
 **Usage:** `/issue <description> [--no-explore]`
 
-Auto-classifies → dispatches **two Task agents** in a single assistant turn (`uberdev:codebase-scout` + `uberdev:triage-scout`, both running on inherit — the session model) → drafts the body inline from their YAML returns → confirms with the user → creates → offers `/solve` as follow-up. Median wall-clock under 30s.
+Auto-classifies → dispatches **two Task agents** in a single assistant turn (`uberdev:codebase-scout` + `uberdev:triage-scout`, both running on inherit — the session model) → drafts the body inline from their YAML returns → **creates** → prints the issue URL and offers `/solve` as follow-up. Median wall-clock under 30s, in ONE turn.
+
+**Autopilot (always ON).** `/issue` runs end to end and asks no approval question before `gh issue create`. Same precedent as `/merge`, where the `auto_confirm` config key is a documented no-op (`skills/using-uberdev/references/configuration.md`, the `auto_confirm` precedence entry), and the same principle as this repo's "No HARD-GATE approval checkpoints" row in `README.md`'s design-decisions table. Filing an issue is trivially reversible — close it, edit it — so the blast radius never justified a gate. There is exactly **one** halt, in Phase 5: an **open** duplicate returned by `uberdev:triage-scout`. Scout degradations (`codebase-scout` `status: BLOCKED`, `triage-scout` `status: DONE_WITH_CONCERNS`, an empty `valid_labels`) are **reported** in the Phase 7 result block and never promoted to gates. There is no config key and no `--confirm` flag: autopilot is unconditional.
 
 ## Phase 0: Detect repo + parse flags
 
@@ -60,9 +62,9 @@ Each brief carries the literal resolved values for `description` (the user's `$D
 - **`uberdev:codebase-scout`** — receives `{description, issue_type, working_dir, model_hint: inherit}` and returns YAML with `likely_area: [paths]` and (if `issue_type=fix`) `likely_root_cause: "one-line hypothesis"`. Drives the bug template's `## Likely area` and `## Likely root cause` sections.
 - **`uberdev:triage-scout`** — receives `{description, issue_type, working_dir, repo_slug, model_hint: inherit}` and returns YAML with `duplicates: [{number, title, state}]`, `valid_labels: [...]`, `valid_scope: "..."`, `commitlint_present: true|false`. Drives the duplicate section, the `--label` flags, and the title scope. (`issue_type` is required so the scout picks the base label — `bug` for `fix`, `enhancement` for `feat` — without re-classifying.)
 
-If the codebase scout returns `status: BLOCKED` (no real paths grounded), the main thread substitutes `"No clear area identified — defer to /brainstorm"` in the `## Likely area` section. **Never invent paths.**
+If the codebase scout returns `status: BLOCKED` (no real paths grounded), the main thread substitutes `"No clear area identified — defer to /brainstorm"` in the `## Likely area` section. **Never invent paths.** This is a degradation, not a gate: record it as a `degradation:` line in the Phase 7 result block and carry on to Phase 3.
 
-If the triage scout returns `status: DONE_WITH_CONCERNS` for `valid_labels` (e.g. `gh label list` failed), the main thread proceeds without a `--label` flag and notes the omission to the user before Phase 4.
+If the triage scout returns `status: DONE_WITH_CONCERNS` for `valid_labels` (e.g. `gh label list` failed), the main thread proceeds without a `--label` flag and records the omission as a `degradation:` line in the Phase 7 result block. It does **not** halt and it does **not** ask.
 
 ## Phase 3: Compose body from scout returns
 
@@ -77,7 +79,7 @@ Parse both YAML returns from Phase 2 and:
 7. **Do not** include the deprecated "Current ecosystem", "Constraints", or "Security signals" headings — they are removed from the templates entirely (see Phase 4 templates below).
 8. Emit the **scope declaration** as the last line of the body: `<!-- uberdev-scope v=1 files=<comma-joined paths> -->`. List the files a fix is expected to **change** — never the files cited as evidence. `lib/solve_triage.py` reads this block as fact and sizes the solver fleet off it (1 agent vs 33), falling back to a prose heuristic only when it is absent, so the declaration is the cheapest accuracy in the pipeline. When the scouts return nothing concrete enough to name, emit `files=` with an empty value: that is a recorded "scope not known yet", and it is always better than a guess. Being an HTML comment it renders invisibly, so it costs a human reader nothing.
 
-If any blocking concern surfaces (e.g. an open duplicate match), raise it to the user **before** drafting Phase 4.
+Nothing in this phase halts. The one halt condition in the whole command is an **open** duplicate, and it is evaluated in Phase 5 against `triage-scout.duplicates` — after the draft exists, so the halt can show both the live match and what would otherwise have been filed. Every other concern (a `BLOCKED` codebase scout, a `DONE_WITH_CONCERNS` triage scout, an empty `valid_labels`, a substituted scope) is a **degradation**: carry it into the Phase 7 result block and keep going.
 
 ## Body authoring rules — WHAT, not HOW
 
@@ -87,7 +89,7 @@ This boundary is enforced both by the templates below (the bug template's `## Li
 
 ## Phase 4: Draft Issue
 
-Show the user a complete draft BEFORE creating.
+Compose the complete draft. It is a record, not a prompt: it is rendered in the Phase 7 result block as what was filed, and it is shown mid-run only when the Phase 5 open-duplicate gate fires.
 
 ### Bug (`fix`)
 
@@ -189,9 +191,14 @@ Show the user a complete draft BEFORE creating.
 <!-- uberdev-scope v=1 files=path/to/one.ts,path/to/two.ts -->
 ```
 
-## Phase 5: Confirm
+## Phase 5: Open-duplicate gate (the only halt)
 
-**STOP and show the draft to the user.** Wait for confirmation, edits, or approval. Do not create the issue yet.
+Evaluate one predicate against the Phase 2 `triage-scout` return: does `duplicates` contain any entry whose `state` is `open`?
+
+- **No open duplicate** — `duplicates` is empty, or every entry is `state: closed`. Proceed **straight to Phase 6**. Do not print the draft here, do not ask for approval, do not end the turn. This is the autopilot path and it is the common one.
+- **At least one open duplicate** — **STOP.** Print the Phase 4 draft, then every open match as `#<number> — <title> (open)`, and ask whether to file anyway, comment on the existing issue instead, or abandon. Do not run `gh issue create` until the user answers. An open duplicate is a fact returned by `triage-scout`, not a judgement call, and a second copy of a live issue is the one outcome that closing it does not cleanly undo.
+
+**Closed** duplicates never halt. They are regression evidence and already render as `## Possible duplicates` with the regression-warning suffix (Phase 3, step 4).
 
 ## Phase 6: Create issue
 
@@ -214,20 +221,23 @@ echo "$ISSUE_URL"
 ISSUE_NUM=$(echo "$ISSUE_URL" | grep -oE '[0-9]+$')
 ```
 
-## Phase 7: Offer follow-up
+## Phase 7: Report what was filed
 
-Print a structured confirmation so the user can copy-paste the next action:
+Print a structured result block. It is the record of what got created and the copy-paste handle for the next action:
 
 ```
 Issue #$ISSUE_NUM created: $ISSUE_URL
 Labels: <comma,separated>
 Triage hint: <tier>
+degradation: <one line per scout degradation; omit this line entirely when both scouts returned status: DONE>
 
 Next step: /solve $ISSUE_NUM
 → spawned workflow: <trivial: direct edit | small: lightweight plan + TDD | medium: full brainstorm>
 ```
 
-**Do not run `/solve` automatically** — always wait for the user.
+Never convert a `degradation:` line into a question — it is reported output, not a gate.
+
+**Do not run `/solve` automatically** — always wait for the user. Autopilot covers `gh issue create` and stops there; dispatching a solver is a different blast radius and stays user-invoked.
 
 ## Rules
 
@@ -239,7 +249,7 @@ Next step: /solve $ISSUE_NUM
 - **Severity mandatory on bugs** — default P2; surface on-call concerns early.
 - **Triage hint mandatory in every issue body** — `/solve` parses it to pick the tier without redoing classification.
 - **Scope declaration mandatory in every issue body** — the trailing `<!-- uberdev-scope v=1 files=… -->` block names the files a fix is expected to CHANGE, and `lib/solve_triage.py` reads it as fact rather than scraping paths out of the prose. Left off, triage falls back to a heuristic and this repo's `path:line` evidence style makes every well-evidenced issue look bigger than it is (#614). A file list here is a size signal, not an implementation plan — it does not breach the WHAT/HOW boundary below, which is about the prose. When the change set is genuinely unknown, `files=` empty is the honest answer.
-- **Always confirm** — show the full draft, wait for explicit approval before `gh issue create`.
+- **Autopilot: never confirm** — `/issue` creates without an approval prompt and the draft is a record, not a question. The single exception is Phase 5's open-duplicate gate. Scout degradations are reported in the Phase 7 result block, never turned into gates. No config key, no `--confirm` flag — matching the `/merge` precedent where `auto_confirm` is a documented no-op.
 - **No screenshots section** — user adds those manually after creation if needed.
 - **WHAT/HOW boundary enforced** — issue body never contains an implementation checklist or fix design; that work belongs in `/uberdev:brainstorm`. Bug template's `## Likely root cause` is a causal triple (symptom/mechanism/owning code), not a file list. Feat template's `## What changes` describes externally visible result, not implementation strategy.
 - **Model override** — to force a specific subagent model regardless of the session, set `CLAUDE_CODE_SUBAGENT_MODEL=<model>` as a global override. Tracked at `affaan-m/everything-claude-code#173`.
