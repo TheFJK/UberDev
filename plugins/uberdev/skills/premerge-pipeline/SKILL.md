@@ -116,7 +116,7 @@ PREMERGE_VERSION_MANIFEST = plugins/uberdev/.claude-plugin/plugin.json
 PREMERGE_CONVERGE_DEFAULT= 3              # REPAIR rounds, --converge dials it
 PREMERGE_REPAIR_CEILING  = 6              # the runaway backstop --converge cannot pass
 PREMERGE_WAIT_CI_CEILING = 8              # WAIT_CI re-probes before the loop calls CI dead
-PREMERGE_RERUN_FLAKY_CAP = 1              # `gh run rerun` attempts per ATTEMPT INDEX
+PREMERGE_RERUN_FLAKY_CAP = 1              # `gh run rerun` attempts per RUN
 ```
 
 `PREMERGE_REPAIR_CEILING` and `PREMERGE_WAIT_CI_CEILING` are **declared in
@@ -898,15 +898,27 @@ PREMERGE_SCOPE_RAW="$PREMERGE_RUN_DIR/fix-scope-$PREMERGE_ATTEMPT_PAD.raw"
 # an empty ASSIGNED makes every file stray (loud, closed), an empty MODIFIED
 # makes none (silent, open). So both are written the same way -- a producer whose
 # own status is checked, then a `sort` whose own status is checked.
+# `LC_ALL=C` ON EVERY MEMBER OF THE sort/comm TRIO, INCLUDING `comm` ITSELF.
+#
+# This guard compares PATHS AS BYTES, and locale collation has no business in
+# it. `sort` orders by the ambient collation and `comm`'s merge walk assumes the
+# order its own collation would produce; when the two disagree the walk
+# desynchronises and reports a file present in BOTH lists as a stray -- which
+# aborts an attempt whose fixers behaved correctly. Demonstrated: the same two
+# paths sorted under en_US.UTF-8 and under C, compared with `comm -23`, print
+# `lib/Zebra.sh` as a stray. The two sorts happen to share a shell today, so
+# they agree with each other by accident; pinning makes the guard's correctness
+# a property of the code rather than of an inherited environment variable that
+# differs across the three CI runners.
 jq -r '.waves[][].file' <"$PREMERGE_WAVES_FILE" >"$PREMERGE_SCOPE_RAW" || exit 2
-sort -u <"$PREMERGE_SCOPE_RAW" >"$PREMERGE_ASSIGNED_LIST" || exit 2
+LC_ALL=C sort -u <"$PREMERGE_SCOPE_RAW" >"$PREMERGE_ASSIGNED_LIST" || exit 2
 # `--no-renames`, because rename detection reports only the NEW path and a scope
 # guard reading `--name-only` alone is bypassable by a rename -- a defect this
 # repo has already shipped once. Against `HEAD`, since nothing is staged yet,
 # and `-C "$PREMERGE_ROOT"` so the paths are repo-relative like the plan's are.
 git -C "$PREMERGE_ROOT" diff --name-only --no-renames HEAD >"$PREMERGE_SCOPE_RAW" || exit 2
-sort -u <"$PREMERGE_SCOPE_RAW" >"$PREMERGE_MODIFIED_LIST" || exit 2
-PREMERGE_STRAY="$(comm -23 "$PREMERGE_MODIFIED_LIST" "$PREMERGE_ASSIGNED_LIST")" || exit 2
+LC_ALL=C sort -u <"$PREMERGE_SCOPE_RAW" >"$PREMERGE_MODIFIED_LIST" || exit 2
+PREMERGE_STRAY="$(LC_ALL=C comm -23 "$PREMERGE_MODIFIED_LIST" "$PREMERGE_ASSIGNED_LIST")" || exit 2
 if [ -n "$PREMERGE_STRAY" ]; then
   printf 'error: attempt %s modified files no fixer wave was assigned:\n%s\nrefusing to sweep them into the stack commit\n' \
     "$PREMERGE_ATTEMPT" "$PREMERGE_STRAY" >&2
@@ -1177,6 +1189,31 @@ printf 'PREMERGE GATE ATTEMPT=%s RC=%s VERDICT=%s CI=%s MERGEABLE=%s REASONS=%s\
 exit 0
 ```
 
+### What `PREMERGE_PUSHED` is at each call site
+
+The fence takes `PREMERGE_PUSHED` with `:?` and no default, because *"defaulting
+it to 0 would make the SAFE answer the one you get by forgetting"*. That only
+holds if the file says what the value **is** at every place the gate runs — and
+it used to say so at exactly one of them (`### 4c` step 3). A controller left to
+infer the rest passes `0` at a gate that just pushed, `no_checks` is read as
+green, and the stack passes on a build that has not started: the whole race
+`--after-push` exists to close, re-entered through the input that closes it.
+
+Every call site, and the value each one passes:
+
+| Gate call site | `PREMERGE_PUSHED` | Why |
+| --- | --- | --- |
+| Phase 3, first entry at attempt 1 | `1` | `### 0c` pushed the stack branch and opened the PR immediately before Phase 1. The branch is new, so its checks are the ones just triggered |
+| Phase 3, re-entry after `premerge-fix-commit` | `1` | That fence ends in `git push origin "$PREMERGE_BRANCH"` |
+| Phase 3, re-entry after `premerge-ci-publish` (commit arm **or** rebase arm) | `1` | Both arms end in a push; the rebase arm's is a `--force-with-lease` |
+| Phase 3, re-probe from a `WAIT_CI` decision | `1` | The re-probe asks about the SAME push that produced the wait. See the row in `### 3c` |
+| `### 4c` step 3, after the simplify commit | `1` | Already stated there; repeated here so this table is the whole list |
+| Phase 3 run against a stack nothing has pushed to since its last probe | `0` | The only `0` case, and it is not reachable from the loop above — it exists for a manual re-run of the fence on an already-settled branch |
+
+There is deliberately no "controller decides" row. If a future arm ends without
+a push, it adds a row here; a gate whose input is inferred is a gate whose
+correctness is inferred.
+
 ### The CI settle window
 
 A push restarts checks, and `test.yml` fires on both `push` and `pull_request`
@@ -1342,7 +1379,7 @@ classification still run, so the summary still names the failure class.
 | `code_bug` | one `uberdev:ci-code-fixer` at the `signal_anchor` | yes |
 | `env_drift` | one `uberdev:ci-code-fixer` at the `signal_anchor` | yes |
 | `stale_base` | one `uberdev:ci-rebase-handler` | yes |
-| `flaky` | the `premerge-ci-rerun` fence, then `gh run rerun --failed <run-id>` on `DECISION=RERUN` | no — but **bounded**, see below |
+| `flaky` | the `premerge-ci-rerun` fence, then `gh run rerun --failed <run-id>` on `DECISION=RERUN` | yes — it is a `CONTINUE`, and `## Phase 2` advances on every one; separately **capped per run**, see below |
 | `billing_quota` | none — stop | stops the loop |
 | `platform_outage` | none — stop | stops the loop |
 | anything else, or `AMBIGUOUS` | none — stop | stops the loop |
@@ -1353,17 +1390,28 @@ exhaustion, which describes the wrong thing. Stop and name it.
 
 ##### The flaky rerun is bounded, and the bound is read from the ledger
 
-`flaky` is the one CI route that does not consume an attempt, which makes it the
-same shape as `WAIT_CI` and the same hazard `### 4c` names outright: *an
-uncounted wait is an unbounded loop under a command that promises it will not
-loop forever.* `WAIT_CI` is bounded from `converge.jsonl` by `_count_wait_rows`
-— and that function filters on `decision == "WAIT_CI"`, so the `CONTINUE` rows
-this route appends are invisible to it. `PREMERGE_RERUN_FLAKY_CAP` was therefore
-prose with nothing behind it, and the loop it failed to bound is not exotic:
-attempt N with zero blockers and `ci=red` re-enters converge at index N, reads
-the same `classified-NN.json` against the same predecessor, answers `CONTINUE`
-again, and reruns again — forever, at one attempt index, with the repair budget
-untouched.
+`flaky` is the CI route that repairs **nothing** — it re-runs the same build
+hoping for a different answer — which makes it the same shape as `WAIT_CI` and
+the same hazard `### 4c` names outright: *an uncounted wait is an unbounded loop
+under a command that promises it will not loop forever.* `WAIT_CI` is bounded
+from `converge.jsonl` by `_count_wait_rows` — and that function filters on
+`decision == "WAIT_CI"`, so the `CONTINUE` rows this route appends are invisible
+to it.
+
+**The bound is per RUN, and that is a correction.** It was written per attempt
+index, which made `PREMERGE_RERUN_FLAKY_CAP` prose with nothing behind it: a
+`CONTINUE` advances `PREMERGE_ATTEMPT` unconditionally (`## Phase 2` rule 1
+carves out only `WAIT_CI`), so each pass through this fence asked about a fresh
+index, found only the row that routed it there, and computed `USED=0` every
+time. `gh run rerun` fired on every attempt until the repair budget ran out —
+spending on reruns the budget that exists for fixing blockers, which is the
+same loss as an unbounded loop arriving on a timer.
+
+Making `flaky` non-advancing instead would have collided with `## Phase 2`'s
+**"Never re-use an index"**: a second Phase 2 at an index that already has
+evidence overwrites `classified-<NN>.json` in place, so the ledger's row for
+that attempt would attest to a tree the artifact no longer holds. The index
+advances; the rerun budget is counted across the run.
 
 Run this fence **before every `gh run rerun`**, and rerun only on
 `DECISION=RERUN`. On `DECISION=STOP_FLAKY_CAP` the loop stops not-green with
@@ -1384,14 +1432,26 @@ PREMERGE_LEDGER="$PREMERGE_RUN_DIR/converge.jsonl"
 # unbounded loop. This is the same reasoning `_count_wait_rows` is built on,
 # applied to the arm it does not cover.
 #
-# Every re-entry into converge at THIS attempt index that answered CONTINUE with
-# `ci=red` still among its reasons is one pass through this route. The first is
-# the pass that routed us here; every later one is a rerun that came back red.
+# KEYED ON THE RUN, NOT ON THE ATTEMPT INDEX.
+#
+# It used to filter `.attempt == $want`, and that made the cap dead prose: a
+# `CONTINUE` advances `PREMERGE_ATTEMPT` unconditionally (`## Phase 2`, rule 1 —
+# only `WAIT_CI` is carved out), so the next pass through this fence asks about
+# a FRESH index, finds the one row that routed it here, and computes USED=0
+# forever. `gh run rerun` then fired on every attempt until the repair budget
+# ran out — spending on reruns the budget that exists for fixing blockers.
+#
+# Keying on the index could not be repaired by making `flaky` non-advancing
+# either: `## Phase 2`'s "Never re-use an index" exists because a second Phase 2
+# at an index that already has evidence OVERWRITES `classified-<NN>.json` in
+# place, leaving the ledger's row attesting to a tree the artifact no longer
+# holds. So the index keeps advancing, and the rerun budget — the thing that
+# actually needs bounding — is counted across the whole run.
 PREMERGE_RED_CONTINUES=0
 if [ -s "$PREMERGE_LEDGER" ]; then
-  PREMERGE_RED_CONTINUES="$(jq -s --argjson want "$PREMERGE_ATTEMPT" '
+  PREMERGE_RED_CONTINUES="$(jq -s '
     [ .[]
-      | select(.attempt == $want and .decision == "CONTINUE")
+      | select(.decision == "CONTINUE")
       | select(((.reasons_other // []) | index("ci=red")) != null)
     ] | length' <"$PREMERGE_LEDGER")" || exit 2
 fi
@@ -1527,16 +1587,19 @@ case "$PREMERGE_CI_ARM" in
     fi
     PREMERGE_CI_ALLOWED="$PREMERGE_RUN_DIR/ci-scope-$PREMERGE_ATTEMPT_PAD.sorted"
     PREMERGE_CI_CHANGED="$PREMERGE_RUN_DIR/ci-scope-$PREMERGE_ATTEMPT_PAD.changed"
-    sort -u <"$PREMERGE_CI_SCOPE" >"$PREMERGE_CI_ALLOWED" || exit 2
+    # `LC_ALL=C` on the sort/comm trio for the same reason the fix-commit guard
+    # pins it: this compares paths as bytes, and a sort/comm collation
+    # disagreement reports a file present in both lists as a stray.
+    LC_ALL=C sort -u <"$PREMERGE_CI_SCOPE" >"$PREMERGE_CI_ALLOWED" || exit 2
     # `--no-renames`, because rename detection reports only the NEW path and a
     # scope guard reading `--name-only` alone is bypassable by a rename.
     git -C "$PREMERGE_ROOT" diff --name-only --no-renames "$PREMERGE_CI_BEFORE" HEAD >"$PREMERGE_CI_RAW" || exit 2
-    sort -u <"$PREMERGE_CI_RAW" >"$PREMERGE_CI_CHANGED" || exit 2
+    LC_ALL=C sort -u <"$PREMERGE_CI_RAW" >"$PREMERGE_CI_CHANGED" || exit 2
     if [ ! -s "$PREMERGE_CI_CHANGED" ]; then
       printf 'PREMERGE CI PUBLISH=none REASON=no-edits ARM=commit ATTEMPT=%s\n' "$PREMERGE_ATTEMPT" >&2
       exit 0
     fi
-    PREMERGE_CI_STRAY="$(comm -23 "$PREMERGE_CI_CHANGED" "$PREMERGE_CI_ALLOWED")" || exit 2
+    PREMERGE_CI_STRAY="$(LC_ALL=C comm -23 "$PREMERGE_CI_CHANGED" "$PREMERGE_CI_ALLOWED")" || exit 2
     if [ -n "$PREMERGE_CI_STRAY" ]; then
       printf 'error: the CI repair modified files outside its signal_anchor scope:\n%s\nrefusing to publish\n' \
         "$PREMERGE_CI_STRAY" >&2
@@ -1558,10 +1621,27 @@ case "$PREMERGE_CI_ARM" in
     PREMERGE_FORK_AFTER="$(git merge-base HEAD "origin/$PREMERGE_BASE")" || exit 2
     PREMERGE_COUNT_BEFORE="$(git rev-list --count --no-merges "$PREMERGE_FORK_BEFORE..$PREMERGE_CI_LEASE")" || exit 2
     PREMERGE_COUNT_AFTER="$(git rev-list --count --no-merges "$PREMERGE_FORK_AFTER..HEAD")" || exit 2
-    if [ "$PREMERGE_COUNT_BEFORE" != "$PREMERGE_COUNT_AFTER" ]; then
-      printf 'error: the rebase changed the stack commit count (%s -> %s); refusing to force-push\n' \
+    # FEWER COMMITS IS THE REPAIR WORKING, NOT THE REPAIR MISBEHAVING.
+    #
+    # This was `!=`, which is stricter than the question the comment above
+    # actually poses ("added none of its own") and blocked exactly the case it
+    # gates. `stale_base` is most often caused by one of the stacked PRs landing
+    # on the base by hand while /premerge runs; the rebase then drops that PR's
+    # now-empty commits, AFTER < BEFORE, and this refused. Refusing here is the
+    # worst available outcome: the branch is already rewritten locally, the
+    # force-push never happens, and there is no recovery arm -- a diverged local
+    # branch and an unpublished repair. Only growth is suspicious.
+    if [ "$PREMERGE_COUNT_AFTER" -gt "$PREMERGE_COUNT_BEFORE" ]; then
+      printf 'error: the rebase ADDED commits (%s -> %s); refusing to force-push\n' \
         "$PREMERGE_COUNT_BEFORE" "$PREMERGE_COUNT_AFTER" >&2
       exit 2
+    fi
+    if [ "$PREMERGE_COUNT_AFTER" -lt "$PREMERGE_COUNT_BEFORE" ]; then
+      # Said out loud rather than passed silently: a dropped commit is a real
+      # change to what the stack carries, and the operator reading this run's
+      # log is the one who decides whether the PR list still describes it.
+      printf 'PREMERGE CI REBASE_DROPPED BEFORE=%s AFTER=%s (commits already on %s)\n' \
+        "$PREMERGE_COUNT_BEFORE" "$PREMERGE_COUNT_AFTER" "$PREMERGE_BASE" >&2
     fi
     git push --force-with-lease="$PREMERGE_BRANCH:$PREMERGE_CI_LEASE" origin "$PREMERGE_BRANCH" >/dev/null 2>&1 || exit 2
     printf 'PREMERGE CI PUBLISH=%s ARM=rebase ATTEMPT=%s COMMITS=%s\n' \
@@ -1661,9 +1741,85 @@ reuse that path (its routed edge does not admit a `premerge` carrier, and it
 needs the `Workflow` tool this command deliberately does not grant), so it
 enforces the same rule at its own seam.
 
-Commit once, as `refactor(premerge): apply simplify lenses to the stack`, using
-the same branch assertion and untracked-file refusal as the Phase 2a commit
-fence. Push.
+**Before committing, write the allowed set.** 4b dispatches the same
+`general-purpose` one-file-per-agent waves as 2a, with the same *"Edit ONLY
+&lt;path&gt;"* prompt, and commits with the same `git add -u` — so it needs the same
+enforcement, and it had only the branch assertion and the untracked refusal.
+Neither catches the agent that edited a **second tracked file** anyway, or a
+stray hunk the CI repair left in the tree earlier in the run; `git add -u` sweeps
+both into `refactor(premerge)` unreviewed. That is the fail-open `## Common
+Mistakes` calls out, and a prompt rule cannot close it.
+
+4b has no `fix-waves-<NN>.json` to compare against, so the merged lens result set
+IS the allowed set — write one repo-relative path per line, from the same merged
+`(path, line)` roster the waves were dispatched from:
+
+```
+$PREMERGE_RUN_DIR/simplify-scope-<NN>.allowed
+```
+
+Then commit with the fence below, which is the Phase 2a guard with that file as
+its assigned list. Push.
+
+```bash uberdev-executable origin=premerge-simplify-commit
+set -u
+RUN_ID="${RUN_ID:?RUN_ID must be prefixed onto this fence by the orchestrator}"
+PREMERGE_ATTEMPT="${PREMERGE_ATTEMPT:?PREMERGE_ATTEMPT must be prefixed onto this fence by the orchestrator}"
+PREMERGE_BRANCH="${PREMERGE_BRANCH:?PREMERGE_BRANCH must be prefixed onto this fence by the orchestrator}"
+PREMERGE_ROOT="$(git rev-parse --show-toplevel)" || exit 2
+PREMERGE_RUN_DIR="$PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
+PREMERGE_ATTEMPT_PAD="$(printf '%02d' "$PREMERGE_ATTEMPT")"
+
+PREMERGE_HEAD_BRANCH="$(git symbolic-ref -q --short HEAD)" || PREMERGE_HEAD_BRANCH=""
+[ "$PREMERGE_HEAD_BRANCH" = "$PREMERGE_BRANCH" ] || {
+  printf 'error: expected to be on %s but HEAD is %s; refusing to commit the simplify pass\n' \
+    "$PREMERGE_BRANCH" "${PREMERGE_HEAD_BRANCH:-(detached)}" >&2
+  exit 2
+}
+PREMERGE_DIRTY="$(git status --porcelain)" || exit 2
+if [ -z "$PREMERGE_DIRTY" ]; then
+  printf 'PREMERGE SIMPLIFY COMMIT=none REASON=no-edits\n' >&2
+  exit 0
+fi
+PREMERGE_UNTRACKED="$(git ls-files --others --exclude-standard)" || exit 2
+if [ -n "$PREMERGE_UNTRACKED" ]; then
+  printf 'error: simplify agents left untracked files, which they were forbidden to create:\n%s\n' \
+    "$PREMERGE_UNTRACKED" >&2
+  exit 2
+fi
+
+# ---- the scope guard, identical in shape to Phase 2a ----------------------
+# Same three rules, for the same reasons documented there: an absent allowed
+# list is a refusal (not an empty set), NEITHER list may be produced by a
+# pipeline (`|| exit 2` would bind to `sort`, which succeeds on empty input and
+# fails OPEN on the modified side), and `LC_ALL=C` pins the sort/comm pair so a
+# collation disagreement cannot report a file present in both lists as a stray.
+PREMERGE_SIMPLIFY_SCOPE="$PREMERGE_RUN_DIR/simplify-scope-$PREMERGE_ATTEMPT_PAD.allowed"
+if [ ! -s "$PREMERGE_SIMPLIFY_SCOPE" ]; then
+  printf 'error: no allowed set at %s; nothing declares which files the lens waves could touch\n' \
+    "$PREMERGE_SIMPLIFY_SCOPE" >&2
+  exit 2
+fi
+PREMERGE_SIMPLIFY_ALLOWED="$PREMERGE_RUN_DIR/simplify-scope-$PREMERGE_ATTEMPT_PAD.sorted"
+PREMERGE_SIMPLIFY_RAW="$PREMERGE_RUN_DIR/simplify-scope-$PREMERGE_ATTEMPT_PAD.raw"
+PREMERGE_SIMPLIFY_MODIFIED="$PREMERGE_RUN_DIR/simplify-scope-$PREMERGE_ATTEMPT_PAD.modified"
+LC_ALL=C sort -u <"$PREMERGE_SIMPLIFY_SCOPE" >"$PREMERGE_SIMPLIFY_ALLOWED" || exit 2
+# `--no-renames`: rename detection reports only the NEW path, and a scope guard
+# reading `--name-only` alone is bypassable by a rename.
+git -C "$PREMERGE_ROOT" diff --name-only --no-renames HEAD >"$PREMERGE_SIMPLIFY_RAW" || exit 2
+LC_ALL=C sort -u <"$PREMERGE_SIMPLIFY_RAW" >"$PREMERGE_SIMPLIFY_MODIFIED" || exit 2
+PREMERGE_SIMPLIFY_STRAY="$(LC_ALL=C comm -23 "$PREMERGE_SIMPLIFY_MODIFIED" "$PREMERGE_SIMPLIFY_ALLOWED")" || exit 2
+if [ -n "$PREMERGE_SIMPLIFY_STRAY" ]; then
+  printf 'error: the simplify pass modified files no lens finding named:\n%s\nrefusing to sweep them into the refactor commit\n' \
+    "$PREMERGE_SIMPLIFY_STRAY" >&2
+  exit 2
+fi
+
+git add -u || exit 2
+git commit -m "refactor(premerge): apply simplify lenses to the stack" >/dev/null || exit 2
+git push origin "$PREMERGE_BRANCH" >/dev/null 2>&1 || exit 2
+printf 'PREMERGE SIMPLIFY COMMIT=%s ATTEMPT=%s\n' "$(git rev-parse HEAD)" "$PREMERGE_ATTEMPT" >&2
+```
 
 ### 4b-defer — the lens findings that were not applied
 
