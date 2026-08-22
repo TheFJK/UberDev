@@ -109,7 +109,7 @@ PREMERGE_DEFAULT_LEVEL   = xhigh          # built-in code-review effort
 PREMERGE_LEVELS          = low medium high xhigh max
 PREMERGE_MAX_FIX_WAVE    = 8              # files per fixer wave (one agent per file)
 PREMERGE_MAX_ISSUES      = 10             # findings-to-issues MAX_NEW, RFC 0018 §7
-PREMERGE_CI_SETTLE_SECS  = 45             # see `## The CI settle window` below
+PREMERGE_CI_SETTLE_SECS  = 45             # see `### The CI settle window` below
 PREMERGE_BRANCH_PREFIX   = chore/stack-
 PREMERGE_AGGREGATE_SOURCE= premerge-aggregate
 PREMERGE_VERSION_MANIFEST = plugins/uberdev/.claude-plugin/plugin.json
@@ -124,6 +124,16 @@ PREMERGE_RERUN_FLAKY_CAP = 1              # `gh run rerun` attempts per RUN
 and restated here for the reader. The library is the enforcer — it refuses an
 out-of-range `--max-repairs` rather than clamping it, so these two numbers being
 prose does not make them advisory.
+
+`PREMERGE_CI_SETTLE_SECS` is consumed by the **controller**, not by a fence, and
+that is deliberate. It is named in exactly one instruction — the waitable-reasons
+row of `### 4c — VERIFY`'s table, which says to wait this long and then re-run the
+same Phase 3 gate fence — and that is the same wait `### The decision table`'s
+`WAIT_CI` row routes to. Both are instructions taken by whatever is driving the
+loop. A `sleep` inside a fence would make the wait a property of a shell that has
+to return promptly, and the re-probe ceiling that actually bounds the waiting
+(`PREMERGE_WAIT_CI_CEILING`) is enforced in the library. Read "no fence reads
+this" as the design, not as a dead constant.
 
 **The budget counts REPAIRS, not reviews.** N repairs cost N+1 reviews: the last
 review is the one that verifies the last repair, which is what keeps anything the
@@ -264,6 +274,12 @@ while IFS= read -r PREMERGE_TOKEN; do
           printf 'error: /premerge --converge needs a number, got %s\n' "$PREMERGE_CONVERGE_ARG" >&2
           exit 2 ;;
       esac
+      # The `6` here is the fourth copy of PREMERGE_REPAIR_CEILING, and it used to be
+      # the only one nothing compared: the library declares it, the Constants block
+      # restates it, the refusal message below quotes it, and this condition just
+      # asserted it. tests/premerge-phase5.test.sh B7 now EXECUTES this parser against
+      # the library's evaluated CONVERGE_REPAIR_CEILING, so raising the library value
+      # reds the suite until this line follows.
       if [ "$PREMERGE_CONVERGE_ARG" -lt 1 ] || [ "$PREMERGE_CONVERGE_ARG" -gt 6 ]; then
         printf 'error: /premerge --converge must be 1..6 repair rounds (PREMERGE_REPAIR_CEILING), got %s\n' \
           "$PREMERGE_CONVERGE_ARG" >&2
@@ -543,9 +559,9 @@ fi
 # construction. review_consolidate_push_branch's cross-repo probe is about the
 # INVOKING PR's head repository, and /premerge has no invoking PR — a fork-head
 # candidate is already excluded as `cross_repo` during the drive.
-git -C "$PREMERGE_WORKTREE" push -u origin "$PREMERGE_BRANCH" >/dev/null 2>&1 || {
+PREMERGE_PUSH_ERR="$(git -C "$PREMERGE_WORKTREE" push -u origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
   printf '%s\n' "push_refused" >"$PREMERGE_RUN_DIR/failure-reason.txt"
-  printf 'error: pushing %s to origin failed\n' "$PREMERGE_BRANCH" >&2
+  printf 'error: pushing %s to origin failed: %s\n' "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2
   review_consolidate_abort "$PREMERGE_WORKTREE" "$PREMERGE_RUN_DIR" || :
   exit 2
 }
@@ -929,7 +945,16 @@ git add -u || exit 2
 # attempts should say so in its own history — that is the record an operator
 # reads to decide whether the loop earned its keep on this run.
 git commit -m "fix(premerge): address code-review blockers on the stack (attempt $PREMERGE_ATTEMPT)" >/dev/null || exit 2
-git push origin "$PREMERGE_BRANCH" >/dev/null 2>&1 || exit 2
+# git's own words survive the redirect now. `>/dev/null 2>&1 || exit 2` sent the
+# explanation of a non-fast-forward, an expired token or a protected-branch rule
+# to the same place as the progress output, and this fence exited 2 having
+# printed neither a `PREMERGE FIX COMMIT=` line nor a cause -- mid-way through an
+# autonomous loop with nobody watching. `### 0c`'s push is the model.
+PREMERGE_PUSH_ERR="$(git push origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
+  printf 'error: pushing the attempt-%s fix commit to %s failed: %s\n' \
+    "$PREMERGE_ATTEMPT" "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2
+  exit 2
+}
 printf 'PREMERGE FIX COMMIT=%s ATTEMPT=%s\n' "$(git rev-parse HEAD)" "$PREMERGE_ATTEMPT" >&2
 ```
 
@@ -1605,7 +1630,11 @@ case "$PREMERGE_CI_ARM" in
         "$PREMERGE_CI_STRAY" >&2
       exit 2
     fi
-    git push origin "$PREMERGE_BRANCH" >/dev/null 2>&1 || exit 2
+    PREMERGE_PUSH_ERR="$(git push origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
+      printf 'error: publishing the CI repair (arm=commit, attempt %s) to %s failed: %s\n' \
+        "$PREMERGE_ATTEMPT" "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2
+      exit 2
+    }
     printf 'PREMERGE CI PUBLISH=%s ARM=commit ATTEMPT=%s\n' "$(git rev-parse HEAD)" "$PREMERGE_ATTEMPT" >&2
     ;;
   rebase)
@@ -1643,7 +1672,34 @@ case "$PREMERGE_CI_ARM" in
       printf 'PREMERGE CI REBASE_DROPPED BEFORE=%s AFTER=%s (commits already on %s)\n' \
         "$PREMERGE_COUNT_BEFORE" "$PREMERGE_COUNT_AFTER" "$PREMERGE_BASE" >&2
     fi
-    git push --force-with-lease="$PREMERGE_BRANCH:$PREMERGE_CI_LEASE" origin "$PREMERGE_BRANCH" >/dev/null 2>&1 || exit 2
+    # `--force-if-includes` pairs with the explicit-form lease. `commands/review-pr.md`
+    # ships exactly this pair and `agents/ci-rebase-handler.md` calls it the single
+    # sanctioned exception to the never-force invariant, so this site spells it the
+    # same way rather than inventing a second form. Be honest about what each half
+    # does, though: `git push --help` documents `--force-if-includes` as a "no-op"
+    # when it is given alongside `--force-with-lease=<refname>:<expect>`, which is
+    # the form this line uses and the one tests/premerge.test.sh pins. The safety
+    # property here is carried entirely by the LEASE -- the remote tip must still be
+    # the SHA the controller captured before the agent ran. The flag is consistency
+    # with the repo's sanctioned pattern, not a second independent refusal.
+    #
+    # And the stderr is CAPTURED, because this is the one push in this file that
+    # REWRITES REMOTE HISTORY and the one whose failure is genuinely ambiguous: a lease
+    # rejection is the safety mechanism firing correctly, an expired token is not, and
+    # `>/dev/null 2>&1 || exit 2` made them the same silent exit 2 -- with no recovery
+    # arm, because the branch is already rebased locally by the time this line runs.
+    PREMERGE_PUSH_ERR="$(git push --force-with-lease="$PREMERGE_BRANCH:$PREMERGE_CI_LEASE" --force-if-includes origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
+      # Herestring, never a pipe: `<producer> | grep -q` is the EPIPE class
+      # tests/epipe-guard.test.sh bans.
+      if grep -qE '\[rejected\].*(stale info|fetch first|non-fast-forward)' <<<"$PREMERGE_PUSH_ERR"; then
+        printf 'error: the lease on %s was REJECTED -- origin moved since %s was pinned. The local branch is already rebased, so re-run /premerge rather than forcing: %s\n' \
+          "$PREMERGE_BRANCH" "$PREMERGE_CI_LEASE" "$PREMERGE_PUSH_ERR" >&2
+      else
+        printf 'error: force-pushing the rebased %s to origin failed: %s\n' \
+          "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2
+      fi
+      exit 2
+    }
     printf 'PREMERGE CI PUBLISH=%s ARM=rebase ATTEMPT=%s COMMITS=%s\n' \
       "$(git rev-parse HEAD)" "$PREMERGE_ATTEMPT" "$PREMERGE_COUNT_AFTER" >&2
     ;;
@@ -1817,7 +1873,11 @@ fi
 
 git add -u || exit 2
 git commit -m "refactor(premerge): apply simplify lenses to the stack" >/dev/null || exit 2
-git push origin "$PREMERGE_BRANCH" >/dev/null 2>&1 || exit 2
+PREMERGE_PUSH_ERR="$(git push origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
+  printf 'error: pushing the simplify commit to %s failed: %s\n' \
+    "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2
+  exit 2
+}
 printf 'PREMERGE SIMPLIFY COMMIT=%s ATTEMPT=%s\n' "$(git rev-parse HEAD)" "$PREMERGE_ATTEMPT" >&2
 ```
 
