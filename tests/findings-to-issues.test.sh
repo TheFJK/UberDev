@@ -494,19 +494,23 @@ echo "### Suite 15: ACCEPTED_SOURCES SSOT (#198)"
 # in the allow-list → findings-to-issues silently files ZERO issues.
 
 LIB_DIR="$REPO_ROOT/plugins/uberdev/lib"
-# The canonical 8-set, sorted (used as the byte-equality oracle for checks 1+2).
+# The canonical 9-set, sorted (used as the byte-equality oracle for checks 1+2).
 # `postfix-aggregate` (#655) is the eighth: the /uberdev:review-pr command fence
 # `review_write_postfix_aggregate` envelopes one post-fix reviewer child's
 # findings under it, and Step 1's closed allow-list has to admit it or every
 # post-fix dispatch refuses `input-malformed` and files ZERO issues — the #182
 # class this whole suite exists to prevent.
+# `premerge-aggregate` (RFC 0021) is the ninth: `lib/premerge-findings.py`
+# envelopes /uberdev:premerge's deferred cleanup findings under it. It is the
+# only source that carries `suggestion` rows meant to be FILED rather than
+# dropped, which is why it could not borrow `simplify-aggregate`.
 EXPECTED_SOURCES_SORTED=$(printf '%s\n' \
   post-impl-review-aggregate simplify-aggregate ci-refused-synthetic \
   uberscan-aggregate ubersimplify-aggregate testers-aggregate uberthink-aggregate \
-  postfix-aggregate \
+  postfix-aggregate premerge-aggregate \
   | LC_ALL=C sort)
 
-# S15.1 — Python frozenset is importable + has exactly the 8 members.
+# S15.1 — Python frozenset is importable + has exactly the 9 members.
 # Capture stderr (NOT 2>/dev/null) so an import/syntax error in report_primitives.py
 # surfaces in the FAIL message instead of being swallowed — fitting for the very
 # anti-silent-failure fix this suite guards.
@@ -520,7 +524,7 @@ S15_PY_ERR="$(mktemp)"
 # no-op on Linux/macOS where output is already LF) — #268 CI.
 PY_SOURCES_SORTED=$( (cd "$LIB_DIR" && python3 -c "from report_primitives import ACCEPTED_SOURCES; print('\n'.join(sorted(ACCEPTED_SOURCES)))") 2>"$S15_PY_ERR" | tr -d '\r')
 if [[ "$PY_SOURCES_SORTED" == "$EXPECTED_SOURCES_SORTED" ]]; then
-  echo "  PASS  S15.1 ACCEPTED_SOURCES frozenset imports with the 8 expected members"; PASS=$((PASS+1))
+  echo "  PASS  S15.1 ACCEPTED_SOURCES frozenset imports with the 9 expected members"; PASS=$((PASS+1))
 else
   echo "  FAIL  S15.1 ACCEPTED_SOURCES frozenset mismatch"
   echo "        expected: $(echo "$EXPECTED_SOURCES_SORTED" | tr '\n' ' ')"

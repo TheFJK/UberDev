@@ -1,9 +1,9 @@
 ---
 name: code-simplifier
 description: |
-  Use ONLY when explicitly invoked as a Phase 2 lens by `/uberdev:review-pr` (three Task() calls with `subagent_type: uberdev:code-simplifier`, parameterised by `## Lens emphasis: Reuse|Quality|Efficiency`) or as a standalone audit by `/uberdev:simplify`. Do not auto-trigger on conversational mentions of "simplify", "clean up", "refactor", or after generic coding work — the agent is audit-only and the named-lens-dispatcher pattern is the single source of truth for when it runs.
+  Use ONLY when explicitly invoked as a Phase 2 lens by `/uberdev:review-pr` (three Task() calls with `subagent_type: uberdev:code-simplifier`, parameterised by `## Lens emphasis: Reuse|Quality|Efficiency`), as a standalone audit by `/uberdev:simplify`, or as the Phase 4 lens trio of `/uberdev:premerge` (the same three-call shape, against the stack PR's diff, and only after that command's clean gate has passed). Do not auto-trigger on conversational mentions of "simplify", "clean up", "refactor", or after generic coding work — the agent is audit-only and the named-lens-dispatcher pattern is the single source of truth for when it runs.
 
-  When invoked, the agent audits recently-modified code for simplification opportunities and returns advisory findings (`file:line` + description). It does not modify files; the controller or a downstream writer command (`/uberdev:simplify`, `/uberdev:review-pr` Phase 2) applies fixes. The agent focuses only on recently modified code unless instructed otherwise.
+  When invoked, the agent audits recently-modified code for simplification opportunities and returns advisory findings (`file:line` + description). It does not modify files; the controller or a downstream writer command (`/uberdev:simplify`, `/uberdev:review-pr` Phase 2, `/uberdev:premerge` Phase 4b) applies fixes. The agent focuses only on recently modified code unless instructed otherwise.
 
   Examples (illustrating the simplification logic — these are NOT auto-trigger licenses; the gating rule above still applies):
 

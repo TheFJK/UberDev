@@ -4,6 +4,81 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.53.0] — 2026-08-21
+
+Adds `/premerge`, the pre-merge stack gate (RFC 0021). MINOR: a new command, a
+new skill, a new lib, and one new tier on an existing agent contract.
+
+### Added — `/premerge`: one stack, one review, one bump, parked
+
+`/premerge` packs **every** open non-draft PR onto a single integration branch,
+opens one `chore(stack): land #A #B …` PR, and reviews *that*. The reason is that
+the defects which actually bite at landing time are cross-PR by construction and
+structurally invisible to any per-PR review:
+
+- two PRs cut from one base both bump to the **same** next version; git
+  auto-merges the identical edit with no conflict and one intended release
+  disappears silently;
+- two PRs add the same helper under different names, and each review sees a
+  reasonable new helper;
+- one PR's rename defeats a guard another PR just added, because
+  `git diff --name-only` collapses renames.
+
+`AGENTS.md` already answered the first of those by binding the version bump to
+the *landing commit* and forbidding PR authors from bumping — which left an
+obvious hole: something has to do the bump, once, at landing time, and nothing
+did. `/premerge` Phase 5 is that something.
+
+Six phases: **PACK** (reusing `lib/review-consolidate.sh` whole — dependency
+ordering, conflict handback, the ancestry gate, typed exclusions, supersession
+comments, `Closes #N` carry-over) → **REVIEW** with the *built-in* `code-review`
+skill → **TRIAGE** (correctness blockers to dispatched fixer agents, cleanup
+findings to GitHub issues) → **CLEAN GATE** → **SIMPLIFY** → **BUMP + PARK**.
+
+**It never merges.** Not on green CI, not on an approving review, not under any
+flag. It ends at a pushed, open, bumped, parked PR and prints the URL.
+
+### Added — a `SUGGESTION` tier in `agents/findings-to-issues.md`
+
+`suggestion` rows were dropped on the floor, correctly: `/review-pr` and
+`/simplify` both *apply* their suggestions inline, so filing them would duplicate
+an applied fix as an open issue. `/premerge` is the first caller for which that
+is false — its Phase 1 reviewer is advisory only.
+
+The tier is added behind a single-armed gate. `SUGGESTION_TIER_ENABLED` defaults
+to `0` and is set by exactly one arm of `findings_derive_review_origin`, so every
+other caller takes the pre-existing `*) return 1` arm bit-identically.
+`severity_rank(suggestion)=0` puts these rows below every other tier, so a
+`MAX_NEW` overflow truncates them first and can never displace a blocker; they
+never halt, never trip the broken-feature overflow guard, and file under
+`premerge-finding` rather than `review-pr-finding` so `/goal`'s recursion
+selector does not enlist every cleanup idea as a convergence blocker.
+
+### Added — `lib/premerge-findings.py`
+
+The built-in `code-review` skill emits **no severity field** in either of its two
+output contracts, and which contract arrives depends on host configuration
+`/premerge` cannot set. This module reads both, and carries the anti-drift gate
+that makes the derived severity trustworthy: where a finding carries a
+`category`, the category decides and a contradicting controller severity is a
+hard `severity_contradicts_category` refusal; where none exists, the controller's
+judgement stands and the run reports `CATEGORY_BACKED` so an operator can see how
+many severities were machine-checked rather than judged.
+
+Unfamiliar categories resolve to **blocker**, deliberately: a novel cleanup slug
+costs one needless fixer dispatch, a novel correctness slug silently demoted to
+`suggestion` ships the bug.
+
+### Notes
+
+- `/premerge` emits **no trust trail**, so `/merge`'s PATH_2 will not accept it
+  as review evidence — that trail claims uberdev's seven-lens fanout, the
+  finding-verification gate and the CI-health phase all ran, and here none did.
+  Run `/review-pr <stack-pr>` on the parked PR when you want one.
+- `/review-pr`, `/simplify`, `/goal` and all four legacy fleet variants are
+  behaviourally unchanged.
+- The short-form alias set grows to fifteen with `/premerge`.
+
 ## [0.52.0] — 2026-08-21
 
 Lands the seven-PR stack #651, #652, #657, #658, #659, #660 and #661 in one

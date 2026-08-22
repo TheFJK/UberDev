@@ -49,6 +49,13 @@ ACCEPTED_SOURCES = frozenset({
     # member here because agents/findings-to-issues.md must accept it, which is
     # the whole point of this frozenset being the SSOT (issue #655).
     "postfix-aggregate",
+    # Library-owned: written by lib/premerge-findings.py from the BUILT-IN
+    # code-review skill's output, which is not an uberdev component and whose
+    # record shape this repo does not control. It carries the ONE severity the
+    # other review sources cannot produce — `suggestion` rows that are meant to
+    # be filed rather than dropped — which is why /premerge needs a source of
+    # its own rather than borrowing "simplify-aggregate" (RFC 0021 §5).
+    "premerge-aggregate",
 })
 
 PHASE1_CONTRIBUTORS = (

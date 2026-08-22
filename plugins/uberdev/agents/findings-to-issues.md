@@ -71,6 +71,19 @@ union; they preserve the established direct-call contracts:
 | `legacy.testers` | `testers-aggregate` | `testers-finding` | `testers` | standalone |
 | `legacy.uberthink` | `uberthink-aggregate` | `uberthink-idea` | `uberthink` | standalone |
 
+The `/premerge` variant is separate again, and is the only one that files
+`suggestion` rows (RFC 0021 §5):
+
+| variant | envelope | label | marker | PR mode |
+|---|---|---|---|---|
+| `premerge.defer.findings` | `premerge-aggregate` | `premerge-finding` | `premerge` | the stack PR number (`pr_number == carrier_issue > 0`) |
+
+Its label is deliberately **not** `review-pr-finding`. `lib/goal-phase3.sh`
+selects `/goal` recursion targets by that label plus a `**Tier:** BLOCKER|CRITICAL`
+body line; filing cleanup ideas under it would enlist every one of them into a
+convergence loop that has no way to decide they are done. A distinct label keeps
+the backlog readable and keeps `/goal` unchanged.
+
 Each legacy variant must supply only its documented aggregate path,
 `working_dir`, `pr_number`, `finding_label`, `finding_marker_slug`, and
 `max_new`; the fixed values in the table are validated rather than accepted as
@@ -105,6 +118,17 @@ findings_derive_review_origin() {
     review_pr.ci.defer_refusal:review-pr:*:*|review_pr.ci.defer_refusal:solve:*:*|review_pr.ci.defer_refusal:turbo:*:*)
       [ "$carrier_issue" -gt 0 ] && [ "$pr_number" -eq "$carrier_issue" ] || return 2
       origin_kind=pr; source_ref="" ;;
+    premerge.defer.findings:premerge:*:*)
+      # /premerge files the CLEANUP half of a built-in code-review pass against
+      # the stack PR it just opened. It is `pr` mode like the review union, but
+      # its carrier issue number is the stack PR itself rather than a solved
+      # issue, so the `pr_number == carrier_issue` identity above still holds
+      # and is still checked. SUGGESTION_TIER_ENABLED is set here and nowhere
+      # else — it is what admits the `suggestion` arm in Step 4, and scoping it
+      # to this one case is what keeps every other variant's routing
+      # bit-identical to its shipped behaviour.
+      [ "$carrier_issue" -gt 0 ] && [ "$pr_number" -eq "$carrier_issue" ] || return 2
+      origin_kind=pr; source_ref=""; SUGGESTION_TIER_ENABLED=1 ;;
     legacy.uberscan:legacy-uberscan:0:0)
       origin_kind=standalone; source_ref="/uberscan run $run_id" ;;
     legacy.ubersimplify:legacy-ubersimplify:0:0)
@@ -181,7 +205,22 @@ Explicit forbidden patterns:
    `/uberdev:testers`, or `uberthink-aggregate` for `/uberthink`). All non-empty
    aggregate paths must share that exact parent; derive `run_id` from it and
    validate `^[0-9]{8}-[0-9]{6}-[a-f0-9]+$`. The accepted-source allow-list is
-   the closed set `{post-impl-review-aggregate, simplify-aggregate, ci-refused-synthetic, uberscan-aggregate, ubersimplify-aggregate, testers-aggregate, uberthink-aggregate, postfix-aggregate}`.
+   the closed set `{post-impl-review-aggregate, simplify-aggregate, ci-refused-synthetic, uberscan-aggregate, ubersimplify-aggregate, testers-aggregate, uberthink-aggregate, postfix-aggregate, premerge-aggregate}`.
+
+   **`premerge-aggregate` parent-directory exception.** The `/premerge` variant's
+   aggregate resolves beneath `$working_dir/.uberdev/premerge/<RUN_ID>/`, not
+   `.uberdev/research/<RUN_ID>/`. That tree is the **run carrier's** research
+   directory, allocated by `lib/command-workspace.py` for a caller that reserved
+   a run; `/premerge` reserves none and deliberately keeps its state out of it so
+   the reservation reaper and the receipt inode-pinning never encounter a
+   directory that looks like a review run and is not one. The `<RUN_ID>` regex,
+   the containment check and the envelope-marker check all still apply
+   unchanged — only the fixed prefix differs, and it remains a fixed prefix, not
+   a caller-supplied one. Like `postfix-aggregate` and the legacy fleet
+   envelopes, `premerge-aggregate` is **exempt from the exact-compact-sorted-
+   JSON-schema-v2 requirement**: it is written by `lib/premerge-findings.py` from
+   the built-in `code-review` skill's output, not by the canonical aggregate
+   encoder, and its `phase` is the literal `premerge`.
    For the two review sources, verify the bytes between the envelope markers are
    exact compact sorted JSON schema v2 before interpreting prose; Markdown-table
    and YAML fallbacks are malformed for those sources. The `/ubersimplify`
@@ -406,10 +445,21 @@ Explicit forbidden patterns:
 
    ```bash
    # Returns 0 if (severity, disposition) qualifies for issue creation, and
-   # sets the per-row `row_tier` variable to one of {BLOCKER, CRITICAL, MAJOR} —
-   # consumed by Step 8d to pick @author-mention vs silent-file shape.
+   # sets the per-row `row_tier` variable to one of
+   # {BLOCKER, CRITICAL, MAJOR, SUGGESTION} — consumed by Step 8d to pick
+   # @author-mention vs silent-file shape.
    # Review schema v2 uses {blocker,suggestion}; explicit legacy variants may
    # additionally normalize {critical,important,major} (RFC 0002 §3.1).
+   #
+   # SUGGESTION_TIER_ENABLED (RFC 0021 §5) defaults to 0 and is set to 1 by
+   # exactly ONE arm of `findings_derive_review_origin` — the
+   # `premerge.defer.findings` case. Every other variant therefore takes the
+   # `*) return 1` arm on a `suggestion` exactly as it does today, so this
+   # change is bit-identical for /review-pr, /simplify and all four legacy
+   # fleets. The default lives HERE rather than at the call sites because a
+   # default that has to be re-established per caller is a default that one
+   # caller eventually forgets, and forgetting it would silently start filing
+   # every Phase 1 suggestion in the repo.
    #
    # `disposition` reaching this helper is one of FOUR values: the validated
    # fixer set {APPLIED, SKIPPED, REFUSED} (shared/code-fixer-output-v1.md),
@@ -426,7 +476,10 @@ Explicit forbidden patterns:
        blocker)         row_tier="BLOCKER"  ; return 0 ;;
        critical)        row_tier="CRITICAL" ; return 0 ;;
        important|major) row_tier="MAJOR"    ; return 0 ;;
-       *)               return 1 ;;   # suggestion, info, etc.
+       suggestion)
+         [ "${SUGGESTION_TIER_ENABLED:-0}" = "1" ] || return 1
+         row_tier="SUGGESTION" ; return 0 ;;
+       *)               return 1 ;;   # info, and any unrecognised token
      esac
    }
    ```
@@ -437,7 +490,10 @@ Explicit forbidden patterns:
    (#655).** A postfix row arrives with `disposition: "DEFERRED"`, so the
    `APPLIED` suppressor never applies to it and its severity alone decides:
    `blocker` resolves `row_tier=BLOCKER` and files, `suggestion` returns `1`
-   and files nothing. That second arm is not a new drop path — it is the
+   and files nothing — a post-fix aggregate can only reach this agent from a
+   `/uberdev:review-pr` carrier, which never sets `SUGGESTION_TIER_ENABLED`, so
+   the RFC 0021 arm is unreachable on this path and the sentence stays exactly
+   true. That second arm is not a new drop path — it is the
    shipped treatment of every Phase 1 `suggestion` row, recorded under *Halt
    semantics* as *"Review-v2 `suggestion` rows do not route to issues"*. The
    post-fix suggestion still reaches durable sinks: it stays in the on-disk
@@ -459,7 +515,13 @@ Explicit forbidden patterns:
 
    `normalised_summary` is the finding's summary string: lowercased, whitespace-runs collapsed to single space, leading/trailing whitespace trimmed, code-fence backticks stripped. The normalisation MUST be deterministic — same input always produces same fingerprint, so a recurring run on the same PR maps to the same fingerprint.
 
-6. **Apply MAX_NEW cap.** Sort the deduped list by `(severity_rank desc, file_path asc, line asc)` where `severity_rank(blocker)=3, severity_rank(critical)=2, severity_rank(major)=1`. Take the first `max_new` rows; record the remainder count as `overflow_count`.
+6. **Apply MAX_NEW cap.** Sort the deduped list by `(severity_rank desc, file_path asc, line asc)` where `severity_rank(blocker)=3, severity_rank(critical)=2, severity_rank(major)=1, severity_rank(suggestion)=0`. Take the first `max_new` rows; record the remainder count as `overflow_count`.
+
+   `suggestion` ranks **below** every other tier, so a `/premerge` dispatch that
+   overflows `max_new` truncates its cleanup rows first and never displaces a
+   blocker. That ordering is the whole reason the suggestion tier can share one
+   cap with the others instead of needing a budget of its own: the cap can only
+   ever cost the least important rows.
 
    `max_new` is a **single shared cap for the whole dispatch**, and stays `10`
    for the review variants (RFC 0018 §7). Phase 1, Phase 2 and both post-fix
@@ -586,7 +648,14 @@ Explicit forbidden patterns:
             backref_line=""
           fi
           ;;
-        MAJOR)
+        MAJOR|SUGGESTION)
+          # Silent file, no @mention, no assignee — a SUGGESTION is by
+          # definition worth doing and not worth interrupting anyone over, and
+          # notifying an author about one is how a useful backlog becomes noise
+          # people mute. `Related:` and not `Blocks:` for the same reason:
+          # `lib/goal-phase3.sh` selects /goal recursion targets by the
+          # `Blocks: #PR` backref, so emitting it here would make every cleanup
+          # idea a convergence blocker for a stack that is already clean.
           mention_line=""
           assignee_args=()
           if [ "$pr_number" -gt 0 ]; then
@@ -765,6 +834,7 @@ by_severity:
   blocker: 0
   critical: 0
   major: 0
+  suggestion: 0
 overflow_count: 0
 halted_due_to_overflow: false
 halted: false
@@ -777,8 +847,8 @@ rationale: ""    # populated on REFUSED
 Empty arrays are emitted as `[]`. `rationale` is empty string `""` on non-REFUSED runs.
 
 **Field semantics (RFC 0002 §3.3.3):**
-- `tier` (per-URL field on `created_urls` / `commented_urls` / `skipped_closed`) — one of `{BLOCKER, CRITICAL, MAJOR}`; lets `/review-pr` Step 7 group filed issues by tier in the user-visible summary and the audit JSON `phases.phase2_5.by_severity` block.
-- `by_severity.{blocker|critical|major}` — count of rows actually written this run (`len(created_urls) + len(commented_urls)` per tier; excludes `skipped_closed` and `blocked_by_dedupe`).
+- `tier` (per-URL field on `created_urls` / `commented_urls` / `skipped_closed`) — one of `{BLOCKER, CRITICAL, MAJOR, SUGGESTION}`; lets `/review-pr` Step 7 group filed issues by tier in the user-visible summary and the audit JSON `phases.phase2_5.by_severity` block. `SUGGESTION` is reachable only from a `premerge.defer.findings` dispatch (RFC 0021 §5); every other caller's tier set is unchanged.
+- `by_severity.{blocker|critical|major|suggestion}` — count of rows actually written this run (`len(created_urls) + len(commented_urls)` per tier; excludes `skipped_closed` and `blocked_by_dedupe`). `by_severity.suggestion` is always `0` for callers that do not set `SUGGESTION_TIER_ENABLED`, so a consumer that reads only the first three keys sees exactly what it saw before.
 - `halted_due_to_overflow` — true iff Step 6's broken-feature guard fired (some truncated row was BLOCKER or CRITICAL tier).
 - `halted` — load-bearing signal for the parent's GREEN/YELLOW/RED predicate; set per Step 9 rule.
 - **Implication**: `halted_due_to_overflow == true` implies `halted == true` — the overflow guard never fires in isolation; it always trips the higher-level halt. (RFC 0002 §3.3.5.)
@@ -809,7 +879,15 @@ Return `status: REFUSED` with the matching rationale string when:
 
 Legacy `MAJOR`-tier rows (mapped from an explicit legacy variant's `major` or
 `important`) NEVER halt the parent; they file silently and the parent emits
-GREEN as before. Review-v2 `suggestion` rows do not route to issues.
+GREEN as before. `SUGGESTION`-tier rows never halt either, and for a stronger
+reason: the severity that produced them is *defined* as "real, worth doing, not
+worth holding the stack for" (RFC 0021 §4), so a halt on one would contradict
+its own definition. They also never trip the broken-feature overflow guard —
+that guard is scoped to `{BLOCKER, CRITICAL}` and `severity_rank(suggestion)=0`
+puts them last in the sort, so they are the first rows a cap truncates and the
+truncation is by design rather than a cliff. Review-v2 `suggestion` rows do not
+route to issues for any caller that does not set `SUGGESTION_TIER_ENABLED`,
+which today means every caller except `/uberdev:premerge`.
 `CRITICAL`-tier legacy rows that fit under `MAX_NEW` ALSO do not halt — they
 trigger the YELLOW state in the parent (see `commands/review-pr.md`
 Trust-Signal Emission section), not RED.
