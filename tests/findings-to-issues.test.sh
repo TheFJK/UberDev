@@ -457,6 +457,44 @@ assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
   're-derive the primary member and .group_tier. over the members that remain' \
   'G19b removing members re-derives the primary member and group_tier'
 
+# --- #722 re-review rows: two passages the fix round left standing --------
+#
+# One asserts the retired per-finding key to a human reader; the other is an
+# interaction between two rules the fix round itself introduced.
+#
+# G20 — the `To resolve:` trailer is the ONE passage in this contract that a
+# human reads rather than the agent: it renders verbatim into every filed
+# issue. It was byte-identical to base, so the fix round repaired the same
+# drift in the meta-trailer paragraph (G18) and walked past it. Under the FILE
+# container, "future runs see state==closed for this fingerprint and skip"
+# instructs the reader that closing this issue mutes this whole path — the
+# exact belief the closed-arm split at 8d exists to falsify. Nothing covered
+# the line, which is why reverting it reds nothing without this row.
+assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
+  'Closing resolves exactly the findings listed in this body.*so closing never mutes the file' \
+  'G20 the issue-body trailer scopes closing to the findings the body lists'
+# The revert-catching negation, the G14c/G16f half. `for this fingerprint`
+# appears nowhere else in this repo, so this pattern is the old sentence and
+# nothing else.
+assert_no_grep "$AGENT_MD" \
+  'state==closed. for this fingerprint' \
+  'G20b no rendered text tells a reader that closing mutes the fingerprint'
+
+# G21 — the honest bound on `c.6`. It assembles the FULL group body, but `d`'s
+# closed-arm split writes only the members not already in the matched issue's
+# index, and which those are is not known until the index read inside `d`. So
+# in that one arm the measurement is a superset of what is written, and a
+# budget applied only at c.6 truncates a body that had room — loudly
+# (`blocked_by_dedupe[]` + DONE_WITH_CONCERNS), but spuriously, against AC 2.
+# Both halves are locked: the acknowledgement, and the re-application that
+# keeps it from being a known-wrong measurement left standing.
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'the FULL group body, a SUPERSET of what that' \
+  'G21 c.6 states which body it measures and that the closed arm writes less'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'Re-apply this same budget to the subset body' \
+  'G21b the budget is re-applied to the split subset, still before any write'
+
 ### Suite 3: Label-provision idempotency ----------
 echo
 echo "### Suite 3: Label-provision idempotency"

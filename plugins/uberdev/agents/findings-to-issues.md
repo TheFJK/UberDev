@@ -872,6 +872,18 @@ Explicit forbidden patterns:
       fences, so it degrades straight to omitting trailing members, under the
       same `blocked_by_dedupe[]` accounting.
 
+      The `state == "closed"` split in `d` is the one write shape this step
+      cannot measure exactly (#722): it creates a body covering only the
+      members NOT in the matched issue's `fingerprints=` index, and which
+      members those are is not known until the index read inside `d`. What is
+      assembled here is therefore the FULL group body, a SUPERSET of what that
+      arm writes, so a budget applied only here would drop prose fences and
+      omit trailing members the subset body had room for — each one a
+      `blocked_by_dedupe[]` entry and a `DONE_WITH_CONCERNS` the run did not
+      earn. Re-apply this same budget to the subset body once `d` has
+      partitioned the group, before that `gh issue create`; it is still applied
+      before any write, so this step's position ahead of `d` is unchanged.
+
    d. **State branching:** every `gh issue create` / `gh issue comment` invocation MUST capture combined stderr+stdout into `CREATE_OUTPUT` and the exit code into `rc`. Step 8f's classifier reads both as preconditions — without this capture the truncation + transient/permanent classification in 8f silently classifies every failure as permanent. Shape: `CREATE_OUTPUT=$(gh issue create ... 2>&1); rc=$?` (or the analogous form for `gh issue comment`).
       - `state == "open"`: build the comment body (see Comment body shape
         below), rendering **every** member of the group and marking each `new`
@@ -1006,7 +1018,7 @@ Lenses: {comma-joined source_edges for this member}
 {… one `###` section per member, in group order, {n} starting at 1 …}
 
 ---
-*To resolve: address the finding in code and close this issue. Future `/uberdev:review-pr` runs see `state==closed` for this fingerprint and skip. Before closing, apply `finding:true-positive` if it was a real defect or `finding:false-positive` if it was not — that label is the eval ground truth (RFC 0018).*
+*To resolve: address the findings above in code and close this issue. Closing resolves exactly the findings listed in this body; once it is closed, a finding in this file that this body does not list — including one raised in a later comment — is filed as a NEW issue rather than suppressed, so closing never mutes the file. Before closing, apply `finding:true-positive` if it was a real defect or `finding:false-positive` if it was not — that label is the eval ground truth (RFC 0018).*
 
 <!-- uberdev-scope v=1 files={file_path} -->
 <!-- uberdev:{finding_marker_slug}-finding fingerprint={16-char-hex} -->
