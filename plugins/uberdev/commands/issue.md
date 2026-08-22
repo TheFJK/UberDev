@@ -89,7 +89,7 @@ This boundary is enforced both by the templates below (the bug template's `## Li
 
 ## Phase 4: Draft Issue
 
-Compose the complete draft. It is a record, not a prompt: it is rendered in the Phase 7 result block as what was filed, and it is shown mid-run only when the Phase 5 open-duplicate gate fires.
+Compose the complete draft. It is a record, not a prompt: it becomes the `--body-file -` payload in Phase 6, and it reaches the user's terminal on exactly one path — when the Phase 5 open-duplicate gate fires. On the autopilot path the draft is never printed; what prints is the Phase 7 result block, which carries the issue URL rather than the body.
 
 ### Bug (`fix`)
 
@@ -196,11 +196,19 @@ Compose the complete draft. It is a record, not a prompt: it is rendered in the 
 Evaluate one predicate against the Phase 2 `triage-scout` return: does `duplicates` contain any entry whose `state` is `open`?
 
 - **No open duplicate** — `duplicates` is empty, or every entry is `state: closed`. Proceed **straight to Phase 6**. Do not print the draft here, do not ask for approval, do not end the turn. This is the autopilot path and it is the common one.
-- **At least one open duplicate** — **STOP.** Print the Phase 4 draft, then every open match as `#<number> — <title> (open)`, and ask whether to file anyway, comment on the existing issue instead, or abandon. Do not run `gh issue create` until the user answers. An open duplicate is a fact returned by `triage-scout`, not a judgement call, and a second copy of a live issue is the one outcome that closing it does not cleanly undo.
+- **At least one open duplicate** — **STOP.** Print the Phase 4 draft, then every open match as `#<number> — <title> (open)`, and ask whether to file anyway, comment on the existing issue instead, or abandon. Do not run `gh issue create` until the user answers, and then run it **only** if the answer is *file anyway*. An answer is not an approval: two of the three answers end the run without creating anything. An open duplicate is a fact returned by `triage-scout`, not a judgement call, and a second copy of a live issue is the one outcome that closing it does not cleanly undo.
+
+Each answer has exactly one terminal state:
+
+- **File anyway** — continue to Phase 6 unchanged.
+- **Comment on the existing issue instead** — post the Phase 4 draft as a comment on the matched issue with `gh issue comment <number> --body-file -`, the same stdin-heredoc delivery Phase 6 mandates, then print `Commented on #<number>: <comment-url>` and end the turn. Phases 6 and 7 do not run and no issue is created.
+- **Abandon** — print `Abandoned: open duplicate #<number>. Nothing was created.` and end the turn. Phases 6 and 7 do not run.
 
 **Closed** duplicates never halt. They are regression evidence and already render as `## Possible duplicates` with the regression-warning suffix (Phase 3, step 4).
 
 ## Phase 6: Create issue
+
+Reached on the autopilot path, or from Phase 5 when the user chose to file anyway. The other two Phase 5 answers already ended the turn, so this phase does not run for them.
 
 The body is delivered via `--body-file -` with the heredoc on stdin — **never**
 the `--body` flag with a `"$VAR"` or `"$(…)"` expansion (the dev-pipeline hard

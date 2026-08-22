@@ -322,8 +322,13 @@ assert_no_grep "$ISSUE_CMD" \
 assert_no_grep "$ISSUE_CMD" \
   '\*\*Always confirm\*\*' \
   "the Always confirm rule is removed"
+# Scoped to the create call, not to the bare phrase: this row's subject is the
+# create gate, but the file also carries the SURVIVING '/solve is never
+# auto-run' rule phrased "always wait for the user". A whole-file negative on
+# 'wait for explicit approval' would red if that surviving sentence were ever
+# reworded — a false red on prose this same change protects.
 assert_no_grep "$ISSUE_CMD" \
-  'wait for explicit approval' \
+  'wait for explicit approval before `gh issue create`' \
   "no rule still demands explicit approval before gh issue create"
 assert_no_grep "$ISSUE_CMD" \
   'confirms with the user' \
@@ -375,8 +380,13 @@ assert_grep "$ISSUE_CMD" \
 
 echo
 echo "== README and RFC 0012 match the autopilot behaviour (#723) =="
+# Scoped to the /issue pipeline arrow (the removed literal was
+# 'draft -> user-confirm -> create'), not to the bare word: README.md documents
+# fifteen commands and already discusses confirm-gate semantics for /merge, so
+# a whole-file negative would red on prose that has nothing to do with /issue.
+# ASCII-only per the plan's D7 — '.*' spans the non-ASCII arrows.
 assert_no_grep "$README_MD" \
-  'user-confirm' \
+  'draft.*user-confirm.*create' \
   "README /issue pipeline no longer claims a user-confirm step"
 assert_grep "$README_MD" \
   'investigation-first issue creation' \
