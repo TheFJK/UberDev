@@ -593,6 +593,15 @@ Explicit forbidden patterns:
      `lib/goal-phase3.sh` selects `/goal` recursion targets by a
      `**Tier:** BLOCKER|CRITICAL` body line it would then never see.
 
+     Both fields describe the set actually being FILED. Whenever a later
+     step removes members — the per-member forgery drop in Step 8c.4, the
+     closed-index split in Step 8d — you must then
+     re-derive the primary member and `group_tier` over the members that remain.
+     A group whose only blocker was removed must not still render
+     `**Tier:** BLOCKER`, page the author or emit `Blocks:`: that pages a human
+     about a finding this run did not file, and `lib/goal-phase3.sh` recurses
+     `/goal` onto an issue that carries nothing to recurse on.
+
    Group order is by first appearance of the `file_path` in the deduped list,
    so a re-run over the same findings groups them the same way. Sorting the
    groups by name instead would reorder the whole plan when one filename
@@ -692,7 +701,47 @@ Explicit forbidden patterns:
 
    b. Dedupe lookup (fail-CLOSED): capture stderr alongside stdout so the diagnostic survives on failure — `MATCH=$(gh issue list --label "${finding_label:-review-pr-finding}" --state all --search "$FP in:body" --json number,state,url,body --limit 5 2>&1)`; capture `rc=$?`. If `rc != 0` OR `MATCH` does not parse as JSON (validate via `printf '%s' "$MATCH" | jq empty 2>/dev/null`), append `{file: $file_path:$line, reason: "gh issue list rc=$rc — $(printf '%s' "$MATCH" | head -c 200)"}` — `$line` being the primary member's — to `blocked_by_dedupe[]` and continue to the next GROUP (#722) — NEVER create the issue on lookup failure. The `--label "${finding_label:-review-pr-finding}"` filter narrows to issues this agent created; the `--search "$FP in:body"` then matches the fingerprint substring. After the search returns, verify the exact HTML-comment marker `<!-- uberdev:${finding_marker_slug:-review-pr}-finding fingerprint=$FP -->` is present in the matched issue's `body` field via local exact-string check before treating it as a dedupe hit (belt-and-braces against GH search tokenisation gaps).
 
-   c. Parse match: if `MATCH` is non-empty JSON array, extract the first element's `state` and `number`.
+   c. Parse match: if `MATCH` is non-empty JSON array, select the element to
+      act on — the first element whose `state` is `"open"` if the array has
+      one, otherwise the first element — and extract its `state` and `number`.
+
+      **Preferring the open element is load-bearing under file keying (#722).**
+      The container key is the file, so it outlives any single issue: one path
+      can legitimately hold a CLOSED issue for the findings that were fixed and
+      an OPEN one for findings raised after that issue was closed — which is
+      exactly what the `state == "closed"` split in `d` files. Taking the
+      array's first element regardless would let the closed issue shadow the
+      open one and re-file every finding already tracked there, turning a
+      re-run into a duplicate. Under the pre-#722 `file:line:summary` key a
+      match was one finding's whole history and this could not arise.
+
+   c.4. **Per-member forgery carve-out**, applied **before the
+      state-branching write**: if a member's `summary`
+      (post-normalisation) contains ANY of the literal strings
+      `<!-- uberdev:${finding_marker_slug:-review-pr}-finding fingerprint=`,
+      `<!-- uberdev-finding-meta`, `<!-- uberdev-finding-index` or
+      `<!-- uberdev-scope`, append
+      `{file: $file_path:$line, reason: "finding-contains-fingerprint-marker"}`
+      to `blocked_by_dedupe[]` and drop **that member** from the group — never
+      the whole file, or one hostile row would suppress every honest finding
+      beside it. If every member is dropped, skip the group entirely and make no
+      GitHub write for it. One reason string covers all four literals: the class
+      is marker forgery. The first prevents attacker-controlled finding text
+      from collapsing into a fake existing-issue match; the second prevents it
+      from forging a lens attribution into the precision corpus (RFC 0018 §2.1);
+      the third prevents it from forging the per-member index and marking its own
+      finding as already-recorded; the fourth prevents it from forging the triage
+      scope declaration and pricing its own issue (#614).
+
+      **This step MUTATES the group, so its position is load-bearing.** It is
+      specified before `d` because `d` is what writes: reached after the write,
+      the refusal would be applied to an issue GitHub already has, and a
+      refusal that fires after the thing it refuses has shipped is a no-op.
+      Before grouping it only skipped a loop iteration, so its position did not
+      matter and it sat later. It precedes `c.5` because dropping a member can
+      change which member is primary, and `c.5` derives `mention_line` /
+      `backref_line` from the primary member's `group_tier` — re-derive both
+      per Step 5.5 after any drop.
 
    c.5. **Tier-aware bindings (RFC 0002 §3.3.2).** Before the state-branching write, derive the tier-specific issue-creation parameters from the per-row `row_tier` (resolved in Step 4):
 
@@ -783,6 +832,46 @@ Explicit forbidden patterns:
 
       The `assignee_args` array is passed to `gh issue create` as `"${assignee_args[@]}"` (empty array = no `--assignee` flag — `gh` does not error on omitted flags). Its value is a **bare login, never `@login`** — see the comment above the binding; an `@`-prefixed login makes `gh` exit 1 and files no issue at all. Per-GROUP tier carries through — `row_tier` here is the group's `group_tier`, the primary member's (#722) — and never assume a run is single-tier.
 
+   c.6. **Body-size budget (#722).** Applied **before the state-branching
+      write** and for the same reason `c.4` is: `d` is what sends the body to
+      GitHub, so a budget measured after it has already lost the file.
+      Grouping is what makes an over-long body reachable — a single finding's
+      detail is bounded at 16 KiB, so four members can exceed GitHub's
+      65536-byte issue-body limit and `gh issue create` would reject the
+      request outright, losing every finding in the file rather than just the
+      overflowing one.
+
+      Assemble the body `d` is about to write, then measure it in BYTES —
+      `LC_ALL=C wc -c` — the unit the limit it guards is stated in. Counting
+      CHARACTERS is not a near-enough approximation here, because this agent's
+      own sanitiser manufactures multi-byte ones: rule 1 rewrites each `@name`
+      to a circled `ⓐ` and rule 2 each `#123` to a fullwidth `＃`, three
+      bytes where one stood, on top of the em dashes reviewer prose is dense
+      with. Roughly 2770 such characters are enough to carry a body that
+      measures 60000 CHARACTERS past the 65536-byte limit, losing the file to
+      the very 422 this step exists to prevent.
+
+      While `LC_ALL=C wc -c` of the assembled body exceeds **60000 bytes**, drop
+      the four-backtick `finding` prose fence of the LOWEST-ranked member that
+      still has one, replacing it with the single line
+      `_(detail omitted: body size budget)_`; that member keeps its `###`
+      heading — which carries its location, tier, disposition AND its summary
+      for exactly this reason — stays in the `fingerprints=` index and still
+      counts in `by_severity`. Only the failure-scenario prose is lost, and the
+      replacement line says so in the body where the reader will see it. If the
+      body still exceeds 60000 bytes with every prose fence dropped, omit
+      trailing members entirely, lowest rank first: an omitted member is NOT in
+      the index, NOT counted in `by_severity`, and gets its own
+      `{file: $file_path:$line, reason: "body-size-budget"}` entry in
+      `blocked_by_dedupe[]` — which sets `status: DONE_WITH_CONCERNS`, so the
+      operator sees the loss. Never omit the header block or any of the four
+      trailing markers.
+
+      The `state == "open"` comment body is measured the same way and against
+      the same 60000 bytes; it carries one line per member and no prose
+      fences, so it degrades straight to omitting trailing members, under the
+      same `blocked_by_dedupe[]` accounting.
+
    d. **State branching:** every `gh issue create` / `gh issue comment` invocation MUST capture combined stderr+stdout into `CREATE_OUTPUT` and the exit code into `rc`. Step 8f's classifier reads both as preconditions — without this capture the truncation + transient/permanent classification in 8f silently classifies every failure as permanent. Shape: `CREATE_OUTPUT=$(gh issue create ... 2>&1); rc=$?` (or the analogous form for `gh issue comment`).
       - `state == "open"`: build the comment body (see Comment body shape
         below), rendering **every** member of the group and marking each `new`
@@ -798,14 +887,54 @@ Explicit forbidden patterns:
         `{url, file, fingerprint, tier: $group_tier, findings: <N>}` to
         `commented_urls[]`, where `file` is `$file_path:$primary_line` and
         `fingerprint` is the container fingerprint.
-      - `state == "closed"`: skip the whole group (user resolved). Append
-        **one entry per member** to `skipped_closed[]` —
-        `{url, file: "$file_path:$line", fingerprint: <member_fp>, tier: <member_tier>}`
-        — never one entry for the group. The blocker accounting downstream
-        counts `skipped_closed[]` entries carrying `tier: "BLOCKER"` one for
-        one against the number of blockers the fixer deferred, so collapsing a
-        file's three closed blockers into a single entry makes that bound fail
-        and refuses the parent run.
+      - `state == "closed"`: **split the group against the closed issue's
+        index — NEVER skip the group whole (#722).** "The user resolved it" is
+        a claim about the findings that issue actually recorded, and under the
+        old `file:line:summary` key a match WAS those findings, so skipping
+        whole was right. Under the file key a closed issue matches every
+        finding the path will ever produce, so skipping whole suppresses every
+        FUTURE finding in that file, permanently and for as long as the issue
+        stays closed. Partition instead, using the machinery the
+        `state == "open"` arm above already uses: read the `fingerprints=`
+        list from the `<!-- uberdev-finding-index -->` line of the matched
+        issue's `body` field and test each member's `MEMBER_FP` against it.
+        - Member IS in the list — it was recorded on the issue the user
+          closed, so it is genuinely resolved. Append **one entry per member**
+          to `skipped_closed[]` —
+          `{url, file: "$file_path:$line", fingerprint: <member_fp>, tier: <member_tier>}`
+          — never one entry for the group. The blocker accounting downstream
+          counts `skipped_closed[]` entries carrying `tier: "BLOCKER"` one for
+          one against the number of blockers the fixer deferred, so collapsing a
+          file's three closed blockers into a single entry makes that bound fail
+          and refuses the parent run.
+        - Member is NOT in the list — it did not exist when the user closed
+          that issue, so nothing about it was resolved and it has never been
+          filed anywhere. Those members take the **No match** arm below as
+          their own new container: one `gh issue create` carrying the same
+          container fingerprint, whose `fingerprints=` index records exactly
+          them, and whose `group_tier`, title and header block are re-derived
+          over that subset per Step 5.5. They count in `by_severity` like any
+          other written finding. This is why `c` prefers an open match: the
+          issue filed here is the open one a later run must find.
+        - **Never route a not-in-list member to `skipped_closed[]`.** The
+          damage would not be lossy-but-visible, it would be SILENT in every
+          place an operator or a machine could catch it: `skipped_closed[]` is
+          excluded from `by_severity`, so a dropped BLOCKER leaves
+          `by_severity.blocker == 0`, which leaves `halted: false`, which makes
+          the parent emit a GREEN trust trail over an unfiled blocker — and the
+          parent's own guard
+          (`by_severity.blocker + skipped_closed@BLOCKER >= deferred blockers`)
+          is SATISFIED by the very entry that dropped it, so the check written
+          to refuse an under-reporting child passes. One closed issue would
+          otherwise disable this file's blocker reporting for good.
+        - If the matched body carries no `<!-- uberdev-finding-index -->` line,
+          or its `fingerprints=` value does not parse as a comma-separated list
+          of 16-hex tokens, treat the list as **EMPTY** — every member is
+          not-in-list and gets filed. Never treat an unreadable index as
+          matching everything: that is the silent drop above, reached through a
+          parse failure instead of a policy. Fail towards filing. An issue the
+          user closes a second time costs one click; a dropped BLOCKER costs
+          the run's entire safety claim, and says nothing while it does.
       - No match: build the issue body (see Issue body shape below — tier-aware
         via `mention_line` / `backref_line` from c.5, driven by `group_tier`);
         secret-scan;
@@ -817,43 +946,6 @@ Explicit forbidden patterns:
         needing work. Append
         `{url, file, fingerprint, tier: $group_tier, findings: <N>}` to
         `created_urls[]`, with `file` and `fingerprint` as in the comment arm.
-
-   e. Refusal carve-out, applied **per member**: if a member's `summary`
-      (post-normalisation) contains ANY of the literal strings
-      `<!-- uberdev:${finding_marker_slug:-review-pr}-finding fingerprint=`,
-      `<!-- uberdev-finding-meta`, `<!-- uberdev-finding-index` or
-      `<!-- uberdev-scope`, append
-      `{file: $file_path:$line, reason: "finding-contains-fingerprint-marker"}`
-      to `blocked_by_dedupe[]` and drop **that member** from the group — never
-      the whole file, or one hostile row would suppress every honest finding
-      beside it. If every member is dropped, skip the group entirely and make no
-      GitHub write for it. One reason string covers all four literals: the class
-      is marker forgery. The first prevents attacker-controlled finding text
-      from collapsing into a fake existing-issue match; the second prevents it
-      from forging a lens attribution into the precision corpus (RFC 0018 §2.1);
-      the third prevents it from forging the per-member index and marking its own
-      finding as already-recorded; the fourth prevents it from forging the triage
-      scope declaration and pricing its own issue (#614).
-
-   e.5. **Body-size budget (#722).** Grouping is what makes an over-long body
-      reachable: a single finding's detail is bounded at 16 KiB, so four members
-      can exceed GitHub's 65536-byte issue-body limit and `gh issue create`
-      would reject the request outright — losing every finding in the file, not
-      just the overflowing one. Assemble the body, then measure it. While it
-      exceeds **60000 characters**, drop the four-backtick `finding` prose fence
-      of the LOWEST-ranked member that still has one, replacing it with the
-      single line `_(detail omitted: body size budget)_`; that member keeps its
-      `###` heading — which carries its location, tier, disposition AND its
-      summary for exactly this reason — stays in the `fingerprints=` index and
-      still counts in `by_severity`. Only the failure-scenario prose is lost, and
-      the replacement line says so in the body where the reader will see it. If
-      the body still exceeds 60000 characters with every prose fence dropped,
-      omit trailing members entirely, lowest rank first: an omitted member is NOT
-      in the index, NOT counted in `by_severity`, and gets its own
-      `{file: $file_path:$line, reason: "body-size-budget"}` entry in
-      `blocked_by_dedupe[]` — which sets `status: DONE_WITH_CONCERNS`, so the
-      operator sees the loss. Never omit the header block or any of the four
-      trailing markers.
 
    f. Write-failure handling with transient/permanent classifier (O4 — design decision D9): if `gh issue create` or `gh issue comment` returns non-zero, capture combined stderr+stdout into `CREATE_OUTPUT`, truncate to 200 chars BEFORE the regex classifier (security Note B — bounds attacker-influenced stderr substring), then classify the failure (see bash block below for the literal trigger regex). Append the typed entry to `blocked_by_dedupe[]`, set `status: DONE_WITH_CONCERNS`, and continue to the next GROUP (#722) — NEVER retry within the same run.
 
@@ -903,7 +995,7 @@ Explicit forbidden patterns:
 
 ## Findings ({member_count})
 
-### {n}. `{file_path}:{line}` — {severity} / {row_tier} / {disposition} ({disposition_reason}) — {summary_first_120_chars}
+### {n}. `{file_path}:{line}` — {severity} / {row_tier} / {disposition} ({disposition_reason}) — {sanitised summary_first_120_chars}
 
 Lenses: {comma-joined source_edges for this member}
 
@@ -936,11 +1028,11 @@ renders the primary member's contributor-ordered display name and
 `**Also flagged by:**` the rest of the group's union.
 
 Each member's `###` heading carries its `{file_path}:{line}`, its tier and its
-`{summary_first_120_chars}` — the summary is in the HEADING, not only inside
-the prose fence, because the body-size budget in step 8e.5 drops fences and a
-member whose summary lived only in its fence would degrade into a bare line
-number. Every member therefore keeps a line and a summary no matter how far
-the budget degrades it.
+`{sanitised summary_first_120_chars}` — the summary is in the HEADING, not
+only inside the prose fence, because the body-size budget in step 8c.6 drops
+fences, and a member whose summary lived only in its fence would degrade into
+a bare line number. Every member therefore keeps a line and a summary no
+matter how far the budget degrades it.
 
 **The `<!-- uberdev-finding-index -->` line (#722).** It is the per-finding
 identity the file-level container has to preserve, and it is what makes a
@@ -953,7 +1045,7 @@ miner reads those two positionally. Its prefix is chosen to diverge from both
 existing marker scans well before either ends: the miner matches
 `<!-- uberdev-finding-meta ` and `<!-- uberdev:`, and this line matches
 neither. Like the other three markers it is refusable input, not decoration:
-step 8e drops any member whose prose contains its literal.
+step 8c.4 drops any member whose prose contains its literal.
 
 **The `<!-- uberdev-scope -->` block (#614).** One issue is one file — that was
 already true per finding, and grouping (#722) makes it true per ISSUE — and this
@@ -991,8 +1083,15 @@ machine-readable sibling of the fingerprint marker and MUST be emitted as the
 line **immediately after** it — the precision miner reads the pair positionally,
 so an intervening blank line or a reordering silently strips provenance from
 every issue this agent ever files. It changes nothing about the fingerprint
-itself: same marker template, same `sha256(path:line:normalised_summary)`
-recipe, same 16-hex truncation, same fail-CLOSED dedupe.
+itself: same marker template, same 16-hex truncation, same fail-CLOSED dedupe —
+the recipe itself is now the container key of Step 8a,
+`sha256(finding_marker_slug:file_path)`. It is NOT
+`sha256(path:line:normalised_summary)`. That recipe still exists — the
+`<!-- uberdev-finding-index -->` paragraph above states it as the per-MEMBER
+key the `fingerprints=` list carries — and the two are not interchangeable:
+a reader who assembles a body from this paragraph and one who assembles it
+from Step 8a would compute different container fingerprints, which is exactly
+how cross-run dedupe stops firing.
 
 - `edges` is the **contributor-ordered union of the kept row's `source_edges`
   and the `source_edges` of every row merged into it by the Step-5
@@ -1041,7 +1140,24 @@ recipe, same 16-hex truncation, same fail-CLOSED dedupe.
 1. Replace `@` immediately before a username-like word (`[A-Za-z][A-Za-z0-9_-]{0,38}`) with `ⓐ` (U+24B6 — Unicode lookalike). Prevents notification spam.
 2. Replace `#` immediately before a digit-only token (`[0-9]+`) with `＃` (U+FF03 — fullwidth). Prevents cross-reference back-links.
 3. The wrapper around the finding prose uses **four** backticks (` ```` `). The literal three-backtick sequence inside the prose is left as-is — the four-backtick wrapper neutralises it without escaping. No further escape needed.
-4. If the (normalised) finding contains the literal `<!-- uberdev:${finding_marker_slug:-review-pr}-finding fingerprint=`, the literal `<!-- uberdev-finding-meta`, the literal `<!-- uberdev-finding-index` or the literal `<!-- uberdev-scope`, the finding is REFUSED for that MEMBER only (process step 8e) — its file's other findings are still filed. Prevents forgery of any of the four markers — the fingerprint marker forges a dedupe hit, the meta trailer forges a lens attribution (RFC 0018 §2.1), the member index forges a per-finding identity so a hostile row reads as already-recorded (#722), and the scope block forges the triage file count that sizes the solver fleet (#614). The scope block needs its OWN rule and does not inherit the fence's protection: step 3 leaves a bare three-backtick run unescaped, and a **four**-backtick run in the prose closes the wrapper outright, after which any marker the prose carries sits in the body proper exactly as a producer-authored one would.
+4. If the (normalised) finding contains the literal `<!-- uberdev:${finding_marker_slug:-review-pr}-finding fingerprint=`, the literal `<!-- uberdev-finding-meta`, the literal `<!-- uberdev-finding-index` or the literal `<!-- uberdev-scope`, the finding is REFUSED for that MEMBER only (process step 8c.4) — its file's other findings are still filed. Prevents forgery of any of the four markers — the fingerprint marker forges a dedupe hit, the meta trailer forges a lens attribution (RFC 0018 §2.1), the member index forges a per-finding identity so a hostile row reads as already-recorded (#722), and the scope block forges the triage file count that sizes the solver fleet (#614). The scope block needs its OWN rule and does not inherit the fence's protection: step 3 leaves a bare three-backtick run unescaped, and a **four**-backtick run in the prose closes the wrapper outright, after which any marker the prose carries sits in the body proper exactly as a producer-authored one would.
+
+**Rules 1 and 2 also apply to the member `summary`, not only to the finding
+prose (#722).** Before grouping, a `summary` reached GitHub through the issue
+TITLE alone, where GitHub linkifies neither `@handle` nor `#123` — so leaving
+it raw cost nothing. The grouped body renders it in every member `###` heading
+and the re-run comment renders it on every member line, and a body and a
+comment both DO linkify: raw reviewer text there is precisely the notification
+spam rule 1 exists to prevent and the cross-reference back-link rule 2 exists
+to prevent. Both templates therefore read the SANITISED placeholder, and a
+bare unsanitised one in either is a regression — the structural suite pins the
+sanitised spelling in both and refuses the bare form anywhere in this file.
+The single-member TITLE keeps the raw `$summary_first_60_chars`: neither
+linkifies in a title, so sanitising it would put a circled `ⓐ` in the backlog
+with no harm to prevent. Rules 3 and 4 stay prose-scoped — rule 3 is
+about a fence the summary never carries, and rule 4 is the per-member refusal
+of step 8c.4, which already tests the normalised `summary` for all four marker
+literals.
 
 ## Comment body shape (state==open branch)
 
@@ -1052,8 +1168,8 @@ Also flagged on commit [`{pr_commit_sha}`](https://github.com/{repo_slug}/commit
 
 {member_count} finding(s) on `{file_path}` — {new_count} new since this issue was filed:
 
-- **new** `{file_path}:{line}` — {severity} — {summary_first_120_chars}
-- recurring `{file_path}:{line}` — {severity} — {summary_first_120_chars}
+- **new** `{file_path}:{line}` — {severity} — {sanitised summary_first_120_chars}
+- recurring `{file_path}:{line}` — {severity} — {sanitised summary_first_120_chars}
 ```
 
 Every member is listed, recurring ones included. `new` versus `recurring` is

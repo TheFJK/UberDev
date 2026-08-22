@@ -321,7 +321,7 @@ assert_grep "$AGENT_MD" \
 # inside its fence would degrade to a bare line number. The summary therefore
 # lives in the member heading, which the budget never drops.
 assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
-  '### [{]n[}][.].*[{]summary_first_120_chars[}]' \
+  '### [{]n[}][.].*[{]sanitised summary_first_120_chars[}]' \
   'G12 every member heading carries its own summary (AC 2 survives degradation)'
 assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
   'the summary is in the HEADING' \
@@ -336,6 +336,126 @@ assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
 assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
   'Grouping does NOT widen .edges' \
   'G13b the trailer records that grouping does not widen its attribution'
+
+# --- #722 quality-review rows: six defects the task-gate pass did not see ----
+#
+# Findings 1-6 of the task-1 quality review. Each row below locks the corrected
+# behaviour, and each was mutation-checked by reverting the agent md to the
+# reviewed text and confirming the row goes red.
+#
+# G14 — the file-scoped TITLE, the first externally-visible consequence #722
+# names, shipped with ZERO coverage: reverting both arms to the old
+# `[finding] $file_path:$line - $summary_first_60_chars` still reported
+# PASS=180 FAIL=0. The em dash is spanned with `.{1,6}` rather than written
+# literally, for the locale reason G4 documents above.
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'members it is .\[finding\] [$]file_path .{1,6} [$]member_count findings' \
+  'G14 the multi-member title is file-scoped and counts findings'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'exactly one it is .\[finding\] [$]file_path .{1,6} [$]summary_first_60_chars' \
+  'G14b the single-member title leads with the path, not path:line'
+# The negation is the half that catches a REVERT: `$file_path:$line` in a title
+# position is the old per-finding title and nothing else.
+assert_no_grep "$AGENT_MD" \
+  '\[finding\] [$]file_path:[$]line' \
+  'G14c no line-scoped title survives anywhere in the agent contract'
+
+# G15 — the body budget guards a limit stated in BYTES, so it must be measured
+# in bytes. Its own sanitiser turns each `@name` and each `#123` into a 3-byte
+# character, so ~2770 of them carry a 60000-CHARACTER body past 65536 bytes and
+# gh 422s the file's every finding away.
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'LC_ALL=C wc -c. of the assembled body exceeds [*][*]60000 bytes' \
+  'G15 the body-size budget is measured in bytes, the unit of the limit'
+assert_no_grep "$AGENT_MD" \
+  '60000 characters' \
+  'G15b the budget is never restated in characters (the unit mismatch it fixed)'
+
+# G16 — the SILENT half of the container re-key, and the most severe row here.
+# Under the file key a closed issue matches every finding the path will ever
+# produce, so `skip the whole group (user resolved)` suppressed every FUTURE
+# finding in that file. Silently: `skipped_closed[]` is excluded from
+# `by_severity`, so a dropped BLOCKER leaves `halted: false` and a GREEN trail,
+# and the parent's `by_severity.blocker + skipped_closed@BLOCKER >= deferred`
+# guard is SATISFIED by the entry that dropped it.
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'NEVER skip the group whole' \
+  'G16 a closed match splits the group instead of skipping it whole'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'Never route a not-in-list member to .skipped_closed' \
+  'G16b an unrecorded member is never routed to skipped_closed'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'Member is NOT in the list' \
+  'G16c the closed arm defines the not-in-index partition'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'treat the list as [*][*]EMPTY[*][*]' \
+  'G16d an absent or unparseable index fails towards filing, not towards skipping'
+# G16e — the split files a SECOND issue under one container key, so the lookup
+# must prefer the open one or the closed issue shadows it and every finding is
+# re-filed on every run.
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'first element whose .state. is .*open.* if the array has' \
+  'G16e the dedupe lookup acts on the OPEN match when one exists'
+# G16f — the anti-regression negation. This exact sentence is what the reviewed
+# commit shipped, and it is the whole defect.
+assert_no_grep "$AGENT_MD" \
+  'skip the whole group [(]user resolved[)]' \
+  'G16f the skip-whole-group rule is gone, not merely qualified'
+
+# G17 — untrusted reviewer summary text newly reaches the issue BODY and the
+# COMMENT, where GitHub linkifies `@handle` and `#123`. It was inert in the
+# title, which is why it shipped raw; it is not inert in either new place.
+assert_in_section "$AGENT_MD" '^## Comment body shape' '^## Return contract' \
+  '[{]sanitised summary_first_120_chars[}]' \
+  'G17 the comment renders the SANITISED member summary'
+assert_in_section "$AGENT_MD" '^## Sanitiser steps' '^## Comment body shape' \
+  'Rules 1 and 2 also apply to the member .summary' \
+  'G17b the sanitiser section scopes rules 1-2 to the summary, not prose alone'
+# The sanitised spelling is `{sanitised summary_first_120_chars}`, so the bare
+# literal below cannot match it: the `{` is followed by `s`, not by `summary`.
+assert_no_grep "$AGENT_MD" \
+  '[{]summary_first_120_chars[}]' \
+  'G17c no bare unsanitised member-summary placeholder remains'
+
+# G18 — the meta-trailer paragraph asserted the OLD per-row recipe for the
+# CONTAINER fingerprint, contradicting Step 8a. Two readers assembling a body
+# from the two passages computed different container keys, which is cross-run
+# dedupe silently not firing (AC 3).
+assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
+  'the recipe itself is now the container key of Step 8a' \
+  'G18 the trailer paragraph names the CONTAINER recipe Step 8a defines'
+assert_no_grep "$AGENT_MD" \
+  'same .sha256[(]path:line:normalised_summary[)]' \
+  'G18b the trailer no longer claims the per-row recipe keys the container'
+
+# G19 — ORDER, not presence. `c.4` drops a forged member from the group and
+# `c.6` measures and degrades the assembled body; both MUTATE what `d` writes,
+# so a literal reader who reached them after `d` would have already created the
+# issue and both would be no-ops. Asserted by line number, because that is the
+# one thing a presence grep cannot see.
+_g19_line() {  # <ere> -> line number of the first match in $AGENT_MD, or empty
+  awk -v pat="$1" '$0 ~ pat { print NR; exit }' "$AGENT_MD"
+}
+G19_C4="$(_g19_line '^   c\.4\. ')"
+G19_C5="$(_g19_line '^   c\.5\. ')"
+G19_C6="$(_g19_line '^   c\.6\. ')"
+G19_D="$(_g19_line '^   d\. ')"
+if [ -n "$G19_C4" ] && [ -n "$G19_C5" ] && [ -n "$G19_C6" ] && [ -n "$G19_D" ] &&
+   [ "$G19_C4" -lt "$G19_C5" ] && [ "$G19_C5" -lt "$G19_C6" ] && [ "$G19_C6" -lt "$G19_D" ]; then
+  echo "  PASS  G19 the group-mutating sub-steps are specified before the write sub-step d"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  G19 the group-mutating sub-steps are specified before the write sub-step d"
+  echo "        file: $AGENT_MD"
+  echo "        c.4=${G19_C4:-<none>} c.5=${G19_C5:-<none>} c.6=${G19_C6:-<none>} d=${G19_D:-<none>}"
+  FAIL=$((FAIL + 1))
+fi
+# G19b — `c.4` must precede `c.5`: dropping a member can change which member is
+# primary, and c.5 derives mention_line/backref_line from the primary member's
+# group_tier. Locked as prose because the line-number row above cannot say WHY.
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  're-derive the primary member and .group_tier. over the members that remain' \
+  'G19b removing members re-derives the primary member and group_tier'
 
 ### Suite 3: Label-provision idempotency ----------
 echo
@@ -443,7 +563,7 @@ fi
 ### Suite 9: Fingerprint-marker reject ----------
 echo
 echo "### Suite 9: Fingerprint-marker forge-protection"
-# B7 lives in either `## Process` (step 8e refusal carve-out) or `## Sanitiser steps`.
+# B7 lives in either `## Process` (step 8c.4 refusal carve-out) or `## Sanitiser steps`.
 # Same EOF-anchor rationale as B6 — inline grep is the robust shape.
 if grep -qE 'finding-contains-fingerprint-marker' "$AGENT_MD"; then
   echo "  PASS  B7 finding containing the marker is refused"; PASS=$((PASS+1))
@@ -1113,10 +1233,10 @@ assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
 # --- forgery refusal covers BOTH literals ---
 assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
   'finding-contains-fingerprint-marker' \
-  'S21.8 — step 8e keeps the fingerprint-marker refusal reason string'
+  'S21.8 — step 8c.4 keeps the fingerprint-marker refusal reason string'
 assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
   '<!-- uberdev-finding-meta' \
-  'S21.8b — step 8e also refuses a forged meta trailer'
+  'S21.8b — step 8c.4 also refuses a forged meta trailer'
 assert_in_section "$AGENT_MD" '^## Sanitiser steps' '^## Comment body shape' \
   '<!-- uberdev:.*-finding fingerprint=' \
   'S21.8c — sanitiser step 4 still names the fingerprint marker literal'
@@ -1127,7 +1247,7 @@ assert_in_section "$AGENT_MD" '^## Sanitiser steps' '^## Comment body shape' \
 # forged one would let hostile finding prose mark itself already-recorded.
 assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
   '<!-- uberdev-finding-index' \
-  'S21.8e — step 8e also refuses a forged member index'
+  'S21.8e — step 8c.4 also refuses a forged member index'
 assert_in_section "$AGENT_MD" '^## Sanitiser steps' '^## Comment body shape' \
   '<!-- uberdev-finding-index' \
   'S21.8f — sanitiser step 4 also names the member-index literal'
