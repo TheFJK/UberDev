@@ -268,19 +268,54 @@ echo "== B7: the --converge ceiling is EXECUTED against the library's constant =
 # without a repo, a run dir or gh: every refusal in the parser exits before the
 # fence reaches `git rev-parse --show-toplevel`. Nothing here transcribes the
 # condition; a test that executes its own copy of the code is green forever.
-arg_block() {
+#
+# THE SLICE IS BOUNDED AT BOTH ENDS, and that is the safety property, not tidiness
+# -- the premise above holds for the PARSER and for nothing past it. Two anchors
+# choose what runs, and when the closing one stops matching the slice keeps
+# growing into fences that make branches, write run dirs and call gh.
+#
+# The first draft bounded it below only. Renaming the terminator to `EOF_ARGS` in
+# a scratch copy grew the slice from 67 lines to 167 with BOTH guards still
+# passing (a floor cannot see growth, and the `-gt` bound is still inside the
+# wider slice), and `run_converge` then ran that widened slice against the
+# LAUNCHING CWD. Every call the parser does not refuse -- two of the three tokens
+# this case tries, since `--converge=7` exits at the range check having written
+# nothing -- ran on past the parser into the fence's setup: it created
+# `.uberdev/premerge/`, wrote a `.gitignore` of `*` and a run dir holding a
+# `discovery-audit.jsonl`, and only then died on
+# `UBERDEV_PREMERGE_PLUGIN_ROOT: unbound variable`. Which is the shape of the
+# hazard rather than a detail of it: the further a call gets, the more it leaves
+# behind. Measured in a throwaway repo, not imagined (#724).
+#
+# So: the extractor PROVES it reached the terminator (awk exits 3 when it never
+# does, which also covers the opening anchor moving -- no anchor, no terminator),
+# the line count is a BAND and not a floor, and nothing is EXECUTED unless both
+# hold. A renamed terminator now reds here, saying that, before anything runs.
+arg_block() {  # arg_block -> the slice on stdout; rc 3 if the terminator was never reached
   fence_body premerge-scan | awk '
     !inb && index($0, "PREMERGE_LEVEL=xhigh") == 1 { inb = 1 }
     inb { print }
-    inb && $0 == "EOF_PREMERGE_ARGS" { exit }
+    inb && $0 == "EOF_PREMERGE_ARGS" { hit = 1; exit }
+    END { if (!hit) exit 3 }
   '
 }
-ARG_BLOCK="$(arg_block)"
+ARG_BLOCK="$(arg_block)"; ARG_BLOCK_RC=$?
 ARG_BLOCK_LINES="$(grep -c . <<<"$ARG_BLOCK")"
-if [ "$ARG_BLOCK_LINES" -ge 40 ]; then
+ARG_BLOCK_OK=1
+if [ "$ARG_BLOCK_RC" -eq 0 ]; then
+  ok "B7: the slice ends where the parser does, at EOF_PREMERGE_ARGS"
+else
+  ARG_BLOCK_OK=0
+  bad "B7: the slice never reached EOF_PREMERGE_ARGS (awk rc=$ARG_BLOCK_RC) -- the terminator moved or was renamed, so the slice is unbounded and will NOT be run"
+fi
+# The upper end is loose on purpose: the parser legitimately grew 61 -> 67 lines
+# while #724 was being written. This is a guard against a slice that ran away,
+# never a line-count lock on a file people are expected to edit.
+if [ "$ARG_BLOCK_LINES" -ge 40 ] && [ "$ARG_BLOCK_LINES" -le 110 ]; then
   ok "B7: extracted $ARG_BLOCK_LINES lines of argument parser"
 else
-  bad "B7: the argument-parser slice yielded $ARG_BLOCK_LINES lines -- an anchor moved; every row below would be meaningless"
+  ARG_BLOCK_OK=0
+  bad "B7: the argument-parser slice yielded $ARG_BLOCK_LINES lines, outside the 40..110 band -- an anchor moved; every row below would be meaningless"
 fi
 case "$ARG_BLOCK" in
   *"PREMERGE_CONVERGE_ARG\" -gt "*) ok "B7: the slice contains the bound it is here to execute" ;;
@@ -310,7 +345,11 @@ $ARG_BLOCK
 printf 'PARSED CONVERGE=%s\n' \"\$PREMERGE_CONVERGE\"" 2>&1
 }
 
-if [ -n "$CEILING" ]; then
+if [ "$ARG_BLOCK_OK" != 1 ]; then
+  # Not a stand-down that hides anything: the FAIL above has already reddened the
+  # file, and refusing to run an unbounded slice is the point of measuring it.
+  echo "  ----  B7: the slice is not bounded (see the FAIL above) -- NOT executing it"
+elif [ -n "$CEILING" ]; then
   OUT="$(run_converge "--converge=$CEILING")"; RC=$?
   if [ "$RC" -eq 0 ] && [ "$OUT" = "PARSED CONVERGE=$CEILING" ]; then
     ok "B7: --converge=$CEILING (the library's ceiling) is ACCEPTED by the fence"
