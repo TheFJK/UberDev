@@ -1572,6 +1572,71 @@ case "$(cat "$D/b30b.txt")" in
   *) bad "B30: single oversized file produced: $(cat "$D/b30b.txt")" ;;
 esac
 
+# A SMALLER FILE RANKED AFTER THE BOUNDARY FILE MUST NOT SLIP IN BEHIND IT.
+# Both cases above put the boundary file LAST in ranked order, so what held them
+# at 64 rows was running out of groups, not the loop's exit. Turn that `break`
+# into a `continue` and both still pass byte for byte — there is nothing after
+# the split file for the leftover budget to admit. But the fill spends the rest
+# of the envelope WITHOUT adding it to `used`, so any lower-priority file that
+# fits against the pre-fill total walks straight past MAX_FINDINGS: this fixture
+# files 68 rows into a 64-row envelope under that one-word change.
+#
+# Ranked order is BLOCK.sh(4) -> whole.sh(31) -> edge.sh(31) -> tail.sh(4): 35
+# rows admitted whole, 29 of edge.sh row-filling the rest, and tail.sh arriving
+# after the budget is gone. Two attempts are what put the smaller file after the
+# boundary one — `defer` unions the deferring attempt's suggestions first and
+# earlier attempts oldest-first, so attempt 2 carries whole.sh plus the blockers
+# while attempt 1 carries edge.sh and then tail.sh.
+D="$(new_case)"
+python3 -I -B -c '
+import json, sys
+rows  = [{"file": "lib/edge.sh", "line": i + 1, "summary": "edge %03d" % i,
+          "failure_scenario": "d", "category": "reuse", "severity": "suggestion"}
+         for i in range(31)]
+rows += [{"file": "lib/tail.sh", "line": i + 1, "summary": "tail %03d" % i,
+          "failure_scenario": "d", "category": "reuse", "severity": "suggestion"}
+         for i in range(4)]
+json.dump({"schema_version": 1, "level": "xhigh", "pr_number": 670,
+           "run_id": sys.argv[2], "findings": rows},
+          open(sys.argv[1] + "/in.json", "w"))
+' "$D" "$RUN_ID"
+plan_at "$D" 1 "$SHA_A" || bad "B30: trailing-file setup 1 failed: $(cat "$D/err.txt")"
+python3 -I -B -c '
+import json, sys
+rows  = [{"file": "lib/whole.sh", "line": i + 1, "summary": "whole %03d" % i,
+          "failure_scenario": "d", "category": "reuse", "severity": "suggestion"}
+         for i in range(31)]
+rows += [{"file": "lib/BLOCK.sh", "line": i + 1, "summary": "block %02d" % i,
+          "failure_scenario": "d", "severity": "blocker"} for i in range(4)]
+json.dump({"schema_version": 1, "level": "xhigh", "pr_number": 670,
+           "run_id": sys.argv[2], "findings": rows},
+          open(sys.argv[1] + "/in.json", "w"))
+' "$D" "$RUN_ID"
+plan_at "$D" 2 "$SHA_B" || bad "B30: trailing-file setup 2 failed: $(cat "$D/err.txt")"
+if python3 -I -B "$LIB" defer --run-dir "$D" --attempt 2 --include-blockers \
+     >"$D/b30c.txt" 2>"$D/b30c.err"; then
+  ok "B30: 70 rows across four files exit 0 rather than filing nothing"
+else
+  bad "B30: defer refused instead of truncating: $(cat "$D/b30c.err")"
+fi
+B30_TAIL="$(python3 -I -B -c '
+import collections, json, sys
+doc = json.loads(open(sys.argv[1], encoding="utf-8").read().splitlines()[1])
+per_file = collections.Counter(f["scope"]["path"] for f in doc["findings"])
+print("n=%d %s" % (len(doc["findings"]),
+                   " ".join("%s=%d" % kv for kv in sorted(per_file.items()))))
+' "$D/deferred-aggregate.md")"
+if [ "$B30_TAIL" = "n=64 lib/BLOCK.sh=4 lib/edge.sh=29 lib/whole.sh=31" ]; then
+  ok "B30: admission stops at the split file — the 4-row file behind it is refused"
+else
+  bad "B30: a file ranked after the boundary file spent a budget already gone: $B30_TAIL"
+fi
+case "$(cat "$D/b30c.txt")" in
+  "PREMERGE_DEFER TOTAL=64 BLOCKER=4 SUGGESTION=60 FILES=3 OVERFLOW=6 PATH="*)
+    ok "B30: the envelope holds at MAX_FINDINGS once the boundary file has spent it" ;;
+  *) bad "B30: unexpected defer line: $(cat "$D/b30c.txt")" ;;
+esac
+
 echo "== B25: a malformed artifact refuses with a token, never a traceback =="
 # The module docstring promises 'every failure exits non-zero with a stable token
 # on stderr' and the verb table promises `defer 0 encoded | 74 refused`. An
