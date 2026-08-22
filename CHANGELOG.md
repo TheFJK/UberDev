@@ -138,14 +138,70 @@ do not.
 A surviving blocker used to be printed in the summary and lost when the terminal
 scrolled — and the encoder pinned every row to `suggestion`, so there was no way
 to file one even in principle. The new `defer` verb is the missing producer;
-`agents/findings-to-issues.md` needed no change, because `severity_rank(blocker)=3`
-already sorts a blocker above every cleanup row so a `max_new` overflow cannot
-displace it. Blockers the loop stopped on now file at `BLOCKER` tier with a
+`severity_rank(blocker)=3` already sorts a blocker above every cleanup row, so a
+`max_new` overflow cannot displace one — but `agents/findings-to-issues.md` did
+need a change after all; see the suggestion-tier subshell fix below. Blockers the loop stopped on now file at `BLOCKER` tier with a
 `Blocks: #<stack-pr>` backref, alongside the suggestions and the un-applied lens
 findings. Suggestions accumulate as a fingerprint-deduped union across attempts —
 one the reviewer stops repeating is unmentioned, not resolved — and are filed
 once, after the loop settles, because per-attempt filing would create duplicates
 and trip the agent's own inode re-check.
+
+### Fixed — 16 defects the gate found in its own second pass
+
+Running `/premerge` over this stack produced two `xhigh` review passes. The first
+found 12 blockers; fixing them surfaced 15 more findings sharing **no location**
+with the first set, which is the honest reading of a reviewer that hit its
+15-finding cap both times: each pass reported a floor, not a tally. All of it is
+fixed here, each fix carrying an executed reproduction and a mutation proving the
+new test row is not vacuous.
+
+The ones that mattered most:
+
+- **An injection breakout.** `_canonical_json` did not escape `<`, so finding text
+  containing `</external-untrusted-input>` closed the spotlighting envelope early
+  and put attacker-chosen prose outside the untrusted region. Both sibling
+  encoders escape it, and this module's docstring claimed byte-identical shape to
+  one of them. `ensure_ascii=True` stays, so unicode lookalikes cannot smuggle a
+  tag either.
+- **`/premerge` filed zero cleanup issues in a stock run.** The suggestion-tier
+  gate was set as a side effect inside a function the contract mandates calling
+  through command substitution, so the assignment died in the subshell and every
+  cleanup row routed out — returning `status: DONE` with empty arrays, which reads
+  exactly like "the review found nothing". The gate now travels out through the
+  function's stdout contract. Both guarding assertions were greps over markdown
+  that never executed; with the fix mutated back out they stayed green, so the
+  replacement rows execute the function instead.
+- **The clean gate answered green on evidence it could not read.** A failed
+  `gh pr checks` collapsed to `no_checks`, which passes. The probe also discarded
+  *valid* JSON on gh's exit 1 (a check failed) and exit 8 (pending), so red and
+  pending builds read as green as well.
+- **The fix-commit scope guard failed open** — `git diff … | sort -u >file || exit 2`
+  tests `sort`'s status, and `sort` succeeds on empty input, so a failing
+  `git diff` produced an empty stray set and `git add -u` swept the whole tree.
+  Its sibling one line above failed closed under the identical shape.
+- **Phase 4c could neither repair nor safely revert.** Its middle arm could never
+  fire (a green predecessor always yields `fixed == 0`, so `converge` answers
+  `STOP_REGRESSED` first), and it had no wait arm, so the post-push settle window
+  this file documents elsewhere reverted correct polish on essentially every run.
+- **Two `aggregate_path` values for one dispatch.** §2b and §5-file disagreed, and
+  §2b's path drops exactly the rows the `defer` verb was added to produce. This
+  bit a real run, which filed only its suggestion rows.
+- **`defer` refused instead of overflowing.** Above 64 rows it exited 74 with no
+  recovery arm, so the one step whose purpose is that nothing is lost filed
+  nothing. It now keeps blockers first, writes the aggregate, reports
+  `OVERFLOW=<n>` on every run, and exits 0 — and because blockers are kept first,
+  `SUGGESTION == 0 && OVERFLOW > 0` is the only state in which a blocker may have
+  been dropped, so that case gets its own louder line.
+- **Uncaught exceptions where the contract promised exit 74**, an unbounded flaky-CI
+  rerun path, CI-repair commits published with none of the three checks the file
+  calls load-bearing, and `--after-push` keyed on a workflow *file* rather than on
+  whether the PR gets checks at all.
+
+Test rows: `premerge.test.sh` 132 → 179, `premerge-findings.test.sh` 93 → 118,
+`findings-to-issues.test.sh` 157 → 159. One harness defect fixed along the way:
+`fence_body` matched fence openers by prefix, so renaming a fence to
+`…-DISABLED` redded nothing.
 
 ### Fixed — `/premerge` is a general PR-phase gate again
 

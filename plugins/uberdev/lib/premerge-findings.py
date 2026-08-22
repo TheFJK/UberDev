@@ -251,9 +251,41 @@ def fail(token: str, detail: str = "") -> "NoReturn":  # type: ignore[valid-type
 
 
 def _canonical_json(value: object) -> bytes:
-    return json.dumps(
+    """Compact, sorted-key JSON with every markup character \\u-escaped.
+
+    JSON does not normally escape `<`, and this encoder's output is written
+    INSIDE an `<external-untrusted-input>` spotlighting envelope. So reviewer
+    prose containing the literal close tag -- which is ordinary prose in a repo
+    that documents the envelope, and is trivially plantable by anything that
+    reaches the reviewer's context -- ended the envelope early and put whatever
+    followed it outside the untrusted region, where `findings-to-issues` reads it
+    as trusted. That is an injection breakout, not a formatting nit.
+
+    Both sibling encoders already prevent it and this one did not, while
+    `_encode_aggregate`'s docstring claimed byte-identical shape to one of them:
+    `report_primitives.canonical_json` rewrites the close marker, and
+    `code_fixer_contract._canonical_json` escapes `<`, `>` and `&`. The wider set
+    is the one adopted here, because the envelope's OPEN tag and any HTML-comment
+    marker downstream are breakable by the same trick, and because matching the
+    sibling exactly is what makes the "no new arm in the agent's parser" claim
+    true rather than merely asserted.
+
+    `\\u003c` is JSON's own escape for `<`, so `json.loads` restores the original
+    prose byte-for-byte -- nothing is lost, only the structural reading is.
+
+    `ensure_ascii=True` stays: it also \\u-escapes every non-ASCII byte, which
+    keeps the payload pure ASCII (so `.encode("ascii")` cannot raise) and closes
+    the unicode-lookalike variant of the same trick.
+    """
+    rendered = json.dumps(
         value, ensure_ascii=True, sort_keys=True, separators=(",", ":")
-    ).encode("ascii")
+    )
+    return (
+        rendered.replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .encode("ascii")
+    )
 
 
 def _bounded_text(value: object, limit: int, token: str, what: str) -> str:
@@ -287,6 +319,31 @@ def _repo_path(value: object) -> str:
     first = value.split("/", 1)[0]
     if first in ("..", ".git"):
         fail("finding_schema_invalid", f"file escapes the repository: {value}")
+    return value
+
+
+_RUN_ID_RE = re.compile(r"\A[0-9]{8}-[0-9]{6}-[0-9a-f]+\Z")
+
+
+def _pr_number(value: object, what: str) -> int:
+    """The two identity fields, validated ONCE and reused.
+
+    `cmd_plan` checked these on the way in and nothing checked them on the way
+    back out, so `cmd_defer` indexing `document["pr_number"]` on an artifact that
+    lacked it died with a `KeyError`, a traceback and exit status 1 -- against a
+    module whose docstring promises "every failure exits non-zero with a stable
+    token on stderr" and a verb table that promises `defer 0 encoded | 74
+    refused`. An uncaught exception is neither, and a fence branching on 74
+    cannot see it.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        fail("input_schema_invalid", f"{what} pr_number must be a positive integer")
+    return value
+
+
+def _run_id_value(value: object, what: str) -> str:
+    if not isinstance(value, str) or not _RUN_ID_RE.match(value):
+        fail("input_schema_invalid", f"{what} run_id must match YYYYMMDD-HHMMSS-<hex>")
     return value
 
 
@@ -327,9 +384,39 @@ _FINGERPRINT_STRIP = re.compile(r"[`'\"]")
 
 
 def _fold_summary(summary: str) -> str:
-    """Line-independent, punctuation-independent identity text for a finding."""
+    """Line-independent, punctuation-independent identity text for a finding.
+
+    Deliberately AGGRESSIVE, and deliberately NOT the uniqueness predicate. This
+    fold answers "is this the same complaint I already tried to fix?" across
+    re-reviews that re-word punctuation, quoting and case, so it has to erase
+    exactly those. `_normalised_summary` answers the different question of
+    whether two rows are one row -- see the comment on the uniqueness key in
+    `_normalise_findings` for why conflating the two cost a whole attempt.
+    """
     folded = " ".join(_FINGERPRINT_STRIP.sub("", summary).split()).casefold()
     return folded.rstrip(".!?;:, ")
+
+
+def _normalised_summary(summary: str) -> str:
+    """The DOWNSTREAM dedupe text, restated: `agents/findings-to-issues.md`.
+
+    Its Step 5 defines `normalised_summary` as the summary "lowercased,
+    whitespace-runs collapsed to single space, leading/trailing whitespace
+    trimmed, code-fence backticks stripped" -- and that is the whole list. No
+    quote stripping, no trailing-punctuation strip, `lower()` rather than
+    `casefold()`.
+
+    This exists so this file's uniqueness refusal can be keyed on the predicate
+    it CLAIMS to mirror instead of on `_fold_summary`, which is strictly coarser.
+    The direction that costs a run is the one the old comment did not cover: two
+    rows the downstream agent would file as two issues, folded together here,
+    refused as `findings_not_unique`, `plan` exiting before it writes, and -- per
+    SKILL.md `## Phase 2` -- the attempt dying over how the reviewer punctuated
+    its output. The built-in reviewer's xhigh prompt explicitly asks for two rows
+    when two angles flag one line, so `the 'lock' is released early` alongside
+    `the lock is released early.` is output it was INSTRUCTED to produce.
+    """
+    return " ".join(summary.replace("`", "").split()).lower()
 
 
 def _fingerprint(file_path: str, summary: str) -> str:
@@ -431,9 +518,19 @@ def _normalise_findings(records: object) -> "list[dict]":
         # classified.json reads the same answer to "have I seen this before?".
         entry["fingerprint"] = _fingerprint(entry["file"], entry["summary"])
 
-        # Uniqueness is (file, line, fingerprint) -- ONE key, whether or not the
-        # reviewer gave us a line. Two properties have to hold at once, and
-        # neither branch of a line-conditional key delivers both.
+        # Uniqueness is (file, line, normalised summary) -- ONE key, whether or
+        # not the reviewer gave us a line. Two properties have to hold at once,
+        # and neither branch of a line-conditional key delivers both.
+        #
+        # NOT the loop fingerprint, which is what this used to be. `_fold_summary`
+        # is strictly coarser than the downstream `normalised_summary` -- it also
+        # strips `'` and `"` and trailing `.!?;:,` and casefolds -- so a pair of
+        # rows that findings-to-issues would file as TWO issues collided here and
+        # killed the attempt. Refusing more than the collapse you claim to mirror
+        # is not the safe direction: it is the unrecoverable one. `_fingerprint`
+        # keeps the coarse fold, because surviving a re-wording is exactly what
+        # cross-attempt identity needs; the two questions are now asked by two
+        # functions instead of one.
         #
         # TWO FINDINGS AT ONE LOCATION ARE TWO FINDINGS. The built-in reviewer's
         # xhigh prompt instructs it, in as many words, that if two angles flag
@@ -446,20 +543,23 @@ def _normalise_findings(records: object) -> "list[dict]":
         # of this collision was fixed first; the with-line half is the likelier
         # one by far, because a line number is the normal case.
         #
-        # TWO LINES ARE TWO PLACES, EVEN UNDER ONE SUMMARY. The fingerprint is
-        # deliberately line-independent (see `_fingerprint`), so two genuinely
+        # TWO LINES ARE TWO PLACES, EVEN UNDER ONE SUMMARY. Two genuinely
         # distinct blockers at different lines of one file, phrased identically
-        # ("the return value of write() is never checked"), share one. Keying on
-        # (file, fingerprint) alone would refuse that pair -- the very case
-        # `_blocker_fingerprints` counts as a multiset in order to keep visible.
+        # ("the return value of write() is never checked"), normalise to the same
+        # text. Keying on (file, summary) alone would refuse that pair -- the very
+        # case `_blocker_fingerprints` counts as a multiset in order to keep
+        # visible.
         #
-        # So `line` separates locations, `fingerprint` separates reasons, and
-        # only a row matching an earlier one in BOTH -- same place, same
-        # complaint, i.e. a finding the reviewer emitted twice -- collides. That
-        # is also the triple `agents/findings-to-issues.md` Step 5 dedupes on
-        # (`(file_path, line, sha256(normalised_summary)[:16])`), so a document
-        # this accepts cannot collapse into one issue downstream.
-        key = (entry["file"], entry["line"], entry["fingerprint"])
+        # So `line` separates locations, the normalised summary separates
+        # reasons, and only a row matching an earlier one in BOTH -- same place,
+        # same complaint, i.e. a finding the reviewer emitted twice -- collides.
+        # That is now literally the triple `agents/findings-to-issues.md` Step 5
+        # dedupes on (`(file_path, line, sha256(normalised_summary)[:16])`),
+        # computed by `_normalised_summary` rather than asserted in prose, so
+        # this file refuses a pair if and only if that agent would merge it. The
+        # unhashed text is compared instead of its 16-hex truncation: same
+        # answer, minus a truncation collision that would refuse a real pair.
+        key = (entry["file"], entry["line"], _normalised_summary(entry["summary"]))
         if key in seen:
             where = (
                 entry["file"]
@@ -542,6 +642,16 @@ def _encode_aggregate(
     (open tag + newline, one compact sorted-key JSON line, newline + close tag +
     newline) so the agent's existing envelope parser reads it with no new arm.
     Only the `source` and the per-finding key set differ, and both are declared.
+
+    EVERY ROW IS RE-VALIDATED, even one that "came from" `_normalise_findings`.
+    Not all of them did: `cmd_defer` feeds this function rows read straight off
+    disk (`document["blockers"]`, `document["suggestions"]`, and every earlier
+    attempt's carried suggestions), which nothing had checked beyond "it is a
+    dict". A row missing `failure_scenario` or `line` therefore raised `KeyError`
+    -- exit 1 and a traceback -- from a verb contracted to answer `0 encoded | 74
+    refused`. Re-validating is cheap (the validators are idempotent on rows that
+    already passed) and it is what makes the exit-status contract true for the
+    disk path as well as the in-memory one.
     """
     findings = []
     # Contributor-ordered, and the built-in reviewer always leads it: an empty
@@ -549,7 +659,20 @@ def _encode_aggregate(
     # must not look alike), and `source_edges` is documented as a subset of the
     # declared contributors, so the roster can never be empty either.
     edges_present = [REVIEW_SOURCE_EDGE]
-    for finding in rows:
+    for index, finding in enumerate(rows, start=1):
+        if not isinstance(finding, dict):
+            fail("finding_schema_invalid", f"aggregate row {index} is not an object")
+        # Read through the validators, never by bare index -- see the docstring.
+        path = _repo_path(finding.get("file"))
+        line = _optional_line(finding.get("line"))
+        summary = _bounded_text(
+            finding.get("summary"), MAX_SUMMARY_BYTES, "finding_schema_invalid",
+            f"aggregate row {index} summary",
+        )
+        detail = _bounded_text(
+            finding.get("failure_scenario"), MAX_DETAIL_BYTES,
+            "finding_schema_invalid", f"aggregate row {index} failure_scenario",
+        )
         # The row's OWN severity, not a hardcoded one.
         #
         # It used to be pinned to "suggestion", which is correct for the
@@ -563,7 +686,7 @@ def _encode_aggregate(
         if severity not in SEVERITIES:
             fail("aggregate_severity_invalid", str(severity))
         if severity == "blocker" and not allow_blockers:
-            fail("aggregate_blocker_not_allowed", finding["file"])
+            fail("aggregate_blocker_not_allowed", path)
         # The row's OWN producer, not a hardcoded one -- see REVIEW_SOURCE_EDGE.
         # Rows that came through `_normalise_findings` carry no `source_edge` and
         # are the built-in reviewer's by construction; `_normalise_lens_findings`
@@ -575,15 +698,15 @@ def _encode_aggregate(
             edges_present.append(edge)
         findings.append(
             {
-                "detail": finding["failure_scenario"],
+                "detail": detail,
                 "scope": {
-                    "line": finding["line"] if finding["line"] is not None else 1,
+                    "line": line if line is not None else 1,
                     "operation": "modify_existing",
-                    "path": finding["file"],
+                    "path": path,
                 },
                 "severity": severity,
                 "source_edges": [edge],
-                "summary": finding["summary"],
+                "summary": summary,
             }
         )
     document = {
@@ -600,6 +723,13 @@ def _encode_aggregate(
     body = _canonical_json(document)
     if b"\x00" in body or b"\r" in body or b"\n" in body:
         fail("aggregate_not_canonical", "envelope body carries a control byte")
+    # The envelope's structural characters must not survive into its own body.
+    # `_canonical_json` escapes them; this asserts it, so a future edit that
+    # loosens the encoder fails here instead of shipping a breakout. `<` alone is
+    # enough to open or close a tag, and it is the only one either sibling
+    # encoder treats as load-bearing.
+    if b"<" in body:
+        fail("aggregate_not_canonical", "envelope body carries an unescaped '<'")
     return (
         f'<external-untrusted-input source="{AGGREGATE_SOURCE}">\n'.encode("ascii")
         + body
@@ -620,6 +750,13 @@ def _read_attempt(out_dir: str, attempt: int, required: bool) -> "dict | None":
     `required=True` is a refusal, never a default. An attempt whose evidence
     cannot be read must not be summarised as "nothing to compare against" --
     that reads as progress and would let the loop run on.
+
+    EVERY FIELD A CALLER DEREFERENCES IS CHECKED HERE, not just the two arrays.
+    This is the designated fail-closed reader, so a field it waves through is a
+    field that crashes somewhere downstream instead of refusing here: `cmd_defer`
+    indexes `pr_number` and `run_id` unconditionally, and on an artifact missing
+    either it raised `KeyError` -- exit 1 with a traceback, not the contracted
+    exit 74 with a stable token.
     """
     target = _attempt_path(out_dir, attempt)
     if not os.path.exists(target):
@@ -632,7 +769,19 @@ def _read_attempt(out_dir: str, attempt: int, required: bool) -> "dict | None":
     for key in ("blockers", "suggestions"):
         if not isinstance(document.get(key), list):
             fail("input_schema_invalid", f"{target} has no {key} array")
+    _pr_number(document.get("pr_number"), target)
+    _run_id_value(document.get("run_id"), target)
     return document
+
+
+def _object_rows(values: "list", what: str) -> "list[dict]":
+    """A stored findings array whose elements are all objects, or a refusal."""
+    out: "list[dict]" = []
+    for index, value in enumerate(values, start=1):
+        if not isinstance(value, dict):
+            fail("finding_schema_invalid", f"{what} {index} is not an object")
+        out.append(value)
+    return out
 
 
 def _blocker_fingerprints(document: "dict") -> "collections.Counter[str]":
@@ -670,6 +819,32 @@ def _carry_prior_suggestions(out_dir: str, attempt: int) -> "list[dict]":
             if isinstance(record, dict) and isinstance(record.get("fingerprint"), str):
                 carried.append(record)
     return carried
+
+
+def _union_suggestions(base: "list[dict]", carried: "list[dict]") -> "list[dict]":
+    """The cross-attempt suggestion union -- ONE implementation, two callers.
+
+    `cmd_plan` builds it for `suggestions-aggregate.md` and `cmd_defer` builds it
+    for `deferred-aggregate.md`, and the second one's comment used to assert the
+    two were "byte-for-byte" the same ordering. An equivalence between two copies,
+    held by a sentence, is a thing this repo has watched drift rather than a thing
+    that stays true; one function makes the claim structural instead.
+
+    Latest attempt's rows first, then earlier attempts oldest-first, deduped by
+    fingerprint with the first occurrence winning -- so a suggestion raised on
+    attempt 1 and not repeated on attempt 3 is still filed. Unmentioned is not
+    resolved.
+    """
+    out = list(base)
+    seen = {
+        row["fingerprint"] for row in out if isinstance(row.get("fingerprint"), str)
+    }
+    for record in carried:
+        fingerprint = record.get("fingerprint")
+        if isinstance(fingerprint, str) and fingerprint not in seen:
+            seen.add(fingerprint)
+            out.append(record)
+    return out
 
 
 def _converge_ledger(run_dir: str) -> str:
@@ -714,6 +889,15 @@ def _read_converge_rows(run_dir: str) -> "list[dict]":
     error would make "no history recorded" indistinguishable from "the history
     says nothing changed" -- the difference between CONTINUE and
     STOP_NO_PROGRESS, and between a bounded WAIT_CI and an unbounded one.
+
+    A ROW WE CANNOT READ IS NOT AN ABSENT ROW EITHER, and that half used to be
+    missing: `json.JSONDecodeError` refused, but a line of `null`, `[]`, `0` or
+    `"x"` -- valid JSON, wrong shape -- was dropped by an `isinstance` filter
+    with no complaint. `_count_wait_rows` then under-counted the WAIT_CI history
+    it is the backstop for: a partially-corrupted ledger reports fewer waits than
+    were recorded, `wait_passes` stays below `CONVERGE_WAIT_CI_CEILING`, and the
+    loop this function's own docstring says is bounded is not. Silently
+    discarding evidence is the same defect as silently discarding the file.
     """
     ledger = _converge_ledger(run_dir)
     if not os.path.exists(ledger):
@@ -724,13 +908,14 @@ def _read_converge_rows(run_dir: str) -> "list[dict]":
     except OSError as exc:
         fail("input_unreadable", f"{ledger}: {exc}")
     rows: "list[dict]" = []
-    for line in lines:
+    for index, line in enumerate(lines, start=1):
         try:
             row = json.loads(line.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             fail("input_not_json", f"{ledger}: {exc}")
-        if isinstance(row, dict):
-            rows.append(row)
+        if not isinstance(row, dict):
+            fail("input_schema_invalid", f"{ledger}: row {index} is not an object")
+        rows.append(row)
     return rows
 
 
@@ -783,6 +968,18 @@ def _normalise_lens_findings(records: object) -> "list[dict]":
     joins a location two lenses both hit as `<Lens>: <text> | <Lens>: <text>`
     (SKILL.md `### 4b`), and prefixing that again reads `Reuse: Reuse: …`.
 
+    IT IS ALSO THE PART THAT GIVES WAY AT THE BOUND. The prefix used to be added
+    AFTER `MAX_SUMMARY_BYTES` was checked, so a maximal lens summary emitted a
+    row `len(lens) + 2` bytes over a limit whose own comment says it exists "so a
+    document that passes here cannot be rejected downstream for a length the two
+    files disagree about" -- and one such row makes the whole
+    `deferred-aggregate.md` refusable, costing every deferred finding in the run.
+    The bound is now measured on the string that is actually emitted, and when
+    the prefix is what breaches it the PREFIX is dropped, not the prose: the
+    attribution it duplicates is already carried, machine-readably, in
+    `source_edges`, so dropping it loses a label while truncating the summary
+    would lose the finding's own words.
+
     Every lens row files as a `suggestion` regardless of the lens's own severity
     field: these are the findings the simplify pass DECLINED to apply, on a stack
     that already passed the clean gate. Filing one as a blocker would halt a run
@@ -810,6 +1007,11 @@ def _normalise_lens_findings(records: object) -> "list[dict]":
         )
         prefix = f"{lens}: " if lens else ""
         if prefix and summary[: len(prefix)].casefold() == prefix.casefold():
+            prefix = ""
+        # The bound is on what is EMITTED. `summary` already fits on its own
+        # (`_bounded_text` above), so dropping the prefix is always a legal
+        # answer, and it is the right one -- see the docstring.
+        if prefix and len((prefix + summary).encode("utf-8")) > MAX_SUMMARY_BYTES:
             prefix = ""
         out.append(
             {
@@ -850,15 +1052,8 @@ def cmd_plan(args: argparse.Namespace) -> int:
     if level not in LEVELS:
         fail("input_schema_invalid", f"level must be one of {sorted(LEVELS)}")
 
-    pr_number = document.get("pr_number")
-    if isinstance(pr_number, bool) or not isinstance(pr_number, int) or pr_number <= 0:
-        fail("input_schema_invalid", "pr_number must be a positive integer")
-
-    run_id = document.get("run_id")
-    if not isinstance(run_id, str) or not re.fullmatch(
-        r"[0-9]{8}-[0-9]{6}-[0-9a-f]+", run_id
-    ):
-        fail("input_schema_invalid", "run_id must match YYYYMMDD-HHMMSS-<hex>")
+    pr_number = _pr_number(document.get("pr_number"), "the plan input's")
+    run_id = _run_id_value(document.get("run_id"), "the plan input's")
 
     findings = _normalise_findings(document.get("findings"))
     blockers = [f for f in findings if f["severity"] == "blocker"]
@@ -887,12 +1082,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
     # repeat on attempt 3 is not resolved -- it is unmentioned, and filing only
     # the last pass's list would silently drop it. Union by fingerprint.
     carried = _carry_prior_suggestions(out_dir, attempt) if args.carry_prior else []
-    aggregate_suggestions = list(suggestions)
-    seen_fp = {s["fingerprint"] for s in aggregate_suggestions}
-    for record in carried:
-        if record["fingerprint"] not in seen_fp:
-            seen_fp.add(record["fingerprint"])
-            aggregate_suggestions.append(record)
+    aggregate_suggestions = _union_suggestions(suggestions, carried)
     carried_count = len(aggregate_suggestions) - len(suggestions)
 
     classified = {
@@ -1110,29 +1300,60 @@ def cmd_defer(args: argparse.Namespace) -> int:
     # repeated on attempt 3 is unmentioned, not resolved, and it was silently
     # dropped -- the exact loss `--carry-prior` exists to prevent.
     #
-    # Latest attempt first, then earlier attempts oldest-first, deduped by
-    # fingerprint: byte-for-byte the ordering `cmd_plan` builds, so the two
-    # aggregates cannot disagree about which findings survived the run.
-    rows = list(document["suggestions"])
-    seen_fp = {
-        row["fingerprint"] for row in rows if isinstance(row.get("fingerprint"), str)
-    }
-    for record in _carry_prior_suggestions(run_dir, attempt):
-        if record["fingerprint"] not in seen_fp:
-            seen_fp.add(record["fingerprint"])
-            rows.append(record)
+    # `_union_suggestions` is now the ONE implementation both verbs call, so
+    # "the two aggregates cannot disagree about which findings survived the run"
+    # is a property of the code rather than a sentence asking you to believe two
+    # copies still match.
+    #
+    # `_read_attempt` proves these are ARRAYS; nothing proved their elements were
+    # objects, and every line below calls `.get()` on them. Same class as the
+    # unchecked `pr_number`: an `AttributeError` is not the contracted exit 74.
+    rows = _union_suggestions(
+        _object_rows(document["suggestions"], "suggestion"),
+        _carry_prior_suggestions(run_dir, attempt),
+    )
 
     if args.include_blockers:
-        rows.extend(document["blockers"])
+        rows.extend(_object_rows(document["blockers"], "blocker"))
 
     if args.lens_findings is not None:
         rows.extend(_normalise_lens_findings(_load(args.lens_findings)))
 
+    # OVERFLOW IS SURVIVABLE, BECAUSE THIS IS THE STEP THAT MUST NOT LOSE THINGS.
+    #
+    # This used to `fail(...)` above MAX_FINDINGS, and the Phase 5 fence is
+    # `defer "$@" || exit 74` with no recovery arm -- so a long run reached the
+    # one step whose entire purpose is "a thing the machine could not fix must
+    # outlive the run" and filed NOTHING. Refusing to drop 5 rows by dropping all
+    # 69 is not the conservative choice; it is the maximal-loss one, and it is
+    # reachable by ordinary means (up to 8 attempts each contributing new unique
+    # fingerprints, plus surviving blockers, plus every un-applied lens row --
+    # `cmd_plan` caps one review's `findings` array and caps the cross-attempt
+    # union not at all).
+    #
+    # So: keep the rows that matter most, say how many did not fit, and exit 0 so
+    # the caller can still dispatch. Blockers first -- a surviving blocker is the
+    # single row this verb exists to preserve, and `findings-to-issues` ranks it
+    # above every cleanup row for the same reason. A blocker is dropped only when
+    # every alternative row is also a blocker.
+    #
+    # NOT silent: `OVERFLOW=<n>` is on the output line, always, and the fence is
+    # required to surface it. "Dropped and reported" is a different thing from
+    # "dropped"; what the old refusal actually protected was the appearance of
+    # rigour, at the cost of the guarantee.
+    #
+    # Kept rows stay in their ORIGINAL relative order, so the only observable
+    # difference from an under-cap run is which rows are absent -- downstream's
+    # first-occurrence-wins dedupe sees the same ordering it always did.
+    overflow = 0
     if len(rows) > MAX_FINDINGS:
-        # Truncating here would silently drop the rows that sorted last, which
-        # after `plan`'s union across attempts is arbitrary. Refuse; the caller
-        # reports the real count.
-        fail("findings_schema_invalid", f"more than {MAX_FINDINGS} deferred rows")
+        by_severity = sorted(
+            range(len(rows)),
+            key=lambda i: 0 if rows[i].get("severity") == "blocker" else 1,
+        )
+        keep = set(by_severity[:MAX_FINDINGS])
+        overflow = len(rows) - MAX_FINDINGS
+        rows = [row for index, row in enumerate(rows) if index in keep]
 
     out_path = os.path.join(run_dir, "deferred-aggregate.md")
     _atomic_write(
@@ -1140,9 +1361,13 @@ def cmd_defer(args: argparse.Namespace) -> int:
         _encode_aggregate(rows, document["pr_number"], document["run_id"], allow_blockers=True),
     )
     blockers = sum(1 for r in rows if r.get("severity") == "blocker")
+    # TOTAL/BLOCKER/SUGGESTION count what is IN the file; OVERFLOW counts what did
+    # not fit, so TOTAL+OVERFLOW is everything the run had to file. `PATH=` stays
+    # LAST because a run dir may contain spaces -- a field appended after it makes
+    # the path unparseable, so new fields are inserted before it, never appended.
     print(
-        "PREMERGE_DEFER TOTAL=%d BLOCKER=%d SUGGESTION=%d PATH=%s"
-        % (len(rows), blockers, len(rows) - blockers, out_path)
+        "PREMERGE_DEFER TOTAL=%d BLOCKER=%d SUGGESTION=%d OVERFLOW=%d PATH=%s"
+        % (len(rows), blockers, len(rows) - blockers, overflow, out_path)
     )
     return 0
 

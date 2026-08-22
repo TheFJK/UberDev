@@ -116,7 +116,7 @@ PREMERGE_VERSION_MANIFEST = plugins/uberdev/.claude-plugin/plugin.json
 PREMERGE_CONVERGE_DEFAULT= 3              # REPAIR rounds, --converge dials it
 PREMERGE_REPAIR_CEILING  = 6              # the runaway backstop --converge cannot pass
 PREMERGE_WAIT_CI_CEILING = 8              # WAIT_CI re-probes before the loop calls CI dead
-PREMERGE_RERUN_FLAKY_CAP = 1              # `gh run rerun` attempts per flaky verdict
+PREMERGE_RERUN_FLAKY_CAP = 1              # `gh run rerun` attempts per ATTEMPT INDEX
 ```
 
 `PREMERGE_REPAIR_CEILING` and `PREMERGE_WAIT_CI_CEILING` are **declared in
@@ -407,8 +407,8 @@ set -u
 UBERDEV_PREMERGE_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
 . "$UBERDEV_PREMERGE_PLUGIN_ROOT/lib/review-consolidate.sh"
 RUN_ID="${RUN_ID:?RUN_ID must be prefixed onto this fence by the orchestrator}"
-PREMERGE_WORKTREE="${WORKTREE_ROOT:-$(git rev-parse --show-toplevel)}"
-PREMERGE_ROOT="$(git -C "$PREMERGE_WORKTREE" rev-parse --show-toplevel)"
+PREMERGE_WORKTREE="${WORKTREE_ROOT:-$(git rev-parse --show-toplevel)}" || exit 2
+PREMERGE_ROOT="$(git -C "$PREMERGE_WORKTREE" rev-parse --show-toplevel)" || exit 2
 PREMERGE_RUN_DIR="$PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
 PREMERGE_SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner)" || exit 2
 PREMERGE_OWNER="${PREMERGE_SLUG%%/*}"
@@ -457,8 +457,8 @@ set -u
 UBERDEV_PREMERGE_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
 . "$UBERDEV_PREMERGE_PLUGIN_ROOT/lib/review-consolidate.sh"
 RUN_ID="${RUN_ID:?RUN_ID must be prefixed onto this fence by the orchestrator}"
-PREMERGE_WORKTREE="${WORKTREE_ROOT:-$(git rev-parse --show-toplevel)}"
-PREMERGE_ROOT="$(git -C "$PREMERGE_WORKTREE" rev-parse --show-toplevel)"
+PREMERGE_WORKTREE="${WORKTREE_ROOT:-$(git rev-parse --show-toplevel)}" || exit 2
+PREMERGE_ROOT="$(git -C "$PREMERGE_WORKTREE" rev-parse --show-toplevel)" || exit 2
 PREMERGE_RUN_DIR="$PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
 PREMERGE_NUMBER="$(cat "$PREMERGE_RUN_DIR/pending-conflict.txt")"
 printf '%s\n' "${PREMERGE_RESOLVED_PATHS:?PREMERGE_RESOLVED_PATHS must be prefixed onto this fence}" \
@@ -484,8 +484,8 @@ set -u
 UBERDEV_PREMERGE_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
 . "$UBERDEV_PREMERGE_PLUGIN_ROOT/lib/review-consolidate.sh"
 RUN_ID="${RUN_ID:?RUN_ID must be prefixed onto this fence by the orchestrator}"
-PREMERGE_WORKTREE="${WORKTREE_ROOT:-$(git rev-parse --show-toplevel)}"
-PREMERGE_ROOT="$(git -C "$PREMERGE_WORKTREE" rev-parse --show-toplevel)"
+PREMERGE_WORKTREE="${WORKTREE_ROOT:-$(git rev-parse --show-toplevel)}" || exit 2
+PREMERGE_ROOT="$(git -C "$PREMERGE_WORKTREE" rev-parse --show-toplevel)" || exit 2
 PREMERGE_RUN_DIR="$PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
 PREMERGE_BRANCH="$(cat "$PREMERGE_RUN_DIR/combine-branch.txt")"
 PREMERGE_BASE="$(cat "$PREMERGE_RUN_DIR/combine-base.txt")"
@@ -653,7 +653,7 @@ Two constraints on applying it:
    The cleanup vocabulary is **this exact set** — apply it literally, do not
    paraphrase it, and do not extend it:
 
-   ```
+   ```text premerge-cleanup-categories
    reuse  simplification  simplify  efficiency  performance  altitude
    conventions  convention  style  documentation  docs
    test-coverage  tests  naming  readability
@@ -663,7 +663,18 @@ Two constraints on applying it:
    finding carrying one **must** be `blocker`. (`CLEANUP_CATEGORIES` in
    `lib/premerge-findings.py` is the enforcer and the source of truth; this copy
    exists because the controller that writes `severity` never opens that file,
-   and a rule it cannot see is a rule it will break. Edit the two together.)
+   and a rule it cannot see is a rule it will break.)
+
+   **The block above carries the `premerge-cleanup-categories` tag because a
+   test reads it.** `tests/premerge.test.sh` P3b imports `premerge-findings.py`,
+   evaluates the real `CLEANUP_CATEGORIES`, and compares it set-for-set with
+   these tokens. "Edit the two together" was the whole enforcement before, and a
+   prose instruction is not one: the only test touching the constant was a grep
+   that the identifier exists, which stays green whichever copy drifts — and the
+   copy the controller actually reads is this one, the copy with nothing behind
+   it. Drift here is `severity_contradicts_category`: `plan` exits 74 having
+   written nothing, and the whole attempt dies because the reviewer used a
+   synonym. Do not retag or reflow the block without updating that row.
 2. **An unfamiliar category is treated as correctness-class, and reading that
    the other way costs the whole attempt.** The asymmetry itself is deliberate: a
    novel *correctness* slug silently demoted to `suggestion` ships the bug. But
@@ -686,8 +697,29 @@ would silently become a no-op exactly where it was supposed to help.
 ## Phase 2 — TRIAGE
 
 Phase 2 runs **once per attempt**. `PREMERGE_ATTEMPT` is the 1-based attempt
-counter the orchestrator prefixes onto every fence in the loop; it starts at 1 and
-is advanced only by `## Phase 3b — CONVERGE`.
+counter the orchestrator prefixes onto every fence in the loop; it starts at 1.
+
+**Exactly two places advance it, and there is no third:**
+
+1. `### 3c — Repair, by reason`, on a `CONTINUE` from `## Phase 3b — CONVERGE`.
+   That is the loop's own step: repair, commit, push, re-enter Phase 1 at
+   `PREMERGE_ATTEMPT + 1`.
+2. `### 4c — VERIFY`, which runs one more full attempt cycle at
+   `PREMERGE_ATTEMPT + 1` over the simplify commit and leaves the counter
+   **advanced** for the rest of the run, so Phase 5 defers and reports at the
+   index that was actually verified.
+
+A `WAIT_CI` decision explicitly does **not** advance it — re-probing costs a
+wait pass, never an attempt.
+
+**Never re-use an index.** `plan` writes `classified-<NN>.json` and
+`fix-waves-<NN>.json`, and the gate writes `gate-<NN>.json`, all keyed on this
+counter, and `converge.jsonl` carries one row per decision naming the `head_sha`
+those artifacts describe. A second Phase 2 at an index that already has evidence
+overwrites it in place, so the ledger's row for that attempt then attests to a
+tree the artifact no longer holds — and Phase 5's `defer --attempt N` describes a
+different tree than the ledger says was decided. That immutability is what the
+two-writes comment in `lib/premerge-findings.py` is built on.
 
 ```bash uberdev-executable origin=premerge-triage
 set -u
@@ -851,13 +883,29 @@ if [ ! -s "$PREMERGE_WAVES_FILE" ]; then
 fi
 PREMERGE_ASSIGNED_LIST="$PREMERGE_RUN_DIR/fix-scope-$PREMERGE_ATTEMPT_PAD.assigned"
 PREMERGE_MODIFIED_LIST="$PREMERGE_RUN_DIR/fix-scope-$PREMERGE_ATTEMPT_PAD.modified"
-jq -r '.waves[][].file' <"$PREMERGE_WAVES_FILE" | sort -u >"$PREMERGE_ASSIGNED_LIST" || exit 2
+PREMERGE_SCOPE_RAW="$PREMERGE_RUN_DIR/fix-scope-$PREMERGE_ATTEMPT_PAD.raw"
+# NEITHER list may be produced by a pipeline. `<producer> | sort -u >LIST || exit 2`
+# binds the `||` to the PIPELINE's status, which is `sort`'s -- and `sort`
+# succeeds on empty input. A `git diff` that failed (index.lock contention from a
+# concurrent agent, a corrupt index, a `$PREMERGE_ROOT` that moved under the
+# fence) therefore produced an EMPTY modified list, an empty `comm -23`, an empty
+# `PREMERGE_STRAY`, and this fence fell through to `git add -u` and swept every
+# tracked modification in the tree into the stack commit. That is the exact
+# fail-OPEN the scope guard exists to prevent, inside the guard itself, on the
+# half `## Common Mistakes` calls "the enforcement".
+#
+# Worse, the two halves failed in OPPOSITE directions under the identical shape:
+# an empty ASSIGNED makes every file stray (loud, closed), an empty MODIFIED
+# makes none (silent, open). So both are written the same way -- a producer whose
+# own status is checked, then a `sort` whose own status is checked.
+jq -r '.waves[][].file' <"$PREMERGE_WAVES_FILE" >"$PREMERGE_SCOPE_RAW" || exit 2
+sort -u <"$PREMERGE_SCOPE_RAW" >"$PREMERGE_ASSIGNED_LIST" || exit 2
 # `--no-renames`, because rename detection reports only the NEW path and a scope
 # guard reading `--name-only` alone is bypassable by a rename -- a defect this
 # repo has already shipped once. Against `HEAD`, since nothing is staged yet,
 # and `-C "$PREMERGE_ROOT"` so the paths are repo-relative like the plan's are.
-git -C "$PREMERGE_ROOT" diff --name-only --no-renames HEAD \
-  | sort -u >"$PREMERGE_MODIFIED_LIST" || exit 2
+git -C "$PREMERGE_ROOT" diff --name-only --no-renames HEAD >"$PREMERGE_SCOPE_RAW" || exit 2
+sort -u <"$PREMERGE_SCOPE_RAW" >"$PREMERGE_MODIFIED_LIST" || exit 2
 PREMERGE_STRAY="$(comm -23 "$PREMERGE_MODIFIED_LIST" "$PREMERGE_ASSIGNED_LIST")" || exit 2
 if [ -n "$PREMERGE_STRAY" ]; then
   printf 'error: attempt %s modified files no fixer wave was assigned:\n%s\nrefusing to sweep them into the stack commit\n' \
@@ -899,17 +947,30 @@ mechanical:
   `os.replace`, which changes the inode — so a re-plan while a dispatch is in
   flight makes the agent refuse `input-malformed`.
 
-The dispatch itself, when it runs:
+**This section defines WHY the filing waits; `### 5-file` is the only place that
+defines the dispatch, and it is dispatched exactly once.** Do not read a second
+`aggregate_path` out of this section — there is deliberately none here.
 
-- `subagent_type: uberdev:findings-to-issues`
-- Inputs: `aggregate_path` = `$PREMERGE_RUN_DIR/suggestions-aggregate.md`,
-  `edge_id` = `premerge.defer.findings`, `carrier.workflow` = `premerge`,
-  `pr_number` = the stack PR, `max_new` = 10.
+> **The canonical `aggregate_path` is the `PATH=` value the Phase 5 `defer` fence
+> prints, and nothing else.** It is `deferred-aggregate.md`.
+> `suggestions-aggregate.md` is `plan --carry-prior`'s *intermediate* — the
+> cross-attempt suggestion union, with no surviving blockers and no un-applied
+> lens rows in it, because neither has been produced yet at the time `plan` runs.
+> Dispatching that file files zero blockers and zero simplify-lens rows: the two
+> "promise with no producer" losses `defer` exists to close, re-opened by naming
+> the wrong input. Dispatching *both* runs `findings-to-issues` twice on one
+> `edge_id`, burning the `max_new = 10` budget and the rate-limit probe twice and
+> filing the suggestion rows a second time under fingerprints the first pass has
+> already consumed.
+>
+> This is not hypothetical. It happened: a run followed this section's path and
+> the Phase 5 dispatch filed only the suggestion rows.
 
-The agent's own machinery does the rest: the 16-hex fingerprint dedupe, the
-fail-closed `gh issue list` lookup, the `--body-file -` writes, the rate-limit
-budget probe and the `MAX_NEW` cap. `/premerge` re-implements none of it — a
-second copy of that logic is exactly the drift this repo has been bitten by.
+When that one dispatch runs, the agent's own machinery does the rest: the 16-hex
+fingerprint dedupe, the fail-closed `gh issue list` lookup, the `--body-file -`
+writes, the rate-limit budget probe and the `MAX_NEW` cap. `/premerge`
+re-implements none of it — a second copy of that logic is exactly the drift this
+repo has been bitten by.
 
 Suggestion rows file at tier `SUGGESTION`, which **never halts the run**. A
 suggestion is by definition something worth doing and not worth holding the stack
@@ -998,6 +1059,16 @@ case "$PREMERGE_CI_CLASS" in
     esac ;;
 esac
 
+# ---- "does this PR get checks AT ALL" -------------------------------------
+# One-way, run-scoped, and written the instant any probe in this run sees a
+# check on this PR. `--after-push` below turns `no_checks` into a WAIT, and the
+# ONLY honest reason to wait is "this PR gets checks and they have not started
+# yet". Once a check has existed on this PR, that is settled forever.
+PREMERGE_CI_SEEN="$PREMERGE_RUN_DIR/ci-observed"
+case "$PREMERGE_CI" in
+  red|pending|green) : >"$PREMERGE_CI_SEEN" || exit 2 ;;
+esac
+
 PREMERGE_MERGEABLE="$(gh pr view "$PREMERGE_PR" --json mergeable -q .mergeable 2>/dev/null)" || PREMERGE_MERGEABLE=UNKNOWN
 case "$PREMERGE_MERGEABLE" in MERGEABLE|CONFLICTING|UNKNOWN) : ;; *) PREMERGE_MERGEABLE=UNKNOWN ;; esac
 
@@ -1020,17 +1091,51 @@ set -- --classified "$PREMERGE_CLASSIFIED" \
        --head-sha "$PREMERGE_HEAD_SHA"
 [ "$PREMERGE_CI_GATE" = "1" ] && set -- "$@" --require-ci
 # `--after-push` turns `no_checks` into a wait rather than a pass. That is right
-# for a repo whose checks have not started yet and WRONG for a repo that has no
-# checks at all — there the loop would wait out its whole ceiling and then report
-# unreadable CI on a repo that was never going to answer. So the flag is
-# conditioned on the repo actually having workflows, which is a fact about the
-# tree and not a guess about timing.
-PREMERGE_HAS_WORKFLOWS=0
-if [ -d "$PREMERGE_ROOT/.github/workflows" ]; then
-  PREMERGE_WORKFLOW_COUNT="$(find "$PREMERGE_ROOT/.github/workflows" -maxdepth 1 -type f -name '*.y*ml' | grep -c .)"
-  [ "$PREMERGE_WORKFLOW_COUNT" -gt 0 ] && PREMERGE_HAS_WORKFLOWS=1
+# for a PR whose checks have not started yet and WRONG for a PR that will never
+# have one — there the loop waits out its whole ceiling and then reports
+# unreadable CI on a stack that was fine.
+#
+# The condition is therefore "does THIS PR get checks", never "does this repo
+# contain a workflow FILE". A repo whose only workflow is `on: schedule` or
+# `on: workflow_dispatch` has a file and never a PR check, and conditioning on
+# the file spun 8 re-probes at PREMERGE_CI_SETTLE_SECS each and then reported
+# STOP_UNREADABLE. The fence's own comment used to claim the file was "a fact
+# about the tree and not a guess about timing"; it is a fact about the wrong
+# thing.
+#
+# Two signals, and only the first is conclusive:
+#
+#   1. This run has already SEEN a check on this PR (the marker written above).
+#      Then `no_checks` right after a push is the settle window by definition.
+#   2. Cold start only — no probe in this run has ever seen a check. Then fall
+#      back to the tree, NARROWED to workflows that declare a PR-reachable
+#      trigger. A `schedule`/`workflow_dispatch`-only repo answers no here, which
+#      is the whole point; anything ambiguous answers yes, because waiting is the
+#      safe direction and a premature green is not.
+PREMERGE_PR_HAS_CHECKS=0
+if [ -e "$PREMERGE_CI_SEEN" ]; then
+  PREMERGE_PR_HAS_CHECKS=1
+elif [ -d "$PREMERGE_ROOT/.github/workflows" ]; then
+  # A heredoc, not a pipe: the loop `break`s, and an early-exiting reader behind
+  # a pipe is the EPIPE class tests/epipe-guard.test.sh bans.
+  while IFS= read -r PREMERGE_WF; do
+    [ -n "$PREMERGE_WF" ] || continue
+    # Two spellings of the same question. The first catches the block form --
+    # `pull_request:` as a mapping key or `- pull_request` as a sequence item,
+    # at any indent. The second catches the inline forms on the `on:` line
+    # itself (`on: push`, `on: [push, pull_request]`, `"on": ...`). A `run:`
+    # step that shells out to `git push` matches NEITHER, because both are
+    # anchored and neither admits a command word before the event name.
+    if grep -qE '^[[:space:]]*(- )?(pull_request|pull_request_target|push|merge_group)([[:space:],:]|$)' "$PREMERGE_WF" \
+       || grep -qE '^[^[:space:]]*on[^[:space:]]*:.*(pull_request|pull_request_target|push|merge_group)' "$PREMERGE_WF"; then
+      PREMERGE_PR_HAS_CHECKS=1
+      break
+    fi
+  done <<EOF_PREMERGE_WORKFLOWS
+$(find "$PREMERGE_ROOT/.github/workflows" -maxdepth 1 -type f -name '*.y*ml')
+EOF_PREMERGE_WORKFLOWS
 fi
-if [ "$PREMERGE_PUSHED" = "1" ] && [ "$PREMERGE_HAS_WORKFLOWS" = "1" ]; then
+if [ "$PREMERGE_PUSHED" = "1" ] && [ "$PREMERGE_PR_HAS_CHECKS" = "1" ]; then
   set -- "$@" --after-push
 fi
 PREMERGE_GATE_LINE="$(python3 -I -B "$UBERDEV_PREMERGE_PLUGIN_ROOT/lib/premerge-findings.py" assert-green "$@")"
@@ -1087,6 +1192,26 @@ pass, and Phase 3b routes it to `WAIT_CI` — which re-probes without consuming 
 attempt. `pending` is a "come back later" state, not a verdict; it is polled out,
 never gated on.
 
+**But `--after-push` is only right where a check is actually coming.** The flag
+is conditioned on *this PR getting checks at all*, not on the repo containing a
+workflow file — a repo whose only workflow is `on: schedule` or
+`on: workflow_dispatch` has a file and will never have a PR check, and a gate
+that waits for one spends the whole `PREMERGE_WAIT_CI_CEILING` and then reports
+`STOP_UNREADABLE` about a stack that was green. The fence answers the question in
+this order:
+
+1. **Has any probe in this run already seen a check on this PR?** The gate
+   records that the first time `PREMERGE_CI` lands on `red`, `pending` or
+   `green`, in `$PREMERGE_RUN_DIR/ci-observed`. It is one-way and run-scoped: a
+   PR that had a check once gets checks, so a later `no_checks` is the settle
+   window and nothing else. This is the conclusive signal.
+2. **Cold start only** — nothing observed yet, which is where the very first
+   post-push gate of a run sits. Then the tree decides, narrowed from "a
+   workflow file exists" to "a workflow file declares a **PR-reachable
+   trigger**" (`pull_request`, `pull_request_target`, `push`, `merge_group`).
+   Ambiguity resolves toward waiting, because a needless wait costs minutes and
+   a premature green ships an unbuilt stack.
+
 Two other answers the probe can give are **not** the settle window, and reading
 them as it is how this gate would go back to passing on evidence it never read.
 A `gh pr checks` that failed outright — expired auth, a network drop, a 404, a
@@ -1118,7 +1243,7 @@ PREMERGE_ATTEMPT="${PREMERGE_ATTEMPT:?PREMERGE_ATTEMPT must be prefixed onto thi
 # fences by the orchestrator because a fence is a fresh shell and a counter that
 # reset every time would never reach its ceiling.
 PREMERGE_WAIT_PASSES="${PREMERGE_WAIT_PASSES:-0}"
-PREMERGE_ROOT="$(git rev-parse --show-toplevel)"
+PREMERGE_ROOT="$(git rev-parse --show-toplevel)" || exit 2
 PREMERGE_RUN_DIR="$PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
 PREMERGE_ATTEMPT_PAD="$(printf '%02d' "$PREMERGE_ATTEMPT")"
 PREMERGE_GATE_FILE="$PREMERGE_RUN_DIR/gate-$PREMERGE_ATTEMPT_PAD.json"
@@ -1217,7 +1342,7 @@ classification still run, so the summary still names the failure class.
 | `code_bug` | one `uberdev:ci-code-fixer` at the `signal_anchor` | yes |
 | `env_drift` | one `uberdev:ci-code-fixer` at the `signal_anchor` | yes |
 | `stale_base` | one `uberdev:ci-rebase-handler` | yes |
-| `flaky` | `gh run rerun --failed <run-id>`, at most `PREMERGE_RERUN_FLAKY_CAP` times | no |
+| `flaky` | the `premerge-ci-rerun` fence, then `gh run rerun --failed <run-id>` on `DECISION=RERUN` | no — but **bounded**, see below |
 | `billing_quota` | none — stop | stops the loop |
 | `platform_outage` | none — stop | stops the loop |
 | anything else, or `AMBIGUOUS` | none — stop | stops the loop |
@@ -1225,6 +1350,70 @@ classification still run, so the summary still names the failure class.
 `billing_quota` and `platform_outage` are **not** code problems and no number of
 attempts will fix them; looping on either burns the budget and then reports
 exhaustion, which describes the wrong thing. Stop and name it.
+
+##### The flaky rerun is bounded, and the bound is read from the ledger
+
+`flaky` is the one CI route that does not consume an attempt, which makes it the
+same shape as `WAIT_CI` and the same hazard `### 4c` names outright: *an
+uncounted wait is an unbounded loop under a command that promises it will not
+loop forever.* `WAIT_CI` is bounded from `converge.jsonl` by `_count_wait_rows`
+— and that function filters on `decision == "WAIT_CI"`, so the `CONTINUE` rows
+this route appends are invisible to it. `PREMERGE_RERUN_FLAKY_CAP` was therefore
+prose with nothing behind it, and the loop it failed to bound is not exotic:
+attempt N with zero blockers and `ci=red` re-enters converge at index N, reads
+the same `classified-NN.json` against the same predecessor, answers `CONTINUE`
+again, and reruns again — forever, at one attempt index, with the repair budget
+untouched.
+
+Run this fence **before every `gh run rerun`**, and rerun only on
+`DECISION=RERUN`. On `DECISION=STOP_FLAKY_CAP` the loop stops not-green with
+`ci=red` as its reason and the class named as `flaky`: a build that failed twice
+in a row is evidence against "flaky", and it is the operator's call from there.
+
+```bash uberdev-executable origin=premerge-ci-rerun
+set -u
+RUN_ID="${RUN_ID:?RUN_ID must be prefixed onto this fence by the orchestrator}"
+PREMERGE_ATTEMPT="${PREMERGE_ATTEMPT:?PREMERGE_ATTEMPT must be prefixed onto this fence by the orchestrator}"
+PREMERGE_ROOT="$(git rev-parse --show-toplevel)" || exit 2
+PREMERGE_RUN_DIR="$PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
+PREMERGE_RERUN_FLAKY_CAP=1
+PREMERGE_LEDGER="$PREMERGE_RUN_DIR/converge.jsonl"
+# DERIVED from the ledger, never carried in a variable. A fence is a fresh shell,
+# so a counter the controller threads across the boundary is a counter it can
+# forget -- and the forgetting direction is "0 forever", which is precisely the
+# unbounded loop. This is the same reasoning `_count_wait_rows` is built on,
+# applied to the arm it does not cover.
+#
+# Every re-entry into converge at THIS attempt index that answered CONTINUE with
+# `ci=red` still among its reasons is one pass through this route. The first is
+# the pass that routed us here; every later one is a rerun that came back red.
+PREMERGE_RED_CONTINUES=0
+if [ -s "$PREMERGE_LEDGER" ]; then
+  PREMERGE_RED_CONTINUES="$(jq -s --argjson want "$PREMERGE_ATTEMPT" '
+    [ .[]
+      | select(.attempt == $want and .decision == "CONTINUE")
+      | select(((.reasons_other // []) | index("ci=red")) != null)
+    ] | length' <"$PREMERGE_LEDGER")" || exit 2
+fi
+# A non-numeric answer is a crashed producer, not a count of zero -- `jq ... ||
+# echo 0` is how this repo has previously turned a crash into a clean report.
+case "$PREMERGE_RED_CONTINUES" in ''|*[!0-9]*) printf 'error: unreadable converge ledger at %s\n' "$PREMERGE_LEDGER" >&2; exit 2 ;; esac
+PREMERGE_RERUNS_USED=0
+if [ "$PREMERGE_RED_CONTINUES" -gt 1 ]; then
+  PREMERGE_RERUNS_USED=$((PREMERGE_RED_CONTINUES - 1))
+fi
+if [ "$PREMERGE_RERUNS_USED" -ge "$PREMERGE_RERUN_FLAKY_CAP" ]; then
+  printf 'PREMERGE_CI_RERUN ATTEMPT=%s USED=%s CAP=%s DECISION=STOP_FLAKY_CAP\n' \
+    "$PREMERGE_ATTEMPT" "$PREMERGE_RERUNS_USED" "$PREMERGE_RERUN_FLAKY_CAP" >&2
+  exit 1
+fi
+printf 'PREMERGE_CI_RERUN ATTEMPT=%s USED=%s CAP=%s DECISION=RERUN\n' \
+  "$PREMERGE_ATTEMPT" "$PREMERGE_RERUNS_USED" "$PREMERGE_RERUN_FLAKY_CAP" >&2
+exit 0
+```
+
+**Branch on `DECISION=`, not on the exit status** — same convention as
+`converge`, and for the same reason: `1` means "stop", `0` means "go".
 
 **None of those three agents PUSHES, and none of them may.** Their contracts
 forbid every remote-writing git verb; `ci-rebase-handler` was demoted to a
@@ -1243,16 +1432,147 @@ runs `git add -u` and refuses an empty tree, and after `ci-code-fixer` has
 already committed there is nothing left to add — it would report
 `COMMIT=none REASON=no-edits` and the repair would look like a no-op.
 
-The CI-repair arm therefore owns its own publication:
+The CI-repair arm therefore owns its own publication — **and owns the checks that
+go with it.** It used to own only the push. That put agent-authored commits on
+the stack PR with none of the three things `## Common Mistakes` calls
+load-bearing (*"the prompt is the instruction; the commit fence's scope check is
+the enforcement"*): no scope comparison, no untracked-file refusal, no branch
+assertion. `ci-code-fixer`'s own "minimal-scope edits" contract is exactly the
+prompt-level assurance that section says is not enough — it is the same sentence
+as the wave agents' "Edit ONLY `<path>`", which this file already refuses to
+trust on its own.
 
-- **`code_bug` / `env_drift`.** The agent commits locally. Assert `HEAD` is the
-  stack branch, then `git push origin <branch>`.
-- **`stale_base`.** Capture the lease SHA **before dispatch** —
-  `git rev-parse refs/remotes/origin/<branch>` — because a rebase rewrites
-  history and a bare push would be rejected. After the agent returns, push with
-  `--force-with-lease=<branch>:<captured-sha>`. The lease SHA is the
-  controller's and never enters the agent's context, which is what makes
-  "the agent pushed anyway" detectable rather than silent.
+Before dispatch the controller captures two things, neither of which ever enters
+an agent's context:
+
+- **`PREMERGE_CI_BEFORE`** — `git rev-parse HEAD`, the SHA the repair starts
+  from. It is what makes "what did this agent change" answerable at all.
+- **`PREMERGE_CI_LEASE`** (rebase arm only) — `git rev-parse
+  refs/remotes/origin/<branch>`, because a rebase rewrites history and a bare
+  push would be rejected. Holding the lease SHA on the controller's side is what
+  makes "the agent pushed anyway" detectable rather than silent.
+
+and writes the repair's allowed file set — derived from the classifier's
+`signal_anchor`, one repo-relative path per line — to
+`$PREMERGE_RUN_DIR/ci-scope-<NN>.allowed`. Then this fence publishes:
+
+```bash uberdev-executable origin=premerge-ci-publish
+set -u
+RUN_ID="${RUN_ID:?RUN_ID must be prefixed onto this fence by the orchestrator}"
+PREMERGE_ATTEMPT="${PREMERGE_ATTEMPT:?PREMERGE_ATTEMPT must be prefixed onto this fence by the orchestrator}"
+# `commit` for the code_bug / env_drift arm (ci-code-fixer committed locally),
+# `rebase` for the stale_base arm (ci-rebase-handler rewrote the branch).
+# Required, never defaulted: the two arms are checked differently and a default
+# would publish one of them under the other's checks.
+PREMERGE_CI_ARM="${PREMERGE_CI_ARM:?PREMERGE_CI_ARM must be prefixed onto this fence: commit|rebase}"
+PREMERGE_CI_BEFORE="${PREMERGE_CI_BEFORE:?PREMERGE_CI_BEFORE must be the SHA captured BEFORE the agent was dispatched}"
+PREMERGE_ROOT="$(git rev-parse --show-toplevel)" || exit 2
+PREMERGE_RUN_DIR="$PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
+PREMERGE_BRANCH="$(cat "$PREMERGE_RUN_DIR/combine-branch.txt")" || exit 2
+PREMERGE_BASE="$(cat "$PREMERGE_RUN_DIR/combine-base.txt")" || exit 2
+PREMERGE_ATTEMPT_PAD="$(printf '%02d' "$PREMERGE_ATTEMPT")"
+
+# ---- check 1: the branch assertion ----------------------------------------
+# A fence is a fresh shell and cannot assume the checkout did not move under it.
+PREMERGE_HEAD_BRANCH="$(git symbolic-ref -q --short HEAD)" || PREMERGE_HEAD_BRANCH=""
+[ "$PREMERGE_HEAD_BRANCH" = "$PREMERGE_BRANCH" ] || {
+  printf 'error: expected to be on %s but HEAD is %s; refusing to publish a CI repair\n' \
+    "$PREMERGE_BRANCH" "${PREMERGE_HEAD_BRANCH:-(detached)}" >&2
+  exit 2
+}
+# A rebase that stopped on a conflict leaves HEAD looking ordinary and the branch
+# half-written. `ci-rebase-handler` stops and surfaces conflicts by contract, so
+# reaching here mid-rebase means something else drove it.
+# `--absolute-git-dir`, not `--git-dir`: the latter answers `.git` relative to
+# the CURRENT directory, so the two `-e` tests below would silently probe the
+# wrong place from anywhere but the repo root -- a guard that cannot fire.
+PREMERGE_GIT_DIR="$(git rev-parse --absolute-git-dir)" || exit 2
+if [ -e "$PREMERGE_GIT_DIR/rebase-merge" ] || [ -e "$PREMERGE_GIT_DIR/rebase-apply" ]; then
+  printf 'error: a rebase is still in progress; refusing to publish a CI repair\n' >&2
+  exit 2
+fi
+
+# ---- check 2: the untracked refusal ---------------------------------------
+# An untracked file is a file the agent created. Both CI agents commit their own
+# work, so anything left behind is work nobody committed and nobody reviewed.
+PREMERGE_UNTRACKED="$(git ls-files --others --exclude-standard)" || exit 2
+if [ -n "$PREMERGE_UNTRACKED" ]; then
+  printf 'error: the CI repair left untracked files:\n%s\nrefusing to publish\n' \
+    "$PREMERGE_UNTRACKED" >&2
+  exit 2
+fi
+PREMERGE_DIRTY="$(git status --porcelain)" || exit 2
+if [ -n "$PREMERGE_DIRTY" ]; then
+  printf 'error: the CI repair left uncommitted changes:\n%s\nrefusing to publish\n' \
+    "$PREMERGE_DIRTY" >&2
+  exit 2
+fi
+
+# ---- check 3: the scope comparison ----------------------------------------
+# Same shape as the Phase 2a scope guard, including the producer-then-sort split:
+# `producer | sort -u >LIST || exit 2` binds the `||` to `sort`'s status and
+# `sort` succeeds on empty input, so a failed producer reads as "changed
+# nothing" and every later check passes over an empty set.
+PREMERGE_CI_RAW="$PREMERGE_RUN_DIR/ci-scope-$PREMERGE_ATTEMPT_PAD.raw"
+case "$PREMERGE_CI_ARM" in
+  commit)
+    # What the agent may touch, declared BEFORE it ran, from the classifier's
+    # signal_anchor. Absent or empty is a refusal, not a free pass: a scope file
+    # nobody wrote is a scope nobody bounded.
+    PREMERGE_CI_SCOPE="$PREMERGE_RUN_DIR/ci-scope-$PREMERGE_ATTEMPT_PAD.allowed"
+    if [ ! -s "$PREMERGE_CI_SCOPE" ]; then
+      printf 'error: no CI repair scope at %s; nothing declares which files the fixer was allowed to touch\n' \
+        "$PREMERGE_CI_SCOPE" >&2
+      exit 2
+    fi
+    PREMERGE_CI_ALLOWED="$PREMERGE_RUN_DIR/ci-scope-$PREMERGE_ATTEMPT_PAD.sorted"
+    PREMERGE_CI_CHANGED="$PREMERGE_RUN_DIR/ci-scope-$PREMERGE_ATTEMPT_PAD.changed"
+    sort -u <"$PREMERGE_CI_SCOPE" >"$PREMERGE_CI_ALLOWED" || exit 2
+    # `--no-renames`, because rename detection reports only the NEW path and a
+    # scope guard reading `--name-only` alone is bypassable by a rename.
+    git -C "$PREMERGE_ROOT" diff --name-only --no-renames "$PREMERGE_CI_BEFORE" HEAD >"$PREMERGE_CI_RAW" || exit 2
+    sort -u <"$PREMERGE_CI_RAW" >"$PREMERGE_CI_CHANGED" || exit 2
+    if [ ! -s "$PREMERGE_CI_CHANGED" ]; then
+      printf 'PREMERGE CI PUBLISH=none REASON=no-edits ARM=commit ATTEMPT=%s\n' "$PREMERGE_ATTEMPT" >&2
+      exit 0
+    fi
+    PREMERGE_CI_STRAY="$(comm -23 "$PREMERGE_CI_CHANGED" "$PREMERGE_CI_ALLOWED")" || exit 2
+    if [ -n "$PREMERGE_CI_STRAY" ]; then
+      printf 'error: the CI repair modified files outside its signal_anchor scope:\n%s\nrefusing to publish\n' \
+        "$PREMERGE_CI_STRAY" >&2
+      exit 2
+    fi
+    git push origin "$PREMERGE_BRANCH" >/dev/null 2>&1 || exit 2
+    printf 'PREMERGE CI PUBLISH=%s ARM=commit ATTEMPT=%s\n' "$(git rev-parse HEAD)" "$PREMERGE_ATTEMPT" >&2
+    ;;
+  rebase)
+    # A rebase's file set is NOT anchor-bounded -- replaying the stack over a
+    # moved base legitimately touches whatever the base touched -- so the
+    # anchor comparison above would be a check that always fires. The bounded
+    # question a rebase CAN be held to is "did it replay our commits and add
+    # none of its own", and that is answerable from the lease SHA the controller
+    # captured before dispatch: the count of non-merge commits on the branch,
+    # measured from its fork point, must be identical either side of the rebase.
+    PREMERGE_CI_LEASE="${PREMERGE_CI_LEASE:?PREMERGE_CI_LEASE must be the origin SHA captured BEFORE the agent was dispatched}"
+    PREMERGE_FORK_BEFORE="$(git merge-base "$PREMERGE_CI_LEASE" "origin/$PREMERGE_BASE")" || exit 2
+    PREMERGE_FORK_AFTER="$(git merge-base HEAD "origin/$PREMERGE_BASE")" || exit 2
+    PREMERGE_COUNT_BEFORE="$(git rev-list --count --no-merges "$PREMERGE_FORK_BEFORE..$PREMERGE_CI_LEASE")" || exit 2
+    PREMERGE_COUNT_AFTER="$(git rev-list --count --no-merges "$PREMERGE_FORK_AFTER..HEAD")" || exit 2
+    if [ "$PREMERGE_COUNT_BEFORE" != "$PREMERGE_COUNT_AFTER" ]; then
+      printf 'error: the rebase changed the stack commit count (%s -> %s); refusing to force-push\n' \
+        "$PREMERGE_COUNT_BEFORE" "$PREMERGE_COUNT_AFTER" >&2
+      exit 2
+    fi
+    git push --force-with-lease="$PREMERGE_BRANCH:$PREMERGE_CI_LEASE" origin "$PREMERGE_BRANCH" >/dev/null 2>&1 || exit 2
+    printf 'PREMERGE CI PUBLISH=%s ARM=rebase ATTEMPT=%s COMMITS=%s\n' \
+      "$(git rev-parse HEAD)" "$PREMERGE_ATTEMPT" "$PREMERGE_COUNT_AFTER" >&2
+    ;;
+  *)
+    printf 'error: PREMERGE_CI_ARM must be commit or rebase, got %s\n' "$PREMERGE_CI_ARM" >&2
+    exit 2 ;;
+esac
+exit 0
+```
 
 **`Letting a fixer agent run git` in `## Common Mistakes` is about the Phase 2a
 and Phase 4b wave agents**, which are `general-purpose` and are told outright not
@@ -1480,7 +1800,7 @@ PREMERGE_ATTEMPT="${PREMERGE_ATTEMPT:?PREMERGE_ATTEMPT must be prefixed onto thi
 # survived and must outlive the run. Required, not defaulted: forgetting it
 # would silently drop exactly the findings this step exists to preserve.
 PREMERGE_SURVIVORS="${PREMERGE_SURVIVORS:?PREMERGE_SURVIVORS must be prefixed onto this fence by the orchestrator}"
-PREMERGE_ROOT="$(git rev-parse --show-toplevel)"
+PREMERGE_ROOT="$(git rev-parse --show-toplevel)" || exit 2
 PREMERGE_RUN_DIR="$PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
 
 set -- --run-dir "$PREMERGE_RUN_DIR" --attempt "$PREMERGE_ATTEMPT"
@@ -1489,18 +1809,101 @@ set -- --run-dir "$PREMERGE_RUN_DIR" --attempt "$PREMERGE_ATTEMPT"
 # return shape. Absent when Phase 4 was skipped or applied everything.
 [ -s "$PREMERGE_RUN_DIR/lens-deferred.json" ] && \
   set -- "$@" --lens-findings "$PREMERGE_RUN_DIR/lens-deferred.json"
-python3 -I -B "$UBERDEV_PREMERGE_PLUGIN_ROOT/lib/premerge-findings.py" defer "$@" || exit 74
+# `|| exit 74` STAYS. 74 still means the verb genuinely refused -- unreadable or
+# malformed evidence -- and that is a hard stop. What it no longer means is
+# "more rows than the envelope holds": an overflow is reported on the line
+# below, at exit 0, with the aggregate written and dispatchable. Treating the
+# overflow as fatal is what made a long run file NOTHING, which is the whole
+# defect. See `#### When the envelope overflows`.
+PREMERGE_DEFER_LINE="$(python3 -I -B "$UBERDEV_PREMERGE_PLUGIN_ROOT/lib/premerge-findings.py" defer "$@")" || exit 74
+
+# PATH= is LAST on the line and its value runs to end-of-line, because a run
+# directory legitimately contains spaces (this repo's own checkout does). Read it
+# as a suffix, never as a whitespace-delimited field, and never re-order the
+# line so something follows it.
+case "$PREMERGE_DEFER_LINE" in
+  'PREMERGE_DEFER TOTAL='*' PATH='*) : ;;
+  *) printf 'error: unparseable defer line: %s\n' "$PREMERGE_DEFER_LINE" >&2; exit 74 ;;
+esac
+PREMERGE_DEFER_PATH="${PREMERGE_DEFER_LINE#* PATH=}"
+PREMERGE_DEFER_HEAD="${PREMERGE_DEFER_LINE%% PATH=*}"
+PREMERGE_DEFER_OVERFLOW="${PREMERGE_DEFER_HEAD##* OVERFLOW=}"
+PREMERGE_DEFER_SUGGESTION="${PREMERGE_DEFER_HEAD##* SUGGESTION=}"
+PREMERGE_DEFER_SUGGESTION="${PREMERGE_DEFER_SUGGESTION%% *}"
+# `OVERFLOW=` is ALWAYS printed -- `OVERFLOW=0` on a normal run -- so a missing
+# or non-numeric field is a contract break, not a zero. Falling back to 0 here
+# would re-create the silent drop by reading it as "nothing overflowed".
+case "$PREMERGE_DEFER_OVERFLOW" in ''|*[!0-9]*) printf 'error: defer line carries no OVERFLOW= count: %s\n' "$PREMERGE_DEFER_LINE" >&2; exit 74 ;; esac
+case "$PREMERGE_DEFER_SUGGESTION" in ''|*[!0-9]*) printf 'error: defer line carries no SUGGESTION= count: %s\n' "$PREMERGE_DEFER_LINE" >&2; exit 74 ;; esac
+[ -s "$PREMERGE_DEFER_PATH" ] || { printf 'error: defer named an aggregate that is missing or empty: %s\n' "$PREMERGE_DEFER_PATH" >&2; exit 74; }
+
+# Blockers are kept FIRST, so `SUGGESTION > 0` proves every blocker fit. The one
+# state in which a blocker may have been dropped is therefore
+# `SUGGESTION == 0 && OVERFLOW > 0`, and it gets its own, louder line: an
+# operator must never read "10 cleanup rows did not fit" and be looking at
+# discarded correctness findings.
+if [ "$PREMERGE_DEFER_OVERFLOW" -gt 0 ]; then
+  if [ "$PREMERGE_DEFER_SUGGESTION" -gt 0 ]; then
+    printf 'PREMERGE DEFER_OVERFLOW=%s CLASS=cleanup — %s cleanup rows did not fit the 64-row envelope; every blocker was kept\n' \
+      "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_OVERFLOW" >&2
+  else
+    printf 'PREMERGE DEFER_OVERFLOW=%s CLASS=blocker — the 64-row envelope was filled ENTIRELY by blockers and %s further rows did not fit; some dropped rows may be blockers\n' \
+      "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_OVERFLOW" >&2
+  fi
+fi
+printf '%s\n' "$PREMERGE_DEFER_LINE" >&2
 ```
 
 It prints one line and writes `deferred-aggregate.md`:
 
 ```
-PREMERGE_DEFER TOTAL=<n> BLOCKER=<n> SUGGESTION=<n> PATH=<path>
+PREMERGE_DEFER TOTAL=<n> BLOCKER=<n> SUGGESTION=<n> OVERFLOW=<n> PATH=<path>
 ```
+
+`TOTAL`, `BLOCKER` and `SUGGESTION` describe the rows that ARE in the written
+aggregate; `OVERFLOW` is how many did not fit. `TOTAL + OVERFLOW` is everything
+the run had to file. **`PATH=` is last and its value runs to end of line** — a
+run directory can contain spaces, so parsing it as a whitespace-delimited field
+truncates it, and appending any field after it breaks every reader.
 
 Then dispatch `subagent_type: uberdev:findings-to-issues` with
 `aggregate_path` = that `PATH`, `edge_id` = `premerge.defer.findings`,
 `carrier.workflow` = `premerge`, `pr_number` = the stack PR, `max_new` = 10.
+**Dispatch it on an overflow too, unchanged** — the aggregate is written and
+real, and a run that files 64 findings instead of 70 is enormously better than
+the one this replaced, which filed none.
+
+#### When the envelope overflows
+
+`MAX_FINDINGS = 64` bounds one aggregate. A long stack can exceed it honestly:
+`defer` unions the cross-attempt suggestion set, adds every surviving blocker,
+and adds every lens finding Phase 4b declined to apply, and eight attempts each
+contributing new fingerprints add up.
+
+`defer` used to **refuse** above the bound — exit 74, no aggregate, and a Phase 5
+fence with no arm for it. So the one step whose entire purpose is *"a thing the
+machine could not fix must outlive the run"* filed **nothing at all**, on exactly
+the runs that had the most to say. That is the same surviving-findings loss the
+`CONVERGE_VERIFY_CEILING` comment exists to prevent, arriving through a different
+door.
+
+What happens now:
+
+- **Blockers are kept first**, then suggestions, both in their existing relative
+  order, truncated to 64. So a blocker is dropped **only** when blockers alone
+  exceed 64 — at which point no ordering saves them all.
+- **The aggregate is still written** and `PATH=` still names a real, dispatchable
+  file. Overflow is never a refusal and never an exit code; it is a count on the
+  line.
+- **The count is reported, never swallowed.** Surface `OVERFLOW=<n>` in the run
+  summary. Silently dropping is the defect; reporting is what makes the drop
+  legitimate rather than a repeat of the thing being fixed.
+- **The two overflow classes are reported differently.** Because blockers are
+  kept first, `SUGGESTION > 0` proves every blocker fit, so `SUGGESTION == 0 &&
+  OVERFLOW > 0` is the only state in which a dropped row could be a blocker. The
+  first reads "N cleanup rows did not fit"; the second reads "the envelope was
+  filled entirely by blockers and N further rows did not fit". An operator must
+  never be shown the mild sentence over the severe state.
 
 **The blocker rows are the new thing here, and they needed a producer, not a
 louder promise.** `_encode_aggregate` used to pin every row to `suggestion`, so
@@ -1629,6 +2032,7 @@ Print the run summary and **stop**:
   clean gate    green | not_green (<reasons>)
   simplify      applied <n> / deferred <n> | skipped (<reason>) | reverted (<reason>)
   issues filed  <n> created, <n> commented, <n> deduped  (<n> blocker, <n> suggestion)
+                  <n> rows did not fit the 64-row envelope (cleanup | BLOCKER-class)
   version       v<X.Y.Z> | skipped (<reason>)
 
   <stack PR URL>
@@ -1715,6 +2119,14 @@ by contract and `uberdev:ci-rebase-handler` rewrites the branch, so the Phase 2a
 commit fence finds a clean tree and reports `COMMIT=none REASON=no-edits`. The
 CI arm publishes its own work — see `#### Repairing red CI` — and the rebase arm
 needs the `--force-with-lease` SHA captured *before* dispatch.
+
+**Reading "the CI arm owns its publication" as "the CI arm skips the checks".**
+A different commit fence is not no commit fence. `premerge-ci-publish` carries
+the same three load-bearing checks as the Phase 2a fence — branch assertion,
+untracked refusal, scope comparison — because `ci-code-fixer`'s "minimal-scope
+edits" is a prompt-level assurance and the entry below says outright that a
+prompt-level assurance is not enforcement. The arm that publishes without them
+puts agent-authored commits on the stack PR unexamined.
 
 **Two agents in one wave sharing a file.** `_fix_waves` groups by path so this
 cannot happen — do not "optimise" it into one-agent-per-finding.

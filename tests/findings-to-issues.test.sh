@@ -743,6 +743,7 @@ for helper in "$ORIGIN_TMP/canonical.sh"; do
     '7 review-pr 7 review_pr.defer.findings pr' \
     '7 solve 7 review_pr.defer.findings pr' \
     '7 turbo 7 review_pr.ci.defer_refusal pr' \
+    '7 premerge 7 premerge.defer.findings pr' \
     '0 legacy-uberscan 0 legacy.uberscan standalone' \
     '0 legacy-ubersimplify 0 legacy.ubersimplify standalone' \
     '7 legacy-ubersimplify 7 legacy.ubersimplify pr' \
@@ -764,6 +765,8 @@ for helper in "$ORIGIN_TMP/canonical.sh"; do
     '0 review-pr 7 review_pr.defer.findings' \
     '8 solve 7 review_pr.defer.findings' \
     '7 simplify 7 review_pr.ci.defer_refusal' \
+    '7 premerge 6 premerge.defer.findings' \
+    '7 review-pr 7 premerge.defer.findings' \
     '0 legacy-testers 0 review_pr.defer.findings'; do
     read -r matrix_pr matrix_workflow matrix_issue matrix_edge <<<"$bad_row"
     if ORIGIN_HEAD="$ORIGIN_HEAD" bash -c '
@@ -779,6 +782,84 @@ if [ "$ORIGIN_MATRIX_FAILURES" -eq 0 ]; then
 else
   echo "  FAIL  S17.8 — carrier origin matrix failures=$ORIGIN_MATRIX_FAILURES"; FAIL=$((FAIL + 1))
 fi
+
+# --- #685: the suggestion-tier gate must survive the subshell Step 1 mandates -
+#
+# S17.1-S17.8 here, and P5/P5b in tests/premerge.test.sh, are grep-shaped: they
+# read the agent markdown and pass on text. That is exactly what stayed green
+# while the RFC 0021 §5 gate was assigned INSIDE
+# `findings_derive_review_origin`. Step 1 mandates calling that function and
+# parsing its stdout, which makes every real call a command substitution — a
+# subshell — so the assignment died at that boundary, `route_by_severity` read
+# the closed default, every `suggestion` row routed out, and a stock /premerge
+# run returned `status: DONE` with empty arrays, indistinguishable from "the
+# code-review pass found nothing". The rows below EXECUTE the shipped helpers
+# across that exact boundary instead of reading them.
+GATE_FAILURES=0
+awk '/^findings_arm_suggestion_tier\(\) \{/{active=1} active{print} active && /^\}/{exit}' \
+  "$AGENT_MD" >"$ORIGIN_TMP/arm.sh"
+awk '/^   route_by_severity\(\) \{/{active=1} active{print} active && /^   [}][[:space:]]*$/{exit}' \
+  "$AGENT_MD" >"$ORIGIN_TMP/route.sh"
+# Refuse a vacuous PASS: an empty slice means an anchor moved, and every
+# assertion below would then be evaluated against nothing at all.
+for gate_slice in "$ORIGIN_TMP/canonical.sh" "$ORIGIN_TMP/arm.sh" "$ORIGIN_TMP/route.sh"; do
+  if [ ! -s "$gate_slice" ]; then
+    echo "        S17.9 slice missing or empty — refusing vacuous PASS: $gate_slice"
+    GATE_FAILURES=$((GATE_FAILURES + 1))
+  fi
+done
+
+# Drive one carrier end to end and report the facts the contract turns on.
+gate_probe() {
+  ORIGIN_HEAD="$ORIGIN_HEAD" bash -c '
+    . "$1"; . "$2"; . "$3"
+    gh(){ printf "%s\n" "$ORIGIN_HEAD"; }
+    # EXACTLY what Step 1 mandates: call the derivation and parse its stdout.
+    # That is a command substitution, so anything the function assigns to a
+    # variable is discarded before the next line runs.
+    ORIGIN_JSON="$(findings_derive_review_origin "$4" 7 20260726-010203-abcdef0 owner/repo "$5" 7 "$6")" || exit 3
+    findings_arm_suggestion_tier "$ORIGIN_JSON"
+    printf "gate=%s\n" "${SUGGESTION_TIER_ENABLED:-unset}"
+    if route_by_severity suggestion DEFERRED; then printf "suggestion=%s\n" "$row_tier"; else printf "suggestion=DROPPED\n"; fi
+    if route_by_severity blocker DEFERRED; then printf "blocker=%s\n" "$row_tier"; else printf "blocker=DROPPED\n"; fi
+    printf "keys=%s\n" "$(printf "%s" "$ORIGIN_JSON" | jq -c "keys_unsorted")"
+  ' _ "$ORIGIN_TMP/canonical.sh" "$ORIGIN_TMP/arm.sh" "$ORIGIN_TMP/route.sh" "$ORIGIN_REPO" "$1" "$2"
+}
+gate_expect() {
+  case "$1" in
+    *"$2"*) ;;
+    *) echo "        S17.9 expected [$2] — got: $(printf '%s' "$1" | tr '\n' ' ')"
+       GATE_FAILURES=$((GATE_FAILURES + 1)) ;;
+  esac
+}
+
+GATE_PREMERGE="$(gate_probe premerge premerge.defer.findings)" || GATE_FAILURES=$((GATE_FAILURES + 1))
+GATE_REVIEW="$(gate_probe review-pr review_pr.defer.findings)" || GATE_FAILURES=$((GATE_FAILURES + 1))
+
+# The /premerge carrier arms the tier IN THE CALLER and files its suggestions.
+gate_expect "$GATE_PREMERGE" 'gate=1'
+gate_expect "$GATE_PREMERGE" 'suggestion=SUGGESTION'
+gate_expect "$GATE_PREMERGE" 'blocker=BLOCKER'
+gate_expect "$GATE_PREMERGE" 'keys=["origin_kind","repo_slug","pr_commit_sha","source_ref","suggestion_tier"]'
+# Every other carrier is byte-identical to shipped: four keys, tier closed,
+# suggestions dropped, blockers still filed.
+gate_expect "$GATE_REVIEW" 'gate=0'
+gate_expect "$GATE_REVIEW" 'suggestion=DROPPED'
+gate_expect "$GATE_REVIEW" 'blocker=BLOCKER'
+gate_expect "$GATE_REVIEW" 'keys=["origin_kind","repo_slug","pr_commit_sha","source_ref"]'
+
+if [ "$GATE_FAILURES" -eq 0 ]; then
+  echo "  PASS  S17.9 — the suggestion tier crosses the mandated command substitution and arms in the caller (#685)"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S17.9 — suggestion-tier gate failures=$GATE_FAILURES"; FAIL=$((FAIL + 1))
+fi
+
+# Shape lock scoped to the FUNCTION BODY, not the whole file: the whole-file
+# count in tests/premerge.test.sh:241 is satisfied by an assignment anywhere,
+# including back inside the derivation where #685 put it.
+assert_no_grep_nonempty "$ORIGIN_TMP/canonical.sh" 'SUGGESTION_TIER_ENABLED' \
+  'S17.10 — the derivation never assigns a gate it cannot carry out of the subshell (#685)'
+
 rm -rf "$ORIGIN_TMP"
 
 ### Suite 18: disposition artifacts are aggregate-bound ----------
