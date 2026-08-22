@@ -103,6 +103,7 @@ findings_derive_review_origin() {
   local working_dir="$1" pr_number="$2" run_id="$3" repo_slug="$4"
   local carrier_workflow="$5" carrier_issue="$6" edge_id="$7"
   local canonical_root git_root local_head pr_commit_sha source_ref origin_kind
+  local suggestion_tier_key=""
   case "$working_dir" in
     /*|[A-Za-z]:[\\/]*) ;;
     *) return 2 ;;
@@ -123,12 +124,16 @@ findings_derive_review_origin() {
       # the stack PR it just opened. It is `pr` mode like the review union, but
       # its carrier issue number is the stack PR itself rather than a solved
       # issue, so the `pr_number == carrier_issue` identity above still holds
-      # and is still checked. SUGGESTION_TIER_ENABLED is set here and nowhere
-      # else — it is what admits the `suggestion` arm in Step 4, and scoping it
-      # to this one case is what keeps every other variant's routing
-      # bit-identical to its shipped behaviour.
+      # and is still checked. This is the ONLY arm that opens the `suggestion`
+      # tier of Step 4, and it opens it through the stdout contract below — as
+      # the optional fifth key — rather than by assigning a global. Step 1
+      # mandates calling this function and parsing its stdout, so every real
+      # call is a command substitution, and a variable assigned here would die
+      # with that subshell before `route_by_severity` ever saw it (#685).
+      # Scoping the fifth key to this one case is what keeps every other
+      # variant's stdout, and its routing, byte-identical to shipped behaviour.
       [ "$carrier_issue" -gt 0 ] && [ "$pr_number" -eq "$carrier_issue" ] || return 2
-      origin_kind=pr; source_ref=""; SUGGESTION_TIER_ENABLED=1 ;;
+      origin_kind=pr; source_ref=""; suggestion_tier_key=',"suggestion_tier":"1"' ;;
     legacy.uberscan:legacy-uberscan:0:0)
       origin_kind=standalone; source_ref="/uberscan run $run_id" ;;
     legacy.ubersimplify:legacy-ubersimplify:0:0)
@@ -157,8 +162,33 @@ findings_derive_review_origin() {
     origin_kind=pr
   fi
   [[ "$pr_commit_sha" =~ ^[0-9a-f]{40}$ ]] || return 2
-  printf '{"origin_kind":"%s","repo_slug":"%s","pr_commit_sha":"%s","source_ref":"%s"}\n' \
-    "$origin_kind" "$repo_slug" "$pr_commit_sha" "$source_ref"
+  printf '{"origin_kind":"%s","repo_slug":"%s","pr_commit_sha":"%s","source_ref":"%s"%s}\n' \
+    "$origin_kind" "$repo_slug" "$pr_commit_sha" "$source_ref" "$suggestion_tier_key"
+}
+
+# Arm the RFC 0021 §5 suggestion tier IN THE CALLER'S SHELL.
+#
+# #685: the gate used to be assigned inside `findings_derive_review_origin`.
+# Step 1 mandates calling that function and parsing its stdout, which makes
+# every real call a command substitution — a subshell — so the assignment was
+# discarded at the subshell boundary, `route_by_severity` saw the default `0`,
+# every `suggestion` row routed out, and a stock `/premerge` run filed zero
+# cleanup issues while returning `status: DONE` with empty arrays. The flag now
+# leaves the derivation on stdout as the optional fifth key and is
+# re-established here, where the assignment survives.
+#
+# Call this as a PLAIN COMMAND — never inside `$( )`, never in a pipeline, and
+# never as the last stage of one — passing the exact JSON the derivation
+# printed, BEFORE any row reaches `route_by_severity`. It is fail-closed: an
+# absent, empty, or non-`1` key leaves the tier shut, which is the shipped
+# behaviour of every caller other than `/premerge`.
+findings_arm_suggestion_tier() {
+  local origin_json="$1" parsed
+  parsed="$(printf '%s' "$origin_json" | jq -r '.suggestion_tier // "0"' 2>/dev/null)" || parsed=0
+  case "$parsed" in
+    1) SUGGESTION_TIER_ENABLED=1 ;;
+    *) SUGGESTION_TIER_ENABLED=0 ;;
+  esac
 }
 ```
 
@@ -253,11 +283,25 @@ Explicit forbidden patterns:
    `findings_derive_review_origin "$working_dir" "$pr_number" "$run_id"
    "$repo_slug" "$carrier_workflow" "$carrier_issue_num" "$edge_id"`.
    Parse only its exact JSON keys `origin_kind`, `repo_slug`,
-   `pr_commit_sha`, and `source_ref`. The explicit `--repo "$repo_slug"` PR
+   `pr_commit_sha`, `source_ref`, and — present on the
+   `premerge.defer.findings` arm alone — the optional `suggestion_tier`. The
+   explicit `--repo "$repo_slug"` PR
    lookup and local-HEAD equality check are mandatory; any derivation,
    malformed output, repository mismatch, or remote-head mismatch is
    `status: REFUSED`, `rationale: "input-malformed"`, before rate-limit, label,
-   issue, comment, author, or any other GitHub write. Source the secret-scan
+   issue, comment, author, or any other GitHub write.
+
+   Capture that stdout once — `ORIGIN_JSON="$(findings_derive_review_origin
+   …)"` — and then, in the SAME shell that will run Step 4, call
+   `findings_arm_suggestion_tier "$ORIGIN_JSON"` as a plain command. That call
+   is not optional and it is not a formality: the derivation runs inside the
+   command substitution this step mandates, so it cannot set a variable the
+   caller will still see, and the RFC 0021 §5 tier is armed only by this
+   second call (#685). Skipping it silently drops every `suggestion` row and
+   makes a `/premerge` cleanup dispatch return `status: DONE` with empty
+   arrays. Never wrap that call in `$( )` or end a pipeline with it — either
+   puts the assignment back in a subshell and re-lands the same defect.
+   Source the secret-scan
    library: `source "${CLAUDE_PLUGIN_ROOT}/lib/secret-scan.sh"` — refuse with
    `rationale: "secret-scan-lib-unavailable"` if the source returns non-zero.
 
@@ -451,9 +495,15 @@ Explicit forbidden patterns:
    # Review schema v2 uses {blocker,suggestion}; explicit legacy variants may
    # additionally normalize {critical,important,major} (RFC 0002 §3.1).
    #
-   # SUGGESTION_TIER_ENABLED (RFC 0021 §5) defaults to 0 and is set to 1 by
+   # SUGGESTION_TIER_ENABLED (RFC 0021 §5) defaults to 0 and is opened by
    # exactly ONE arm of `findings_derive_review_origin` — the
-   # `premerge.defer.findings` case. Every other variant therefore takes the
+   # `premerge.defer.findings` case — which emits the optional
+   # `suggestion_tier` stdout key that Step 1 then feeds to
+   # `findings_arm_suggestion_tier` IN THIS SHELL. The gate is never assigned
+   # inside the derivation itself: that function is always called through
+   # command substitution, so such an assignment dies in the subshell and the
+   # tier reads closed here no matter which carrier dispatched the run (#685).
+   # Every other variant emits no fifth key, so it takes the
    # `*) return 1` arm on a `suggestion` exactly as it does today, so this
    # change is bit-identical for /review-pr, /simplify and all four legacy
    # fleets. The default lives HERE rather than at the call sites because a
@@ -491,7 +541,8 @@ Explicit forbidden patterns:
    `APPLIED` suppressor never applies to it and its severity alone decides:
    `blocker` resolves `row_tier=BLOCKER` and files, `suggestion` returns `1`
    and files nothing — a post-fix aggregate can only reach this agent from a
-   `/uberdev:review-pr` carrier, which never sets `SUGGESTION_TIER_ENABLED`, so
+   `/uberdev:review-pr` carrier, whose derivation emits no `suggestion_tier`
+   key and therefore leaves `SUGGESTION_TIER_ENABLED` at its closed default, so
    the RFC 0021 arm is unreachable on this path and the sentence stays exactly
    true. That second arm is not a new drop path — it is the
    shipped treatment of every Phase 1 `suggestion` row, recorded under *Halt
@@ -848,7 +899,7 @@ Empty arrays are emitted as `[]`. `rationale` is empty string `""` on non-REFUSE
 
 **Field semantics (RFC 0002 §3.3.3):**
 - `tier` (per-URL field on `created_urls` / `commented_urls` / `skipped_closed`) — one of `{BLOCKER, CRITICAL, MAJOR, SUGGESTION}`; lets `/review-pr` Step 7 group filed issues by tier in the user-visible summary and the audit JSON `phases.phase2_5.by_severity` block. `SUGGESTION` is reachable only from a `premerge.defer.findings` dispatch (RFC 0021 §5); every other caller's tier set is unchanged.
-- `by_severity.{blocker|critical|major|suggestion}` — count of rows actually written this run (`len(created_urls) + len(commented_urls)` per tier; excludes `skipped_closed` and `blocked_by_dedupe`). `by_severity.suggestion` is always `0` for callers that do not set `SUGGESTION_TIER_ENABLED`, so a consumer that reads only the first three keys sees exactly what it saw before.
+- `by_severity.{blocker|critical|major|suggestion}` — count of rows actually written this run (`len(created_urls) + len(commented_urls)` per tier; excludes `skipped_closed` and `blocked_by_dedupe`). `by_severity.suggestion` is always `0` for callers whose origin derivation emits no `suggestion_tier` key and therefore leaves `SUGGESTION_TIER_ENABLED` closed, so a consumer that reads only the first three keys sees exactly what it saw before.
 - `halted_due_to_overflow` — true iff Step 6's broken-feature guard fired (some truncated row was BLOCKER or CRITICAL tier).
 - `halted` — load-bearing signal for the parent's GREEN/YELLOW/RED predicate; set per Step 9 rule.
 - **Implication**: `halted_due_to_overflow == true` implies `halted == true` — the overflow guard never fires in isolation; it always trips the higher-level halt. (RFC 0002 §3.3.5.)
@@ -886,8 +937,9 @@ its own definition. They also never trip the broken-feature overflow guard —
 that guard is scoped to `{BLOCKER, CRITICAL}` and `severity_rank(suggestion)=0`
 puts them last in the sort, so they are the first rows a cap truncates and the
 truncation is by design rather than a cliff. Review-v2 `suggestion` rows do not
-route to issues for any caller that does not set `SUGGESTION_TIER_ENABLED`,
-which today means every caller except `/uberdev:premerge`.
+route to issues for any caller whose origin derivation emits no
+`suggestion_tier` key, leaving `SUGGESTION_TIER_ENABLED` closed — which today
+means every caller except `/uberdev:premerge`.
 `CRITICAL`-tier legacy rows that fit under `MAX_NEW` ALSO do not halt — they
 trigger the YELLOW state in the parent (see `commands/review-pr.md`
 Trust-Signal Emission section), not RED.

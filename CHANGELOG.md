@@ -4,6 +4,316 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.54.0] — 2026-08-22
+
+Turns `/premerge`'s review→fix→gate line into a bounded convergence loop, repairs
+red CI inside it, and makes the simplify phase both reachable and verified.
+MINOR: four new flags, one new library verb, two amendments to RFC 0021.
+
+### Changed — `/premerge` fixes until green instead of parking on the first survivor
+
+Phases 1→2→3 were a straight line: one review, one set of fixer waves, exactly
+one re-review, then a clean gate. RFC 0021 §8 refused a loop outright, for a real
+reason — *"the third automatic attempt is where a fixer starts 'fixing' the test
+instead of the code."* The refusal named the hazard correctly and the remedy
+incorrectly. A counter of one does not stop a fixer disposed to weaken a test; it
+does reliably stop a loop that was converging, parking the stack with a live
+blocker in it. And because the gate is also what unlocks Phase 4, that same stop
+took the not-green branch and skipped the simplify pass entirely — so on any stack
+that needed real work, the three lenses **silently never ran** and the run still
+reported success.
+
+What now bounds the loop is evidence rather than a countdown:
+
+- `STOP_NO_PROGRESS` — an attempt changed neither the blocker set nor the CI reason;
+- `STOP_REGRESSED` — our own fixes grew the blocker set;
+- `--converge=<n>` (1–6, default 3, **refused not clamped**) is the runaway
+  backstop behind those two, with `--no-converge` as its `=1` spelling.
+
+Blocker identity across re-reviews is a fingerprint over path plus a folded
+summary, deliberately **not** `file:line`: every fix moves lines, and a
+location-keyed identity reports each survivor as brand new, sees infinite
+progress, and never stops. It is deliberately not the `file:line:summary`
+fingerprint `findings-to-issues` computes either — same width, different question.
+
+### Added — red CI is repaired, not just observed
+
+Nothing in the pipeline had ever been pointed at a red build. The gate could see
+`ci=red` and the run's only response was to stop. The failing log is now fetched,
+enveloped with its `sha256`, and classified by `uberdev:ci-failure-classifier`;
+`code_bug`/`env_drift` route to `uberdev:ci-code-fixer`, `stale_base` to
+`uberdev:ci-rebase-handler`, `flaky` to one `gh run rerun`. `billing_quota` and
+`platform_outage` are named as non-loopable and stop the run — no number of
+attempts fixes a billing problem, and looping on one burns the budget and then
+reports the wrong thing. Suppress the repair alone with `--no-ci-fix`; the probe
+and the classification still run.
+
+### Added — Phase 4c VERIFY, and the revert rule
+
+Phase 4 is the last thing to touch the branch and every gate in the run was
+computed before it, so a refactor that reddened the suite shipped inside a stack
+whose summary said `clean gate green` — and Phase 5's `chore(release)` commit then
+attested to code nothing had verified. VERIFY re-probes CI and re-gates the
+simplify commit on its own SHA. Since simplify is optional polish, its failure
+mode is **undo**: with no attempts left, the polish commit is reverted rather than
+handed to a human at 3am. The revert never reaches the fix commits. Opt out with
+`--no-post-simplify-review`.
+
+### Fixed — the clean gate never returned green under zsh
+
+`/premerge`'s fences run through `/bin/zsh`, which does **not** word-split an
+unquoted scalar. Phase 3 built its arguments as a string and expanded them
+unquoted, so `assert-green` received one giant `argv[1]`, argparse exited 2, and
+the fence's fail-closed default recorded `not_green / gate_unreadable` — on every
+attempt, including a perfectly clean stack. Shipped in v0.53.0 behind the
+plugin's only `# shellcheck disable=SC2086` waiver, which was the tell. The gate
+now accumulates an argv list with `set --`, verified green under both shells.
+
+Under the old single-shot pipeline this meant the simplify pass never ran. Under
+a loop it would have meant no run could ever converge, so the fix is load-bearing
+for everything else in this release.
+
+### Fixed — two defects in the shipped Phase 4
+
+- Phase 4 promised to file its un-applied lens findings and **no producer
+  existed**: `plan` requires a `failure_scenario` that a `code-simplifier` lens
+  never emits, so the promise silently did nothing. There is now a `defer` verb
+  that translates the lens return shape (`detail` → `failure_scenario`, lens name
+  prefixed onto the summary) and encodes it. A lens finding always files as a
+  `suggestion` regardless of what the lens called it — filing one as a blocker
+  would halt a run over a refactor suggestion.
+- "Preserves behaviour" was a sentence in a prompt with nothing checking it.
+  Fixer agents now return a `behavior: preserve | change | n/a` disposition and a
+  `change` on an applied row refuses the wave-set.
+
+### Fixed — the gate could answer for code that no longer existed
+
+A refused `plan` (a >64-finding review, a duplicate location, any schema refusal)
+exits **before** writing anything, leaving the previous attempt's
+`classified.json` on disk looking perfectly fresh. `plan` now stamps the reviewed
+`head_sha` and `assert-green --head-sha` refuses on a mismatch. Per-attempt
+evidence (`classified-NN.json`, `fix-waves-NN.json`, `gate-NN.json`,
+`converge.jsonl`) is preserved instead of overwritten.
+
+### Fixed — the CI settle race (RFC 0021 §9, first open question)
+
+A push restarts checks and `test.yml` fires on both `push` and `pull_request`
+with nothing cancelling the loser, so for ~10–30s `gh pr checks` reports no checks
+at all — which the gate read as green. Under a loop that stops being an edge case:
+every attempt ends in a push. `assert-green --after-push` turns `no_checks` into
+`ci=no_checks_after_push`, which routes to `WAIT_CI` — a re-probe that does **not**
+consume a fix attempt, bounded so a check that never settles ends the run not
+green rather than passing. Conditioned on the repo actually having workflows, so a
+repo with no CI is not made to wait for a verdict that will never come.
+
+### Fixed — three ways the loop could stop on the wrong answer
+
+Found by executing the loop rather than reading it:
+
+- **A converging attempt read as a regression.** `STOP_REGRESSED` compared raw
+  blocker counts, but the built-in reviewer's output is capped and ranked
+  most-severe-first — clearing the top blockers routinely surfaces ones the cap
+  had cut. Fixing one blocker and surfacing two stopped the loop and told the
+  operator the machine had made the stack worse. The predicate is now "new
+  blockers appeared **and** we cleared none".
+- **Two blockers sharing a summary counted as one.** The fingerprint is
+  line-independent by design, so two distinct blockers in one file reported with
+  the same summary collide. Compared as a *set* they collapsed to one element,
+  so fixing one left the set unchanged and the loop answered `STOP_NO_PROGRESS`
+  on an attempt that had removed a real blocker. Comparison is now a multiset.
+- **A failed mergeability probe passed the gate.** The fence maps a failed
+  `gh pr view` onto `UNKNOWN`, and `UNKNOWN` contributed no gate reason — the one
+  unreadable-evidence state the gate answered green on. It is now a waitable
+  reason: re-probed without spending a repair, bounded, and never a pass.
+
+Also: two line-less findings in one file used to refuse the whole document
+(`line` is optional in both reviewer contracts), and under a loop that refusal
+was unrecoverable — `plan` exits before writing, the gate reads a missing
+artifact, and `converge` aborts. Uniqueness now falls back to the fingerprint
+when there is no line, so genuine duplicates still collide and distinct findings
+do not.
+
+### Added — nothing the run could not fix is lost
+
+A surviving blocker used to be printed in the summary and lost when the terminal
+scrolled — and the encoder pinned every row to `suggestion`, so there was no way
+to file one even in principle. The new `defer` verb is the missing producer;
+`severity_rank(blocker)=3` already sorts a blocker above every cleanup row, so a
+`max_new` overflow cannot displace one — but `agents/findings-to-issues.md` did
+need a change after all; see the suggestion-tier subshell fix below. Blockers the loop stopped on now file at `BLOCKER` tier with a
+`Blocks: #<stack-pr>` backref, alongside the suggestions and the un-applied lens
+findings. Suggestions accumulate as a fingerprint-deduped union across attempts —
+one the reviewer stops repeating is unmentioned, not resolved — and are filed
+once, after the loop settles, because per-attempt filing would create duplicates
+and trip the agent's own inode re-check.
+
+### Fixed — 16 defects the gate found in its own second pass
+
+Running `/premerge` over this stack produced two `xhigh` review passes. The first
+found 12 blockers; fixing them surfaced 15 more findings sharing **no location**
+with the first set, which is the honest reading of a reviewer that hit its
+15-finding cap both times: each pass reported a floor, not a tally. All of it is
+fixed here, each fix carrying an executed reproduction and a mutation proving the
+new test row is not vacuous.
+
+The ones that mattered most:
+
+- **An injection breakout.** `_canonical_json` did not escape `<`, so finding text
+  containing `</external-untrusted-input>` closed the spotlighting envelope early
+  and put attacker-chosen prose outside the untrusted region. Both sibling
+  encoders escape it, and this module's docstring claimed byte-identical shape to
+  one of them. `ensure_ascii=True` stays, so unicode lookalikes cannot smuggle a
+  tag either.
+- **`/premerge` filed zero cleanup issues in a stock run.** The suggestion-tier
+  gate was set as a side effect inside a function the contract mandates calling
+  through command substitution, so the assignment died in the subshell and every
+  cleanup row routed out — returning `status: DONE` with empty arrays, which reads
+  exactly like "the review found nothing". The gate now travels out through the
+  function's stdout contract. Both guarding assertions were greps over markdown
+  that never executed; with the fix mutated back out they stayed green, so the
+  replacement rows execute the function instead.
+- **The clean gate answered green on evidence it could not read.** A failed
+  `gh pr checks` collapsed to `no_checks`, which passes. The probe also discarded
+  *valid* JSON on gh's exit 1 (a check failed) and exit 8 (pending), so red and
+  pending builds read as green as well.
+- **The fix-commit scope guard failed open** — `git diff … | sort -u >file || exit 2`
+  tests `sort`'s status, and `sort` succeeds on empty input, so a failing
+  `git diff` produced an empty stray set and `git add -u` swept the whole tree.
+  Its sibling one line above failed closed under the identical shape.
+- **Phase 4c could neither repair nor safely revert.** Its middle arm could never
+  fire (a green predecessor always yields `fixed == 0`, so `converge` answers
+  `STOP_REGRESSED` first), and it had no wait arm, so the post-push settle window
+  this file documents elsewhere reverted correct polish on essentially every run.
+- **Two `aggregate_path` values for one dispatch.** §2b and §5-file disagreed, and
+  §2b's path drops exactly the rows the `defer` verb was added to produce. This
+  bit a real run, which filed only its suggestion rows.
+- **`defer` refused instead of overflowing.** Above 64 rows it exited 74 with no
+  recovery arm, so the one step whose purpose is that nothing is lost filed
+  nothing. It now keeps blockers first, writes the aggregate, reports
+  `OVERFLOW=<n>` on every run, and exits 0 — and because blockers are kept first,
+  `SUGGESTION == 0 && OVERFLOW > 0` is the only state in which a blocker may have
+  been dropped, so that case gets its own louder line.
+- **Uncaught exceptions where the contract promised exit 74**, an unbounded flaky-CI
+  rerun path, CI-repair commits published with none of the three checks the file
+  calls load-bearing, and `--after-push` keyed on a workflow *file* rather than on
+  whether the PR gets checks at all.
+
+Test rows: `premerge.test.sh` 132 → 179, `premerge-findings.test.sh` 93 → 118,
+`findings-to-issues.test.sh` 157 → 159. One harness defect fixed along the way:
+`fence_body` matched fence openers by prefix, so renaming a fence to
+`…-DISABLED` redded nothing.
+
+### Fixed — `/premerge` is a general PR-phase gate again
+
+- **`/premerge` Phase 5 aborted the run in every repository, including this one.**
+  The apply fence called `lib/bump-version.sh` with no `--repo-root`, and that
+  script resolves its target from its own on-disk location — which lands on a repo
+  root only when it runs out of a source checkout. Under a marketplace install it
+  resolved into the plugin cache, found none of the six version surfaces there and
+  exited 3, so `|| exit 2` killed Phase 5 after pack, review, fix, issues and
+  simplify had all already run. The fence now passes the packed repo's own root.
+
+- **`/premerge` is a general PR-phase gate again.** The version bump is UberDev
+  self-hosting machinery, and its documented "skipped with a reported reason"
+  escape hatch could never fire: it probed `$PLUGIN_ROOT/lib/bump-version.sh`,
+  which ships with every install, so it answered "is uberdev installed" (always
+  yes) rather than "does this repo have a version ratchet". The gate now probes
+  `PREMERGE_VERSION_MANIFEST` in the **target** tree — the same signal `/goal`
+  uses — and a repo without it reports `version skipped (no-version-ratchet)` and
+  parks normally. In this repository the ratchet stays exactly as mandatory as
+  before.
+
+- **`/premerge` no longer dirties the working tree it is about to gate on.**
+  Phase 0a creates `.uberdev/premerge/<RUN_ID>/` inside the packed repo and Phase
+  0b refuses to build a combine branch over an unclean tree, so every repository
+  but this one aborted at the directory `/premerge` had just created — this one
+  survived only because its own `.gitignore` lists `.uberdev/`. Phase 0a now
+  publishes a private, no-clobber `.uberdev/premerge/.gitignore`, as `/review-pr`
+  already does for `<runs_root>/.gitignore`. It is scoped to `premerge/` and
+  deliberately not to `.uberdev/`: that parent is the documented per-repo config
+  root (`.uberdev/config.yaml`, RFC 0006; `.uberdev/config.json`, RFC 0007), and a
+  catch-all one level up would permanently un-add a repository's own committed
+  config. Publication verifies the **effect** with `git check-ignore` rather than
+  trusting no-clobber: a 0-byte policy left by an interrupted run, or a repo's own
+  selective one, used to leave the run directory perfectly visible and surface
+  five fences later as "the working tree is not clean" — naming nothing the
+  operator could act on. That case now refuses at the cause, naming the file.
+
+### Added — `tests/premerge-phase5.test.sh`
+
+- **`tests/premerge-phase5.test.sh`** — behaviour gates that build throwaway git
+  repos and execute the fences **extracted** from `SKILL.md`: the skip, the
+  non-skip, all six surfaces actually moving, the apply-fence probe being
+  reachable with `PREMERGE_NEXT` unset, the cleanliness gate passing with the
+  policy and refusing without it, and the config root staying addable. The shape
+  gates in `tests/premerge.test.sh` are now scoped to fence **bodies** rather than
+  to the whole file — matched against the whole file, every one of them was
+  satisfiable by prose, and a Phase 5 that had stopped bumping altogether passed
+  them all.
+
+### Fixed — ten blockers a second `xhigh` pass found in the first pass's repairs
+
+Both review passes over this stack returned exactly fifteen findings and the
+second shared no location with the first, so the second pass was reading code the
+first pass's fixes had just written. Every fix below carries an executed
+reproduction and a mutation proving its test row reds on the unfixed shape.
+
+In `lib/premerge-findings.py`:
+
+- **One corrupt artifact cost the whole run.** `_carry_prior_suggestions`
+  tolerated an *absent* earlier attempt and died on an *unreadable* one, so a
+  single truncated `classified-01.json` refused every later `plan --carry-prior`
+  and the Phase 5 `defer` — filing nothing at all, on the step whose purpose is
+  that findings outlive the run. `fail()` now raises `Refusal`, a `SystemExit`
+  subclass carrying its token, so the one caller that means to tolerate a refusal
+  can catch exactly that and announce what it skipped.
+- **Two lines under one summary filed as one finding.** The suggestion union
+  deduped on the deliberately line-independent `_fingerprint`. It now keys on the
+  same `(file, line, normalised summary)` triple `_normalise_findings` uses, so
+  both paths agree what makes two findings the same finding.
+- **`path:line:col` filed against a file that does not exist.** `rpartition`
+  split at the last colon, `_repo_path` accepts a colon, and nothing refused. A
+  residual colon is now a refusal rather than a guess.
+- **A Unicode digit in a location crashed the verb.** `'²'.isdigit()` is
+  `True` and `int('²')` raises, as does a 4301+ digit string under CPython
+  3.11+ — exit 1 with a traceback, not the contracted exit 74 with a token the
+  fences branch on.
+- **`defer` refused at the index a refused `plan` left behind.** Phase 2 makes a
+  refused `plan` a hard stop that *leaves* `PREMERGE_ATTEMPT` at N, so
+  `classified-0N.json` is legitimately absent where Phase 5 defers from. It now
+  walks down to the newest readable attempt and says on stderr that it did.
+
+In `skills/premerge-pipeline/SKILL.md`:
+
+- **The scope guards trusted the ambient locale.** They compare paths as bytes,
+  but `sort` orders by the ambient collation and `comm`'s merge walk assumes its
+  own; the same two paths sorted under `en_US.UTF-8` and under `C` make
+  `comm -23` report a file present in *both* lists as a stray. `LC_ALL=C` now
+  pins every member of the trio.
+- **`PREMERGE_PUSHED` had a stated value at one call site of five.** The gate
+  takes it with `:?` and no default so that forgetting is loud — which only holds
+  if the file says what the value is everywhere the gate runs. Every call site is
+  now tabulated.
+- **The flaky-rerun cap bounded nothing.** It counted `CONTINUE` rows at a fixed
+  attempt index while every `CONTINUE` advances that index, so `USED` was 0
+  forever and `gh run rerun` fired each attempt until the repair budget ran out.
+  The budget is now counted across the run.
+- **The rebase arm blocked the repair it gates.** It refused on any commit-count
+  change, but a `stale_base` rebase legitimately drops commits that already
+  landed on the new base — the commonest cause of `stale_base` — leaving a branch
+  rewritten locally and never force-pushed. Only growth is refused now.
+- **Phase 4b committed without a scope guard.** It runs the same one-file-per-
+  agent waves and the same `git add -u` as Phase 2a and had only the branch and
+  untracked checks. It now writes its merged lens result set as
+  `simplify-scope-<NN>.allowed` and commits behind the same comparison.
+
+Two test-hygiene repairs fell out of writing those rows: the locale probe and the
+flaky-index absence assertion both had to strip fence **comments**, because these
+fences carry the prose explaining them and a probe over the raw body is satisfied
+by that explanation; and `assert_not_in` is `grep -qE`, so an unescaped `$want`
+made `$` an end-of-line anchor and the row passed vacuously against the very
+shape it was added to forbid.
+
 ## [0.53.0] — 2026-08-21
 
 Adds `/premerge`, the pre-merge stack gate (RFC 0021). MINOR: a new command, a

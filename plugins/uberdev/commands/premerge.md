@@ -1,10 +1,10 @@
 ---
-description: "Pre-merge stack gate. Packs every open non-draft PR onto ONE integration branch, reviews the combined result with the built-in /code-review, dispatches fixers at the blockers, files the rest as GitHub issues, and only once the stack is clean runs the /simplify three-lens pass and the version bump. Always parks the stack PR — never merges."
-argument-hint: "[<level>] [--no-simplify] [--no-issues] [--no-bump] [--no-ci-gate] [--dry-run]"
+description: "Pre-merge stack gate. Packs every open non-draft PR onto ONE integration branch, then loops review → fix → re-review until the stack is green or repairing provably stops working, repairing red CI along the way. Once green it runs the /simplify three-lens pass, re-gates the polish and reverts it if it did harm, files everything it could not fix as GitHub issues, and bumps the version. Always parks the stack PR — never merges."
+argument-hint: "[<level>] [--converge=<n>] [--no-converge] [--no-ci-fix] [--no-post-simplify-review] [--no-simplify] [--no-issues] [--no-bump] [--no-ci-gate] [--dry-run]"
 allowed-tools: ["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Task", "Write"]
 ---
 
-# /premerge — one stack, one review, one bump, parked
+# /premerge — one stack, one loop, one bump, parked
 
 `/premerge` is the gate a pile of open PRs passes through **before** anything lands.
 It packs every open non-draft PR onto a single integration branch, opens ONE
@@ -18,9 +18,16 @@ Review is the **built-in `code-review` skill**, not uberdev's seven-agent fanout
 Findings split two ways: a correctness blocker gets a **dispatched fixer**, and
 everything else — reuse, simplification, efficiency, altitude, conventions —
 becomes a **GitHub issue**, so the polish is recorded without holding the stack.
-The `/simplify` three-lens pass runs **last and only on a clean stack**: polishing
+Review, fix and gate then run **as a loop** rather than a straight line: the gate's
+not-green branch repairs what it can and reviews again, so a stack that needs real
+work reaches green instead of being parked with a live blocker still in it.
+
+The `/simplify` three-lens pass runs **last and only on a green stack**: polishing
 code that still carries a known bug is wasted work, and it buries the bug in
-refactor noise.
+refactor noise. Because it is also the last thing to touch the branch, it is the
+one phase whose output nothing else would check — so it re-probes CI, re-gates its
+own commit, and **reverts itself** rather than parking a stack that was green
+before the polish and broken after it.
 
 **`/premerge` never merges.** It ends at a pushed, open, bumped stack PR — parked.
 Landing it is `/merge`, and only when you say so.
@@ -32,11 +39,46 @@ Landing it is `/merge`, and only when you say so.
 | Argument | Meaning |
 |---|---|
 | `<level>` | Review effort for the built-in `code-review`: `low`, `medium`, `high`, `xhigh` (default), `max`. **Not a free dial** — see `## Effort levels are not a ladder` below before changing it. |
-| `--no-simplify` | Stop after the clean gate. Skips Phase 4 entirely. |
-| `--no-issues` | Do not file suggestion findings as issues. They are still reported in the run summary — unfiled, not unrecorded. |
+| `--converge=<n>` | How many **repair rounds** the loop may take: `1` to `6`, default `3`. N repairs cost N+1 reviews — the last review is the one that verifies the last repair, which is why nothing the loop writes ever ships ungated. Out of range is a **refusal, not a clamp** — running six rounds while you believe ninety-nine are coming is the silent substitution every other refusal here exists to prevent. |
+| `--no-converge` | The same request as `--converge=1`: one wave-set of fixes, one re-review, the pre-loop behaviour. Spelled both ways because one reads as a dial position and the other as a mode. |
+| `--no-ci-fix` | Suppress the CI **repair** only. The probe and the classification still run, so the gate still reports what CI said and the summary still names the failure class. A flag that blinded the gate as well would be a different, much worse flag. |
+| `--no-post-simplify-review` | Skip the VERIFY step that re-probes and re-gates the simplify commit. The polish then ships on the strength of a gate that predates it — a state worth making deliberate rather than accidental. |
+| `--no-simplify` | Stop at the clean gate. Skips Phase 4 entirely, VERIFY included. |
+| `--no-issues` | Do not file findings as issues — the surviving blockers included. They are still reported in the run summary: unfiled, not unrecorded. |
 | `--no-bump` | Skip Phase 5's version bump. The stack PR is still pushed and parked. |
 | `--no-ci-gate` | Drop the CI-green term from the clean gate. Blocker count and mergeable state still gate. Use when the repo has no checks worth waiting on. |
 | `--dry-run` | Run Phase 0's discovery and print the pack plan — which PRs, in what order, onto what base — then stop. No branch, no PR, no review, no writes. |
+
+## The loop stops on evidence, not on a counter
+
+The clean gate's not-green branch routes each failing term at something that can
+repair it: the fixer waves at a surviving blocker, `uberdev:ci-failure-classifier`
+and then `uberdev:ci-code-fixer` or `uberdev:ci-rebase-handler` at a red build, a
+controller-owned merge of the base into the stack at `CONFLICTING`. Then it reviews
+again. Before the loop the gate was single-shot, so any stack that needed real
+fixing never reached green — which left the simplify phase behind that gate
+structurally unreachable and silently never run, and left a red build unrepaired
+altogether.
+
+What ends the loop is a measurement, not a countdown. `STOP_NO_PROGRESS` fires on
+an attempt that changed neither the blocker set nor the CI reason; `STOP_REGRESSED`
+fires when our own fixes grew the blocker set. Both compare blocker **fingerprints**
+across attempts rather than `file:line`, because a fix moves lines and a
+location-keyed identity would report every survivor as brand new — the loop would
+see infinite progress and never stop.
+
+`--converge` is the runaway backstop behind those two, not the stop condition, and
+that distinction is the answer to the hazard RFC 0021 originally refused a loop
+over: *"the third automatic attempt is where a fixer starts 'fixing' the test."*
+The attempt that achieves nothing is now caught **when it happens** rather than
+assumed to be the third one, and the fixer agents are told outright that a test
+they read as the wrong half is a finding to report and skip, never an obstacle to
+delete.
+
+Waiting on a build is not an attempt. `pending`, `unknown`, and the no-checks
+window that a push opens are re-probed without spending fix budget, under a bound
+of their own — so a check that never settles ends the run as **not green**, never
+as a pass.
 
 ## Effort levels are not a ladder
 
@@ -64,13 +106,27 @@ trusting a run's split.
 - **It will not drop a PR silently.** A candidate that cannot be packed is
   excluded **by number with a typed reason** and that reason is rendered into
   the stack PR body.
+- **It will not loop forever.** The loop ends on the attempt that stopped making
+  progress or made things worse; `--converge`'s ceiling of six is only the
+  backstop behind that, and waiting on CI has a bound of its own.
+- **It will not weaken a test to clear a finding.** Making the evidence stop
+  complaining is not fixing the bug. A fixer that honestly reads the test as the
+  wrong half says so and skips, and the run records that as an answer.
+- **It will not report a stack green on a simplify pass nothing verified.** The
+  polish lands after every other gate in the run, so it is re-probed and re-gated
+  on its own SHA — and reverted, not debugged, if it broke a stack that was green.
+- **It will not lose what it could not fix.** A blocker the loop stopped on
+  becomes an issue at BLOCKER tier with a backref to the stack PR, instead of a
+  line in a summary that scrolls away.
 - **It will not report green on evidence it could not read.** Every gate in the
   pipeline fails closed.
 
 ## Implementation
 
 Invoke the `uberdev:premerge-pipeline` skill with `$ARGUMENTS` in scope. The skill
-owns all six phases (pack, review, triage, clean gate, simplify, bump+park). This
+owns all six phases — pack, review, triage, the clean gate and its convergence
+branch, verified simplify, bump+park — and the review→fix→gate loop that runs the
+middle three until the stack is green or repairing provably stops working. This
 command performs only preflight validation, then hands off:
 
 ```bash
