@@ -76,6 +76,25 @@ SCHEMA_VERSION = 1
 # tests/premerge.test.sh asserts the three agree.
 AGGREGATE_SOURCE = "premerge-aggregate"
 
+# WHO RAISED A ROW -- the only attribution `agents/findings-to-issues.md` is
+# allowed to read.
+#
+# Its Step 5 derives the issue body's `**Agent:**` and `**Also flagged by:**`
+# lines, and the display `agent_name`, from `source_edges`; its Step-1 rules
+# state outright that `summary` and `detail` are "context-only prose and never
+# path, phase, contributor, or operation authority". So an edge is not decoration
+# -- it is the row's identity of origin, and stamping every row with the built-in
+# reviewer's edge made a filed issue claim the code-review pass had raised a
+# Reuse/Quality/Efficiency refactor suggestion it never saw.
+#
+# One edge per producer, and `_encode_aggregate` publishes exactly the
+# contributors its rows actually cite.
+REVIEW_SOURCE_EDGE = "premerge.review.code_review"
+SIMPLIFY_SOURCE_EDGE_PREFIX = "premerge.simplify."
+# A lens row whose `lens` field is absent or unusable. Still a simplify edge:
+# "we do not know which lens" must never collapse back onto "the code reviewer".
+SIMPLIFY_SOURCE_EDGE_FALLBACK = SIMPLIFY_SOURCE_EDGE_PREFIX + "unattributed"
+
 # The cleanup half of the built-in reviewer's own angle vocabulary. Its prompt
 # states the precedence this set encodes, verbatim: "Correctness bugs always
 # outrank cleanup, altitude, and conventions findings when the output cap forces
@@ -83,10 +102,23 @@ AGGREGATE_SOURCE = "premerge-aggregate"
 # is that sentence, made executable.
 #
 # Membership, not exhaustiveness, is what this set claims. A slug the reviewer
-# invents that is NOT listed here is treated as correctness-class (blocker
-# eligible), which is the fail-loud direction: a novel cleanup slug costs one
-# needless fixer dispatch, whereas a novel correctness slug silently demoted to
-# `suggestion` would ship the bug.
+# invents that is NOT listed here DERIVES as correctness-class (blocker), and
+# `_normalise_findings` then refuses any controller severity that disagrees.
+#
+# SO SAY WHAT THAT ACTUALLY COSTS. It is not "one needless fixer dispatch" -- a
+# dispatch only happens when the controller also called the finding a blocker.
+# The likely case is the opposite one: the controller applies `## The severity
+# rule` correctly, writes `severity: suggestion` for a cleanup finding filed
+# under a slug this set has never heard of (`maintainability`, `cleanup`,
+# `dead-code`), and the derived `blocker` contradicts it. That is
+# `severity_contradicts_category`, exit 74, `plan` writing nothing, and -- per
+# SKILL.md `## Phase 2 — TRIAGE`, "a refused `plan` is a hard stop for the
+# attempt" -- the whole attempt dying because the reviewer used a synonym.
+#
+# The asymmetry itself is still right, and still the fail-loud direction: a novel
+# correctness slug silently demoted to `suggestion` would ship the bug, and a
+# refusal is at least visible. What keeps it cheap is KEEPING THIS SET CURRENT,
+# not an assumption that the reviewer only ever emits the slugs listed below.
 CLEANUP_CATEGORIES = frozenset(
     {
         "reuse",
@@ -152,6 +184,49 @@ CONVERGE_CONTINUE = frozenset({"CONTINUE", "WAIT_CI"})
 # a flag documented as reproducing it.
 CONVERGE_REPAIR_CEILING = 6
 CONVERGE_WAIT_CI_CEILING = 8
+
+# `plan` and `defer` legally run ONE ATTEMPT PAST the loop's last attempt.
+#
+# `converge` stops at `CONVERGE_REPAIR_CEILING + 1`, because that review is the
+# one verifying the final repair. But the loop is not the last thing that
+# triages: SKILL.md `### 4c — VERIFY` runs a full review -> triage -> gate cycle
+# at `PREMERGE_ATTEMPT + 1` after the simplify commit, deliberately NOT routed
+# through `converge` (the repair budget may already be spent, and `converge`
+# would refuse). `PREMERGE_ATTEMPT` then stays advanced, so Phase 5's `defer`
+# fence runs at that index too.
+#
+# So a `--converge=6` run that converges on its last legal attempt (7) triages
+# and defers at 8. Capping these two verbs at the loop's ceiling refused both:
+# the re-stamp 4c calls "fatal to skip" never happened, and `defer --attempt 8`
+# then exited 74 behind `|| exit 74`, filing NO issues at all -- the
+# surviving-findings guarantee dying on the one run that used the whole budget.
+#
+# `converge` keeps the tighter bound. This one is only for the verbs 4c and
+# Phase 5 reach after the loop has ended.
+CONVERGE_VERIFY_CEILING = CONVERGE_REPAIR_CEILING + 2
+
+# The closed set of gate terms this loop knows how to route.
+#
+# `cmd_assert_green` is not the only producer of a `--reasons` value. The Phase 3
+# gate fence (SKILL.md `## Phase 3 — CLEAN GATE`) maps a non-verdict exit -- 74,
+# unreadable or malformed evidence -- onto its own fail-closed
+# `reasons=gate_unreadable`, and any future fence may invent another term. A term
+# with no entry here used to fall through to CONTINUE: with no blockers there are
+# no fix waves, the commit fence reports `no-edits`, and the loop re-reviews until
+# reasons and fingerprints repeat and it reports STOP_NO_PROGRESS -- "the fixers
+# are stuck, a human should look" about a run whose gate never produced a verdict
+# at all. SKILL.md `### 3c` states the rule this makes executable: a term with no
+# route is a `STOP_UNREADABLE`, not a shrug.
+#
+# `blockers_remaining=<n>` is deliberately NOT a member: it is the one term the
+# fingerprint multisets represent far more precisely, and `cmd_converge` strips it
+# before routing.
+GATE_REASONS_REPAIRABLE = frozenset({"ci=red", "mergeable=CONFLICTING"})
+# A gate term the loop cannot fix by fixing code, only by waiting.
+GATE_REASONS_WAITABLE = frozenset(
+    {"ci=pending", "ci=unknown", "ci=no_checks_after_push", "mergeable=unknown"}
+)
+GATE_REASONS_ROUTABLE = GATE_REASONS_REPAIRABLE | GATE_REASONS_WAITABLE
 
 _SHA1_RE = re.compile(r"\A[0-9a-f]{40}\Z")
 _ATTEMPT_RE = re.compile(r"\A[0-9]{2}\Z")
@@ -326,7 +401,7 @@ def _normalise_findings(records: object) -> "list[dict]":
     if len(records) > MAX_FINDINGS:
         fail("findings_schema_invalid", f"more than {MAX_FINDINGS} findings")
 
-    seen: "set[tuple[str, int | None]]" = set()
+    seen: "set[tuple[str, int | None, str]]" = set()
     out: "list[dict]" = []
     for index, record in enumerate(records, start=1):
         if not isinstance(record, dict):
@@ -356,25 +431,44 @@ def _normalise_findings(records: object) -> "list[dict]":
         # classified.json reads the same answer to "have I seen this before?".
         entry["fingerprint"] = _fingerprint(entry["file"], entry["summary"])
 
-        # Uniqueness is (file, line) when there IS a line, and (file,
-        # fingerprint) when there is not.
+        # Uniqueness is (file, line, fingerprint) -- ONE key, whether or not the
+        # reviewer gave us a line. Two properties have to hold at once, and
+        # neither branch of a line-conditional key delivers both.
         #
-        # `line` is optional in both reviewer contracts, so two line-less
-        # findings in one file used to collide on `(path, None)` and refuse the
-        # whole document. Under the loop that refusal is unrecoverable: `plan`
-        # exits before writing, the gate then reads a missing artifact, and
-        # `converge` aborts on `attempt_evidence_missing` -- the entire run dies
-        # because the reviewer omitted a line number. Two line-less findings with
-        # different summaries are two findings; only genuine duplicates collide.
-        key = (
-            (entry["file"], entry["line"])
-            if entry["line"] is not None
-            else (entry["file"], entry["fingerprint"])
-        )
+        # TWO FINDINGS AT ONE LOCATION ARE TWO FINDINGS. The built-in reviewer's
+        # xhigh prompt instructs it, in as many words, that if two angles flag
+        # the same line for different reasons it must record both, and its own
+        # dedup pass only collapses "same defect, same location, same reason". A
+        # key of (file, line) refuses exactly the document that prompt asks for.
+        # Under the loop that refusal is unrecoverable: `plan` exits before
+        # writing, the gate then reads the PREVIOUS attempt's artifact, and the
+        # run dies because the reviewer did what it was told. The line-LESS half
+        # of this collision was fixed first; the with-line half is the likelier
+        # one by far, because a line number is the normal case.
+        #
+        # TWO LINES ARE TWO PLACES, EVEN UNDER ONE SUMMARY. The fingerprint is
+        # deliberately line-independent (see `_fingerprint`), so two genuinely
+        # distinct blockers at different lines of one file, phrased identically
+        # ("the return value of write() is never checked"), share one. Keying on
+        # (file, fingerprint) alone would refuse that pair -- the very case
+        # `_blocker_fingerprints` counts as a multiset in order to keep visible.
+        #
+        # So `line` separates locations, `fingerprint` separates reasons, and
+        # only a row matching an earlier one in BOTH -- same place, same
+        # complaint, i.e. a finding the reviewer emitted twice -- collides. That
+        # is also the triple `agents/findings-to-issues.md` Step 5 dedupes on
+        # (`(file_path, line, sha256(normalised_summary)[:16])`), so a document
+        # this accepts cannot collapse into one issue downstream.
+        key = (entry["file"], entry["line"], entry["fingerprint"])
         if key in seen:
+            where = (
+                entry["file"]
+                if entry["line"] is None
+                else "%s:%d" % (entry["file"], entry["line"])
+            )
             fail(
                 "findings_not_unique",
-                f"two findings share {entry['file']}:{entry['line']}",
+                f"finding {index} repeats an earlier finding at {where}",
             )
         seen.add(key)
 
@@ -450,6 +544,11 @@ def _encode_aggregate(
     Only the `source` and the per-finding key set differ, and both are declared.
     """
     findings = []
+    # Contributor-ordered, and the built-in reviewer always leads it: an empty
+    # findings array still publishes an envelope (a clean run and a broken one
+    # must not look alike), and `source_edges` is documented as a subset of the
+    # declared contributors, so the roster can never be empty either.
+    edges_present = [REVIEW_SOURCE_EDGE]
     for finding in rows:
         # The row's OWN severity, not a hardcoded one.
         #
@@ -465,6 +564,15 @@ def _encode_aggregate(
             fail("aggregate_severity_invalid", str(severity))
         if severity == "blocker" and not allow_blockers:
             fail("aggregate_blocker_not_allowed", finding["file"])
+        # The row's OWN producer, not a hardcoded one -- see REVIEW_SOURCE_EDGE.
+        # Rows that came through `_normalise_findings` carry no `source_edge` and
+        # are the built-in reviewer's by construction; `_normalise_lens_findings`
+        # stamps the simplify lens onto every row it makes.
+        edge = finding.get("source_edge", REVIEW_SOURCE_EDGE)
+        if not isinstance(edge, str) or not edge:
+            fail("aggregate_source_edge_invalid", str(edge))
+        if edge not in edges_present:
+            edges_present.append(edge)
         findings.append(
             {
                 "detail": finding["failure_scenario"],
@@ -474,17 +582,14 @@ def _encode_aggregate(
                     "path": finding["file"],
                 },
                 "severity": severity,
-                "source_edges": ["premerge.review.code_review"],
+                "source_edges": [edge],
                 "summary": finding["summary"],
             }
         )
     document = {
         "contributors": [
-            {
-                "confidence": "n/a",
-                "id": "premerge.review.code_review",
-                "verdict": "COMPLETE",
-            }
+            {"confidence": "n/a", "id": edge_id, "verdict": "COMPLETE"}
+            for edge_id in edges_present
         ],
         "findings": findings,
         "phase": "premerge",
@@ -645,6 +750,22 @@ def _read_converge_row(run_dir: str, attempt: int) -> "dict | None":
     return found
 
 
+def _lens_source_edge(lens: "str | None") -> str:
+    """The `source_edges` value that says a simplify lens raised this row.
+
+    Mirrors `/review-pr`'s own `review_pr.simplify.{reuse,quality,efficiency}`
+    edges. A lens we cannot slugify still gets a SIMPLIFY edge -- "we do not know
+    which lens" must never fall back onto the code reviewer's edge, which is the
+    misattribution this function exists to end.
+    """
+    if not isinstance(lens, str) or not lens.strip():
+        return SIMPLIFY_SOURCE_EDGE_FALLBACK
+    slug = re.sub(r"[^a-z0-9]+", "-", lens.strip().lower()).strip("-")
+    if not re.fullmatch(r"[a-z][a-z0-9-]{0,39}", slug):
+        return SIMPLIFY_SOURCE_EDGE_FALLBACK
+    return SIMPLIFY_SOURCE_EDGE_PREFIX + slug
+
+
 def _normalise_lens_findings(records: object) -> "list[dict]":
     """Translate `code-simplifier` lens output into the aggregate's row shape.
 
@@ -653,6 +774,14 @@ def _normalise_lens_findings(records: object) -> "list[dict]":
     `plan` is impossible rather than merely inconvenient. `detail` carries the
     rationale, so it becomes the row's detail, and the lens name is prefixed onto
     the summary so the issue says which of the three raised it.
+
+    THE PREFIX IS THE DISPLAY, NOT THE ATTRIBUTION. `agents/findings-to-issues.md`
+    reads contributor identity from `source_edges` alone and is forbidden from
+    inferring it from prose, so each row also carries its own simplify edge --
+    without which a deferred lens finding files as the built-in code reviewer's.
+    And the prefix is skipped when the summary already opens with it: Phase 4b
+    joins a location two lenses both hit as `<Lens>: <text> | <Lens>: <text>`
+    (SKILL.md `### 4b`), and prefixing that again reads `Reuse: Reuse: …`.
 
     Every lens row files as a `suggestion` regardless of the lens's own severity
     field: these are the findings the simplify pass DECLINED to apply, on a stack
@@ -679,16 +808,20 @@ def _normalise_lens_findings(records: object) -> "list[dict]":
             record.get("summary"), MAX_SUMMARY_BYTES, "finding_schema_invalid",
             f"lens finding {index} summary",
         )
+        prefix = f"{lens}: " if lens else ""
+        if prefix and summary[: len(prefix)].casefold() == prefix.casefold():
+            prefix = ""
         out.append(
             {
                 "file": _repo_path(raw_path),
                 "line": line,
-                "summary": f"{lens}: {summary}" if lens else summary,
+                "summary": prefix + summary,
                 "failure_scenario": _bounded_text(
                     record.get("detail"), MAX_DETAIL_BYTES, "finding_schema_invalid",
                     f"lens finding {index} detail",
                 ),
                 "severity": "suggestion",
+                "source_edge": _lens_source_edge(lens),
             }
         )
     return out
@@ -736,8 +869,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
         fail("output_unsafe", f"out-dir does not exist: {out_dir}")
 
     attempt = args.attempt
-    if not 1 <= attempt <= CONVERGE_REPAIR_CEILING + 1:
-        fail("bad_attempt", f"attempt must be 1..{CONVERGE_REPAIR_CEILING + 1}")
+    # Wider than `converge`'s bound on purpose -- see CONVERGE_VERIFY_CEILING.
+    # Phase 4c re-triages at `PREMERGE_ATTEMPT + 1` after the simplify commit,
+    # and that re-stamp is the step SKILL.md calls fatal to skip.
+    if not 1 <= attempt <= CONVERGE_VERIFY_CEILING:
+        fail("bad_attempt", f"attempt must be 1..{CONVERGE_VERIFY_CEILING}")
 
     head_sha = args.head_sha
     if head_sha is not None and not _SHA1_RE.match(head_sha):
@@ -871,12 +1007,12 @@ def cmd_assert_green(args: argparse.Namespace) -> int:
         reasons.append("blockers_remaining=%d" % len(blockers))
 
     # ---- is this evidence about the code that is on the branch RIGHT NOW? ----
-    # A refused re-plan (a >64-finding review, a duplicate location, any schema
-    # refusal) exits before writing anything, leaving the PREVIOUS attempt's
-    # classified.json in place. Without this check the gate answers for code that
-    # no longer exists, and can call a stack green whose latest review it never
-    # managed to read. Opt-in so pre-loop callers are unaffected; once opted in
-    # an unstamped document is a refusal, not a pass.
+    # A refused re-plan (a >64-finding review, a finding the reviewer emitted
+    # twice, any schema refusal) exits before writing anything, leaving the
+    # PREVIOUS attempt's classified.json in place. Without this check the gate
+    # answers for code that no longer exists, and can call a stack green whose
+    # latest review it never managed to read. Opt-in so pre-loop callers are
+    # unaffected; once opted in an unstamped document is a refusal, not a pass.
     if args.head_sha is not None:
         if not _SHA1_RE.match(args.head_sha):
             fail("bad_head_sha", "head-sha must be 40 lowercase hex characters")
@@ -955,11 +1091,36 @@ def cmd_defer(args: argparse.Namespace) -> int:
     if not os.path.isdir(run_dir):
         fail("output_unsafe", f"run-dir does not exist: {run_dir}")
     attempt = args.attempt
-    if not 1 <= attempt <= CONVERGE_REPAIR_CEILING + 1:
-        fail("bad_attempt", f"attempt must be 1..{CONVERGE_REPAIR_CEILING + 1}")
+    # Same widened bound as `plan`: Phase 5 defers at the index Phase 4c
+    # advanced to, so a run that spent its whole repair budget defers at
+    # CONVERGE_REPAIR_CEILING + 2. See CONVERGE_VERIFY_CEILING.
+    if not 1 <= attempt <= CONVERGE_VERIFY_CEILING:
+        fail("bad_attempt", f"attempt must be 1..{CONVERGE_VERIFY_CEILING}")
 
     document = _read_attempt(run_dir, attempt, required=True)
+
+    # THE SAME UNION `plan --carry-prior` COMPUTES, because this is the aggregate
+    # that actually gets dispatched.
+    #
+    # `plan` unions every attempt's cleanup findings into
+    # `suggestions-aggregate.md`; this verb read one attempt's `suggestions`
+    # array and wrote `deferred-aggregate.md`, and SKILL.md `### 5-file` hands
+    # findings-to-issues the `defer` PATH. So the union was computed, tested, and
+    # then filed from the wrong file: a suggestion raised on attempt 1 and not
+    # repeated on attempt 3 is unmentioned, not resolved, and it was silently
+    # dropped -- the exact loss `--carry-prior` exists to prevent.
+    #
+    # Latest attempt first, then earlier attempts oldest-first, deduped by
+    # fingerprint: byte-for-byte the ordering `cmd_plan` builds, so the two
+    # aggregates cannot disagree about which findings survived the run.
     rows = list(document["suggestions"])
+    seen_fp = {
+        row["fingerprint"] for row in rows if isinstance(row.get("fingerprint"), str)
+    }
+    for record in _carry_prior_suggestions(run_dir, attempt):
+        if record["fingerprint"] not in seen_fp:
+            seen_fp.add(record["fingerprint"])
+            rows.append(record)
 
     if args.include_blockers:
         rows.extend(document["blockers"])
@@ -1027,7 +1188,18 @@ def cmd_converge(args: argparse.Namespace) -> int:
         fail("verdict_contradicts_reasons", ",".join(reasons))
 
     current = _read_attempt(run_dir, attempt, required=True)
-    previous = _read_attempt(run_dir, attempt - 1, required=False) if attempt > 1 else None
+    # REQUIRED, exactly as `_read_attempt`'s docstring demands.
+    #
+    # This used to pass `required=False`, so a predecessor whose evidence was
+    # absent or unreadable -- a truncated write, a cleaned run dir, an interrupted
+    # attempt -- summarised as `previous_prints = None`, i.e. `fixed=0` and
+    # `appeared=current_total`. Both STOP_REGRESSED and STOP_NO_PROGRESS are then
+    # structurally unreachable for that attempt and the loop runs to its counter
+    # backstop instead of noticing that repairing stopped working: precisely the
+    # "reads as progress and would let the loop run on" outcome the docstring
+    # forbids. Attempt 1 legitimately has no predecessor; every later attempt has
+    # one, because `plan` wrote it before the gate could run.
+    previous = _read_attempt(run_dir, attempt - 1, required=True) if attempt > 1 else None
 
     current_prints = _blocker_fingerprints(current)
     previous_prints = _blocker_fingerprints(previous) if previous is not None else None
@@ -1064,16 +1236,18 @@ def cmd_converge(args: argparse.Namespace) -> int:
         frozenset(last_row.get("reasons_other") or []) if isinstance(last_row, dict) else None
     )
 
-    # A gate term the loop cannot fix by fixing code, only by waiting.
-    waitable = frozenset(
-        {"ci=pending", "ci=unknown", "ci=no_checks_after_push", "mergeable=unknown"}
-    )
+    # Every gate term this loop has no route for: `stale_evidence`, which is
+    # unrepairable by definition, plus anything a fence invented that
+    # GATE_REASONS_ROUTABLE has never heard of -- `gate_unreadable` above all,
+    # which the Phase 3 fence writes whenever `assert-green` exits non-0/1. A term
+    # with no route is a STOP_UNREADABLE, never a fall-through to CONTINUE.
+    unroutable = frozenset(t for t in other if t not in GATE_REASONS_ROUTABLE)
 
     if args.verdict == "green":
         decision = "STOP_GREEN"
-    elif "stale_evidence" in other:
+    elif unroutable:
         decision = "STOP_UNREADABLE"
-    elif not current_prints and other and other <= waitable:
+    elif not current_prints and other and other <= GATE_REASONS_WAITABLE:
         # Nothing to fix and the only complaint is a build that has not answered.
         # Waiting deliberately does NOT consume an attempt -- a slow CI must not
         # eat the fix budget -- so it needs its own bound or a check that never

@@ -645,15 +645,35 @@ Two constraints on applying it:
 
 1. **When the finding carries a `category`, the category decides and your
    judgement does not get a vote.** `lib/premerge-findings.py` maps the reviewer's
-   own cleanup vocabulary (`reuse`, `simplification`, `efficiency`, `altitude`,
-   `conventions`, `test-coverage`, and the near-synonyms listed in
-   `CLEANUP_CATEGORIES`) to `suggestion` and everything else to `blocker`, and it
+   own cleanup vocabulary to `suggestion` and everything else to `blocker`, and it
    **exits non-zero** on a severity that contradicts the category. This is not
    advisory: the free-judgement path exists only where no machine-checkable signal
    does, and it collapses to the checked path the instant one appears.
-2. **An unfamiliar category is treated as correctness-class.** A novel cleanup
-   slug costs one needless fixer dispatch. A novel correctness slug silently
-   demoted to `suggestion` ships the bug. The asymmetry is deliberate.
+
+   The cleanup vocabulary is **this exact set** — apply it literally, do not
+   paraphrase it, and do not extend it:
+
+   ```
+   reuse  simplification  simplify  efficiency  performance  altitude
+   conventions  convention  style  documentation  docs
+   test-coverage  tests  naming  readability
+   ```
+
+   Every other slug is correctness-class, so the severity you write for a
+   finding carrying one **must** be `blocker`. (`CLEANUP_CATEGORIES` in
+   `lib/premerge-findings.py` is the enforcer and the source of truth; this copy
+   exists because the controller that writes `severity` never opens that file,
+   and a rule it cannot see is a rule it will break. Edit the two together.)
+2. **An unfamiliar category is treated as correctness-class, and reading that
+   the other way costs the whole attempt.** The asymmetry itself is deliberate: a
+   novel *correctness* slug silently demoted to `suggestion` ships the bug. But
+   the price of the safe direction is not "one needless fixer dispatch". A slug
+   that is not in the set above, written up as `suggestion` because it *reads*
+   like a cleanup, is `severity_contradicts_category` — `plan` **exits 74 before
+   writing anything**, which per `## Phase 2 — TRIAGE` is a hard stop for the
+   attempt, not a fall-through. The needless fixer dispatch is what you get from
+   classifying it `blocker`, as the rule requires: that is the cheap outcome, and
+   it is the one to pick.
 
 `verdict` is **confidence, not severity** — `CONFIRMED` vs `PLAUSIBLE` says how
 sure the reviewer is that the mechanism is real, not how much it matters. Never
@@ -759,7 +779,8 @@ outcomes:
 ```
 
 After the last wave returns, **the controller makes exactly one commit** —
-agents never touch git:
+agents never touch git, and the fence checks what they actually changed against
+the wave plan before it stages anything:
 
 ```bash uberdev-executable origin=premerge-fix-commit
 set -u
@@ -809,6 +830,38 @@ PREMERGE_UNTRACKED="$(git ls-files --others --exclude-standard)" || exit 2
 if [ -n "$PREMERGE_UNTRACKED" ]; then
   printf 'error: fixer agents left untracked files, which they were forbidden to create:\n%s\n' \
     "$PREMERGE_UNTRACKED" >&2
+  exit 2
+fi
+# ---- the scope guard -----------------------------------------------------
+# The wave prompt says "Edit ONLY <path>", and the check above catches an agent
+# that CREATED a file. Neither catches the agent that edited a SECOND tracked
+# file anyway -- and `git add -u` sweeps every tracked modification in the tree
+# into this commit whether a wave asked for it or not: the agent that wandered,
+# a controller edit left behind, a stray hunk from a CI repair earlier in the
+# same attempt. File-disjointness is the entire safety claim of the wave design
+# and this is the seam that can enforce it, so the modified set is compared
+# against the set `plan` actually assigned and anything else is a refusal --
+# the same shape as Phase 4b's `behavior: change` check, which refuses a
+# wave-set rather than trusting a rule that lived only in a prompt.
+PREMERGE_WAVES_FILE="$PREMERGE_RUN_DIR/fix-waves-$PREMERGE_ATTEMPT_PAD.json"
+if [ ! -s "$PREMERGE_WAVES_FILE" ]; then
+  printf 'error: no wave plan at %s; nothing declares which files the fixers were allowed to touch\n' \
+    "$PREMERGE_WAVES_FILE" >&2
+  exit 2
+fi
+PREMERGE_ASSIGNED_LIST="$PREMERGE_RUN_DIR/fix-scope-$PREMERGE_ATTEMPT_PAD.assigned"
+PREMERGE_MODIFIED_LIST="$PREMERGE_RUN_DIR/fix-scope-$PREMERGE_ATTEMPT_PAD.modified"
+jq -r '.waves[][].file' <"$PREMERGE_WAVES_FILE" | sort -u >"$PREMERGE_ASSIGNED_LIST" || exit 2
+# `--no-renames`, because rename detection reports only the NEW path and a scope
+# guard reading `--name-only` alone is bypassable by a rename -- a defect this
+# repo has already shipped once. Against `HEAD`, since nothing is staged yet,
+# and `-C "$PREMERGE_ROOT"` so the paths are repo-relative like the plan's are.
+git -C "$PREMERGE_ROOT" diff --name-only --no-renames HEAD \
+  | sort -u >"$PREMERGE_MODIFIED_LIST" || exit 2
+PREMERGE_STRAY="$(comm -23 "$PREMERGE_MODIFIED_LIST" "$PREMERGE_ASSIGNED_LIST")" || exit 2
+if [ -n "$PREMERGE_STRAY" ]; then
+  printf 'error: attempt %s modified files no fixer wave was assigned:\n%s\nrefusing to sweep them into the stack commit\n' \
+    "$PREMERGE_ATTEMPT" "$PREMERGE_STRAY" >&2
   exit 2
 fi
 git add -u || exit 2
@@ -888,17 +941,62 @@ PREMERGE_HEAD_SHA="$(git rev-parse HEAD)" || exit 2
 # `status`/`conclusion` pair. Asking for the retired names returns an error that
 # reads exactly like "the probe could not reach CI", which is how a healthy red
 # build gets misreported as an infrastructure problem.
+#
+# The EXIT STATUS is not the signal here, in either direction. `gh pr checks`
+# exits 1 when a check has FAILED and 8 while checks are PENDING -- with the
+# JSON it was asked for already on stdout -- and it exits 1 again when the probe
+# never ran at all (expired auth, a network drop, a 404, a rate limit). So the
+# PAYLOAD decides, and a payload that cannot be read is corroborated before it
+# is allowed to mean anything: `no_checks` is a state `assert-green` accepts as
+# green under --require-ci, and collapsing an outage into it is the same
+# unreadable-evidence-reads-as-clean defect `mergeable=UNKNOWN` was fixed for.
 PREMERGE_CI=unknown
-PREMERGE_CHECKS="$(gh pr checks "$PREMERGE_PR" --json name,state,bucket 2>/dev/null)" || PREMERGE_CHECKS=""
-if [ -z "$PREMERGE_CHECKS" ] || [ "$PREMERGE_CHECKS" = "[]" ]; then
-  PREMERGE_CI=no_checks
-else
-  PREMERGE_CI="$(jq -r '
-    if   any(.[]; .bucket == "fail")    then "red"
-    elif any(.[]; .bucket == "pending") then "pending"
-    elif all(.[]; .bucket == "pass" or .bucket == "skipping") then "green"
-    else "unknown" end' <<<"$PREMERGE_CHECKS")" || PREMERGE_CI=unknown
+PREMERGE_CHECKS="$(gh pr checks "$PREMERGE_PR" --json name,state,bucket 2>/dev/null)"
+PREMERGE_CI_CLASS=""
+if [ -n "$PREMERGE_CHECKS" ]; then
+  # `cancel` is the fifth bucket (pass/fail/pending/skipping/cancel) and under
+  # this loop it is routine, not exotic: test.yml fires on both `push` and
+  # `pull_request`, cancel-in-progress kills the loser, and every attempt ends
+  # in a push. A SUPERSEDED cancellation then sits in the rollup beside the run
+  # that replaced it forever -- so a cancelled check is dropped when a same-named
+  # check survives in another bucket, and kept when none does, because then
+  # nothing replaced it and that check never completed. With no arm at all every
+  # such stack fell to `unknown`, which is waitable, so the loop re-probed a
+  # terminal state up to its ceiling and then reported STOP_UNREADABLE about
+  # checks that had all passed.
+  PREMERGE_CI_CLASS="$(jq -r '
+    if type != "array" then "probe_unreadable"
+    elif length == 0 then "no_checks"
+    else
+      ([.[] | select(.bucket != "cancel") | .name]) as $live
+      | ([.[] | . as $check
+              | select($check.bucket != "cancel"
+                       or (($live | index($check.name)) == null))]) as $effective
+      | if   any($effective[]; .bucket == "fail" or .bucket == "cancel") then "red"
+        elif any($effective[]; .bucket == "pending")                     then "pending"
+        elif all($effective[]; .bucket == "pass" or .bucket == "skipping") then "green"
+        else "probe_unreadable" end
+    end' <<<"$PREMERGE_CHECKS" 2>/dev/null)" || PREMERGE_CI_CLASS=""
 fi
+case "$PREMERGE_CI_CLASS" in
+  red|pending|green|no_checks) PREMERGE_CI="$PREMERGE_CI_CLASS" ;;
+  *)
+    # Nothing readable came back, and that answer is ambiguous by itself: it is
+    # what `gh pr checks` says when the PR genuinely has no checks ("no checks
+    # reported on the '<branch>' branch", exit 1) AND what it says when the probe
+    # failed outright. Only the first is `no_checks`. `gh pr view --json
+    # statusCheckRollup` answers the same question with an unambiguous empty
+    # array and a 0 exit, so it can tell the two apart; every other answer -- an
+    # unreachable API, a non-array, checks that exist but could not be described
+    # -- leaves the state `unknown`, which is waitable, bounded, and never green.
+    PREMERGE_ROLLUP="$(gh pr view "$PREMERGE_PR" --json statusCheckRollup \
+      -q '.statusCheckRollup | if type == "array" then length else -1 end' 2>/dev/null)" \
+      || PREMERGE_ROLLUP=""
+    case "$PREMERGE_ROLLUP" in
+      0) PREMERGE_CI=no_checks ;;
+      *) PREMERGE_CI=unknown ;;
+    esac ;;
+esac
 
 PREMERGE_MERGEABLE="$(gh pr view "$PREMERGE_PR" --json mergeable -q .mergeable 2>/dev/null)" || PREMERGE_MERGEABLE=UNKNOWN
 case "$PREMERGE_MERGEABLE" in MERGEABLE|CONFLICTING|UNKNOWN) : ;; *) PREMERGE_MERGEABLE=UNKNOWN ;; esac
@@ -988,6 +1086,17 @@ pushed, `no_checks` becomes the reason `ci=no_checks_after_push` instead of a
 pass, and Phase 3b routes it to `WAIT_CI` — which re-probes without consuming an
 attempt. `pending` is a "come back later" state, not a verdict; it is polled out,
 never gated on.
+
+Two other answers the probe can give are **not** the settle window, and reading
+them as it is how this gate would go back to passing on evidence it never read.
+A `gh pr checks` that failed outright — expired auth, a network drop, a 404, a
+rate limit — is `unknown`, never `no_checks`; the fence tells the two apart by
+corroborating with `gh pr view --json statusCheckRollup`, because the exit
+status means "a check failed" or "checks are pending" just as often as it means
+"the probe never ran". And a `cancel` bucket is **terminal**: a cancellation a
+same-named run replaced is dropped, one that nothing replaced is `red`. Waiting
+on either only spends the ceiling to arrive at `STOP_UNREADABLE` about a state
+that was never going to change.
 
 `PREMERGE_WAIT_CI_CEILING` bounds the waiting. A check that never settles is not
 a reason to loop forever, and after that many re-probes the loop calls the
@@ -1297,25 +1406,55 @@ attempt index 4c planned, so its `defer` and its summary describe the tree that
 was actually verified rather than the one before the polish.
 
 **Read the gate verdict from `gate-<NN>.json` directly — do not route this
-through `converge`.** The repair budget may already be spent, and `converge`
-refuses an attempt past it (`bad_attempt`, exit 74), which would turn a
-successful verify into a crash. The branch is:
+through `converge`.** Two reasons, and the second is the load-bearing one. The
+repair budget may already be spent, and `converge` refuses an attempt past it
+(`bad_attempt`, exit 74), which would turn a successful verify into a crash. And
+`converge` would answer the wrong question anyway: the predecessor attempt gated
+**green**, so its blocker set is empty, so a blocker the polish introduced is
+`appeared > 0` with `fixed == 0` — `STOP_REGRESSED` on the first call, on every
+run, which parks the exact commit this phase exists to remove. The branch is:
 
 | Verify outcome | Action |
 |---|---|
 | `verdict=green` | Phase 5. The summary may now honestly say the stack is green **after** simplify |
-| `not_green`, and `PREMERGE_ATTEMPT <= converge_repairs` | re-enter the loop at Phase 3b — the budget still admits this attempt, so `converge` is callable and the refactor is just more code to converge on |
-| `not_green`, and the budget is spent | **revert the simplify commit**, push, and report `simplify=reverted (<reason>)` |
+| `not_green`, and **every** reason is waitable — `ci=pending`, `ci=no_checks_after_push`, `ci=unknown`, `mergeable=unknown` | wait `PREMERGE_CI_SETTLE_SECS`, re-run **this same** Phase 3 gate fence (same attempt index, `PREMERGE_PUSHED=1`), and take this table again. At most `PREMERGE_WAIT_CI_CEILING` re-probes; reaching the ceiling is `not_green` for `ci_unsettled` — the state `converge` would call `STOP_UNREADABLE` — i.e. the row below |
+| `not_green` for **any** other reason — a blocker the polish introduced, `ci=red`, `mergeable=CONFLICTING`, `stale_evidence` | **revert the simplify commit**, push, and report `simplify=reverted (<reason>)` |
 
-The middle row's condition is the same arithmetic `converge` enforces, checked
-before calling it rather than after being refused by it.
+The arms are disjoint and exhaustive by construction: the verdict is `green` or
+`not_green`, and a not-green reason set either sits entirely inside the waitable
+set or it does not. Count the re-probes in the controller — 4c does not call
+`converge`, so it writes no `converge.jsonl` row for `_count_wait_rows` to find,
+and an uncounted wait is an unbounded loop under a command that promises it will
+not loop forever.
 
-The revert rule is the point. **Simplify is optional polish, so its failure mode
-is `undo`, not `halt`.** A stack that was green before the polish and broken after
-it does not need a human to debug the polish at 3am — it needs the polish gone.
-`git revert --no-edit <simplify-sha>` restores the last state that actually
-passed a gate, and the un-applied findings are already on their way to issues, so
-nothing is lost except a refactor that was not safe to ship.
+**The wait arm is not politeness; without it the verify is a coin flip that
+always lands the same way.** Step 3 gates with `PREMERGE_PUSHED=1` immediately
+after pushing the simplify commit, and by `### The CI settle window` above
+`gh pr checks` reports nothing at all for the first 10–30 seconds after a push.
+So the first probe answers `not_green REASONS=ci=no_checks_after_push` on
+essentially every run, and reverting on that throws away a correct,
+behaviour-preserving polish because the build had not started yet — the same
+"a self-check that always fails is worse than none" hazard step 2 warns about.
+Everywhere else in the pipeline those reasons are explicitly waitable; 4c does
+not get to be the one gate reader that treats them as a verdict.
+
+**And there is no "repair it" arm, deliberately.** Simplify is optional polish,
+so its failure mode is `undo`, not `debug`: routing a broken polish back into the
+loop spends the repair budget — when any is left — on a refactor nobody asked
+for, and on the failure it would most often be handed, a blocker the polish
+itself introduced, `converge` stops with `STOP_REGRESSED` before one fixer is
+dispatched. So the run would park the broken polish either way, which is what
+both this file's `## The order within one attempt` ("un-does itself if it did
+harm") and the command's own guarantee ("reverted, not debugged") forbid.
+
+The revert rule is the point. **A stack that was green before the polish and
+broken after it does not need a human to debug the polish at 3am — it needs the
+polish gone.** `git revert --no-edit <simplify-sha>` restores the last state that
+actually passed a gate, and the un-applied findings are already on their way to
+issues, so nothing is lost except a refactor that was not safe to ship. Report
+the verify reason alongside `simplify=reverted`: the revert removes the polish,
+not the reason, and a `mergeable=CONFLICTING` that appeared while Phase 4 ran is
+still true of the stack afterwards.
 
 Never revert past the fix commits. They are the loop's product and they are what
 made the stack green in the first place.
@@ -1521,7 +1660,7 @@ this plugin ends somewhere near a merge. This one does not.
 blocker list describes code that no longer exists. Gate on
 `classified-<NN>.json` for the attempt you are in — and pass `--head-sha`, which
 is what catches the nastier version: a `plan` that REFUSED (a >64-finding review,
-a duplicate location) exits before writing anything, so the previous attempt's
+a finding the reviewer emitted twice) exits before writing anything, so the previous attempt's
 artifact is still sitting there looking perfectly fresh.
 
 **Dispatching the fixers before the gate.** The single most dangerous edit
@@ -1579,6 +1718,13 @@ needs the `--force-with-lease` SHA captured *before* dispatch.
 
 **Two agents in one wave sharing a file.** `_fix_waves` groups by path so this
 cannot happen — do not "optimise" it into one-agent-per-finding.
+
+**Trusting "Edit ONLY `<path>`" because the prompt says it.** The prompt is the
+instruction; the commit fence's scope check is the enforcement. `git add -u`
+stages every tracked modification in the tree, so without that comparison
+against `fix-waves-<NN>.json` an agent that wandered into a second file — or any
+stray hunk sitting in the tree — lands in the stack commit unreviewed, and the
+file-disjointness the wave design rests on becomes a claim nobody checks.
 
 **Treating an empty findings artifact as an absent one.** `findings: []` means the
 reviewer found nothing. A missing `review-input.json` means something broke. If

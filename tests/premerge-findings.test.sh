@@ -150,13 +150,19 @@ D="$(new_case)"
 write_input "$D" '[{"file":"/abs/path","line":1,"summary":"x","failure_scenario":"y","severity":"blocker"}]'
 if plan "$D"; then bad "B4: accepted an absolute path"; else ok "B4: absolute path refused"; fi
 
+# A DUPLICATE is the same complaint about the same place — a row the reviewer
+# emitted twice. Sharing a location is not enough, and this row used to say it
+# was: it fed two DIFFERENT summaries at lib/a.sh:7 and asserted the refusal,
+# which locked in the collision B19c now covers as a bug. Same place AND same
+# summary is the case that has to keep failing, or `plan` would let a reviewer
+# double-count one blocker and the loop would chase a phantom.
 D="$(new_case)"
 write_input "$D" '[
   {"file":"lib/a.sh","line":7,"summary":"x","failure_scenario":"y","severity":"blocker"},
-  {"file":"lib/a.sh","line":7,"summary":"z","failure_scenario":"w","severity":"blocker"}
+  {"file":"lib/a.sh","line":7,"summary":"x","failure_scenario":"y","severity":"blocker"}
 ]'
-if plan "$D"; then bad "B4: accepted two findings at one (file,line)"; else
-  grep -q 'findings_not_unique' "$D/err.txt" && ok "B4: duplicate location refused" || bad "B4: wrong token for duplicate location"
+if plan "$D"; then bad "B4: accepted the same finding twice at one (file,line)"; else
+  grep -q 'findings_not_unique' "$D/err.txt" && ok "B4: a repeated finding is refused" || bad "B4: wrong token for a repeated finding"
 fi
 
 D="$(new_case)"
@@ -907,11 +913,18 @@ esac
 B19_RES="$(decide "$D" 1 3 not_green 'mergeable=unknown')"
 expect_decision "$B19_RES" WAIT_CI 0 "an unreadable mergeable state re-probing rather than failing"
 
-# B19c — two line-less findings in one file are two findings. `line` is optional
-# in both reviewer contracts, and under the loop one refusal is unrecoverable:
-# plan exits before writing, the gate reads a missing artifact, and converge
-# aborts on attempt_evidence_missing. The whole run would die because the
-# reviewer omitted a line number.
+# B19c — WHAT MAKES TWO ROWS ONE FINDING. Four cases, and they only make sense
+# read together: `line` says WHERE, the folded summary says WHAT, and a row is a
+# duplicate only when it repeats BOTH.
+#
+# Under the loop a wrong answer here is unrecoverable in one direction and
+# silently wrong in the other. Refuse too much and `plan` exits before writing,
+# the gate reads the previous attempt's artifact, and the run dies over how the
+# reviewer phrased its output. Refuse too little and one blocker counts twice,
+# so the fingerprint multiset never empties and the loop chases a phantom.
+#
+# c1 — two line-less findings in one file are two findings. `line` is optional in
+# both reviewer contracts, so this is ordinary output, not a malformed document.
 D="$(new_case)"
 write_input "$D" '[
   {"file":"lib/a.sh","summary":"first problem","failure_scenario":"crash","severity":"blocker"},
@@ -922,7 +935,7 @@ if plan_at "$D" 1 "$SHA_A"; then
 else
   bad "B19c: line-less findings still abort the run: $(cat "$D/err.txt")"
 fi
-# ...but a genuine duplicate still collides.
+# c2 — ...but a genuine duplicate still collides.
 write_input "$D" '[
   {"file":"lib/a.sh","summary":"first problem","failure_scenario":"crash","severity":"blocker"},
   {"file":"lib/a.sh","summary":"first problem","failure_scenario":"crash","severity":"blocker"}
@@ -933,6 +946,43 @@ else
   grep -q 'findings_not_unique' "$D/err.txt" \
     && ok "B19c: a genuine duplicate is still refused" \
     || bad "B19c: wrong token: $(cat "$D/err.txt")"
+fi
+# c3 — the SAME rule with a line present, which is the normal case and was the
+# one left behind. The built-in reviewer's xhigh prompt tells it to record both
+# when two angles flag one line for different reasons, so a document like this
+# is what the reviewer was INSTRUCTED to produce; refusing it killed the run for
+# obeying. c1 and c3 are one rule, and locking only c1 is what let them drift.
+D="$(new_case)"
+write_input "$D" '[
+  {"file":"lib/a.sh","line":42,"summary":"the return value is never checked","failure_scenario":"a failed write reports success","severity":"blocker"},
+  {"file":"lib/a.sh","line":42,"summary":"the lock is released before the write lands","failure_scenario":"two writers interleave","severity":"blocker"}
+]'
+if plan_at "$D" 1 "$SHA_A"; then
+  case "$(cat "$D/out.txt")" in
+    "PREMERGE_TRIAGE TOTAL=2 BLOCKER=2"*)
+      ok "B19c: two reasons at one file:line are two findings, not a refusal" ;;
+    *) bad "B19c: both findings survived parsing but not the counts: $(cat "$D/out.txt")" ;;
+  esac
+else
+  bad "B19c: two reasons at one file:line still abort the run: $(cat "$D/err.txt")"
+fi
+# c4 — and the converse the fingerprint alone cannot see. `_fingerprint` is
+# deliberately line-independent, so two distinct blockers at two lines of one
+# file phrased identically share one. Keying uniqueness on (file, fingerprint)
+# would refuse this pair — the exact case `_blocker_fingerprints` counts as a
+# MULTISET so that fixing one of them still reads as progress.
+write_input "$D" '[
+  {"file":"lib/a.sh","line":42,"summary":"the return value is never checked","failure_scenario":"a failed write reports success","severity":"blocker"},
+  {"file":"lib/a.sh","line":91,"summary":"the return value is never checked","failure_scenario":"a failed write reports success","severity":"blocker"}
+]'
+if plan_at "$D" 2 "$SHA_B"; then
+  case "$(cat "$D/out.txt")" in
+    "PREMERGE_TRIAGE TOTAL=2 BLOCKER=2"*)
+      ok "B19c: one summary at two lines stays two findings" ;;
+    *) bad "B19c: the two-line pair collapsed: $(cat "$D/out.txt")" ;;
+  esac
+else
+  bad "B19c: one summary at two lines was refused: $(cat "$D/err.txt")"
 fi
 
 echo "== B16: the defer verb — the producer that did not exist =="
