@@ -1015,10 +1015,15 @@ fi
 #
 # `FILES=<n>` (#722) is the same kind of field and obeys the same rule: it is how
 # many distinct owning files those rows cover — the file GROUPS the downstream
-# dispatch considers now that the filer groups by file, of which it opens at most
-# max_new (10) as new issues and folds the rest onto ones that already exist. It
-# is an upper bound on issues, not a count of them. It is inserted BEFORE
-# OVERFLOW= so the fence's `${HEAD##* OVERFLOW=}` suffix read stays exact.
+# dispatch considers now that the filer groups by file. It gets to at most
+# max_new (10) of them in a run — a group it takes either opens a new issue or is
+# commented onto an existing issue carrying the same container fingerprint — and
+# the groups past that cap are not filed at all: the filer records them as its
+# own overflow_count and they wait for a later run. So FILES is an upper bound on
+# the issues the dispatch touches, never a count of them, and a FILES above
+# max_new says outright that some of these files do not get filed today. It is
+# inserted BEFORE OVERFLOW= so the fence's `${HEAD##* OVERFLOW=}` suffix read
+# stays exact.
 case "$(cat "$D/defer.txt")" in
   "PREMERGE_DEFER TOTAL=3 BLOCKER=1 SUGGESTION=2 FILES=3 OVERFLOW=0 PATH="*)
     ok "B16: the defer line reports the split, its file count, and OVERFLOW=0 on a normal run" ;;
@@ -1720,9 +1725,20 @@ case "$(cat "$D/b31a.txt")" in
 esac
 
 # The other half of the same property, so the fix cannot be read as "stop
-# validating": `_encode_aggregate` is still the single gate, so a malformed row
-# that SURVIVES the cut refuses exactly as it always did. Same fixture, the bad
-# row moved to index 3 where it is kept.
+# validating": a malformed row that SURVIVES the cut refuses exactly as it always
+# did. Same fixture, the bad row moved to index 3 where it is kept.
+#
+# Refusing is only half of what is promised — the refusal has to land BEFORE
+# anything is published, and that is a claim about ORDER that an exit status
+# cannot carry. `_encode_aggregate` is the gate that makes it true: it is
+# evaluated as `_atomic_write`'s ARGUMENT, so it raises before the write is
+# entered. Delete that gate and the `files = len({_repo_path(...)})` re-derivation
+# below it still refuses, with the same token and the same rc=74 — but it runs
+# AFTER the write, so `deferred-aggregate.md` is on disk holding 64 rows whose
+# `scope.path` is an absolute path, and the Phase 5 fence's `|| exit 74` never
+# learns that a file it must not trust exists. rc, token and no-traceback are
+# byte-identical across those two builds; only "nothing was written" tells them
+# apart, which is why it is asserted separately below.
 D="$(new_case)"
 python3 -I -B -c '
 import json, sys
@@ -1744,6 +1760,11 @@ else
   else
     bad "B31: wrong failure for a kept malformed row (rc=$RC): $(cat "$D/b31b.err")"
   fi
+fi
+if [ -e "$D/deferred-aggregate.md" ]; then
+  bad "B31: the refusal published an aggregate before raising — a fence reading only the exit status is left a file carrying the rejected path"
+else
+  ok "B31: and it refuses BEFORE publishing — no aggregate is left on disk"
 fi
 
 # A `file` that is not a string at all is the one value the grouping genuinely

@@ -1603,14 +1603,32 @@ def cmd_defer(args: argparse.Namespace) -> int:
         _encode_aggregate(rows, document["pr_number"], document["run_id"], allow_blockers=True),
     )
     blockers = sum(1 for r in rows if r.get("severity") == "blocker")
+    # This re-derivation stays BELOW the write on purpose, and hoisting it is a
+    # regression even though it looks like a hardening. `_encode_aggregate` is
+    # the gate: it is evaluated as `_atomic_write`'s argument, so it refuses a
+    # malformed surviving row BEFORE the write is entered and nothing lands on
+    # disk. Move this line above the write and it becomes a SECOND gate that can
+    # refuse first -- which sounds safer and is not, because it means weakening
+    # `_encode_aggregate` no longer changes anything observable and the "refused
+    # before publishing" property stops being testable. Left here, it is a
+    # backstop that guarantees rc != 0 either way, and B31 pins the order by
+    # asserting no aggregate exists after the refusal.
     files = len({_repo_path(r.get("file")) for r in rows})
     # TOTAL/BLOCKER/SUGGESTION count what is IN the file; FILES is how many
     # distinct owning files those rows cover -- the file GROUPS the downstream
-    # dispatch will consider now that it groups by file, of which it opens AT
-    # MOST `max_new` (10) as new issues and folds the rest onto ones that already
-    # exist, so this is an upper bound on issues and not a count of them;
-    # OVERFLOW counts what did not fit, so TOTAL+OVERFLOW is everything the run
-    # had to file.
+    # dispatch will consider now that it groups by file. It gets to at most
+    # `max_new` (10) of them in a run: a group it takes either opens a new issue
+    # or is commented onto an existing issue carrying the same container
+    # fingerprint, and the groups past that cap are not filed AT ALL -- the filer
+    # records them as its own `overflow_count`, they wait for a later run, and a
+    # blocker- or critical-tier group stranded in that tail escalates to
+    # `halted_due_to_overflow`. So FILES is an upper bound on the issues the
+    # dispatch touches and never a count of them, and a FILES above `max_new`
+    # says outright that some of these files do not get filed today.
+    # OVERFLOW is this command's OWN cut -- rows that did not fit MAX_FINDINGS,
+    # dropped before the filer ever sees them, and a different number from the
+    # filer's `overflow_count` -- so TOTAL+OVERFLOW is everything the run had to
+    # file.
     # `PATH=` stays LAST because a run dir may contain spaces -- a field appended
     # after it makes the path unparseable, so new fields are inserted before it,
     # never appended. FILES= specifically goes BEFORE OVERFLOW= so the fence's
