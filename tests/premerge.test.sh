@@ -47,7 +47,9 @@
 #          --after-push asks whether the PR gets checks (#695), the flaky rerun
 #          is bounded from the ledger (#696), the CI-repair arm carries the three
 #          load-bearing checks (#697), every fence root resolution is guarded
-#          (#700), and a defer overflow is survivable and loud (#690)
+#          (#700), a defer overflow is survivable and loud (#690), and the
+#          grouped-filing contract reads the same way in every place it is
+#          stated at all (#722)
 #   P16  — repo-agnosticism: Phase 5's bump probes the TARGET repo (not the
 #          plugin install), passes that root through to bump-version.sh, and
 #          skips with a typed reason elsewhere; Phase 0 publishes the private
@@ -875,6 +877,52 @@ assert_in "$DEFER_FENCE" 'check BLOCKER= on the line below' \
   "P17/#722: it points at the only field that answers 'did every blocker fit'"
 assert_in "$DEFER_FENCE" 'CLASS=blocker — the 64-row envelope was filled ENTIRELY by blockers' \
   "P17/#722: the severe arm is untouched — that state is still provable"
+
+# --- #722: ONE grouped-filing contract, not N uncompared copies ---------------
+# §2b and §3b were restated against grouping; `## Common Mistakes` kept a third
+# copy of the premise they retired, and grouping INVERTS it — the ISSUE key is
+# `sha256("<slug>:<file_path>")[:16]`, so a second dispatch over the same file
+# COMMENTS. That bullet said it duplicates. Its conclusion survives on its other
+# clauses, but a rule whose stated MECHANISM is false is one the next editor
+# checks, finds untrue, and deletes — putting filing back inside the loop. Lock
+# the COUNT the way the aggregate_path row above does (#694): the per-finding
+# identity belongs to §2b and §3b, and a third copy is one that drifts unnoticed.
+assert_count_fixed "$SKILL" 'file:line:summary' 2 \
+  "P17/#722: the per-finding identity is stated in exactly two places"
+assert_no_grep "$SKILL" 'duplicates rather than comments' \
+  "P17/#722: no copy says per-attempt filing duplicates instead of commenting"
+assert_fixed "$SKILL" 'keys the ISSUE' \
+  "P17/#722: Common Mistakes states the grouped mechanism (anti-vacuity)"
+assert_fixed "$SKILL" 'File once, at Phase 5.' \
+  "P17/#722: and keeps the conclusion the corrected mechanism still carries"
+
+# --- #722: DEFER_FILES= must name the bound the operator actually feels -------
+# FILES= is an upper bound, not a forecast: `max_new` bounds the dispatch and it
+# now counts FILES, so above the cap the surplus files are deferred whole and
+# come back only as `overflow_count`. The executed run B24 pins in
+# tests/premerge-findings.test.sh is FILES=64 — "at most 64 issues, one per file"
+# is literally true there while at most 10 open. Compare the stated caps by
+# VALUE the way P16 compares the manifest literals, so changing the cap needs no
+# test edit while drifting one copy out of step with the others reds here.
+assert_in "$DEFER_FENCE" 'no more than max_new=' \
+  "P17/#722: the operator line names the cap that actually bounds the dispatch"
+assert_fixed "$SKILL" "one issue each up to the dispatch's" \
+  "P17/#722: and the documented FILES= field is hedged to that same cap"
+DEFER_CAPS="$(
+  sed -n 's/^PREMERGE_MAX_ISSUES[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$SKILL"
+  sed -n 's/.*max_new`\{0,1\}[[:space:]]\{0,1\}=[[:space:]]\{0,1\}\([0-9][0-9]*\).*/\1/p' "$SKILL"
+)"
+DEFER_CAP_COUNT="$(grep -c . <<<"$DEFER_CAPS")"
+DEFER_CAP_UNIQ="$(sort -u <<<"$DEFER_CAPS" | grep -c .)"
+if [ "$DEFER_CAP_COUNT" -lt 4 ]; then
+  echo "  FAIL  P17/#722: expected the 4 stated max_new caps (Constants row, §2b, the §5-file dispatch, the defer fence), found $DEFER_CAP_COUNT"
+  FAIL=$((FAIL + 1))
+elif [ "$DEFER_CAP_UNIQ" != 1 ]; then
+  echo "  FAIL  P17/#722: the stated max_new caps disagree:"; sed 's/^/          /' <<<"$DEFER_CAPS"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  P17/#722: all $DEFER_CAP_COUNT stated max_new caps agree on $(sed -n 1p <<<"$DEFER_CAPS")"; PASS=$((PASS + 1))
+fi
 
 echo ""
 echo "== Summary =="

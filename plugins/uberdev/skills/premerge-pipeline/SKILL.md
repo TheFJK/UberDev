@@ -2023,7 +2023,7 @@ if [ "$PREMERGE_DEFER_OVERFLOW" -gt 0 ]; then
       "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_OVERFLOW" >&2
   fi
 fi
-printf 'PREMERGE DEFER_FILES=%s — the dispatch will open at most that many issues, one per file\n' \
+printf 'PREMERGE DEFER_FILES=%s — the dispatch will open at most that many issues, one per file, and no more than max_new=10 of them\n' \
   "$PREMERGE_DEFER_FILES" >&2
 printf '%s\n' "$PREMERGE_DEFER_LINE" >&2
 ```
@@ -2037,8 +2037,11 @@ PREMERGE_DEFER TOTAL=<n> BLOCKER=<n> SUGGESTION=<n> FILES=<n> OVERFLOW=<n> PATH=
 `TOTAL`, `BLOCKER` and `SUGGESTION` describe the rows that ARE in the written
 aggregate; `OVERFLOW` is how many did not fit. `TOTAL + OVERFLOW` is everything
 the run had to file. `FILES` is how many distinct owning files those rows cover —
-one issue each, because the filer groups by file — and it is inserted before
-`OVERFLOW=` so the fence's existing suffix read of that field is unchanged.
+one issue each up to the dispatch's `max_new`, because the filer groups by file
+and that cap counts files too. Above the cap `FILES` is an upper bound and not a
+forecast: the surplus files are deferred whole and counted in that agent's
+`overflow_count`. `FILES=` is inserted before `OVERFLOW=` so the fence's
+existing suffix read of that field is unchanged.
 **`PATH=` is last and its value runs to end of line** — a run directory can
 contain spaces, so parsing it as a whitespace-delimited field truncates it, and
 appending any field after it breaks every reader.
@@ -2285,12 +2288,13 @@ third of which quietly edits a test.
 **Reading `converge`'s exit status as success or failure.** `STOP_GREEN` exits 1.
 1 means "stop", 0 means "go round again". Branch on `DECISION=`.
 
-**Filing issues inside the loop.** `findings-to-issues` fingerprints on
-`file:line:summary`, and every fix moves lines — so per-attempt filing creates
-duplicates rather than comments, and burns the per-dispatch `MAX_NEW` and
-rate-limit budget doing it. It also re-`os.replace`s the aggregate under an
-in-flight dispatch, which that agent refuses as `input-malformed`. File once, at
-Phase 5.
+**Filing issues inside the loop.** `findings-to-issues` keys the ISSUE on the
+owning file, so a second dispatch comments rather than duplicating — but every
+fix moves lines, so each attempt re-lists the same members as new and turns
+one issue into a per-attempt transcript, while burning the per-dispatch
+`MAX_NEW` and rate-limit budget doing it. It also re-`os.replace`s the
+aggregate under an in-flight dispatch, which that agent refuses as
+`input-malformed`. File once, at Phase 5.
 
 **Letting a fixer edit the test instead of the code.** The named hazard. It is
 guarded in the fixer prompt and by the progress detectors, and both halves are
