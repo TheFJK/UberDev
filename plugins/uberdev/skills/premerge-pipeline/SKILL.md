@@ -951,9 +951,12 @@ report it clean without evidence.
 **Runs after the loop settles, not inside it** — Phase 5, once. Two reasons, both
 mechanical:
 
-- `agents/findings-to-issues.md` fingerprints an issue as `file:line:summary`, and
-  a fix that shifts a line by one gives the same suggestion a new fingerprint. Per
-  attempt filing therefore creates *duplicates*, not comments.
+- That agent's per-finding identity is still `file:line:summary`, and a fix that
+  shifts a line by one gives the same finding a new one. Its ISSUE identity is
+  now the file alone, so a second dispatch over the same file comments rather
+  than duplicating — but the members inside it would still be re-listed as new
+  on every attempt, turning one issue into a per-attempt transcript. Filing once
+  is what keeps the issue a statement about the file rather than a log.
 - That agent snapshots the aggregate's `(device, inode, size, mtime)` before
   parsing and re-checks it before its first GitHub write. `plan` publishes through
   `os.replace`, which changes the inode — so a re-plan while a dispatch is in
@@ -980,7 +983,9 @@ defines the dispatch, and it is dispatched exactly once.** Do not read a second
 
 When that one dispatch runs, the agent's own machinery does the rest: the 16-hex
 fingerprint dedupe, the fail-closed `gh issue list` lookup, the `--body-file -`
-writes, the rate-limit budget probe and the `MAX_NEW` cap. `/premerge`
+writes, the rate-limit budget probe and the `MAX_NEW` cap — which now counts
+FILES, so it caps how many issues the dispatch opens, not how many findings
+survive it. `/premerge`
 re-implements none of it — a second copy of that logic is exactly the drift this
 repo has been bitten by.
 
@@ -1332,9 +1337,11 @@ computed from blocker **fingerprints**, not from prose.
 findings' hunks — so an identity keyed on the line reports every survivor as
 brand new. The loop would see infinite progress and never stop. `lib/premerge-findings.py`
 hashes `path` + a case-folded, punctuation-stripped `summary` instead, which is
-stable across exactly the edits the loop makes. It is deliberately **not** the
-fingerprint `findings-to-issues` computes — that one is `file:line:summary`
-because an issue is about a location. Same width, different question.
+stable across exactly the edits the loop makes. It is deliberately **not** either
+fingerprint `findings-to-issues` computes. That agent keys a per-finding identity
+on `file:line:summary` because a finding is about a location, and a per-ISSUE
+identity on the owning file alone because an issue is now about a file. Same
+width, three different questions.
 
 ### 3c — Repair, by reason
 
@@ -1986,41 +1993,55 @@ PREMERGE_DEFER_HEAD="${PREMERGE_DEFER_LINE%% PATH=*}"
 PREMERGE_DEFER_OVERFLOW="${PREMERGE_DEFER_HEAD##* OVERFLOW=}"
 PREMERGE_DEFER_SUGGESTION="${PREMERGE_DEFER_HEAD##* SUGGESTION=}"
 PREMERGE_DEFER_SUGGESTION="${PREMERGE_DEFER_SUGGESTION%% *}"
+PREMERGE_DEFER_FILES="${PREMERGE_DEFER_HEAD##* FILES=}"
+PREMERGE_DEFER_FILES="${PREMERGE_DEFER_FILES%% *}"
 # `OVERFLOW=` is ALWAYS printed -- `OVERFLOW=0` on a normal run -- so a missing
 # or non-numeric field is a contract break, not a zero. Falling back to 0 here
 # would re-create the silent drop by reading it as "nothing overflowed".
 case "$PREMERGE_DEFER_OVERFLOW" in ''|*[!0-9]*) printf 'error: defer line carries no OVERFLOW= count: %s\n' "$PREMERGE_DEFER_LINE" >&2; exit 74 ;; esac
 case "$PREMERGE_DEFER_SUGGESTION" in ''|*[!0-9]*) printf 'error: defer line carries no SUGGESTION= count: %s\n' "$PREMERGE_DEFER_LINE" >&2; exit 74 ;; esac
+# FILES= is how many ISSUES the dispatch below will open, because the filer
+# groups by owning file. Like OVERFLOW= it is always printed, so a missing or
+# non-numeric field is a contract break rather than a zero.
+case "$PREMERGE_DEFER_FILES" in ''|*[!0-9]*) printf 'error: defer line carries no FILES= count: %s\n' "$PREMERGE_DEFER_LINE" >&2; exit 74 ;; esac
 [ -s "$PREMERGE_DEFER_PATH" ] || { printf 'error: defer named an aggregate that is missing or empty: %s\n' "$PREMERGE_DEFER_PATH" >&2; exit 74; }
 
-# Blockers are kept FIRST, so `SUGGESTION > 0` proves every blocker fit. The one
-# state in which a blocker may have been dropped is therefore
-# `SUGGESTION == 0 && OVERFLOW > 0`, and it gets its own, louder line: an
-# operator must never read "10 cleanup rows did not fit" and be looking at
-# discarded correctness findings.
+# Blocker-bearing FILES are admitted first, which is weaker than the row-level
+# "blockers first" this arm was written against: a blocker file carries its own
+# cleanup rows in with it, so `SUGGESTION > 0` no longer proves every blocker
+# fit (#722). `SUGGESTION == 0 && OVERFLOW > 0` still means the envelope is
+# ENTIRELY blockers and the dropped rows certainly are too, so it keeps its own
+# louder line -- an operator must never read the mild sentence over that state.
+# The mild arm therefore retires its blanket blocker reassurance and points at
+# `BLOCKER=` on the line below instead, which is the only field that answers it.
 if [ "$PREMERGE_DEFER_OVERFLOW" -gt 0 ]; then
   if [ "$PREMERGE_DEFER_SUGGESTION" -gt 0 ]; then
-    printf 'PREMERGE DEFER_OVERFLOW=%s CLASS=cleanup — %s cleanup rows did not fit the 64-row envelope; every blocker was kept\n' \
+    printf 'PREMERGE DEFER_OVERFLOW=%s CLASS=cleanup — %s rows did not fit the 64-row envelope; blocker-bearing files were admitted first, but file grouping no longer proves every blocker fit — check BLOCKER= on the line below against the blockers this run reported\n' \
       "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_OVERFLOW" >&2
   else
     printf 'PREMERGE DEFER_OVERFLOW=%s CLASS=blocker — the 64-row envelope was filled ENTIRELY by blockers and %s further rows did not fit; some dropped rows may be blockers\n' \
       "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_OVERFLOW" >&2
   fi
 fi
+printf 'PREMERGE DEFER_FILES=%s — the dispatch will open at most that many issues, one per file\n' \
+  "$PREMERGE_DEFER_FILES" >&2
 printf '%s\n' "$PREMERGE_DEFER_LINE" >&2
 ```
 
 It prints one line and writes `deferred-aggregate.md`:
 
 ```
-PREMERGE_DEFER TOTAL=<n> BLOCKER=<n> SUGGESTION=<n> OVERFLOW=<n> PATH=<path>
+PREMERGE_DEFER TOTAL=<n> BLOCKER=<n> SUGGESTION=<n> FILES=<n> OVERFLOW=<n> PATH=<path>
 ```
 
 `TOTAL`, `BLOCKER` and `SUGGESTION` describe the rows that ARE in the written
 aggregate; `OVERFLOW` is how many did not fit. `TOTAL + OVERFLOW` is everything
-the run had to file. **`PATH=` is last and its value runs to end of line** — a
-run directory can contain spaces, so parsing it as a whitespace-delimited field
-truncates it, and appending any field after it breaks every reader.
+the run had to file. `FILES` is how many distinct owning files those rows cover —
+one issue each, because the filer groups by file — and it is inserted before
+`OVERFLOW=` so the fence's existing suffix read of that field is unchanged.
+**`PATH=` is last and its value runs to end of line** — a run directory can
+contain spaces, so parsing it as a whitespace-delimited field truncates it, and
+appending any field after it breaks every reader.
 
 Then dispatch `subagent_type: uberdev:findings-to-issues` with
 `aggregate_path` = that `PATH`, `edge_id` = `premerge.defer.findings`,
@@ -2045,29 +2066,52 @@ door.
 
 What happens now:
 
-- **Blockers are kept first**, then suggestions, both in their existing relative
-  order, truncated to 64. So a blocker is dropped **only** when blockers alone
-  exceed 64 — at which point no ordering saves them all.
+- **Whole files while they fit, then one row-filled boundary file.** The unit is
+  the owning file, because the filer opens one issue per file and half a file's
+  findings make an issue that reads as complete and is not. Files carrying a
+  blocker are admitted first, then the rest in first-appearance order. The first
+  file that does not fit is **not** skipped, and admission does **not** stop dead
+  there: the leftover budget is row-filled from that one file — blockers within
+  it first — and only then does admission end. The cut is arithmetic rather than
+  policy, so no lower-ranked file jumps it and exactly one file is ever split. A
+  hard stop would file *fewer* rows than the row-level truncation this replaces:
+  a 4-row file, two 30-row files and a 5-row blocker file, cut against a 64-row
+  envelope, would file 39 rows where a row-level cut files 64. That is the same
+  maximal-loss trade the refusal above was making, wearing a better argument. A
+  single file
+  larger than the whole envelope needs no special arm: it is this same rule with
+  no whole file admitted ahead of it. Rows keep their existing relative order
+  inside the envelope.
 - **The aggregate is still written** and `PATH=` still names a real, dispatchable
   file. Overflow is never a refusal and never an exit code; it is a count on the
   line.
 - **The count is reported, never swallowed.** Surface `OVERFLOW=<n>` in the run
   summary. Silently dropping is the defect; reporting is what makes the drop
   legitimate rather than a repeat of the thing being fixed.
-- **The two overflow classes are reported differently.** Because blockers are
-  kept first, `SUGGESTION > 0` proves every blocker fit, so `SUGGESTION == 0 &&
-  OVERFLOW > 0` is the only state in which a dropped row could be a blocker. The
-  first reads "N cleanup rows did not fit"; the second reads "the envelope was
-  filled entirely by blockers and N further rows did not fit". An operator must
-  never be shown the mild sentence over the severe state.
+- **The two overflow classes are reported differently, and neither promises more
+  than it can.** `SUGGESTION == 0 && OVERFLOW > 0` means the envelope was filled
+  entirely by blockers and the dropped rows certainly are blockers too; it keeps
+  the severe sentence, and an operator must never be shown the mild one over that
+  state. What the mild arm may no longer say is *every blocker was kept*. Files
+  are the unit now, and a blocker-bearing file carries its own cleanup rows into
+  the envelope with it — so cleanup can survive while a blocker is dropped, and
+  `SUGGESTION > 0` no longer witnesses anything about blockers. Run the shipped
+  rule over one file holding 40 cleanup rows plus a blocker and one holding 30
+  blockers and it prints `TOTAL=64 BLOCKER=24 SUGGESTION=40 FILES=2 OVERFLOW=7`:
+  all seven dropped rows are blockers. `BLOCKER=` on the defer line is the only
+  field that answers "did every blocker fit", and the mild arm points at it
+  rather than guessing.
 
 **The blocker rows are the new thing here, and they needed a producer, not a
 louder promise.** `_encode_aggregate` used to pin every row to `suggestion`, so
 the claim that surviving blockers were filed had nothing behind it — the same
 no-producer defect Phase 4 shipped with. `agents/findings-to-issues.md` was
 already ready for them: `severity_rank(blocker)=3` sorts a blocker above every
-cleanup row so a `max_new` overflow can never displace one, and Step 8d gives it
-the `@author`-mention shape. Only the writer was missing.
+cleanup row, and since the cap moved to file groups the file holding it ranks at
+`group_tier_rank(BLOCKER)=3` above every cleanup-only file — so a `max_new`
+overflow can never displace it, and a blocker sharing a file with cleanup rows is
+not dragged under the cap by them. Step 8d gives it the `@author`-mention shape.
+Only the writer was missing.
 
 A deferred blocker **halts** the parent run in that agent (RFC 0002). That is the
 correct outcome and not a regression: the loop has already stopped not-green, so

@@ -851,6 +851,31 @@ assert_in "$DEFER_FENCE" 'CLASS=cleanup' \
 assert_fixed "$SKILL" '#### When the envelope overflows' \
   "P17/#690: §5-file says what happens to the rows that did not fit"
 
+# --- #722: the defer line's FILES= field, and its placement -------------------
+assert_in "$DEFER_FENCE" 'carries no FILES= count' \
+  "P17/#722: a missing FILES= is a contract break, never a silent zero"
+assert_in "$DEFER_FENCE" 'PREMERGE_DEFER_OVERFLOW="${PREMERGE_DEFER_HEAD##* OVERFLOW=}"' \
+  "P17/#722: FILES= went in BEFORE OVERFLOW=, so the suffix read is untouched"
+assert_fixed "$SKILL" 'FILES=<n> OVERFLOW=<n> PATH=<path>' \
+  "P17/#722: the documented line shows FILES= in its real position"
+assert_in "$DEFER_FENCE" 'PREMERGE DEFER_FILES=%s' \
+  "P17/#722: the fence surfaces how many issues the dispatch will open"
+
+# --- #722: grouping REMOVED the row-level "every blocker fit" guarantee -------
+# `defer` now admits whole FILES, blocker-bearing ones first, and row-fills the
+# leftover budget from the single next-ranked file. A blocker-bearing file drags
+# its own cleanup rows into the envelope with it, so `SUGGESTION > 0` no longer
+# witnesses that every blocker fit. Executed against the shipped rule — one file
+# holding 40 cleanup rows plus a blocker, one holding 30 blockers — the verb
+# prints `TOTAL=64 BLOCKER=24 SUGGESTION=40 FILES=2 OVERFLOW=7`, and all seven
+# dropped rows are blockers. The mild arm must not reassure an operator there.
+assert_not_in "$DEFER_FENCE" 'every blocker was kept' \
+  "P17/#722: the cleanup arm no longer promises what grouping took away"
+assert_in "$DEFER_FENCE" 'check BLOCKER= on the line below' \
+  "P17/#722: it points at the only field that answers 'did every blocker fit'"
+assert_in "$DEFER_FENCE" 'CLASS=blocker — the 64-row envelope was filled ENTIRELY by blockers' \
+  "P17/#722: the severe arm is untouched — that state is still provable"
+
 echo ""
 echo "== Summary =="
 echo "  passed: $PASS"
