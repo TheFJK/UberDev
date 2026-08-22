@@ -621,8 +621,10 @@ GATE_FENCE="$(fence_body "$SKILL" premerge-gate)"
 RERUN_FENCE="$(fence_body "$SKILL" premerge-ci-rerun)"
 PUBLISH_FENCE="$(fence_body "$SKILL" premerge-ci-publish)"
 DEFER_FENCE="$(fence_body "$SKILL" premerge-defer)"
+SIMPLIFY_FENCE="$(fence_body "$SKILL" premerge-simplify-commit)"
 for pair in "fix-commit:$FIX_FENCE" "gate:$GATE_FENCE" "ci-rerun:$RERUN_FENCE" \
-            "ci-publish:$PUBLISH_FENCE" "defer:$DEFER_FENCE"; do
+            "ci-publish:$PUBLISH_FENCE" "defer:$DEFER_FENCE" \
+            "simplify-commit:$SIMPLIFY_FENCE"; do
   if [ -z "${pair#*:}" ]; then
     echo "  FAIL  P17: fence '${pair%%:*}' extracted empty — the origin tag moved or was renamed"
     FAIL=$((FAIL + 1))
@@ -636,6 +638,59 @@ assert_grep "$SKILL" '^```bash uberdev-executable origin=premerge-ci-rerun$' \
   "P17: the ci-rerun fence carries exactly its documented origin tag"
 assert_grep "$SKILL" '^```bash uberdev-executable origin=premerge-ci-publish$' \
   "P17: the ci-publish fence carries exactly its documented origin tag"
+assert_grep "$SKILL" '^```bash uberdev-executable origin=premerge-simplify-commit$' \
+  "P17/#710: the simplify-commit fence carries exactly its documented origin tag"
+
+# --- #706: the sort/comm trio is locale-pinned wherever it guards scope -------
+# The guard compares PATHS AS BYTES. `sort` orders by the ambient collation and
+# `comm`'s merge walk assumes its own; when they disagree the walk desynchronises
+# and reports a file present in BOTH lists as a stray, aborting an attempt whose
+# fixers behaved correctly. Executed: the same two paths sorted under
+# en_US.UTF-8 and under C, compared with `comm -23`, print `lib/Zebra.sh`.
+for scope_pair in "fix-commit:$FIX_FENCE" "ci-publish:$PUBLISH_FENCE" \
+                  "simplify-commit:$SIMPLIFY_FENCE"; do
+  scope_tag="${scope_pair%%:*}"; scope_body="${scope_pair#*:}"
+  # COMMENT LINES ARE STRIPPED FIRST. These fences carry their own rationale, and
+  # the paragraphs above each guard say the words "sort" and "comm" — so a probe
+  # run over the raw body is satisfied by the fence's own prose, which is the
+  # failure mode this repo has already shipped in a whole-file grep.
+  scope_unpinned="$(printf '%s\n' "$scope_body" \
+    | grep -vE '^[[:space:]]*#' \
+    | grep -nE '(^|[^=[:alnum:]_./-])(sort|comm)[[:space:]]' \
+    | grep -v 'LC_ALL=C' || :)"
+  if [ -z "$scope_unpinned" ]; then
+    echo "  PASS  P17/#706: every sort/comm in '$scope_tag' is LC_ALL=C-pinned"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  P17/#706: unpinned sort/comm in '$scope_tag': $scope_unpinned"; FAIL=$((FAIL + 1))
+  fi
+done
+
+# --- #710: Phase 4b commits behind the SAME scope guard as Phase 2a ----------
+# 4b dispatches the identical one-file-per-agent waves with the identical
+# `git add -u`, and had only the branch assertion and the untracked refusal —
+# neither of which catches an agent that edited a second TRACKED file, or a
+# stray hunk an earlier CI repair left in the tree.
+assert_in "$SIMPLIFY_FENCE" 'simplify-scope-$PREMERGE_ATTEMPT_PAD.allowed' \
+  "P17/#710: 4b declares an allowed set, since it has no fix-waves file to reuse"
+assert_in "$SIMPLIFY_FENCE" 'if [ ! -s "$PREMERGE_SIMPLIFY_SCOPE" ]; then' \
+  "P17/#710: a missing allowed set is a refusal, not an empty set"
+assert_in "$SIMPLIFY_FENCE" 'comm -23 "$PREMERGE_SIMPLIFY_MODIFIED" "$PREMERGE_SIMPLIFY_ALLOWED"' \
+  "P17/#710: and the scope comparison actually runs before git add -u"
+assert_in "$SIMPLIFY_FENCE" 'git -C "$PREMERGE_ROOT" diff --name-only --no-renames HEAD >"$PREMERGE_SIMPLIFY_RAW" || exit 2' \
+  "P17/#710: it uses the #693-safe producer shape, not a pipeline"
+
+# --- #707: PREMERGE_PUSHED has a stated value at EVERY gate call site --------
+# The fence takes it with `:?` and no default precisely so forgetting is loud —
+# which only holds if the file says what the value IS everywhere the gate runs.
+# It used to say so at `### 4c` step 3 alone; a controller inferring 0 at a gate
+# that just pushed gets `no_checks` read as green.
+assert_grep "$SKILL" '^### What `PREMERGE_PUSHED` is at each call site$' \
+  "P17/#707: the call-site table exists"
+for pushed_site in 'first entry at attempt 1' 'premerge-fix-commit' \
+                   'premerge-ci-publish' 'WAIT_CI'; do
+  assert_grep "$SKILL" "$pushed_site" \
+    "P17/#707: the table names the '$pushed_site' call site"
+done
 
 # --- #693: the scope guard's two halves must fail in the SAME direction -------
 # `<producer> | sort -u >LIST || exit 2` binds the `||` to `sort`'s status, and
@@ -697,8 +752,25 @@ assert_in "$RERUN_FENCE" 'PREMERGE_RERUN_FLAKY_CAP=1' \
   "P17/#696: the cap is a value the fence reads, not a constant in a table"
 assert_in "$RERUN_FENCE" 'converge.jsonl' \
   "P17/#696: the bound is DERIVED from the ledger, not carried across fences"
-assert_in "$RERUN_FENCE" 'select(.attempt == $want and .decision == "CONTINUE")' \
-  "P17/#696: it counts re-entries at THIS attempt index"
+# #708 RETARGETS THIS ROW. It asserted `.attempt == $want`, which is what made
+# the cap dead: a CONTINUE advances PREMERGE_ATTEMPT (`## Phase 2` rule 1 carves
+# out only WAIT_CI), so each pass asked about a fresh index and computed USED=0
+# forever. The count is now run-scoped, and the row asserts the ABSENCE of the
+# index filter as well as the presence of the decision filter — a bare
+# `.decision == "CONTINUE"` assertion would also pass on the old expression.
+assert_in "$RERUN_FENCE" 'select(.decision == "CONTINUE")' \
+  "P17/#708: it counts every red CONTINUE in the RUN, not at one index"
+# Asserted against the fence's CODE, not its comments. The comment above the jq
+# call names the old expression in order to explain why it was wrong, and a probe
+# run over the raw body is satisfied by that explanation — the same
+# prose-satisfies-grep trap the #706 rows strip comments for.
+#
+# `assert_not_in` is grep -qE, so the metacharacters are escaped too: an
+# unescaped `$want` makes `$` an end-of-line anchor and the row passes vacuously,
+# which is how this assertion first shipped green against the unfixed fence.
+RERUN_FENCE_CODE="$(printf '%s\n' "$RERUN_FENCE" | grep -vE '^[[:space:]]*#' || :)"
+assert_not_in "$RERUN_FENCE_CODE" '\.attempt == \$want' \
+  "P17/#708: the index filter that made the cap dead prose is gone"
 assert_in "$RERUN_FENCE" 'index("ci=red")' \
   "P17/#696: and only the ones whose reason was a red build"
 assert_in "$RERUN_FENCE" 'DECISION=STOP_FLAKY_CAP' \
@@ -726,8 +798,17 @@ assert_in "$PUBLISH_FENCE" 'git -C "$PREMERGE_ROOT" diff --name-only --no-rename
   "P17/#697: and it uses the #693-safe producer shape, not a pipeline"
 assert_in "$PUBLISH_FENCE" '--force-with-lease="$PREMERGE_BRANCH:$PREMERGE_CI_LEASE"' \
   "P17/#697: the rebase arm still publishes under the controller's lease"
-assert_in "$PUBLISH_FENCE" 'PREMERGE_COUNT_BEFORE" != "$PREMERGE_COUNT_AFTER' \
-  "P17/#697: a rebase that added a commit of its own is refused"
+# #709 RETARGETS THIS ROW. `!=` was stricter than the question the fence's own
+# comment poses ("added none of its own") and blocked the repair it gates: a
+# stale_base rebase legitimately DROPS commits that already landed on the new
+# base — the commonest cause of stale_base in the first place — and refusing
+# there leaves a rewritten local branch that was never force-pushed.
+assert_in "$PUBLISH_FENCE" '[ "$PREMERGE_COUNT_AFTER" -gt "$PREMERGE_COUNT_BEFORE" ]' \
+  "P17/#709: a rebase that ADDED a commit of its own is refused"
+assert_not_in "$PUBLISH_FENCE" 'PREMERGE_COUNT_BEFORE" != "\$PREMERGE_COUNT_AFTER' \
+  "P17/#709: and a rebase that dropped a landed commit is no longer refused"
+assert_in "$PUBLISH_FENCE" 'PREMERGE CI REBASE_DROPPED BEFORE=%s AFTER=%s' \
+  "P17/#709: a dropped commit is announced, not passed silently"
 assert_in "$PUBLISH_FENCE" 'git rev-parse --absolute-git-dir' \
   "P17/#697: the in-progress-rebase probe cannot be defeated by the cwd"
 

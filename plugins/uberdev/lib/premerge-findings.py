@@ -237,9 +237,34 @@ MAX_SUMMARY_BYTES = 4096
 MAX_DETAIL_BYTES = 16384
 MAX_PATH_CHARS = 4096
 MAX_LINE = 999_999_999
+# The digit COUNT is bounded before `int()` is ever called on a line string.
+# CPython 3.11+ raises `ValueError` converting a string of more than 4300
+# digits, and an uncaught ValueError is exit 1 with a traceback -- not the
+# contracted exit 74 with a stable token that every calling fence branches on.
+# Nine is `MAX_LINE`'s own width, so anything longer was out of range anyway.
+MAX_LINE_DIGITS = len(str(MAX_LINE))
 MAX_FINDINGS = 64
 
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+class Refusal(SystemExit):
+    """What `fail()` raises.
+
+    A SystemExit subclass, so every existing caller and the process exit code
+    are unchanged -- but a caller that means to TOLERATE one refusal can catch
+    exactly this and nothing else. A bare `except SystemExit` would also swallow
+    argparse's `--help` exit and any deliberate `raise SystemExit(2)`, which is
+    how a tolerant read turns into a silent one.
+
+    The token travels on the exception so the tolerating caller can say which
+    refusal it absorbed rather than reporting a bare count.
+    """
+
+    def __init__(self, token: str, detail: str) -> None:
+        super().__init__(74)
+        self.token = token
+        self.detail = detail
 
 
 def fail(token: str, detail: str = "") -> "NoReturn":  # type: ignore[valid-type]
@@ -247,7 +272,7 @@ def fail(token: str, detail: str = "") -> "NoReturn":  # type: ignore[valid-type
     if detail:
         message = f"{message}: {detail}"
     print(message, file=sys.stderr)
-    raise SystemExit(74)
+    raise Refusal(token, detail)
 
 
 def _canonical_json(value: object) -> bytes:
@@ -809,16 +834,64 @@ def _blocker_fingerprints(document: "dict") -> "collections.Counter[str]":
 
 
 def _carry_prior_suggestions(out_dir: str, attempt: int) -> "list[dict]":
-    """Every earlier attempt's suggestions, oldest first."""
+    """Every earlier attempt's suggestions, oldest first.
+
+    AN UNREADABLE EARLIER ATTEMPT IS SKIPPED AND REPORTED, NOT FATAL.
+
+    The absent-file branch was already tolerant and the unreadable-file branch
+    was fatal, so one truncated `classified-01.json` -- an interrupted run, a
+    full disk -- refused every later `plan --carry-prior` AND the Phase 5
+    `defer`, and the run filed nothing at all. On a step whose whole purpose is
+    that findings outlive the run, losing every surviving finding to one corrupt
+    byte range is the wrong trade; it is the same one the OVERFLOW arm already
+    declines to make.
+
+    The skip is announced on stderr with its refusal token, so a run that
+    carried less than it should is visible rather than silently short. Only
+    `Refusal` is caught -- see its docstring for why the exception is not a bare
+    SystemExit.
+    """
     carried: "list[dict]" = []
     for earlier in range(1, attempt):
-        document = _read_attempt(out_dir, earlier, required=False)
+        try:
+            document = _read_attempt(out_dir, earlier, required=False)
+        except Refusal as refusal:
+            print(
+                "premerge-findings: attempt_unreadable_skipped: "
+                f"attempt {earlier} ({refusal.token}); its suggestions are not carried",
+                file=sys.stderr,
+            )
+            continue
         if document is None:
             continue
         for record in document["suggestions"]:
             if isinstance(record, dict) and isinstance(record.get("fingerprint"), str):
                 carried.append(record)
     return carried
+
+
+def _suggestion_key(row: "dict") -> "tuple":
+    """The identity the cross-attempt suggestion union dedupes on.
+
+    NOT the fingerprint. `_fingerprint` is deliberately line-independent (file +
+    summary), which is right for the blocker-progress comparison and wrong here:
+    two genuinely distinct suggestions in one file that the reviewer summarised
+    the same way ("the return value of write() is never checked") share it, so
+    the second collapsed into the first and never reached
+    `deferred-aggregate.md` -- never filed, never seen, on the step whose stated
+    purpose is that findings outlive the run.
+
+    This is the exact case `_blocker_fingerprints` keeps a Counter for on the
+    blocker path ("TWO LINES ARE TWO PLACES, EVEN UNDER ONE SUMMARY"). The
+    suggestion path now keys on the same three fields `_normalise_findings`
+    already keys its duplicate check on, so the two paths agree about what makes
+    two findings the same finding.
+    """
+    return (
+        row.get("file"),
+        row.get("line"),
+        _normalised_summary(row["summary"]) if isinstance(row.get("summary"), str) else None,
+    )
 
 
 def _union_suggestions(base: "list[dict]", carried: "list[dict]") -> "list[dict]":
@@ -831,18 +904,16 @@ def _union_suggestions(base: "list[dict]", carried: "list[dict]") -> "list[dict]
     that stays true; one function makes the claim structural instead.
 
     Latest attempt's rows first, then earlier attempts oldest-first, deduped by
-    fingerprint with the first occurrence winning -- so a suggestion raised on
-    attempt 1 and not repeated on attempt 3 is still filed. Unmentioned is not
+    `_suggestion_key` with the first occurrence winning -- so a suggestion raised
+    on attempt 1 and not repeated on attempt 3 is still filed. Unmentioned is not
     resolved.
     """
     out = list(base)
-    seen = {
-        row["fingerprint"] for row in out if isinstance(row.get("fingerprint"), str)
-    }
+    seen = {_suggestion_key(row) for row in out}
     for record in carried:
-        fingerprint = record.get("fingerprint")
-        if isinstance(fingerprint, str) and fingerprint not in seen:
-            seen.add(fingerprint)
+        key = _suggestion_key(record)
+        if key not in seen:
+            seen.add(key)
             out.append(record)
     return out
 
@@ -995,9 +1066,31 @@ def _normalise_lens_findings(records: object) -> "list[dict]":
         if not isinstance(location, str) or ":" not in location:
             fail("finding_schema_invalid", f"lens finding {index} has no path:line location")
         raw_path, _, raw_line = location.rpartition(":")
+        # A RESIDUAL COLON IS REFUSED, NOT ABSORBED INTO THE PATH.
+        #
+        # `rpartition` splits at the LAST colon, so a `path:line:col` location
+        # yielded file=`path:line` and line=col. `_repo_path` accepts that,
+        # because a colon is a legal POSIX path byte -- so nothing refused, and
+        # the run filed an issue whose location names a file that does not
+        # exist. A location this consumer cannot parse unambiguously is a
+        # refusal; guessing which colon was the separator is how the finding
+        # gets lost rather than reported.
+        if ":" in raw_path:
+            fail(
+                "finding_schema_invalid",
+                f"lens finding {index} location {location!r} has more than one colon",
+            )
         line = None
-        if raw_line.isdigit() and 1 <= int(raw_line) <= MAX_LINE:
-            line = int(raw_line)
+        # `str.isdigit()` IS TRUE FOR '²', AND `int('²')` RAISES.
+        # The ASCII check excludes the Unicode digit classes isdigit() accepts,
+        # and MAX_LINE_DIGITS keeps the conversion clear of CPython's int-str
+        # limit -- both before `int()` is reached, so an unparseable line
+        # degrades to None (which this row already supports) instead of exiting
+        # 1 with a traceback the fences cannot branch on.
+        if raw_line.isascii() and raw_line.isdigit() and len(raw_line) <= MAX_LINE_DIGITS:
+            value = int(raw_line)
+            if 1 <= value <= MAX_LINE:
+                line = value
         lens = record.get("lens")
         if lens is not None and not isinstance(lens, str):
             fail("finding_schema_invalid", f"lens finding {index} has a non-string lens")
@@ -1287,7 +1380,39 @@ def cmd_defer(args: argparse.Namespace) -> int:
     if not 1 <= attempt <= CONVERGE_VERIFY_CEILING:
         fail("bad_attempt", f"attempt must be 1..{CONVERGE_VERIFY_CEILING}")
 
-    document = _read_attempt(run_dir, attempt, required=True)
+    # FALL BACK TO THE NEWEST READABLE ATTEMPT RATHER THAN FILING NOTHING.
+    #
+    # `## Phase 2` makes a refused `plan` a hard stop for the attempt while
+    # leaving PREMERGE_ATTEMPT at N, so `classified-0N.json` is legitimately
+    # absent at the index Phase 5 defers from -- and a required read there exits
+    # 74 behind the fence's `|| exit 74`, costing every surviving blocker and
+    # every cleanup finding the run had already classified. That is the maximal
+    # loss the `#### When the envelope overflows` arm exists to prevent,
+    # arriving through a different door.
+    #
+    # The walk is tolerant on the way down for the same reason
+    # `_carry_prior_suggestions` is: one corrupt artifact must not cost the
+    # readable ones behind it. It refuses only when NO attempt at or below the
+    # index can be read -- there is genuinely nothing to file then.
+    document = None
+    defer_attempt = attempt
+    for candidate in range(attempt, 0, -1):
+        try:
+            document = _read_attempt(run_dir, candidate, required=False)
+        except Refusal:
+            document = None
+        if document is not None:
+            defer_attempt = candidate
+            break
+    if document is None:
+        fail("attempt_evidence_missing", _attempt_path(run_dir, attempt))
+    if defer_attempt != attempt:
+        print(
+            "premerge-findings: attempt_fallback: "
+            f"{_attempt_path(run_dir, attempt)} is unusable; "
+            f"deferring from attempt {defer_attempt}",
+            file=sys.stderr,
+        )
 
     # THE SAME UNION `plan --carry-prior` COMPUTES, because this is the aggregate
     # that actually gets dispatched.

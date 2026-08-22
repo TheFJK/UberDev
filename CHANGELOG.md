@@ -251,6 +251,69 @@ Test rows: `premerge.test.sh` 132 → 179, `premerge-findings.test.sh` 93 → 11
   satisfiable by prose, and a Phase 5 that had stopped bumping altogether passed
   them all.
 
+### Fixed — ten blockers a second `xhigh` pass found in the first pass's repairs
+
+Both review passes over this stack returned exactly fifteen findings and the
+second shared no location with the first, so the second pass was reading code the
+first pass's fixes had just written. Every fix below carries an executed
+reproduction and a mutation proving its test row reds on the unfixed shape.
+
+In `lib/premerge-findings.py`:
+
+- **One corrupt artifact cost the whole run.** `_carry_prior_suggestions`
+  tolerated an *absent* earlier attempt and died on an *unreadable* one, so a
+  single truncated `classified-01.json` refused every later `plan --carry-prior`
+  and the Phase 5 `defer` — filing nothing at all, on the step whose purpose is
+  that findings outlive the run. `fail()` now raises `Refusal`, a `SystemExit`
+  subclass carrying its token, so the one caller that means to tolerate a refusal
+  can catch exactly that and announce what it skipped.
+- **Two lines under one summary filed as one finding.** The suggestion union
+  deduped on the deliberately line-independent `_fingerprint`. It now keys on the
+  same `(file, line, normalised summary)` triple `_normalise_findings` uses, so
+  both paths agree what makes two findings the same finding.
+- **`path:line:col` filed against a file that does not exist.** `rpartition`
+  split at the last colon, `_repo_path` accepts a colon, and nothing refused. A
+  residual colon is now a refusal rather than a guess.
+- **A Unicode digit in a location crashed the verb.** `'²'.isdigit()` is
+  `True` and `int('²')` raises, as does a 4301+ digit string under CPython
+  3.11+ — exit 1 with a traceback, not the contracted exit 74 with a token the
+  fences branch on.
+- **`defer` refused at the index a refused `plan` left behind.** Phase 2 makes a
+  refused `plan` a hard stop that *leaves* `PREMERGE_ATTEMPT` at N, so
+  `classified-0N.json` is legitimately absent where Phase 5 defers from. It now
+  walks down to the newest readable attempt and says on stderr that it did.
+
+In `skills/premerge-pipeline/SKILL.md`:
+
+- **The scope guards trusted the ambient locale.** They compare paths as bytes,
+  but `sort` orders by the ambient collation and `comm`'s merge walk assumes its
+  own; the same two paths sorted under `en_US.UTF-8` and under `C` make
+  `comm -23` report a file present in *both* lists as a stray. `LC_ALL=C` now
+  pins every member of the trio.
+- **`PREMERGE_PUSHED` had a stated value at one call site of five.** The gate
+  takes it with `:?` and no default so that forgetting is loud — which only holds
+  if the file says what the value is everywhere the gate runs. Every call site is
+  now tabulated.
+- **The flaky-rerun cap bounded nothing.** It counted `CONTINUE` rows at a fixed
+  attempt index while every `CONTINUE` advances that index, so `USED` was 0
+  forever and `gh run rerun` fired each attempt until the repair budget ran out.
+  The budget is now counted across the run.
+- **The rebase arm blocked the repair it gates.** It refused on any commit-count
+  change, but a `stale_base` rebase legitimately drops commits that already
+  landed on the new base — the commonest cause of `stale_base` — leaving a branch
+  rewritten locally and never force-pushed. Only growth is refused now.
+- **Phase 4b committed without a scope guard.** It runs the same one-file-per-
+  agent waves and the same `git add -u` as Phase 2a and had only the branch and
+  untracked checks. It now writes its merged lens result set as
+  `simplify-scope-<NN>.allowed` and commits behind the same comparison.
+
+Two test-hygiene repairs fell out of writing those rows: the locale probe and the
+flaky-index absence assertion both had to strip fence **comments**, because these
+fences carry the prose explaining them and a probe over the raw body is satisfied
+by that explanation; and `assert_not_in` is `grep -qE`, so an unescaped `$want`
+made `$` an end-of-line anchor and the row passed vacuously against the very
+shape it was added to forbid.
+
 ## [0.53.0] — 2026-08-21
 
 Adds `/premerge`, the pre-merge stack gate (RFC 0021). MINOR: a new command, a

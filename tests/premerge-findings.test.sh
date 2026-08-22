@@ -1064,12 +1064,33 @@ else
   bad "B16: the cleanup encoder accepted a blocker row"
 fi
 
-if python3 -I -B "$LIB" defer --run-dir "$D" --attempt 3 >/dev/null 2>"$D/d3.err"; then
-  bad "B16: defer accepted an attempt with no evidence"
+# `## Phase 2` makes a refused `plan` a hard stop for the attempt while LEAVING
+# PREMERGE_ATTEMPT at N, so classified-0N.json is legitimately absent at the index
+# Phase 5 defers from. Refusing there exits 74 behind the fence's `|| exit 74` and
+# the run files NOTHING — every surviving blocker and every cleanup finding lost to
+# an artifact that was never going to be written. `defer` now walks down to the
+# newest readable attempt and says on stderr that it did.
+if python3 -I -B "$LIB" defer --run-dir "$D" --attempt 3 >"$D/d3.txt" 2>"$D/d3.err"; then
+  grep -q 'attempt_fallback' "$D/d3.err" \
+    && ok "B16: defer falls back to the newest readable attempt and announces it" \
+    || bad "B16: defer fell back silently: $(cat "$D/d3.err")"
 else
-  grep -q 'attempt_evidence_missing' "$D/d3.err" \
-    && ok "B16: defer refuses an attempt whose evidence is missing" \
-    || bad "B16: wrong token: $(cat "$D/d3.err")"
+  bad "B16: defer still refuses rather than filing what it has: $(cat "$D/d3.err")"
+fi
+case "$(cat "$D/d3.txt")" in
+  "PREMERGE_DEFER TOTAL="[1-9]*) ok "B16: the fallback files findings instead of none" ;;
+  *) bad "B16: fallback produced no rows: $(cat "$D/d3.txt")" ;;
+esac
+
+# ANTI-VACUITY: the refusal still exists, at the only index where it is honest —
+# no attempt at or below the requested one can be read, so there is nothing to file.
+D_EMPTY="$(new_case)"
+if python3 -I -B "$LIB" defer --run-dir "$D_EMPTY" --attempt 3 >/dev/null 2>"$D_EMPTY/d3.err"; then
+  bad "B16: defer accepted a run-dir with no evidence at all"
+else
+  grep -q 'attempt_evidence_missing' "$D_EMPTY/d3.err" \
+    && ok "B16: defer refuses when NO attempt is readable" \
+    || bad "B16: wrong token: $(cat "$D_EMPTY/d3.err")"
 fi
 
 echo "== B17: the WAIT_CI bound enforces itself =="
@@ -1492,6 +1513,139 @@ else
   grep -q 'finding_schema_invalid' "$D/b25d.err" && ! grep -q 'Traceback' "$D/b25d.err" \
     && ok "B25: a non-object stored row is refused with a token" \
     || bad "B25: wrong failure for a non-object row: $(cat "$D/b25d.err")"
+fi
+
+# --------------------------------------------------------------------------
+echo "== B26: a lens location this consumer cannot parse is refused, never guessed =="
+# `rpartition` splits at the LAST colon, so `path:line:col` yielded
+# file=`path:line`. `_repo_path` accepts it — a colon is a legal POSIX path byte —
+# so nothing refused and the run filed an issue naming a file that does not exist.
+D="$(new_case)"
+python3 -I -B -c '
+import json, sys
+json.dump({"schema_version": 1, "pr_number": 670, "run_id": sys.argv[2],
+           "blockers": [], "suggestions": []},
+          open(sys.argv[1] + "/classified-01.json", "w"))
+' "$D" "$RUN_ID"
+printf '%s' '[{"location":"lib/foo.sh:42:7","summary":"s","detail":"d","lens":"Reuse"}]' >"$D/l26.json"
+if python3 -I -B "$LIB" defer --run-dir "$D" --attempt 1 --lens-findings "$D/l26.json" \
+     >/dev/null 2>"$D/b26.err"; then
+  B26_PATH="$(python3 -I -B -c '
+import json, sys
+doc = json.loads(open(sys.argv[1], encoding="utf-8").read().splitlines()[1])
+print(",".join(f["scope"]["path"] for f in doc["findings"]))
+' "$D/deferred-aggregate.md")"
+  bad "B26: an ambiguous location was absorbed into the path: $B26_PATH"
+else
+  RC=$?
+  if [ "$RC" -eq 74 ] && grep -q 'more than one colon' "$D/b26.err" \
+     && ! grep -q 'Traceback' "$D/b26.err"; then
+    ok "B26: path:line:col is exit 74 with a token, not a nonexistent path"
+  else
+    bad "B26: wrong failure (rc=$RC): $(cat "$D/b26.err")"
+  fi
+fi
+
+echo "== B27: a hostile line string degrades, it does not crash =="
+# `'²'.isdigit()` is True and `int('²')` raises; CPython 3.11+ raises the same way
+# on a 4301+ digit string. An uncaught ValueError is exit 1 with a traceback — not
+# the contracted exit-74-with-a-token that every calling fence branches on.
+for B27_CASE in unicode-digit long-digits; do
+  case "$B27_CASE" in
+    unicode-digit) python3 -I -B -c '
+import json, sys
+json.dump([{"location":"a.py:²","summary":"s","detail":"d","lens":"Reuse"}],
+          open(sys.argv[1] + "/l27.json", "w"))
+' "$D" ;;
+    long-digits) python3 -I -B -c '
+import json, sys
+json.dump([{"location":"a.py:" + "9"*5000,"summary":"s","detail":"d","lens":"Reuse"}],
+          open(sys.argv[1] + "/l27.json", "w"))
+' "$D" ;;
+  esac
+  python3 -I -B "$LIB" defer --run-dir "$D" --attempt 1 --lens-findings "$D/l27.json" \
+    >/dev/null 2>"$D/b27.err"
+  RC=$?
+  if [ "$RC" -ne 1 ] && ! grep -q 'Traceback' "$D/b27.err"; then
+    ok "B27 ($B27_CASE): no uncaught ValueError — rc=$RC"
+  else
+    bad "B27 ($B27_CASE): crashed with rc=$RC: $(head -3 "$D/b27.err")"
+  fi
+done
+
+echo "== B28: two lines are two findings, even under one summary =="
+# `_fingerprint` is deliberately line-independent, which is right for the blocker
+# progress comparison and wrong for the suggestion union: two distinct findings in
+# one file that the reviewer summarised identically collapsed to one, and the
+# second never reached deferred-aggregate.md — never filed, never seen.
+D="$(new_case)"
+python3 -I -B -c '
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("pmf", sys.argv[3])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+s = "the return value of write() is never checked"
+rows = [{"file": "a.py", "line": l, "summary": s, "failure_scenario": "d",
+         "severity": "suggestion", "severity_source": "category",
+         "fingerprint": m._fingerprint("a.py", s),
+         "source_edge": "premerge.review.code_review"} for l in (10, 99)]
+json.dump({"schema_version": 1, "pr_number": 670, "run_id": sys.argv[2],
+           "blockers": [], "suggestions": rows},
+          open(sys.argv[1] + "/classified-01.json", "w"))
+json.dump({"schema_version": 1, "pr_number": 670, "run_id": sys.argv[2],
+           "blockers": [], "suggestions": []},
+          open(sys.argv[1] + "/classified-02.json", "w"))
+' "$D" "$RUN_ID" "$LIB"
+# Both rows really do share a fingerprint — without this the test could pass for
+# the wrong reason, on a fixture the old code would also have kept whole.
+B28_FP="$(python3 -I -B -c '
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+print(len({r["fingerprint"] for r in doc["suggestions"]}))
+' "$D/classified-01.json")"
+[ "$B28_FP" = "1" ] && ok "B28: the fixture's two rows do share one fingerprint" \
+  || bad "B28: fixture is vacuous — $B28_FP distinct fingerprints, expected 1"
+if python3 -I -B "$LIB" defer --run-dir "$D" --attempt 2 >"$D/b28.txt" 2>"$D/b28.err"; then
+  B28_ROWS="$(python3 -I -B -c '
+import json, sys
+doc = json.loads(open(sys.argv[1], encoding="utf-8").read().splitlines()[1])
+print(",".join(sorted("%s:%s" % (f["scope"]["path"], f["scope"]["line"]) for f in doc["findings"])))
+' "$D/deferred-aggregate.md")"
+  [ "$B28_ROWS" = "a.py:10,a.py:99" ] \
+    && ok "B28: both lines survive the cross-attempt union" \
+    || bad "B28: a distinct finding was dropped — kept: $B28_ROWS"
+else
+  bad "B28: defer refused: $(cat "$D/b28.err")"
+fi
+
+echo "== B29: one corrupt earlier artifact does not cost the readable ones =="
+# The absent-file branch was tolerant and the unreadable-file branch was fatal, so
+# a truncated classified-01.json refused every later plan --carry-prior AND the
+# Phase 5 defer — the run filed nothing at all.
+D="$(new_case)"
+printf '%s' '{"schema_version":1,"blockers":[]' >"$D/classified-01.json"
+python3 -I -B -c '
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("pmf", sys.argv[3])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+s = "a finding from the readable attempt"
+row = {"file": "b.py", "line": 3, "summary": s, "failure_scenario": "d",
+       "severity": "suggestion", "severity_source": "category",
+       "fingerprint": m._fingerprint("b.py", s),
+       "source_edge": "premerge.review.code_review"}
+json.dump({"schema_version": 1, "pr_number": 670, "run_id": sys.argv[2],
+           "blockers": [], "suggestions": [row]},
+          open(sys.argv[1] + "/classified-02.json", "w"))
+' "$D" "$RUN_ID" "$LIB"
+if python3 -I -B "$LIB" defer --run-dir "$D" --attempt 2 >"$D/b29.txt" 2>"$D/b29.err"; then
+  case "$(cat "$D/b29.txt")" in
+    "PREMERGE_DEFER TOTAL=1 "*) ok "B29: the readable attempt's finding is still filed" ;;
+    *) bad "B29: unexpected defer line: $(cat "$D/b29.txt")" ;;
+  esac
+  grep -q 'attempt_unreadable_skipped' "$D/b29.err" \
+    && ok "B29: the skipped attempt is announced, not silently dropped" \
+    || bad "B29: the skip was silent: $(cat "$D/b29.err")"
+else
+  bad "B29: one corrupt artifact still costs the whole run: $(cat "$D/b29.err")"
 fi
 
 # --------------------------------------------------------------------------
