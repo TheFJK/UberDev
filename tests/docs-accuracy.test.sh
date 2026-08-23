@@ -4561,14 +4561,32 @@ roster_md = plugin_dir / "skills" / "post-impl-review" / "SKILL.md"
 roster_text = roster_md.read_text(encoding="utf-8").replace("\r\n", "\n")
 # #747 — the post-impl-review body was cut toward Anthropic's 500-line ceiling
 # and its roster table, fanout-cap precedence and failure boundary moved into
-# reference files the body points at. The SKILL is now those files together, so
-# a quotation credited to the skill is checked against all of them; checking the
-# body alone would report a correctly-cited sentence as a fabrication.
-roster_refs = sorted((roster_md.parent / "references").glob("*.md"))
-roster_all = roster_text + "\n" + "\n".join(
-    r.read_text(encoding="utf-8").replace("\r\n", "\n") for r in roster_refs)
-# The two spellings a shipped source may use to credit that skill.
-ROSTER_CREDITS = ("post-impl-review/SKILL.md", "post-impl-review/references/")
+# reference files the body points at. A quotation credited to a reference file is
+# therefore checked against THAT reference file; checking the body alone would
+# report a correctly-cited sentence as a fabrication.
+#
+# The files are kept SEPARATE, keyed by the pathname a shipped source would cite
+# them with. Concatenating the skill directory into one haystack would trade away
+# both halves of this row's precision: a sentence credited to `SKILL.md` would be
+# satisfied by text that exists only in a reference file (the row would stop
+# checking WHICH file the citation names, which is the whole job), and — because
+# the join collapses to a single space under the normalisation below — a needle
+# spanning one file's tail and the next one's head would match a string that
+# appears in neither.
+ROSTER_FILES = {"post-impl-review/SKILL.md": roster_text}
+for ref in sorted((roster_md.parent / "references").glob("*.md")):
+    ROSTER_FILES["post-impl-review/references/" + ref.name] = (
+        ref.read_text(encoding="utf-8").replace("\r\n", "\n"))
+# Normalised once, per file, in the same shape the quotations are flattened into.
+ROSTER_FLAT = {name: re.sub(r"\s+", " ", body).casefold()
+               for name, body in ROSTER_FILES.items()}
+# A credit is a PATHNAME, and it is resolved to the file it names. Bare
+# `post-impl-review` is not enough: the artifact filename `post-impl-review-final.md`
+# occurs inside quoted prompt text and is not a citation of the skill. A bare
+# `references/` with no filename names the directory, so it resolves to every file
+# in that directory — each still searched on its own, never joined.
+ROSTER_CITE = re.compile(
+    r"post-impl-review/(?:SKILL\.md|references/(?:[A-Za-z0-9._-]+\.md)?)")
 ok = True
 
 # T20.1 — anti-vacuity for the roster. A renamed marker or a reshaped block
@@ -4724,6 +4742,12 @@ else:
 # mid-sentence quotations, so a leading capital is the quoter's, not a
 # divergence. Only the DERIVED owner set is read, and only its source files —
 # markdown carries `#` as syntax, which this normalisation would eat.
+#
+# The needle is looked for in the file the citation NAMES, one file at a time.
+# That is the row's whole job: a citation of file X is evidence about X, so a
+# quote credited to `SKILL.md` for a sentence that has moved into a reference
+# file is a real drift in the CITING file and reds here. Searching one file at a
+# time is also what keeps a needle from matching across a file boundary.
 attributed = 0
 for path in sorted(p for p in owners if p.suffix in (".js", ".sh")):
     flat = re.sub(r"\s+", " ",
@@ -4731,13 +4755,29 @@ for path in sorted(p for p in owners if p.suffix in (".js", ".sh")):
                          texts[path].replace("\r\n", "\n")))
     for quoted in re.finditer(r"[\"“]([^\"“”]{20,300})[\"”]", flat):
         tail = flat[quoted.end():quoted.end() + 160]
-        if not any(credit in tail for credit in ROSTER_CREDITS):
+        cited = ROSTER_CITE.findall(tail)
+        if not cited:
             continue
         attributed += 1
+        where = path.relative_to(plugin_dir).as_posix()
+        named, unknown = {}, []
+        for cite in cited:
+            # A directory citation names its whole contents; a file citation
+            # names exactly one file. Either way each candidate stays separate.
+            hits = {name: body for name, body in ROSTER_FLAT.items()
+                    if (name.startswith(cite) if cite.endswith("/") else name == cite)}
+            if hits:
+                named.update(hits)
+            else:
+                unknown.append(cite)
+        if unknown:
+            print("T20.6 %s quotes %r and credits %s, which is not a file in the post-impl-review skill"
+                  % (where, quoted.group(1), ", ".join(sorted(set(unknown)))))
+            ok = False
         needle = re.sub(r"\s+", " ", quoted.group(1)).strip().casefold()
-        if needle not in re.sub(r"\s+", " ", roster_all).casefold():
-            print("T20.6 %s quotes %r and credits the post-impl-review skill, which does not contain it"
-                  % (path.relative_to(plugin_dir).as_posix(), quoted.group(1)))
+        if named and not any(needle in body for body in named.values()):
+            print("T20.6 %s quotes %r and credits %s, which does not contain it"
+                  % (where, quoted.group(1), ", ".join(sorted(named))))
             ok = False
 if attributed < 2:
     print("T20.6 found %d attributed quotation(s) in the review-fleet sources — it has stopped detecting"

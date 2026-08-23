@@ -636,11 +636,60 @@ observable state, because one means "clean" and the other means "something broke
 
 ## The severity rule
 
-The built-in reviewer emits **no severity field in either contract**, so
-`/premerge` derives one. The whole derivation — and the rule that `verdict` is
-**confidence, not severity**, so `PLAUSIBLE` never maps to `suggestion` — is in
-`references/phase-contracts.md`. Derive severity from that file, never from
-memory.
+The built-in reviewer emits **no severity field in either contract**. `/premerge`
+derives one, and this is the entire derivation:
+
+> **`blocker`** — the finding names a concrete path to wrong output, a crash, data
+> loss, a security hole, or a broken build/CI invariant. Its `failure_scenario`
+> describes observable misbehaviour with inputs or state that reach it.
+>
+> **`suggestion`** — everything else: duplicated logic, needless complexity,
+> wasted work, wrong abstraction altitude, a convention violation, a missing test.
+> Real, worth doing, not worth holding the stack for.
+
+Two constraints on applying it:
+
+1. **When the finding carries a `category`, the category decides and your
+   judgement does not get a vote.** `lib/premerge-findings.py` maps the reviewer's
+   own cleanup vocabulary to `suggestion` and everything else to `blocker`, and it
+   **exits non-zero** on a severity that contradicts the category. This is not
+   advisory: the free-judgement path exists only where no machine-checkable signal
+   does, and it collapses to the checked path the instant one appears.
+
+   The cleanup vocabulary is **this exact set** — apply it literally, do not
+   paraphrase it, and do not extend it:
+
+   ```text premerge-cleanup-categories
+   reuse  simplification  simplify  efficiency  performance  altitude
+   conventions  convention  style  documentation  docs
+   test-coverage  tests  naming  readability
+   ```
+
+   Every other slug is correctness-class, so the severity you write for a
+   finding carrying one **must** be `blocker`. (`CLEANUP_CATEGORIES` in
+   `lib/premerge-findings.py` is the enforcer and the source of truth; this copy
+   exists because the controller that writes `severity` never opens that file,
+   and a rule it cannot see is a rule it will break.)
+
+   **This copy is the one the controller reads; it is not the one the test
+   compares.** `tests/premerge.test.sh` P3b checks the copy in
+   `references/phase-contracts.md` against the library — edit all three in step.
+2. **An unfamiliar category is treated as correctness-class, and reading that
+   the other way costs the whole attempt.** The asymmetry itself is deliberate: a
+   novel *correctness* slug silently demoted to `suggestion` ships the bug. But
+   the price of the safe direction is not "one needless fixer dispatch". A slug
+   that is not in the set above, written up as `suggestion` because it *reads*
+   like a cleanup, is `severity_contradicts_category` — `plan` **exits 74 before
+   writing anything**, which per `## Phase 2 — TRIAGE` is a hard stop for the
+   attempt, not a fall-through. The needless fixer dispatch is what you get from
+   classifying it `blocker`, as the rule requires: that is the cheap outcome, and
+   it is the one to pick.
+
+`verdict` is **confidence, not severity** — `CONFIRMED` vs `PLAUSIBLE` says how
+sure the reviewer is that the mechanism is real, not how much it matters. Never
+map `PLAUSIBLE` to `suggestion`. At `xhigh` on Opus-family models no verify pass
+runs at all and `verdict` is absent from every finding, so any rule built on it
+would silently become a no-op exactly where it was supposed to help.
 
 ---
 
@@ -892,7 +941,7 @@ git commit -m "fix(premerge): address code-review blockers on the stack (attempt
 # printed neither a `PREMERGE FIX COMMIT=` line nor a cause -- mid-way through an
 # autonomous loop with nobody watching. `### 0c`'s push is the model.
 PREMERGE_PUSH_ERR="$(git push origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
-  # Bounded and defused first — `### What a failed push is allowed to say`.
+  # Bounded and defused first — references/phase-contracts.md, `### What a failed push is allowed to say`.
   PREMERGE_PUSH_ERR="$(printf '%s' "${PREMERGE_PUSH_ERR//PREMERGE/PRE-MERGE}" | tr -s '\n\r\t' ' ' | cut -c1-200)"
   printf 'error: pushing the attempt-%s fix commit to %s failed: %s\n' \
     "$PREMERGE_ATTEMPT" "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2
@@ -1522,7 +1571,7 @@ case "$PREMERGE_CI_ARM" in
       exit 2
     fi
     PREMERGE_PUSH_ERR="$(git push origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
-      # Bounded and defused first — `### What a failed push is allowed to say`.
+      # Bounded and defused first — references/phase-contracts.md, `### What a failed push is allowed to say`.
       PREMERGE_PUSH_ERR="$(printf '%s' "${PREMERGE_PUSH_ERR//PREMERGE/PRE-MERGE}" | tr -s '\n\r\t' ' ' | cut -c1-200)"
       printf 'error: publishing the CI repair (arm=commit, attempt %s) to %s failed: %s\n' \
         "$PREMERGE_ATTEMPT" "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2
@@ -1583,7 +1632,7 @@ case "$PREMERGE_CI_ARM" in
     # arm, because the branch is already rebased locally by the time this line runs.
     PREMERGE_PUSH_ERR="$(git push --force-with-lease="$PREMERGE_BRANCH:$PREMERGE_CI_LEASE" --force-if-includes origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
       # CLASSIFY THE RAW CAPTURE; BOUND ONLY WHAT IS PRINTED. The ordering and
-      # the measurements are in `### What a failed push is allowed to say`.
+      # the measurements are in references/phase-contracts.md, `### What a failed push is allowed to say`.
       # Bounding first hid the marker this arm exists to name, behind git's
       # `To <remote>` line and the server's `remote:` banner; flattening first
       # let `.*` bridge two unrelated lines. grep is line-oriented and drained,
@@ -1776,7 +1825,7 @@ fi
 git add -u || exit 2
 git commit -m "refactor(premerge): apply simplify lenses to the stack" >/dev/null || exit 2
 PREMERGE_PUSH_ERR="$(git push origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
-  # Bounded and defused first — `### What a failed push is allowed to say`.
+  # Bounded and defused first — references/phase-contracts.md, `### What a failed push is allowed to say`.
   PREMERGE_PUSH_ERR="$(printf '%s' "${PREMERGE_PUSH_ERR//PREMERGE/PRE-MERGE}" | tr -s '\n\r\t' ' ' | cut -c1-200)"
   printf 'error: pushing the simplify commit to %s failed: %s\n' \
     "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2

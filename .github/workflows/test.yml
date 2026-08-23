@@ -668,6 +668,20 @@ jobs:
 #                                         portable shape gates live in
 #                                         premerge.test.sh, which DOES run on
 #                                         both jobs)
+#   - agent-description-budget.test.sh   (the A0-A4 probe does `import yaml`
+#                                         and PyYAML is not importable on
+#                                         windows-latest — the same dependency
+#                                         that already declares
+#                                         ubersimplify-aggregate.test.sh and
+#                                         the four testers-* fixtures above
+#                                         [#520]. The shell half is genuinely
+#                                         portable — pure file reads, no path
+#                                         separators — so this is a
+#                                         missing-dependency skip, not a
+#                                         Git-Bash path-translation one; the
+#                                         fixture itself REFUSES with rc=2
+#                                         rather than reporting success over
+#                                         an unexecuted body.)
 # === END ci-wiring windows-skip-list ===
         # review-child-handoff and run-manifest use bounded native-Windows
         # modes for carrier/path serialization and captured publication retry;
@@ -754,7 +768,6 @@ jobs:
           run_one bash tests/spec-reviewer-plan-aware.test.sh
           run_one bash tests/leaf-worker-contract.test.sh
           run_one bash tests/audit-fixups.test.sh
-          run_one bash tests/agent-description-budget.test.sh
           run_one bash tests/review-pr.test.sh
           run_one bash tests/prkit-manifest.test.sh
           run_one bash tests/cluster.test.sh

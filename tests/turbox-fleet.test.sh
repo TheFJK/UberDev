@@ -51,6 +51,11 @@ SKILL_SET=( "$SKILL" )
 for _ref in "$SKILL_DIR"/references/*.md; do
   [ -r "$_ref" ] && SKILL_SET+=( "$_ref" )
 done
+# The one reference file named individually, and only because ONE row needs a
+# section scope rather than the set: TX16's Phase-3 `plan_path` row. Its needle
+# also occurs under Phase 4 in SKILL.md, so a set-wide grep cannot tell the rung
+# from the line that predates it. See the comment at that row.
+DESIGN_PATH_REF="$SKILL_DIR/references/design-path.md"
 LIB="$REPO_ROOT/plugins/uberdev/lib/turbox-fleet.sh"
 LAUNCHER="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
 RFC="$REPO_ROOT/docs/rfc/0020-turbox-standard-mode-fleet.md"
@@ -387,22 +392,32 @@ echo "== TX16: the design path is two rungs, and no spec artifact survives =="
 # and to a requirements document -- and the fourth is the negative control that
 # says the thing it replaced is actually gone.
 ck "the design rung dispatches design-planner"  "grep -q 'uberdev:design-planner' \"\${SKILL_SET[@]}\""
-# Scoped to the Phase 3 section on purpose. The same token appears in Phase 4's
-# `plan-tasks --plan` line, which predates the collapse -- so a whole-file grep
-# is vacuous: it stays green on a skill whose design rung binds no `plan_path`
-# at all, and it passes unchanged against the pre-collapse skill. Only the
-# section-scoped form proves the RUNG is pointed at that path. The awk range
-# reads to EOF, so it is E1-safe, and the needle carries no `$` (ck() evals).
+# Scoped to the Phase 3 section on purpose, and pointed at the file that HOLDS
+# that section. This is the ONE content row that must not read the globbed set:
+# the same token also sits in SKILL.md under `## Phase 4 — Implementation
+# waves`, on the `plan-tasks --plan` line that predates the collapse. A grep
+# over the whole set is therefore vacuous -- it stays green on a design rung
+# that binds no `plan_path` at all, and it passes unchanged against the
+# pre-collapse skill. Only the section-scoped form proves the RUNG is pointed at
+# that path. Measured, not assumed: deleting the `plan_path` binding from
+# references/design-path.md REDs this row, and left it green when the row was a
+# whole-set grep.
 #
-# The range's END pattern is load-bearing, and it is NOT independent of TX3: it
-# is TX3's `has '## Phase 4 '` row that keeps `/^## Phase 4 /` matchable. If TX3
-# ever reds and someone repairs it by LOOSENING the pattern instead of restoring
-# the heading, this range stops terminating, runs to EOF, swallows Phase 4's own
-# `plan-tasks --plan <runDirAbs>/issue-<N>/plan.md` line, and this row goes
-# silently vacuous again — green while asserting nothing. Repair a red TX3 by
-# restoring the heading, never by relaxing either pattern.
+# The slice is a flag, not a range: `f` is (re)set on EVERY `## ` heading to
+# whether that heading is Phase 3's, so it opens at `## Phase 3` and closes at
+# the next `## ` heading whatever that heading is named. It does NOT depend on a
+# `## Phase 4 ` heading being matchable -- design-path.md carries Phases 2 and 3
+# only, so the slice legitimately runs to EOF -- which also decouples it from
+# TX3, whose Phase-4 row used to be this range's load-bearing terminator. awk
+# reads its input to EOF (no early-exiting reader on the pipe), so it is
+# E1-safe; the awk program carries no `$` column ref and the needle carries no
+# `$` either, because ck() evals the string.
+#
+# If Phase 3's prose moves again this row goes RED, not vacuous: the slice comes
+# back empty and the count is 0. Repair it by re-pointing DESIGN_PATH_REF at
+# wherever the rung then lives -- never by widening it back to the skill set.
 ck "the design rung writes plan.md in the run dir" \
-   "[ \$(skill_count '<runDirAbs>/issue-<N>/plan.md') -ge 1 ]"
+   "[ \$(awk '/^## /{f = /^## Phase 3/} f' '$DESIGN_PATH_REF' | grep -c '<runDirAbs>/issue-<N>/plan.md') -ge 1 ]"
 # Both reviewer rungs read the issue body as their requirements document on this
 # lane -- Phase 3's plan-reviewer and Phase 5's spec-compliance-reviewer. The
 # count is >= 2 because ONE of them stating it is the half-migration that would
