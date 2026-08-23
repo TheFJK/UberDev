@@ -3244,9 +3244,11 @@ echo "== T17: the brainstorm launcher is invoked through bash, with the reason r
 # with nothing noticing. Two halves are locked here:
 #   (a) the shape — every documented launch goes through `bash`, and NO bare form survives at any
 #       indentation, plus the reason recorded where the next editor reads it (the Windows block);
-#   (b) the cross-file citation — orchestrator/SKILL.md quotes a fragment OUT of this file, and it
+#   (b) the cross-file citation — the orchestrator quotes a fragment OUT of this file, and it
 #       used to name a LINE RANGE (`visual-companion.md:118-127`). Editing (a) shifted those lines
 #       and silently invalidated it. Same class as #349 / T9: anchor on a SYMBOL that resolves.
+#       Since #747 that quote lives in orchestrator/references/visual-companion.md rather than in
+#       the orchestrator body, so BOTH files are guarded — see the T17.1a/T17.1b note below.
 #
 # FLOOR, NOT AN EXACT COUNT (deliberate, see #533 review finding 4). The absence row forbids ANY bare
 # invocation, whitespace-tolerantly — that alone fully enforces "every invocation is prefixed". The
@@ -3259,15 +3261,42 @@ echo "== T17: the brainstorm launcher is invoked through bash, with the reason r
 # lane (skills/solve-fleet/workflow.js).
 VC_MD="$REPO_ROOT/plugins/uberdev/skills/brainstorm/visual-companion.md"
 ORCH_SKILL="$REPO_ROOT/plugins/uberdev/skills/orchestrator/SKILL.md"
-if [ ! -r "$VC_MD" ] || [ ! -r "$ORCH_SKILL" ]; then
+# #747 — the Phase 2 visual-companion flow, and the cross-file citation it
+# carries, moved into this reference file when the orchestrator body was cut
+# toward Anthropic's 500-line ceiling. The citation still belongs to the
+# orchestrator skill; it is just no longer in the body file.
+ORCH_VC_REF="$REPO_ROOT/plugins/uberdev/skills/orchestrator/references/visual-companion.md"
+# The reference file belongs in this pre-flight, not just in the rows: T17.1b reads
+# it with `grep -qF`, and grep on a path that does not exist exits non-zero — which
+# an ABSENCE row scores as "the literal is not present", i.e. a silent PASS. A
+# deleted or unreadable reference file has to fail loudly HERE, where the message
+# can name it, rather than be caught incidentally by T17.2a.
+if [ ! -r "$VC_MD" ] || [ ! -r "$ORCH_SKILL" ] || [ ! -r "$ORCH_VC_REF" ]; then
   echo "  FAIL  T17.0 corpus missing or unreadable — every row below would pass vacuously"
   echo "        visual-companion: $VC_MD"
   echo "        orchestrator:     $ORCH_SKILL"
-  FAIL=$((FAIL + 10))
+  echo "        orchestrator ref: $ORCH_VC_REF"
+  FAIL=$((FAIL + 11))
 else
+  # BOTH files, not a swap. The citation moved into the reference file (#747), so
+  # that is where a line anchor gets reintroduced today; the body file is where the
+  # `:118-127` rot actually happened, and nothing prevents a future edit from
+  # pulling the flow back inline. Guarding one and dropping the other just trades
+  # one blind spot for the other.
+  #
+  # SCOPE, unchanged since #533: this row governs the `visual-companion.md`
+  # citation. Line-anchored citations to OTHER files are a separate, pre-existing
+  # convention in this skill — `merge-pipeline/SKILL.md:343` sits in the body and
+  # was green under this row for its whole life, and `skills/brainstorm/SKILL.md:166`,
+  # `agents/spec-writer.md:30` and `skills/brainstorm/SKILL.md:206-214` moved into
+  # the reference file verbatim from that same body. Widening the literal here would
+  # not be a re-point, it would be a new rule retro-applied to text this row never
+  # covered; that belongs in its own row with its own remediation.
   assert_absent_fixed "$ORCH_SKILL" 'visual-companion.md:' \
-    "T17.1 the orchestrator's cross-file citation carries no line-number anchor"
-  assert_grep "$ORCH_SKILL" 'Unload when returning to terminal' \
+    "T17.1a the orchestrator body carries no line-number anchor on that citation"
+  assert_absent_fixed "$ORCH_VC_REF" 'visual-companion.md:' \
+    "T17.1b nor does the reference file the citation moved into"
+  assert_grep "$ORCH_VC_REF" 'Unload when returning to terminal' \
     "T17.2a the orchestrator anchors on the step's heading text instead"
   assert_grep "$VC_MD" 'Unload when returning to terminal' \
     "T17.2b that heading still resolves in the file it cites"
@@ -4554,6 +4583,34 @@ tiers = list(st.TIERS)
 
 roster_md = plugin_dir / "skills" / "post-impl-review" / "SKILL.md"
 roster_text = roster_md.read_text(encoding="utf-8").replace("\r\n", "\n")
+# #747 — the post-impl-review body was cut toward Anthropic's 500-line ceiling
+# and its roster table, fanout-cap precedence and failure boundary moved into
+# reference files the body points at. A quotation credited to a reference file is
+# therefore checked against THAT reference file; checking the body alone would
+# report a correctly-cited sentence as a fabrication.
+#
+# The files are kept SEPARATE, keyed by the pathname a shipped source would cite
+# them with. Concatenating the skill directory into one haystack would trade away
+# both halves of this row's precision: a sentence credited to `SKILL.md` would be
+# satisfied by text that exists only in a reference file (the row would stop
+# checking WHICH file the citation names, which is the whole job), and — because
+# the join collapses to a single space under the normalisation below — a needle
+# spanning one file's tail and the next one's head would match a string that
+# appears in neither.
+ROSTER_FILES = {"post-impl-review/SKILL.md": roster_text}
+for ref in sorted((roster_md.parent / "references").glob("*.md")):
+    ROSTER_FILES["post-impl-review/references/" + ref.name] = (
+        ref.read_text(encoding="utf-8").replace("\r\n", "\n"))
+# Normalised once, per file, in the same shape the quotations are flattened into.
+ROSTER_FLAT = {name: re.sub(r"\s+", " ", body).casefold()
+               for name, body in ROSTER_FILES.items()}
+# A credit is a PATHNAME, and it is resolved to the file it names. Bare
+# `post-impl-review` is not enough: the artifact filename `post-impl-review-final.md`
+# occurs inside quoted prompt text and is not a citation of the skill. A bare
+# `references/` with no filename names the directory, so it resolves to every file
+# in that directory — each still searched on its own, never joined.
+ROSTER_CITE = re.compile(
+    r"post-impl-review/(?:SKILL\.md|references/(?:[A-Za-z0-9._-]+\.md)?)")
 ok = True
 
 # T20.1 — anti-vacuity for the roster. A renamed marker or a reshaped block
@@ -4709,19 +4766,42 @@ else:
 # mid-sentence quotations, so a leading capital is the quoter's, not a
 # divergence. Only the DERIVED owner set is read, and only its source files —
 # markdown carries `#` as syntax, which this normalisation would eat.
+#
+# The needle is looked for in the file the citation NAMES, one file at a time.
+# That is the row's whole job: a citation of file X is evidence about X, so a
+# quote credited to `SKILL.md` for a sentence that has moved into a reference
+# file is a real drift in the CITING file and reds here. Searching one file at a
+# time is also what keeps a needle from matching across a file boundary.
 attributed = 0
 for path in sorted(p for p in owners if p.suffix in (".js", ".sh")):
     flat = re.sub(r"\s+", " ",
                   re.sub(r"\n\s*(?://+|#+)\s*", " ",
                          texts[path].replace("\r\n", "\n")))
     for quoted in re.finditer(r"[\"“]([^\"“”]{20,300})[\"”]", flat):
-        if "post-impl-review/SKILL.md" not in flat[quoted.end():quoted.end() + 160]:
+        tail = flat[quoted.end():quoted.end() + 160]
+        cited = ROSTER_CITE.findall(tail)
+        if not cited:
             continue
         attributed += 1
+        where = path.relative_to(plugin_dir).as_posix()
+        named, unknown = {}, []
+        for cite in cited:
+            # A directory citation names its whole contents; a file citation
+            # names exactly one file. Either way each candidate stays separate.
+            hits = {name: body for name, body in ROSTER_FLAT.items()
+                    if (name.startswith(cite) if cite.endswith("/") else name == cite)}
+            if hits:
+                named.update(hits)
+            else:
+                unknown.append(cite)
+        if unknown:
+            print("T20.6 %s quotes %r and credits %s, which is not a file in the post-impl-review skill"
+                  % (where, quoted.group(1), ", ".join(sorted(set(unknown)))))
+            ok = False
         needle = re.sub(r"\s+", " ", quoted.group(1)).strip().casefold()
-        if needle not in re.sub(r"\s+", " ", roster_text).casefold():
-            print("T20.6 %s quotes %r and credits post-impl-review/SKILL.md, which does not contain it"
-                  % (path.relative_to(plugin_dir).as_posix(), quoted.group(1)))
+        if named and not any(needle in body for body in named.values()):
+            print("T20.6 %s quotes %r and credits %s, which does not contain it"
+                  % (where, quoted.group(1), ", ".join(sorted(named))))
             ok = False
 if attributed < 2:
     print("T20.6 found %d attributed quotation(s) in the review-fleet sources — it has stopped detecting"

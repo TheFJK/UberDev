@@ -17,6 +17,12 @@ set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SKILL="$REPO_ROOT/plugins/uberdev/skills/orchestrator/SKILL.md"
+# #747 — the cache-deletion decision record moved into this reference file
+# when the orchestrator body was cut toward Anthropic's 500-line ceiling. The
+# body keeps the heading and the "do not reintroduce without reading the
+# binding rules" pointer; the binding rules themselves live here, so the two
+# rows that quote them read this file.
+SKILL_TIERS_REF="$REPO_ROOT/plugins/uberdev/skills/orchestrator/references/tiers-and-recovery.md"
 
 # Pre-flight: refuse to run if the files we're asserting against are missing
 # or unreadable — without this, every assertion fails with a confusing
@@ -64,13 +70,13 @@ echo "== Cache-deletion decision record present (#308 / RFC 0012 §3.5) =="
 assert_grep "$SKILL" \
   '^### Phase 1 research cache — deleted' \
   'cache-deletion decision-record heading present'
-assert_grep "$SKILL" \
+assert_grep "$SKILL_TIERS_REF" \
   'zero writers' \
   'decision record cites the zero-writers finding'
-assert_grep "$SKILL" \
+assert_grep "$SKILL_TIERS_REF" \
   'git rev-parse --git-common-dir' \
   'future-reintroduction rule pins --git-common-dir for the MAIN repo root'
-assert_grep "$SKILL" \
+assert_grep "$SKILL_TIERS_REF" \
   'thin preflight probe' \
   'future-reintroduction rule forbids re-growing an inline freshness predicate'
 

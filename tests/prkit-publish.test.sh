@@ -100,9 +100,9 @@ missing = sorted(manifest - recorded)
 extra = sorted(recorded - manifest)
 assert not missing, f"in manifest, absent from record: {missing}"
 assert not extra, f"in record, absent from manifest: {extra}"
-assert len(recorded) == 43, f"copyset has {len(recorded)} paths (expected 43)"
+assert len(recorded) == 44, f"copyset has {len(recorded)} paths (expected 44)"
 PY
-then ok "P2 the record's copy set is exactly the 43-entry manifest, both directions"
+then ok "P2 the record's copy set is exactly the 44-entry manifest, both directions"
 else no "P2 record and manifest disagree about the copy set"
 fi
 

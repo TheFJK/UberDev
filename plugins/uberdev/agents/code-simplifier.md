@@ -1,44 +1,6 @@
 ---
 name: code-simplifier
-description: |
-  Use ONLY when explicitly invoked as a Phase 2 lens by `/uberdev:review-pr` (three Task() calls with `subagent_type: uberdev:code-simplifier`, parameterised by `## Lens emphasis: Reuse|Quality|Efficiency`), as a standalone audit by `/uberdev:simplify`, or as the Phase 4 lens trio of `/uberdev:premerge` (the same three-call shape, against the stack PR's diff, and only after that command's clean gate has passed). Do not auto-trigger on conversational mentions of "simplify", "clean up", "refactor", or after generic coding work — the agent is audit-only and the named-lens-dispatcher pattern is the single source of truth for when it runs.
-
-  When invoked, the agent audits recently-modified code for simplification opportunities and returns advisory findings (`file:line` + description). It does not modify files; the controller or a downstream writer command (`/uberdev:simplify`, `/uberdev:review-pr` Phase 2, `/uberdev:premerge` Phase 4b) applies fixes. The agent focuses only on recently modified code unless instructed otherwise.
-
-  Examples (illustrating the simplification logic — these are NOT auto-trigger licenses; the gating rule above still applies):
-
-  <example>
-  Context: The assistant has just implemented a new feature that adds user authentication to an API endpoint.
-  user: "Please add authentication to the /api/users endpoint"
-  assistant: "I've implemented the authentication for the /api/users endpoint. Here's the code:"
-  <function call omitted for brevity>
-  <commentary>
-  Since a logical chunk of code has been written (authentication feature), use the Task tool to launch the uberdev:code-simplifier agent to audit the code and surface advisory findings about clarity and maintainability. The agent does not modify files; any fixes are applied later by the controller or a downstream writer command.
-  </commentary>
-  assistant: "Now let me use the uberdev:code-simplifier agent to audit this implementation and surface advisory findings about clarity and maintainability"
-  </example>
-
-  <example>
-  Context: The assistant has just fixed a bug by adding several conditional checks.
-  user: "Fix the null pointer exception in the data processor"
-  assistant: "I've added the necessary null checks to prevent the exception:"
-  <function call omitted for brevity>
-  <commentary>
-  After modifying code to fix a bug, use the uberdev:code-simplifier agent to audit the fix and surface advisory findings on best practices and code quality.
-  </commentary>
-  assistant: "Let me audit this bug fix using the uberdev:code-simplifier agent to surface advisory findings about our best practices"
-  </example>
-
-  <example>
-  Context: The assistant has just refactored a function to improve performance.
-  user: "Optimize the data sorting algorithm for better performance"
-  assistant: "I've optimized the sorting algorithm. Here's the updated implementation:"
-  <function call omitted for brevity>
-  <commentary>
-  After completing a performance optimization task, use the uberdev:code-simplifier agent to audit the optimized code for clarity and maintainability and surface advisory findings.
-  </commentary>
-  assistant: "Now I'll use the uberdev:code-simplifier agent to audit the optimized code for clarity and surface advisory findings on our coding standards"
-  </example>
+description: Audit-only simplification lens over recently-modified code, returning advisory `file:line` findings; it never edits files. Dispatch ONLY as a named lens — the Phase 2 lens trio of `/uberdev:review-pr`, a standalone `/uberdev:simplify` audit, or the Phase 4 trio of `/uberdev:premerge` — each parameterised by a Reuse|Quality|Efficiency emphasis. Never auto-trigger on talk of simplifying or refactoring, or after generic coding work.
 model: inherit
 ---
 <!-- Vendored from anthropics/claude-plugins-official@ceb9b72b4c4c20ad39efce780edd0aabe80ebce3 (Apache-2.0). Base evidenced by blob identity, not asserted: the bytes copied at that commit are upstream blob 05e361b4ef1b688203251989707f8a924a9ed266, the same object id this file carried when it was vendored here. Local deltas since: the description frontmatter rewritten into the named-lens gating contract (audit-only, never conversationally auto-triggered), model routing set to inherit, per-lens Reuse/Quality/Efficiency checklists and a return contract added, plus secret-leak reporting rules. -->

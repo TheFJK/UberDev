@@ -30,6 +30,14 @@ set -o pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TEST_FILE="$REPO_ROOT/tests/post-impl-review.test.sh"
 POST_IMPL="$REPO_ROOT/plugins/uberdev/skills/post-impl-review/SKILL.md"
+# #747 — the reviewer roster table, the fanout-cap precedence, the
+# evidence-failure taxonomy, the convention citation gate and the whole
+# integration contract moved into this reference file when SKILL.md was cut
+# toward Anthropic's 500-line ceiling. The BYTES are unchanged; only the
+# file holding them moved, so an assertion about that content now names
+# this path. Fence extraction still reads $POST_IMPL — no executable fence
+# moved.
+POST_IMPL_REF="$REPO_ROOT/plugins/uberdev/skills/post-impl-review/references/contracts.md"
 REVIEW_AGG="$REPO_ROOT/plugins/uberdev/lib/review-aggregate.sh"
 PHASE1_ORACLE_RELPATH="tests/fixtures/findings-to-issues/post-impl-review-final.sample.md"
 PHASE1_EMPTY_ORACLE_RELPATH="tests/fixtures/findings-to-issues/post-impl-review-empty.sample.md"
@@ -44,7 +52,7 @@ SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
 # explicit rc=2, never a silently-zero-assertion PASS.
 REVIEW_FLEET_JS="$REPO_ROOT/plugins/uberdev/skills/review-fleet/workflow.js"
 
-for f in "$POST_IMPL" "$SOLVE_CMD" "$SUBAGENT_DRIVEN" "$SOLVE_PIPELINE" "$REVIEW_FLEET_JS"; do
+for f in "$POST_IMPL" "$POST_IMPL_REF" "$SOLVE_CMD" "$SUBAGENT_DRIVEN" "$SOLVE_PIPELINE" "$REVIEW_FLEET_JS"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -87,26 +95,37 @@ assert_grep "$POST_IMPL" 'pr-test-analyzer' "pr-test-analyzer named (6th reviewe
 assert_grep "$POST_IMPL" 'silent-failure-hunter' "silent-failure-hunter named"
 assert_grep "$POST_IMPL" 'type-design-analyzer' "type-design-analyzer named"
 assert_grep "$POST_IMPL" 'comment-analyzer' "comment-analyzer named"
-# Anti-regression: code-simplifier MUST NOT be in the Step 2 dispatch table region
-# (it moved to Phase 2 of /uberdev:review-pr as the named lens dispatcher per #73).
+# Anti-regression: code-simplifier MUST NOT be a row of the reviewer dispatch
+# table (it moved to Phase 2 of /uberdev:review-pr as the named lens dispatcher
+# per #73).
+#
+# #747 moved that table out of SKILL.md's Step 2 and into $POST_IMPL_REF. The
+# old `awk /^### Step 2:/,/^### Step 3:/` region over $POST_IMPL now holds the
+# child-callsite-contracts JSON and no markdown table at all, so the absence
+# check was inspecting a region that CANNOT contain its subject — the #347
+# vacuous-pass shape. Read the table where it now lives, and refuse to pass
+# unless the slice actually contains the table's header row.
 # Herestring, not a pipe: `grep -q` exits on its first match, which SIGPIPEs awk
 # and — under this file's `set -o pipefail` — turns a successful match into a
 # non-zero pipeline status on Linux CI.
-STEP2_TABLE_REGION="$(awk '/^### Step 2:/,/^### Step 3:/' "$POST_IMPL")"
-if grep -qE '\| .code-simplifier. \|' <<<"$STEP2_TABLE_REGION"; then
-  echo "  FAIL  code-simplifier MUST NOT appear in Step 2 dispatch table (moved to Phase 2 lens per #73)"
+ROSTER_TABLE_REGION="$(awk '/^## Reviewer roster and the fanout cap/{f=1} f; /^## The evidence ledger/{f=0}' "$POST_IMPL_REF")"
+if ! grep -qF '| Reviewer | Agent file | Lens |' <<<"$ROSTER_TABLE_REGION"; then
+  echo "  FAIL  reviewer dispatch table not found in the roster section of $POST_IMPL_REF (section or table header renamed?) — refusing a vacuous absence PASS"
+  FAIL=$((FAIL + 1))
+elif grep -qE '\| .code-simplifier. \|' <<<"$ROSTER_TABLE_REGION"; then
+  echo "  FAIL  code-simplifier MUST NOT appear in the reviewer dispatch table (moved to Phase 2 lens per #73)"
   FAIL=$((FAIL + 1))
 else
-  echo "  PASS  code-simplifier removed from Step 2 dispatch table (Phase 1 → Phase 2 lens migration)"; PASS=$((PASS + 1))
+  echo "  PASS  code-simplifier removed from the reviewer dispatch table (Phase 1 → Phase 2 lens migration)"; PASS=$((PASS + 1))
 fi
 # F3 — dispatch table row count, anchored on the FIRST column (the reviewer
 # name) to avoid over-matching row dividers. The first column shape is
 # "| `<name>`" optionally followed by " (qualifier)" before the next pipe —
 # the second `code-reviewer` row uses " (general lens)" so we tolerate any
 # non-pipe trailing chars between the closing backtick and the next "|".
-assert_count "$POST_IMPL" '^### Step 2: ' '^### Step 3: ' '^\| .code-[a-z-]+.[^|]*\||^\| .pr-test-analyzer.[^|]*\||^\| .silent-failure-hunter.[^|]*\||^\| .type-design-analyzer.[^|]*\||^\| .comment-analyzer.[^|]*\||^\| .convention-compliance.[^|]*\|' \
+assert_count "$POST_IMPL_REF" '^## Reviewer roster and the fanout cap' '^## The evidence ledger' '^\| .code-[a-z-]+.[^|]*\||^\| .pr-test-analyzer.[^|]*\||^\| .silent-failure-hunter.[^|]*\||^\| .type-design-analyzer.[^|]*\||^\| .comment-analyzer.[^|]*\||^\| .convention-compliance.[^|]*\|' \
   7 \
-  "Step 2 dispatch table has exactly 7 reviewer rows (one per dispatch slot, including 2 code-reviewer rows)"
+  "reviewer dispatch table has exactly 7 reviewer rows (one per dispatch slot, including 2 code-reviewer rows)"
 assert_grep "$POST_IMPL" 'dispatch-all-before-wait|dispatch.*before waiting' \
   "dispatch-before-wait invariant documented"
 assert_grep "$POST_IMPL" 'configured wave|each wave|within.*wave' \
@@ -252,13 +271,13 @@ ROSTER_FILES="$(sed -n '/^const REVIEW_ROSTER = \[/,/^];/p' "$REVIEW_FLEET_JS" \
 # The table's second column, block-scoped from its header row to the next blank
 # line. `agents/` and the ` (inherit)` adornment are stripped so both sides
 # speak the roster's bare-filename vocabulary.
-TABLE_FILES="$(awk '/^\| Reviewer \| Agent file \| Lens \|/{f=1;next} f&&/^$/{exit} f' "$POST_IMPL" \
+TABLE_FILES="$(awk '/^\| Reviewer \| Agent file \| Lens \|/{f=1;next} f&&/^$/{exit} f' "$POST_IMPL_REF" \
   | grep -v '^|[- |]*|$' | awk -F'|' '{print $3}' \
   | sed 's/`//g; s/ (inherit)//; s#agents/##; s/^ *//; s/ *$//')"
 # The "Pairs with:" prose is explicitly the SIX DISTINCT files, so it is
 # compared de-duplicated. Its block is the last one in the file, so the
 # terminator must be "blank line OR EOF" — which is what a bare `f` action does.
-PAIRS_FILES="$(awk '/^\*\*Pairs with:\*\*/{f=1;next} f&&/^$/{exit} f' "$POST_IMPL" \
+PAIRS_FILES="$(awk '/^\*\*Pairs with:\*\*/{f=1;next} f&&/^$/{exit} f' "$POST_IMPL_REF" \
   | grep -o 'agents/[a-z0-9-]*\.md' | sed 's#agents/##' | sort -u)"
 ROSTER_FILES_UNIQ="$(sort -u <<<"$ROSTER_FILES")"
 ROSTER_COUNT="$(grep -c . <<<"$ROSTER_FILES")"
@@ -281,7 +300,7 @@ if [ "$TABLE_COUNT" -eq "$ROSTER_COUNT" ]; then
   PASS=$((PASS + 1))
 else
   echo "  FAIL  R-roster-files — the reviewer table has $TABLE_COUNT row(s) for $ROSTER_COUNT roster record(s)"
-  echo "        file: $POST_IMPL"
+  echo "        file: $POST_IMPL_REF"
   FAIL=$((FAIL + 1))
 fi
 if [ "$PAIRS_COUNT" -eq "$ROSTER_UNIQ_COUNT" ]; then
@@ -289,7 +308,7 @@ if [ "$PAIRS_COUNT" -eq "$ROSTER_UNIQ_COUNT" ]; then
   PASS=$((PASS + 1))
 else
   echo "  FAIL  R-roster-files — the 'Pairs with:' prose names $PAIRS_COUNT file(s) for $ROSTER_UNIQ_COUNT distinct roster file(s)"
-  echo "        file: $POST_IMPL"
+  echo "        file: $POST_IMPL_REF"
   FAIL=$((FAIL + 1))
 fi
 # ORDERED, not set-equal: a set compare passes straight through a swap of two
@@ -460,11 +479,27 @@ assert_no_grep "$POST_IMPL" 'end-of-issue from subagent-driven-dev' \
   "frontmatter description no longer names subagent-driven-dev as a caller"
 assert_grep "$POST_IMPL" 'post-impl-review-final\.md' \
   "Step 4 output paths name the canonical post-impl-review-final.md (no wave- infix)"
-assert_grep "$POST_IMPL" 'Findings artifact contract' \
+# #747 — the WHOLE Integration contract moved into $POST_IMPL_REF, and SKILL.md
+# kept only a one-line CROSS-REFERENCE to it: line 18's "…see the 'Pre-push
+# bypass (documented opt-out)' subsection under Integration below". A whole-file
+# grep on $POST_IMPL was satisfied by that pointer, so deleting the subsection it
+# points AT left the row green — the guard had stopped guarding anything. These
+# rows read the file that now HOLDS the documentation, and each is scoped to the
+# block it is about, so neither the pointer in SKILL.md nor contracts.md's own
+# intro prose ABOUT its integration contract can satisfy them.
+assert_in_section "$POST_IMPL_REF" '^## Integration' '^\*\*Does NOT call:' \
+  '^\*\*Findings artifact contract:\*\*$' \
   "Integration section contains a Findings artifact contract subsection"
-assert_grep "$POST_IMPL" 'Pre-push bypass|Options 1.*3.*4.*bypass|Options 1, 3, 4 bypass' \
+assert_in_section "$POST_IMPL_REF" '^## Integration' '^\*\*Does NOT call:' \
+  '^\*\*Pre-push bypass \(documented opt-out\):\*\*$' \
+  "Integration section contains the Pre-push bypass (documented opt-out) subsection"
+# The BODY, not the subsection header the row above already pins: a header with
+# an empty body would otherwise satisfy both.
+assert_in_section "$POST_IMPL_REF" '^\*\*Pre-push bypass' '^\*\*Does NOT call:' \
+  'Options 1 \(local merge\), 3 \(keep\), and 4 \(discard\) bypass' \
   "Integration section documents the finish-branch Options 1/3/4 bypass"
-assert_grep "$POST_IMPL" 'external-untrusted-input source="post-impl-review-aggregate"' \
+assert_in_section "$POST_IMPL_REF" '^\*\*Findings artifact contract:' '^\*\*Pre-push bypass' \
+  'external-untrusted-input source="post-impl-review-aggregate"' \
   "Findings artifact contract names the trust-boundary envelope on the reader side"
 
 echo
@@ -753,11 +788,27 @@ else
     FAIL=$((FAIL + 1))
   fi
 fi
-# W1.4 — reader side: pass path / already-enveloped bytes verbatim; never re-wrap.
-assert_grep "$POST_IMPL" 'MUST NOT re-wrap' \
-  "W1.4 — Findings artifact contract forbids reader-side re-wrapping (#302)"
+# W1.4 — reader side: pass path / already-enveloped bytes verbatim; never
+# re-wrap. TWO rows, because #747 split the rule's two statements across two
+# files: Step 4's "Envelope-as-file-bytes" paragraph still carries it in
+# $POST_IMPL, and the Findings artifact contract the READERS are pointed at now
+# lives in $POST_IMPL_REF. One whole-file grep on $POST_IMPL was satisfied by the
+# Step 4 paragraph alone, so deleting the reader bullet out of the artifact
+# contract kept the row green.
+assert_in_section "$POST_IMPL" '^### Step 4: Aggregate' '^## Output' \
+  'MUST NOT re-wrap' \
+  "W1.4a — Step 4 Envelope-as-file-bytes forbids reader-side re-wrapping (#302)"
+assert_in_section "$POST_IMPL_REF" '^\*\*Findings artifact contract:' '^\*\*Pre-push bypass' \
+  'MUST NOT re-wrap' \
+  "W1.4b — Findings artifact contract forbids reader-side re-wrapping (#302)"
+# W1.5 — the anti-regression covers BOTH halves of that split for the same
+# reason: the old mandate lived in the Integration section, which is now in
+# $POST_IMPL_REF, so a $POST_IMPL-only absence check stopped watching the file
+# the wording would come back to.
 assert_no_grep "$POST_IMPL" 'reader MUST wrap the read content' \
-  "W1.5 — old read-time-wrap reader mandate removed (anti-regression; #302)"
+  "W1.5a — old read-time-wrap reader mandate absent from SKILL.md (anti-regression; #302)"
+assert_no_grep "$POST_IMPL_REF" 'reader MUST wrap the read content' \
+  "W1.5b — old read-time-wrap reader mandate absent from references/contracts.md (anti-regression; #302)"
 
 echo
 echo "== Canonical aggregate schema v2 =="
@@ -1438,10 +1489,18 @@ rm -rf "$POST_REVIEW_V2_TMP"
 echo
 echo "== Model posture: lightweight-lens Haiku pins retired (RFC 0012 §5) =="
 # The tier input no longer drives model selection — all 6 reviewer agents inherit.
+# #747 moved the reviewer dispatch table — the surface that carried the per-lens
+# model annotations — out of SKILL.md's Step 2 and into $POST_IMPL_REF, so a
+# $POST_IMPL-only absence check no longer watches the table it names. Both
+# anti-regressions are asserted against the reference file too.
 assert_no_grep "$POST_IMPL" 'lightweight lenses pin Haiku' \
-  "M1.1 — 'lightweight lenses pin Haiku' prose removed (tier input dead for model selection)"
+  "M1.1a — 'lightweight lenses pin Haiku' prose removed from SKILL.md (tier input dead for model selection)"
+assert_no_grep "$POST_IMPL_REF" 'lightweight lenses pin Haiku' \
+  "M1.1b — 'lightweight lenses pin Haiku' prose absent from references/contracts.md"
 assert_no_grep "$POST_IMPL" '\(haiku\)' \
-  "M1.2 — Step 2 dispatch table carries no (haiku) annotation"
+  "M1.2a — SKILL.md carries no (haiku) annotation"
+assert_no_grep "$POST_IMPL_REF" '\(haiku\)' \
+  "M1.2b — the reviewer dispatch table carries no (haiku) annotation"
 assert_grep "$POST_IMPL" 'model: inherit' \
   "M1.3 — prose states reviewer agents carry model: inherit"
 

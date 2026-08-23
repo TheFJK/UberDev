@@ -1,6 +1,6 @@
 ---
 name: findings-to-issues
-description: Persists deferred findings (severity ∈ {blocker, critical, major, important} AND disposition != APPLIED) from /uberdev:review-pr Phase 1 + Phase 2 aggregates as durable GitHub issues with HTML-comment fingerprint dedupe, fail-CLOSED safety, and a hard MAX_NEW=10 per-run write cap. Blocker/critical findings receive @author mentions and Blocks: PR-N backrefs; major/important findings are filed silently. Dispatched via Task(subagent_type=uberdev:findings-to-issues) from /uberdev:review-pr Phase 2.5 and /uberdev:simplify Phase 3.5. Halts the parent run iff blocker findings are deferred OR critical/blocker overflow exceeds MAX_NEW (RFC 0002).
+description: Persists deferred review findings as durable GitHub issues, with fingerprint dedupe, fail-CLOSED safety and a per-run write cap. Dispatched from /uberdev:review-pr Phase 2.5 and /uberdev:simplify Phase 3.5; it halts the parent run when blocker findings are deferred, or when blocker/critical overflow exceeds the cap (RFC 0002).
 # WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
 model: inherit
 color: orange

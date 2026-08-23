@@ -1873,8 +1873,8 @@ function recordChild(entry, ret, phaseName) {
 // consumes the FULL roster (post_review_write_aggregate_v2 re-validates the
 // closed seven-edge roster; encode-aggregate does the same for the three
 // lenses), and "The ordinary aggregate exists only after all seven reviewer
-// slots have valid evidence" (skills/post-impl-review/SKILL.md failure
-// boundary). There is no partial-consumption step that a barrier-free
+// slots have valid evidence" (skills/post-impl-review/references/contracts.md
+// failure boundary -- that contract moved out of the SKILL.md body under #747). There is no partial-consumption step that a barrier-free
 // pipeline() could overlap with, so pipeline() would buy nothing here and
 // would make this the first shipped call site of an API whose semantics are
 // pinned only by harness self-tests. See the SKILL.md "Why parallel(), not

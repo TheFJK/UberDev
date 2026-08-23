@@ -172,6 +172,10 @@
     {
       "path": "skills/post-impl-review/SKILL.md",
       "sha256": "b6a12bafb9d9a39be890a06c6e49f7274b63ae9e7977d5549afae0fed5c12858"
+    },
+    {
+      "path": "skills/post-impl-review/references/contracts.md",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
     }
   ],
   "pending": [
@@ -181,9 +185,11 @@
     "agents/code-reviewer.md",
     "agents/code-simplifier.md",
     "agents/comment-analyzer.md",
+    "agents/convention-compliance.md",
     "agents/findings-to-issues.md",
     "agents/pr-test-analyzer.md",
     "agents/silent-failure-hunter.md",
+    "agents/trust-trail-evaluator.md",
     "agents/type-design-analyzer.md",
     "commands/review-pr.md",
     "commands/simplify.md",
@@ -201,6 +207,7 @@
     "shared/finding-verifier-output-v1.md",
     "skills/merge-pipeline/SKILL.md",
     "skills/merge-pipeline/lib/discover.sh",
-    "skills/post-impl-review/SKILL.md"
+    "skills/post-impl-review/SKILL.md",
+    "skills/post-impl-review/references/contracts.md"
   ]
 }

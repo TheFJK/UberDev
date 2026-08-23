@@ -4,6 +4,155 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.55.1] — 2026-08-23
+
+Packs #750 and #751 as one stack. Both are context-cost work on the eager
+path: the agent register's always-resident descriptions are halved, and the
+five biggest skill bodies move their reference material behind progressive
+disclosure. Each half ships its own CI ratchet. Closes #746 and #747.
+PATCH: no behaviour changes and no interface changes — every dispatch
+contract and every skill instruction is preserved; only their length is not.
+
+### Changed — agent descriptions cut from 23,871 to 11,720 resident chars
+
+An agent's `description` frontmatter is the one part of an agent that sits in
+the system prompt of **every session**, whether or not that agent ever runs: it
+is how the model decides when to delegate, so it can never be lazy-loaded.
+Everything else in the file is paid for only on dispatch. The register carried
+23,871 resolved description chars (~5,967 est. tokens, every session and every
+subagent), of which ~10k was `<example>` dispatch-demo blocks in eight files.
+For scale, Anthropic's reference `code-reviewer` description is ~150 chars;
+ours was 1,984.
+
+[The new rules of context engineering for Claude 5 generation models](https://claude.com/blog/the-new-rules-of-context-engineering-for-claude-5-generation-models)
+names *Give Claude examples → Design interfaces* and *Repeat yourself → Simple
+tool descriptions* as two of its six shifts, and reports that Anthropic removed
+over 80% of Claude Code's own system prompt for Claude 5 models "with no
+measurable loss". Dispatch-trigger demonstrations are exactly that scaffolding,
+and they are also the wrong place for it: dispatch has already happened by the
+time an agent reads its own file, so the demos were dropped rather than
+relocated to the body.
+
+Ten descriptions were rewritten to one specialty statement plus one when-to-use
+clause. Every load-bearing clause survives verbatim in substance —
+`code-simplifier` keeps its named-lens-only gating rule, `convention-compliance`
+keeps its quote-the-rule-or-do-not-report rule, `plan-reviewer` keeps its verdict
+vocabulary and its runs-before-any-code distinction. Net: **12,151 chars
+(~3,037 est. tokens) recovered from every session**, a 50% cut.
+
+### Fixed — eight agent frontmatter blocks did not parse as YAML
+
+Bare colon-space inside a plain scalar ends the scalar, so a strict YAML consumer
+rejects the whole mapping and drops `name`, `model` and `description` with it —
+the same class as #744. Eight of the 47 agents were in that state: six of the
+eight `<example>`-carrying files, whose demos embed `Context: `, `user: ` and
+`assistant: `; plus `findings-to-issues` (`Blocks: PR-N`) and `ci-code-fixer`
+(`fix(ci): `), which carry no examples at all. The two `<example>` carriers that
+escaped did so incidentally — `code-simplifier` used a `|` block scalar, and
+`plan-reviewer`'s demos happen to write `Context.` with a period. All 47 now
+parse; the new fixture's first row is what keeps it that way.
+
+### Added — `tests/agent-description-budget.test.sh`
+
+Four asserts plus an anti-vacuity row, wired into both the ubuntu and windows
+shape-checks jobs: strict-YAML parse (A1), no `<example>` in any description
+(A2), a 500-char per-agent cap (A3), and a pinned 12,500-char total budget (A4).
+A4 exists because A3 alone is defeated by growth spread thinly across 47 files;
+like the version locks it is a hardcoded literal, so raising it is a diff a human
+approves. A0 pins the corpus size, because the other four are loops over a glob
+and a glob that matches nothing passes all of them. All five rows were verified
+by mutation.
+
+### Changed — vendored register re-measured (RFC 0019 §4.3)
+
+Six of the ten rewritten agents are vendored from `claude-plugins-official`.
+Their `measured_diff_lines` were re-measured at the same recorded bases with the
+method the register itself records — reproducing all six 2026-08-13 figures
+exactly as a control first — giving 58 / 59 / 60 / 66 / 83 / 116 (was
+56 / 57 / 58 / 64 / 81 / 154). Five `stance_reason` entries asserted the
+`description` was byte-identical to upstream; that was true when written and is
+now false, so it was corrected rather than left to read as evidence. §4.3's table
+is updated in place rather than superseded by a second table: unlike #534's, this
+re-measurement is at the *same* bases, and two tables at one base would both
+reconcile against one register value.
+
+### Changed — five oversize `SKILL.md` bodies now point at reference files
+
+Anthropic's skills documentation caps a skill body at 500 lines and says to move
+detailed reference material into separate files. Ten of thirty UberDev skills
+were over that, and five of the ten had no supporting files at all — so the
+entire body landed in context on invocation and stayed there across turns.
+
+Reference material, worked rationale and decision records moved out of the five
+zero-disclosure bodies into sibling `references/*.md` files the body points at by
+path. **The moved bytes are unchanged** — this is a relocation, not a rewrite:
+
+| Skill | Before | After | New reference files |
+|---|---:|---:|---|
+| `premerge-pipeline` | 2,666 | 2,323 | `phase-contracts.md`, `finding-overflow.md`, `common-mistakes.md` |
+| `orchestrator` | 1,095 | 1,012 | `visual-companion.md`, `tiers-and-recovery.md` |
+| `finish-branch` | 1,024 | 984 | `options-and-integration.md` |
+| `post-impl-review` | 900 | 797 | `contracts.md` |
+| `turbox-fleet` | 669 | **471** | `return-contracts.md`, `rationale.md`, `design-path.md` |
+
+`premerge-pipeline` reads 2,323 rather than the 2,274 the extraction reached: the severity
+rule and its `premerge-cleanup-categories` token block were put back into the body, because
+only `SKILL.md` is loaded when a skill fires and that rule is one the controller must read at
+the moment it writes a `severity`. Behind a reference file it was a rule the controller could
+not see. `tests/skill-size.test.sh` records the re-pin and its reason on the waiver row.
+
+`turbox-fleet` is the one that clears 500 outright. The other four are still
+dominated by executable `uberdev-executable` fences that tests extract and run;
+taking those under the limit means relocating shipped shell, which is a separate
+change with a different blast radius, so they ship waived at their new — lower —
+line counts.
+
+### Added — `tests/skill-size.test.sh`, the 500-line ratchet
+
+Wired into both CI jobs. Every `SKILL.md` must be at or under 500 lines unless it
+carries a waiver, and each waiver pins the **measured** count at the moment it
+was written, so:
+
+- a waived skill that grows past its pin reds — a waiver is not a licence;
+- a waived skill that shrinks under 500 also reds, telling you to delete its row,
+  so an earned-out ceiling cannot quietly drift back up;
+- a waiver naming a skill that no longer exists reds.
+
+The list can therefore only ever get shorter. The gate also executes its own
+classifier against synthetic rows, so a rule that stopped refusing reds on the
+commit that broke it rather than printing a screen of green.
+
+### Fixed — runtime contracts and test guards the split had broken
+
+Caught by the `/premerge` stack gate on #752, before landing.
+
+**The dispatch brief handed leaf agents an unresolvable path.** `turbox-fleet`'s Phase 1c and
+Phase 4b briefs were rewritten from `the structured return in "Return contracts" below` to the bare
+path `references/return-contracts.md`. That text is relayed verbatim into a dispatched agent's
+prompt, and a leaf runs with `cwd` set to an issue worktree and no plugin root — so the path resolved
+to nothing and the agent answered without the required block. By the skill's own rule a missing
+return block is "a blocker, never a prompt to guess", so every single-solver and implementer task
+would have blocked. A new invariant now makes the controller read the reference file and paste the
+block into the brief; a leaf is never handed a path.
+
+**Four test guards had gone vacuous.** Assertions whose subject moved into a reference file were left
+pointing at the body, where a one-line cross-reference still satisfied the grep — so deleting the
+documentation they guard left them green. Repaired and each verified by mutation: `turbox-fleet`
+TX16 (re-scoped to the Phase 3 rung in `design-path.md`), `docs-accuracy` T20.6 (citations now
+resolve to the file they name, searched per-file so a needle cannot span two) and T17.1 (split so
+both files are guarded, with T17.0's readability pre-flight extended), and `post-impl-review`'s
+Integration row plus four siblings the audit found.
+
+**The severity rule was un-guarded in the copy that governs a run.** It was restored to
+`premerge-pipeline/SKILL.md`, the reference copy replaced by a pointer, and `tests/premerge.test.sh`
+P3b re-pointed to compare the copy the controller actually reads against the shipped library.
+
+### Fixed — two cross-file citations that had drifted
+
+`skills/review-fleet/workflow.js` credited a quotation to
+`post-impl-review/SKILL.md`, and the orchestrator's visual-companion citation
+named its own body; both now name the file that actually holds the text. Both
+were caught by `tests/docs-accuracy.test.sh`, not by inspection.
 ## [0.55.0] — 2026-08-23
 
 Packs #727, #728, #729 and #730 as one stack. `/issue` becomes autopilot with a

@@ -302,7 +302,7 @@
       "last_reviewed_upstream_commit": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
       "last_reviewed_on": "2026-08-13",
       "stance": "fork",
-      "stance_reason": "Base e7a2d16 \u2014 upstream main's HEAD across the 2026-04-27\u21922026-05-04 vendoring window. Measured at that base on 2026-08-13: the file set is 1:1 (1/1, symmetric difference 0) and the copy diverges by 949 changed lines (GNU diff, '<' plus '>' lines); method and the 12-candidate scan are in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md, where no candidate scores better. A heavily-modified descendant: the local copy owns the pre-push secret-scan gate, the auto-chain into /uberdev:review-pr, and the no-Co-Authored-By PR rule. Upstream's version is not drop-in.",
+      "stance_reason": "Base e7a2d16 \u2014 upstream main's HEAD across the 2026-04-27\u21922026-05-04 vendoring window. Measured at that base on 2026-08-13: the file set is 1:1 (1/1, symmetric difference 0) and the copy diverges by 949 changed lines (GNU diff, '<' plus '>' lines); method and the 12-candidate scan are in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md, where no candidate scores better. A heavily-modified descendant: the local copy owns the pre-push secret-scan gate, the auto-chain into /uberdev:review-pr, and the no-Co-Authored-By PR rule. Upstream's version is not drop-in. Local-only addition (#747): references/options-and-integration.md holds the option matrix, Common Mistakes, Red Flags and Integration sections moved out of SKILL.md to bring the body toward Anthropic's 500-line ceiling. Upstream has no such file, so the 1:1 file-set measurement above is the reading AT ITS DATED BASE and no longer describes the current tree: the local set is now 2 files to upstream's 1. The moved bytes are unchanged, so the divergence is a relocation, not new content. The new file carries no provenance header on purpose \u2014 it was not copied from upstream, and stamping it as vendored would be a false attribution.",
       "measured_diff_lines": 1077,
       "measured_diff_basis": {
         "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
@@ -328,7 +328,11 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "5558bf49c3e6d69001892a9b0eb9e018bb40930ab9521e682e47a0921cf1cec7"
+          "sha256": "4d31ab9a878e290c48f3962f6808c6a0c3a4a13a34f34dacbc9d0ce5982d4a97"
+        },
+        {
+          "path": "references/options-and-integration.md",
+          "sha256": "e958f86af0bc51a546a642d36052cfff28b678c745864a56f3d35968ae197f23"
         }
       ]
     },
@@ -902,20 +906,20 @@
       "last_reviewed_upstream_commit": "920824c3e9509890fbec03ba6097014222393022",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "The frontmatter differs by exactly two lines, both of them `model: opus` -> `model: inherit` (RFC 0019 \u00a74.2); the `description` dispatch contract inside it is byte-identical to upstream at the recovered base. The BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in. The 0-100 confidence anchors are also extracted into `shared/finding-confidence-rubric-v1.md`.",
-      "measured_diff_lines": 81,
+      "stance_reason": "The frontmatter differs by the `model: opus` -> `model: inherit` routing line (RFC 0019 \u00a74.2) and, since #746, by the `description` dispatch contract \u2014 byte-identical to upstream at the recovered base until #746 compressed it to a one-line routing statement and dropped upstream's `<example>` dispatch demos, which cost ~1.3k chars resident in every session's system prompt. The BODY diverges separately. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in. The 0-100 confidence anchors are also extracted into `shared/finding-confidence-rubric-v1.md`.",
+      "measured_diff_lines": 83,
       "measured_diff_basis": {
         "upstream_rev": "4ca561fb8532594e7a5faef945e85096fcec0616",
         "upstream_tree": "anthropics/claude-plugins-official blob 462f2e01b89e6339994c071c765dcb4dd380c869 \u2014 the single-file artifact base_evidence records for code-reviewer.md, re-derivable offline from this repository at base_evidence.vendored_ref",
-        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
-        "measured_on": "2026-08-14",
+        "uberdev_rev": "b7dbe74a36bbc4ff02bc364f0ae554f1c9800872",
+        "measured_on": "2026-08-23",
         "method": "diff of upstream blob 462f2e01b89e6339994c071c765dcb4dd380c869 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines"
       },
       "divergences": [],
       "files": [
         {
           "path": "code-reviewer.md",
-          "sha256": "ad1fe6f0b90dff13041f423ca154fffbfeeb08c172444f954d32ccbd55dbb09d"
+          "sha256": "09e4f06b80367fff1653f1fd64ceee94e8ffc59083233f13c6ebc19a459451e1"
         }
       ]
     },
@@ -938,12 +942,12 @@
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
       "stance_reason": "The `description` frontmatter is the dispatch contract, and UberDev rewrote it into the named-lens contract driven by /uberdev:review-pr Phase 2 and /uberdev:simplify, replacing upstream's auto-trigger examples. Upstream's copy would re-enable auto-triggering, so it is not drop-in.",
-      "measured_diff_lines": 154,
+      "measured_diff_lines": 116,
       "measured_diff_basis": {
         "upstream_rev": "ceb9b72b4c4c20ad39efce780edd0aabe80ebce3",
         "upstream_tree": "anthropics/claude-plugins-official blob 05e361b4ef1b688203251989707f8a924a9ed266 \u2014 the single-file artifact base_evidence records for code-simplifier.md, re-derivable offline from this repository at base_evidence.vendored_ref",
-        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
-        "measured_on": "2026-08-14",
+        "uberdev_rev": "b7dbe74a36bbc4ff02bc364f0ae554f1c9800872",
+        "measured_on": "2026-08-23",
         "method": "diff of upstream blob 05e361b4ef1b688203251989707f8a924a9ed266 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines"
       },
       "divergences": [
@@ -955,7 +959,7 @@
       "files": [
         {
           "path": "code-simplifier.md",
-          "sha256": "2466ad36cf7796fabfdfa1b7182749893ef51f6d951951bb0aa2981bf36a248b"
+          "sha256": "5ba985090eef92c7104c1e12c669374d88e3528328fa8ece1e7e83d5be4accfb"
         }
       ]
     },
@@ -982,20 +986,20 @@
       "last_reviewed_upstream_commit": "920824c3e9509890fbec03ba6097014222393022",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "The frontmatter \u2014 including the `description` dispatch contract \u2014 is byte-identical to upstream at the recovered base; the BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
-      "measured_diff_lines": 56,
+      "stance_reason": "The `description` dispatch contract was byte-identical to upstream at the recovered base until #746 compressed it to a one-line routing statement and dropped upstream's `<example>` dispatch demos \u2014 agent descriptions are resident in every session's system prompt, so upstream's shape cost ~1.3k always-on chars here. The BODY diverges separately. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
+      "measured_diff_lines": 58,
       "measured_diff_basis": {
         "upstream_rev": "4ca561fb8532594e7a5faef945e85096fcec0616",
         "upstream_tree": "anthropics/claude-plugins-official blob e214620a3fa348c550bfca1f8d23ceaec39bfe57 \u2014 the single-file artifact base_evidence records for comment-analyzer.md, re-derivable offline from this repository at base_evidence.vendored_ref",
-        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
-        "measured_on": "2026-08-14",
+        "uberdev_rev": "b7dbe74a36bbc4ff02bc364f0ae554f1c9800872",
+        "measured_on": "2026-08-23",
         "method": "diff of upstream blob e214620a3fa348c550bfca1f8d23ceaec39bfe57 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines"
       },
       "divergences": [],
       "files": [
         {
           "path": "comment-analyzer.md",
-          "sha256": "09e09a3d2e0f467f2095b9236455f849fffccae22c00ddfec4ad6dc4391125f9"
+          "sha256": "0cb7745b73994ab917499a981a45ad711627675500e8b707c6e2100c18b96c38"
         }
       ]
     },
@@ -1067,20 +1071,20 @@
       "last_reviewed_upstream_commit": "920824c3e9509890fbec03ba6097014222393022",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "The frontmatter \u2014 including the `description` dispatch contract \u2014 is byte-identical to upstream at the recovered base; the BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
-      "measured_diff_lines": 58,
+      "stance_reason": "The `description` dispatch contract was byte-identical to upstream at the recovered base until #746 compressed it to a one-line routing statement and dropped upstream's `<example>` dispatch demos \u2014 agent descriptions are resident in every session's system prompt, so upstream's shape cost ~1.3k always-on chars here. The BODY diverges separately. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
+      "measured_diff_lines": 60,
       "measured_diff_basis": {
         "upstream_rev": "4ca561fb8532594e7a5faef945e85096fcec0616",
         "upstream_tree": "anthropics/claude-plugins-official blob 9b2de05b90e74f828e58a8874ed17f6eb9372db3 \u2014 the single-file artifact base_evidence records for pr-test-analyzer.md, re-derivable offline from this repository at base_evidence.vendored_ref",
-        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
-        "measured_on": "2026-08-14",
+        "uberdev_rev": "b7dbe74a36bbc4ff02bc364f0ae554f1c9800872",
+        "measured_on": "2026-08-23",
         "method": "diff of upstream blob 9b2de05b90e74f828e58a8874ed17f6eb9372db3 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines"
       },
       "divergences": [],
       "files": [
         {
           "path": "pr-test-analyzer.md",
-          "sha256": "c5492af0f98c69072e374df1b9833902220534a28b820e93fd226bb89af2b53d"
+          "sha256": "b1662e7ba11f2db1e9f345394985b6efda437f1d98f9d3e82a07f82e11ad4eb7"
         }
       ]
     },
@@ -1132,20 +1136,20 @@
       "last_reviewed_upstream_commit": "920824c3e9509890fbec03ba6097014222393022",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "The frontmatter \u2014 including the `description` dispatch contract \u2014 is byte-identical to upstream at the recovered base; the BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
-      "measured_diff_lines": 57,
+      "stance_reason": "The `description` dispatch contract was byte-identical to upstream at the recovered base until #746 compressed it to a one-line routing statement and dropped upstream's `<example>` dispatch demos \u2014 agent descriptions are resident in every session's system prompt, so upstream's shape cost ~1.3k always-on chars here. The BODY diverges separately. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
+      "measured_diff_lines": 59,
       "measured_diff_basis": {
         "upstream_rev": "4ca561fb8532594e7a5faef945e85096fcec0616",
         "upstream_tree": "anthropics/claude-plugins-official blob b8a8dfa41e18ef6ac801ae64be38b2508aa04f44 \u2014 the single-file artifact base_evidence records for silent-failure-hunter.md, re-derivable offline from this repository at base_evidence.vendored_ref",
-        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
-        "measured_on": "2026-08-14",
+        "uberdev_rev": "b7dbe74a36bbc4ff02bc364f0ae554f1c9800872",
+        "measured_on": "2026-08-23",
         "method": "diff of upstream blob b8a8dfa41e18ef6ac801ae64be38b2508aa04f44 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines"
       },
       "divergences": [],
       "files": [
         {
           "path": "silent-failure-hunter.md",
-          "sha256": "35b434ec4512aa88a00d93f8d09ab4c6e813b8cacf8d8b045554fa0b66d40ed0"
+          "sha256": "f789d71fc53f9d01f3f20c81004cd5dea3fa16f821b742b66e1d3c107652e16a"
         }
       ]
     },
@@ -1237,20 +1241,20 @@
       "last_reviewed_upstream_commit": "920824c3e9509890fbec03ba6097014222393022",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "The frontmatter \u2014 including the `description` dispatch contract \u2014 is byte-identical to upstream at the recovered base; the BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
-      "measured_diff_lines": 64,
+      "stance_reason": "The `description` dispatch contract was byte-identical to upstream at the recovered base until #746 compressed it to a one-line routing statement and dropped upstream's `<example>` dispatch demos \u2014 agent descriptions are resident in every session's system prompt, so upstream's shape cost ~1.3k always-on chars here. The BODY diverges separately. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
+      "measured_diff_lines": 66,
       "measured_diff_basis": {
         "upstream_rev": "4ca561fb8532594e7a5faef945e85096fcec0616",
         "upstream_tree": "anthropics/claude-plugins-official blob f720f0fcec856560cdddb6b030ac7e64af159438 \u2014 the single-file artifact base_evidence records for type-design-analyzer.md, re-derivable offline from this repository at base_evidence.vendored_ref",
-        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
-        "measured_on": "2026-08-14",
+        "uberdev_rev": "b7dbe74a36bbc4ff02bc364f0ae554f1c9800872",
+        "measured_on": "2026-08-23",
         "method": "diff of upstream blob f720f0fcec856560cdddb6b030ac7e64af159438 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines"
       },
       "divergences": [],
       "files": [
         {
           "path": "type-design-analyzer.md",
-          "sha256": "fe64f4309cc962fc1fb499063dd4af6cd840fa701be78a2e15595d5b9b133d40"
+          "sha256": "9e8e8436a3ac3360f2fb9d3320225387067c3f41ed1d25e8939f3caae8ed96bd"
         }
       ]
     },

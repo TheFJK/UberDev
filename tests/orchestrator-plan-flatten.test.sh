@@ -816,6 +816,16 @@ REGISTER = {
     "plugins/uberdev/skills/brainstorm/SKILL.md": True,
     "plugins/uberdev/skills/orchestrator/SKILL.md": True,
     "plugins/uberdev/skills/turbox-fleet/SKILL.md": True,
+    # #747 — the turbox design path moved into a reference file when the
+    # skill was cut under the 500-line ceiling. The body still names the
+    # lens; the reference carries the wire keys, so BOTH are dispatchers
+    # and both are compared against the cards.
+    "plugins/uberdev/skills/turbox-fleet/references/design-path.md": True,
+    # #747 — the orchestrator's Phase 2 visual-companion flow moved into this
+    # reference file. It NAMES two research summaries as a signal source for
+    # whether to offer the browser companion; it dispatches no card, so its
+    # wire keys are not compared against them.
+    "plugins/uberdev/skills/orchestrator/references/visual-companion.md": False,
     # Names the role to say it MIRRORS its job inline; never dispatches the card.
     "plugins/uberdev/skills/solve-fleet/workflow.js": False,
     # Uses the role name as a report label for a global pass; not a dispatch.
@@ -1884,7 +1894,10 @@ else
   printf '%s\n' '  FAIL F8 artifact verification quoting/grep contract failed'
   FAIL=$((FAIL + 1))
 fi
-n=$(grep -cE '^\| small \|.*\| N/A \(orchestrator bypassed\) \|' "$ORCHESTRATOR" || true)
+# #747 — the tier-profile table moved into references/tiers-and-recovery.md when
+# the orchestrator body was cut toward Anthropic's 500-line ceiling.
+ORCH_TIERS_REF="$(dirname "$ORCHESTRATOR")/references/tiers-and-recovery.md"
+n=$(grep -cE '^\| small \|.*\| N/A \(orchestrator bypassed\) \|' "$ORCH_TIERS_REF" || true)
 assert_eq 'F8 small-tier planning research is N/A because small bypasses orchestrator' 1 "$n"
 
 printf '%s\n' '== F9 routed helper, retry identity, cleanup, and lineage contracts =='

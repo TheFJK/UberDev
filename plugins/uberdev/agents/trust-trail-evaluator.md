@@ -1,6 +1,6 @@
 ---
 name: trust-trail-evaluator
-description: Evaluates whether the /review-pr trust trail (label + trailer + audit JSON) on a PR remains valid against the live HEAD SHA. Inspects ancestor, diff-empty, and log-empty structural primitives plus caller-supplied PR-state corroborators; emits a verdict in {PASS, STALE, INVALID, FORCE_PUSHED} with rationale. One agent per PR; every pending PR's agent is dispatched together in ONE assistant turn from skills/merge-pipeline/SKILL.md Phase 1.4 PATH_2 sub-condition (c).
+description: Evaluates whether the /review-pr trust trail (label + trailer + audit JSON) on a PR is still valid against the live HEAD SHA, emitting a verdict of PASS, STALE, INVALID or FORCE_PUSHED with rationale. Dispatched once per PR — every pending PR's evaluator goes out in ONE assistant turn from the /merge pipeline's PATH_2 staleness check.
 # WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
 model: inherit
 color: cyan

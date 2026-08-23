@@ -967,58 +967,18 @@ explicit:
 - A worktree that is not in a location this project creates is never removed,
   and the skip always says which path and why.
 
-**For Options 2 and 3:** Keep worktree. Option 2 leaves the branch alive for PR-feedback fixups; Option 3 is explicit "keep as-is". The Quick Reference table and Red Flags below codify this.
+**For Options 2 and 3:** Keep worktree. Option 2 leaves the branch alive for PR-feedback fixups; Option 3 is explicit "keep as-is". The Quick Reference table and Red Flags in `references/options-and-integration.md` codify this.
 
-## Quick Reference
+## Quick reference, mistakes, red flags, integration
 
-| Option | Merge | Push | Keep Worktree | Cleanup Branch | Post-impl review |
-|--------|-------|------|---------------|----------------|------------------|
-| 1. Merge locally | ✓ | - | - | ✓ | bypassed (no PR) |
-| 2. Create PR | - | ✓ | ✓ | - | runs (via /review-pr Phase 1) |
-| 3. Keep as-is | - | - | ✓ | - | bypassed (no PR) |
-| 4. Discard | - | - | - | ✓ (force) | bypassed (no PR) |
+The per-option matrix (merge / push / keep worktree / cleanup branch / post-impl
+review), the four common mistakes, the never/always red-flag lists, and the
+integration contract — who calls this skill, what it pairs with, and that Option
+2 chains into `/uberdev:review-pr` without blocking on its verdict — are all in
+`references/options-and-integration.md`.
 
-## Common Mistakes
+The two rules that must never be inferred from anything else: **verify tests
+before offering options**, and **clean up the worktree for Options 1 and 4
+only** — Option 2 leaves the branch alive for PR-feedback fixups and Option 3 is
+an explicit keep.
 
-**Skipping test verification**
-- **Problem:** Merge broken code, create failing PR
-- **Fix:** Always verify tests before offering options
-
-**Open-ended questions**
-- **Problem:** "What should I do next?" → ambiguous
-- **Fix:** Present exactly 4 structured options
-
-**Automatic worktree cleanup**
-- **Problem:** Remove worktree when might need it (Option 2, 3)
-- **Fix:** Only cleanup for Options 1 and 4
-
-**No confirmation for discard**
-- **Problem:** Accidentally delete work
-- **Fix:** Require typed "discard" confirmation
-
-## Red Flags
-
-**Never:**
-- Proceed with failing tests
-- Merge without verifying tests on result
-- Delete work without confirmation
-- Force-push without explicit request
-
-**Always:**
-- Verify tests before offering options
-- Present exactly 4 options
-- Get typed confirmation for Option 4
-- Clean up worktree for Options 1 & 4 only
-
-## Integration
-
-**Called by:**
-- **`uberdev:subagent-driven-dev`** — after all tasks complete and final review approves
-- **`uberdev:execute-plan`** — after all batches complete and verification passes
-
-**Pairs with:**
-- The worktree-setup prose inlined in `uberdev:execute-plan` and `uberdev:subagent-driven-dev` — this skill cleans up the worktree those skills created.
-- **`uberdev:merge`** — follows Option 2. `finish-branch` opens the PR; `/merge` lands it. Together they form the lifecycle `/issue → /solve → push → /review-pr → /merge`.
-
-**Chains into:**
-- **`uberdev:review-pr`** — invoked via the `Skill` tool after PR creation on the always-PR path (default mode + Turbo mode under `UBERDEV_TURBO=1`). `/review-pr` owns the post-push reviewer fanout; `finish-branch` does not block on reviewer verdict.
