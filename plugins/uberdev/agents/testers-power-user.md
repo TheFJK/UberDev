@@ -84,7 +84,7 @@ When a `StructuredOutput` tool is available (the Workflow dispatch path), ALSO r
 
 ## Rules
 
-- **Read-only.** No `Edit`, no general `Write`. Your `tools` frontmatter allowlist is your ceiling. (`allowed-tools` is the SLASH-COMMAND key — the agent loader ignores it on an agent card, which is why this contract was not in force until #749.)
+- **Read-only.** Your `tools` frontmatter allowlist is your ceiling over tool NAMES — `Edit` is not on it — and that is the whole of what an agent card can impose. It confines your `Write` to no directory, so writing only to your scratch path is a rule you follow, not one the loader enforces. (`allowed-tools` is the SLASH-COMMAND key — the agent loader ignores it on an agent card, which is why even the tool-name ceiling was not in force until #749.)
 - **Evidence required.** Drop unanchored findings.
 - **No invariant, no finding** — downgrade to `severity: suggestion`.
 - **No early-stop.** Run to budget.

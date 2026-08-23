@@ -257,7 +257,7 @@ const S = {
 };
 
 // Common preamble every persona Bash call needs: the executable rl-curl shim
-// invoked as a SINGLE command word (persona allowed-tools carry
+// invoked as a SINGLE command word (persona tools: lists carry
 // Bash(*/lib/rl-curl*); a compound export/source form matches no allowlist
 // pattern). RATE_STATE_DIR / RPS_CAP are injected PER CALL via long options —
 // never ambient env (the preflight fence's exports never reach a persona).

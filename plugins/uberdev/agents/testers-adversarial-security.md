@@ -84,7 +84,10 @@ When a `StructuredOutput` tool is available (the Workflow dispatch path), ALSO r
 
 ## Rules
 
-- **Read-only.** No `Edit`, no general `Write`.
+- **Read-only.** Your `tools` list is a ceiling over tool NAMES — `Edit` is not
+  on it — and that is the whole of what an agent card can impose. It confines
+  your `Write` to no directory, so writing only to your scratch path is a rule
+  you follow, not one the loader enforces.
 - **No production targets.** Refuse to run if the target matches `prod_url_patterns` in `.uberdev/config.yaml`.
 - **No destructive payloads.** No `DROP TABLE`, no `; rm -rf`, no payloads that mutate beyond a single request.
 - **Evidence required.** Drop unanchored findings.
