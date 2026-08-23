@@ -72,7 +72,7 @@ LIMIT=500
 # extraction is right for material a reader consults on demand, and wrong for
 # material the runtime obeys.
 WAIVERS="$(cat <<'EOF'
-premerge-pipeline	2323	~54% fenced; rose 2274->2323 re-inlining the severity rule the controller reads at runtime
+premerge-pipeline	2391	~54% fenced; rose 2323->2391 adding the blocked_on_file wave-return contract the controller obeys at runtime
 merge-pipeline	1778	~27% fenced, no references/ yet — prose extraction is open work
 subagent-driven-dev	1019	~64% fenced — one ~450-line bash block plus dispatch examples
 orchestrator	1012	~53% fenced, 26 executable blocks; 2 reference files already split out
