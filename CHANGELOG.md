@@ -4,6 +4,80 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.55.0] — 2026-08-23
+
+Packs #727, #728, #729 and #730 as one stack. `/issue` becomes autopilot with a
+single fail-closed halt, `findings-to-issues` files one issue per owning FILE
+instead of one per finding, and `/premerge`'s defer envelope becomes file-atomic.
+MINOR: user-visible behaviour changes in `/issue` and in the issue format.
+
+### Changed — `/issue` runs unattended, and its one gate fails closed
+
+`/issue` no longer asks for approval on the healthy path. Exactly one halt
+survives — the open-duplicate gate — and it now halts on **two** verdicts, not
+one: an open duplicate, and a duplicate search that cannot be shown to have
+completed. Treating "we could not look" as "we looked and found nothing" was a
+gate that failed open on precisely the outcome closing an issue does not cleanly
+undo.
+
+The classification turns on a single question — did the duplicate search run to
+completion? — answered from the scout's `summary`, never from `status` alone and
+never from the shape of `duplicates`. A `duplicates` list is evidence the search
+started, never that it finished, so entries never upgrade UNKNOWN to PROVEN. A
+label-only degradation stays non-halting and prompt-free.
+
+`agents/triage-scout.md` prescribed `gh search issues --state all`, which gh
+rejects outright (`invalid argument "all"`, valid values are `{open|closed}`) —
+so the duplicate search had never run on any current gh. Under the old
+report-only degradation that was invisible; under the new fail-closed gate it
+would have halted `/issue` on 100% of invocations. The flag is gone; a bare
+`gh search issues` already searches open and closed.
+
+### Changed — one issue per file, not one per finding
+
+`findings-to-issues` now keys the issue container on
+`sha256("<slug>:<file_path>")[:16]` and groups findings by owning file, so a
+second dispatch over the same file COMMENTS rather than opening a second issue.
+A bounded, self-retiring legacy probe adopts and re-stamps issues filed under the
+retired per-finding key, so the re-key does not duplicate the existing backlog.
+
+`overflow_count` now counts FILE GROUPS, and every rendering of it says so —
+`commands/review-pr.md`'s operator summary included, at all four sites.
+
+### Changed — `/premerge`'s defer envelope is file-atomic
+
+`defer` admits whole files, blocker-bearing ones first, and reports `FILES=`
+alongside `TOTAL=`/`BLOCKER=`/`SUGGESTION=`/`OVERFLOW=`. Because a blocker-bearing
+file drags its own cleanup rows into the envelope, `SUGGESTION > 0` no longer
+witnesses that every blocker fit — the overflow report gained a third `CLASS=`
+arm (`unknown`) for the state that cannot be proven either way, and the severe
+arm is now gated on `TOTAL > 0` so an empty envelope cannot raise a false
+blocker-overflow alarm.
+
+### Fixed
+
+- `cmd_defer` no longer dies with a raw `TypeError` when a suggestion row's
+  `file` is not a string; unhashable values are canonicalised so distinct
+  malformed rows stay distinct.
+- An empty-string `file` no longer groups with real paths and costs the whole
+  64-row envelope; the unusable-path cut runs on every `defer`, not only above
+  the cap, so one malformed row can no longer refuse an aggregate that would
+  otherwise file 64 findings.
+- `cmd_plan` validates the cross-attempt suggestion union every attempt again —
+  the check was lost with the intermediate file it happened to live in, moving
+  every refusal to after the repair budget was spent. It now shares
+  `_drop_unfilable` with `cmd_defer`, so the early check can never be stricter
+  than the late one.
+- `README.md` and RFC 0021 describe the shipped halt set and the shipped
+  container key; RFC 0021 records the change as an `A3` amendment rather than a
+  silent rewrite.
+
+### Known issues
+
+The `/premerge` convergence loop stopped `STOP_EXHAUSTED` on this stack with
+blockers still live; they are filed as issues with a `Blocks:` backref rather
+than fixed here. See the issues linked from the stack PR.
+
 ## [0.54.0] — 2026-08-22
 
 Turns `/premerge`'s review→fix→gate line into a bounded convergence loop, repairs
