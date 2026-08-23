@@ -2072,6 +2072,8 @@ PREMERGE_DEFER_BLOCKER="${PREMERGE_DEFER_HEAD##* BLOCKER=}"
 PREMERGE_DEFER_BLOCKER="${PREMERGE_DEFER_BLOCKER%% *}"
 PREMERGE_DEFER_FILES="${PREMERGE_DEFER_HEAD##* FILES=}"
 PREMERGE_DEFER_FILES="${PREMERGE_DEFER_FILES%% *}"
+PREMERGE_DEFER_TOTAL="${PREMERGE_DEFER_HEAD##* TOTAL=}"
+PREMERGE_DEFER_TOTAL="${PREMERGE_DEFER_TOTAL%% *}"
 # `OVERFLOW=` is ALWAYS printed -- `OVERFLOW=0` on a normal run -- so a missing
 # or non-numeric field is a contract break, not a zero. Falling back to 0 here
 # would re-create the silent drop by reading it as "nothing overflowed".
@@ -2086,14 +2088,40 @@ case "$PREMERGE_DEFER_BLOCKER" in ''|*[!0-9]*) printf 'error: defer line carries
 # groups by owning file. Like OVERFLOW= it is always printed, so a missing or
 # non-numeric field is a contract break rather than a zero.
 case "$PREMERGE_DEFER_FILES" in ''|*[!0-9]*) printf 'error: defer line carries no FILES= count: %s\n' "$PREMERGE_DEFER_LINE" >&2; exit 74 ;; esac
+# TOTAL= is the WITNESS that the envelope is non-empty, which is what the severe
+# arm below turns on, so it is validated like the fields it stands beside. The
+# opening case-glob proves the literal `TOTAL=` is present; only this proves the
+# value is a number. Skipping it would not fail loudly either: `[ "" -gt 0 ]` is
+# a shell ERROR, not a false, and an `if` swallows the non-zero status -- so a
+# malformed count would silently route every overflow away from the severe arm,
+# which is the exact direction a guard must never fail.
+case "$PREMERGE_DEFER_TOTAL" in ''|*[!0-9]*) printf 'error: defer line carries no TOTAL= count: %s\n' "$PREMERGE_DEFER_LINE" >&2; exit 74 ;; esac
 [ -s "$PREMERGE_DEFER_PATH" ] || { printf 'error: defer named an aggregate that is missing or empty: %s\n' "$PREMERGE_DEFER_PATH" >&2; exit 74; }
 
 # Blocker-bearing FILES are admitted first, which is weaker than the row-level
 # "blockers first" this arm was written against: a blocker file carries its own
 # cleanup rows in with it, so `SUGGESTION > 0` no longer proves every blocker
-# fit (#722). `SUGGESTION == 0 && OVERFLOW > 0` still means the envelope is
-# ENTIRELY blockers and the dropped rows certainly are too, so it keeps its own
-# louder line -- an operator must never read the mild sentence over that state.
+# fit (#722). `TOTAL > 0 && SUGGESTION == 0 && OVERFLOW > 0` still means the
+# envelope is ENTIRELY blockers, so it keeps its own louder line -- an operator
+# must never read the mild sentence over that state.
+#
+# `TOTAL > 0` IS LOAD-BEARING AND IS NOT A TAUTOLOGY. `SUGGESTION == 0` was a
+# sound stand-in for "entirely blockers" only while `OVERFLOW > 0` implied a
+# FULL envelope, and it no longer does: the unusable-path cut in
+# lib/premerge-findings.py runs on EVERY run, not just an overflowing one, so a
+# row the filer could open no issue for is dropped and counted in `OVERFLOW=`
+# with the envelope nowhere near its bound. Executed against the shipped
+# library, a run whose only deferred row has a non-string `file` prints
+# `TOTAL=0 BLOCKER=0 SUGGESTION=0 FILES=0 OVERFLOW=1` -- an EMPTY envelope
+# holding no blockers and one dropped SUGGESTION. `SUGGESTION == 0` is
+# vacuously true there, and the severe arm read it as proof and announced a
+# blocker overflow that never happened. Since `TOTAL = BLOCKER + SUGGESTION`,
+# `TOTAL > 0 && SUGGESTION == 0` is exactly "the envelope holds rows and every
+# one of them is a blocker" -- the fact the sentence asserts, back on the line
+# that carries it. An empty envelope proves nothing about what was dropped, so
+# it falls through to the arms below, which answer from the CANDIDATE SET
+# (`PREMERGE_SURVIVORS`) rather than from the envelope and stay correct at
+# `TOTAL=0`.
 #
 # `CLASS=` IS THE ONLY PARSEABLE PART OF THE LINE, SO IT MAY ONLY CLAIM WHAT THE
 # RUN CAN PROVE. Correcting the prose after the em dash and leaving the token at
@@ -2119,7 +2147,7 @@ case "$PREMERGE_DEFER_FILES" in ''|*[!0-9]*) printf 'error: defer line carries n
 printf 'PREMERGE DEFER_FILES=%s — the dispatch will open at most that many issues, one per file, and no more than max_new=10 of them\n' \
   "$PREMERGE_DEFER_FILES" >&2
 if [ "$PREMERGE_DEFER_OVERFLOW" -gt 0 ]; then
-  if [ "$PREMERGE_DEFER_SUGGESTION" -eq 0 ]; then
+  if [ "$PREMERGE_DEFER_TOTAL" -gt 0 ] && [ "$PREMERGE_DEFER_SUGGESTION" -eq 0 ]; then
     printf 'PREMERGE DEFER_OVERFLOW=%s CLASS=blocker — the 64-row envelope was filled ENTIRELY by blockers and %s further rows did not fit; some dropped rows may be blockers\n' \
       "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_OVERFLOW" >&2
   elif [ "$PREMERGE_SURVIVORS" != "1" ] && [ "$PREMERGE_DEFER_BLOCKER" -eq 0 ]; then
@@ -2140,7 +2168,11 @@ PREMERGE_DEFER TOTAL=<n> BLOCKER=<n> SUGGESTION=<n> FILES=<n> OVERFLOW=<n> PATH=
 ```
 
 `TOTAL`, `BLOCKER` and `SUGGESTION` describe the rows that ARE in the written
-aggregate; `OVERFLOW` is how many did not fit. `TOTAL + OVERFLOW` is everything
+aggregate; `OVERFLOW` is how many were dropped — the ones that did not fit **and**
+the ones the filer could open no issue for, which are cut on every run, so
+`OVERFLOW > 0` does not imply the envelope was full. `TOTAL` is therefore the only
+field on the line that witnesses the envelope is non-empty, and the fence reads it
+as one. `TOTAL + OVERFLOW` is everything
 the run had to file. `FILES` is how many distinct owning files those rows cover —
 one issue each up to the dispatch's `max_new`, because the filer groups by file
 and that cap counts files too. Above the cap `FILES` is an upper bound and not a
@@ -2196,11 +2228,28 @@ What happens now:
 - **The count is reported, never swallowed.** Surface `OVERFLOW=<n>` in the run
   summary. Silently dropping is the defect; reporting is what makes the drop
   legitimate rather than a repeat of the thing being fixed.
+- **`OVERFLOW=` is not only the envelope cut, and the fence must not read it as
+  one.** A row whose `file` is not a usable string can become no issue under any
+  ranking, so `defer` drops it on **every** run rather than only an overflowing
+  one — and counts it in `OVERFLOW=` so the drop is stated instead of hidden.
+  `OVERFLOW > 0` therefore no longer implies the envelope was full, or even that
+  it holds anything: a run whose only deferred row has a non-string `file` prints
+  `TOTAL=0 BLOCKER=0 SUGGESTION=0 FILES=0 OVERFLOW=1`. Any arm reasoning about
+  what the envelope contains needs its own witness that the envelope is
+  non-empty, and `TOTAL=` on the same line is it.
 - **The overflow classes are reported differently, and none promises more than it
-  can — the `CLASS=` token included.** `SUGGESTION == 0 && OVERFLOW > 0` means the
-  envelope was filled entirely by blockers and the dropped rows certainly are
-  blockers too; it keeps the severe `CLASS=blocker` sentence, and an operator must
-  never be shown a milder one over that state. What the mild arm may no longer say
+  can — the `CLASS=` token included.** `TOTAL > 0 && SUGGESTION == 0 &&
+  OVERFLOW > 0` means the envelope was filled entirely by blockers; it keeps the
+  severe `CLASS=blocker` sentence, and an operator must never be shown a milder one
+  over that state. `TOTAL > 0` is the half that is easy to drop and must not be:
+  `TOTAL = BLOCKER + SUGGESTION`, so it is what turns `SUGGESTION == 0` from
+  vacuously true on an empty envelope into "every row in here is a blocker". Guard
+  the arm on `SUGGESTION == 0` alone and the empty-envelope line above takes it,
+  announcing a blocker overflow over a dropped *suggestion* — and because `CLASS=`
+  is the only parseable part of the line, a scraper records the alarm as real. An
+  empty envelope witnesses nothing about the dropped rows, so it falls through to
+  the arms that answer from the **candidate set** rather than from the envelope,
+  and those stay correct at `TOTAL=0`. What the mild arm may no longer say
   is *every blocker was kept*. Files are the unit now, and a blocker-bearing file
   carries its own cleanup rows into the envelope with it — so cleanup can survive
   while a blocker is dropped, and `SUGGESTION > 0` no longer witnesses anything

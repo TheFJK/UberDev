@@ -731,6 +731,35 @@ def _defer_groups(rows: "list[dict]") -> "list[tuple[object, list[int]]]":
     return [(key, by_file[key]) for key in order]
 
 
+def _drop_unfilable(rows: "list[dict]") -> "tuple[list[dict], int]":
+    """The rows a file-keyed filer could open an issue for, and how many could not.
+
+    ONE implementation, two callers, for the same reason `_union_suggestions` is:
+    `cmd_defer` drops these rows into `OVERFLOW=` and `cmd_plan` has to skip
+    exactly the same ones before it validates the union. A `plan` that refused on
+    a row `defer` is going to discard would abort an attempt that was going to
+    succeed -- the same maximal-loss trade the drop itself exists to refuse -- and
+    an equivalence between two hand-written predicates is a thing this file has
+    watched drift rather than a thing that stays true.
+
+    The decision is `_defer_groups`' KEY, never the row's `file` read a second
+    time: that function is where "not a string, or the empty string `_repo_path`
+    refuses" is defined, and re-deriving it here would be the second copy.
+    """
+    unfilable = {
+        index
+        for key, members in _defer_groups(rows)
+        if not isinstance(key, str)
+        for index in members
+    }
+    if not unfilable:
+        return rows, 0
+    return (
+        [row for index, row in enumerate(rows) if index not in unfilable],
+        len(unfilable),
+    )
+
+
 # --------------------------------------------------------------------------
 # the deferred-findings envelope handed to agents/findings-to-issues.md
 # --------------------------------------------------------------------------
@@ -1314,7 +1343,48 @@ def cmd_plan(args: argparse.Namespace) -> int:
     # `classified-NN.json` evidence, through the same `_union_suggestions`, and
     # that one is the file Phase 5 dispatches.
     carried = _carry_prior_suggestions(out_dir, attempt) if args.carry_prior else []
-    carried_count = len(_union_suggestions(suggestions, carried)) - len(suggestions)
+    union = _union_suggestions(suggestions, carried)
+    carried_count = len(union) - len(suggestions)
+
+    # THE UNION IS CHECKED HERE AND WRITTEN NOWHERE.
+    #
+    # Deleting the `suggestions-aggregate.md` write (see below) also deleted the
+    # only per-attempt validation the CARRIED rows ever got. `_encode_aggregate`
+    # ran on this union on every attempt, so a carried suggestion with an absolute
+    # path or an over-long summary refused at the attempt that produced it.
+    # Nothing replaced it, which moved every such refusal to the Phase 5 `defer`
+    # -- after the whole repair budget has been spent, on the one step whose
+    # entire purpose is that findings outlive the run. A refused `plan` is a hard
+    # stop for the attempt with the previous attempt's artifacts intact (SKILL.md
+    # `## Phase 2`); a refused `defer` is the run's findings, gone. Same
+    # malformation, and the two timings are nowhere near the same cost.
+    #
+    # So the check comes back and the FILE does not. The encoder is called for its
+    # refusals and its bytes are dropped on the floor: calling the REAL one is
+    # what makes this equivalent to what `defer` will do, where restating the
+    # validators here would be one more "two copies that cannot disagree" claim
+    # held up by a sentence. Nothing is published, so `## Phase 2`'s "no aggregate
+    # at all" and the run's one-aggregate property are both untouched.
+    #
+    # NOT STRICTER THAN THE STEP IT STANDS IN FOR, in either place `defer`
+    # deliberately tolerates something:
+    #
+    #   * `_drop_unfilable` first, because `defer` drops a row with no usable
+    #     `file` into `OVERFLOW=` rather than refusing the envelope. Refusing here
+    #     on a row that is going to be discarded there would kill attempts that
+    #     were going to succeed -- the exact trade that drop exists to refuse.
+    #   * `allow_blockers=True`, matching the one caller that writes the envelope.
+    #     This union carries no blocker by construction, so the flag changes
+    #     nothing today; it is here so a stored `severity` this verb never wrote
+    #     cannot make `plan` refuse a document `defer` would happily encode.
+    #
+    # The one cut it does NOT mirror is the MAX_FINDINGS truncation, which can
+    # also discard a malformed row before `_encode_aggregate` sees it. That one is
+    # not reproducible at plan time -- its membership depends on the surviving
+    # blockers and the un-applied lens rows, and neither exists yet -- and the row
+    # it would have hidden is malformed either way. Refusing loudly on attempt N
+    # beats being saved by a ranking accident at the end of the run.
+    _encode_aggregate(_drop_unfilable(union)[0], pr_number, run_id, allow_blockers=True)
 
     classified = {
         "schema_version": SCHEMA_VERSION,
@@ -1393,6 +1463,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
     # suggestions stay on disk in its own `classified-NN.json`, which is what
     # `_carry_prior_suggestions` reads, and that is what makes the union
     # reconstructible at defer time.
+    #
+    # WHAT STOPPED IS THE PUBLISHING, NOT THE VALIDATION. The union still goes
+    # through `_encode_aggregate` on every attempt, above, with its bytes
+    # discarded -- see that comment for why moving that check to Phase 5 was the
+    # maximal-loss timing and why the plan-side copy is deliberately no stricter.
     #
     # `defer` writes the run's ONE aggregate, once, after the loop settles --
     # which is also what keeps `agents/findings-to-issues.md` happy: it re-checks
@@ -1620,20 +1695,11 @@ def cmd_defer(args: argparse.Namespace) -> int:
     # whose `file` IS a usable string but is still malformed (an absolute path, a
     # missing `failure_scenario`) survives here and refuses there, exactly as it
     # always did.
-    overflow = 0
+    rows, overflow = _drop_unfilable(rows)
+    # Grouped AFTER the cut, never before it: the cut renumbered every row behind
+    # the first drop, and the ranking below indexes `rows` by exactly these
+    # positions.
     groups = _defer_groups(rows)
-    unfilable = {
-        index
-        for key, members in groups
-        if not isinstance(key, str)
-        for index in members
-    }
-    if unfilable:
-        overflow += len(unfilable)
-        rows = [row for index, row in enumerate(rows) if index not in unfilable]
-        # Re-group: the cut renumbered every row behind the first drop, and the
-        # ranking below indexes `rows` by exactly these positions.
-        groups = _defer_groups(rows)
 
     # OVERFLOW IS SURVIVABLE, BECAUSE THIS IS THE STEP THAT MUST NOT LOSE THINGS.
     #

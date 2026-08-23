@@ -3374,7 +3374,7 @@ EOF_VERIFY_AUDIT
 
 6b. **Phase 2.5 — Findings-to-Issues sub-phase** (skip iff `DEFER_ISSUES_PHASE=0` OR `defer_issues_enabled=false`)
 
-    Reads the run aggregate artifacts produced by Phase 1 (`post-impl-review-final.md`) and Phase 2 (`simplify-final.md`), filters all issue-eligible deferred rows (`severity ∈ {blocker, critical, important, major} AND disposition != APPLIED`), maps them to BLOCKER / CRITICAL / MAJOR tiers, and persists them as durable GitHub issues with HTML-comment fingerprint dedupe. Default-on. The parent halts only when at least one BLOCKER is deferred or when the `MAX_NEW` cap truncates a BLOCKER/CRITICAL row; major/important filings and non-overflow critical filings remain non-halting.
+    Reads the run aggregate artifacts produced by Phase 1 (`post-impl-review-final.md`) and Phase 2 (`simplify-final.md`), filters all issue-eligible deferred rows (`severity ∈ {blocker, critical, important, major} AND disposition != APPLIED`), maps them to BLOCKER / CRITICAL / MAJOR tiers, and persists them as durable GitHub issues with HTML-comment fingerprint dedupe. Default-on. The parent halts only when at least one BLOCKER is deferred or when the `MAX_NEW` cap truncates a BLOCKER/CRITICAL FILE GROUP (the cap defers whole files, so `overflow_count` counts files, not findings — #722); major/important filings and non-overflow critical filings remain non-halting.
 
     **Effective-enabled gate:** the sub-phase runs only when BOTH the CLI flag AND the config key are ON. Either knob disables (CLI flag `DEFER_ISSUES_PHASE=1` AND config `DEFER_ISSUES_CONFIG=true`).
 
@@ -3707,7 +3707,7 @@ EOF_VERIFY_AUDIT
 
     ```bash
     if [ "${PHASE2_5_HALTED:-false}" = "true" ]; then
-      # Phase 2.5 filed at least one BLOCKER tier issue OR truncated a BLOCKER/CRITICAL.
+      # Phase 2.5 filed at least one BLOCKER tier issue OR truncated a BLOCKER/CRITICAL FILE GROUP.
       # Surface a user-visible halt block; the RED trust-trail emission downstream
       # will skip the label + trailer.
       :
@@ -3720,7 +3720,7 @@ EOF_VERIFY_AUDIT
     /uberdev:review-pr — Phase 2.5 halt (RFC 0002)
       blocker filings:   $BY_SEVERITY_BLOCKER
       critical filings:  $BY_SEVERITY_CRITICAL
-      overflow halt:     $HALTED_DUE_TO_OVERFLOW (truncated count: $OVERFLOW_COUNT)
+      overflow halt:     $HALTED_DUE_TO_OVERFLOW (truncated files: $OVERFLOW_COUNT)
       filed issues:      <render created_urls + commented_urls as bullet list with tier>
       trust trail:       RED — no Reviewed-by trailer, no uberdev-approved label
       /merge will:       INVALID until issues resolved OR --accept-blocker-deferred passed
@@ -6647,7 +6647,7 @@ PY
    |---|---|---|---|---|
    | Phase 1 — Review + Fix | ran | APPROVE / REVISIONS_REQUIRED / REJECT | <commit shas> | <count> |
    | Phase 2 — Simplify     | ran / blocked / skipped | APPROVE / REVISIONS_REQUIRED / REJECT (omit if status≠ran) | <commit sha or ∅> | <count> |
-   | Issues filed (Phase 2.5) | Rendered from the agent's return YAML, broken down by tier per RFC 0002 §3.4: `BLOCKER: <n>` / `CRITICAL: <n>` / `MAJOR: <n>` (each line omitted when count is 0). Sum line: `<total> created + <total> commented` followed by the trust-trail state implication — `(halt: trust trail RED)` when `halted=true`, `(critical-deferred: trust trail YELLOW)` when only `by_severity.critical > 0`, `(silent file: trust trail GREEN)` otherwise. `overflow_count` additional findings exceeded `MAX_NEW=10` cap; suffix `(BROKEN-FEATURE HALT)` when `halted_due_to_overflow=true`. `len(blocked_by_dedupe)` blocked by dedupe-lookup failure or fail-CLOSED branch. Full URL list with `(tier)` annotation in the "Issues filed (links)" block below. Skip path: `(skipped: --no-defer-issues)` when `DEFER_ISSUES_PHASE=0`, OR `(skipped: defer_issues_enabled=false)` when the config disables, OR both joined by " and " when both knobs are off. |
+   | Issues filed (Phase 2.5) | Rendered from the agent's return YAML, broken down by tier per RFC 0002 §3.4: `BLOCKER: <n>` / `CRITICAL: <n>` / `MAJOR: <n>` (each line omitted when count is 0). Sum line: `<total> created + <total> commented` followed by the trust-trail state implication — `(halt: trust trail RED)` when `halted=true`, `(critical-deferred: trust trail YELLOW)` when only `by_severity.critical > 0`, `(silent file: trust trail GREEN)` otherwise. `overflow_count` additional files exceeded `MAX_NEW=10` cap — the field counts whole FILE GROUPS, not findings (#722), so the number of deferred findings is at least that high; suffix `(BROKEN-FEATURE HALT)` when `halted_due_to_overflow=true`. `len(blocked_by_dedupe)` blocked by dedupe-lookup failure or fail-CLOSED branch. Full URL list with `(tier)` annotation in the "Issues filed (links)" block below. Skip path: `(skipped: --no-defer-issues)` when `DEFER_ISSUES_PHASE=0`, OR `(skipped: defer_issues_enabled=false)` when the config disables, OR both joined by " and " when both knobs are off. |
 
    | Post-fix review — Phase 1 fixer (5p) | Rendered from `$RESEARCH_DIR_ABS/postfix-phase1-iter<N>.json`: `status` (`ran` / `skipped` / `blocked`), `findings_count`, and exactly two severity counters — `blocker: <n>` / `suggestion: <n>`. No `critical` / `major` / `important` counter is rendered: the child's `phase1-reviewer-v1` contract admits no such value, so one would be structurally zero forever. Append `(diff summarised)` when `diff_summarised` is `true`, so a pass that read a per-file summary instead of the diff says so. Skip paths, from `reason`: `(skipped: --no-post-fix-review)` for `off-switch`, `(skipped: no applied fixer commit)` for `no-applied-commit`. Blocked path: `(blocked: the Phase 1 fixer commits were NOT reviewed — child-unavailable)`. That last rendering is load-bearing — see the note under the trust predicate below: no predicate reads this row, so it is where a human or `trust-trail-evaluator` tells an unreviewed pass apart from a clean one. |
    | Post-fix review — Phase 2 fixer (6p) | The same row, read from `$RESEARCH_DIR_ABS/postfix-phase2-iter<N>.json`. A run with `--no-simplify` dispatched no Phase 2 fixer and therefore renders `(skipped: no applied fixer commit)`. |
