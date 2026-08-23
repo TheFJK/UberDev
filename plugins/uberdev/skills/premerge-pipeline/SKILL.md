@@ -2068,6 +2068,8 @@ PREMERGE_DEFER_HEAD="${PREMERGE_DEFER_LINE%% PATH=*}"
 PREMERGE_DEFER_OVERFLOW="${PREMERGE_DEFER_HEAD##* OVERFLOW=}"
 PREMERGE_DEFER_SUGGESTION="${PREMERGE_DEFER_HEAD##* SUGGESTION=}"
 PREMERGE_DEFER_SUGGESTION="${PREMERGE_DEFER_SUGGESTION%% *}"
+PREMERGE_DEFER_BLOCKER="${PREMERGE_DEFER_HEAD##* BLOCKER=}"
+PREMERGE_DEFER_BLOCKER="${PREMERGE_DEFER_BLOCKER%% *}"
 PREMERGE_DEFER_FILES="${PREMERGE_DEFER_HEAD##* FILES=}"
 PREMERGE_DEFER_FILES="${PREMERGE_DEFER_FILES%% *}"
 # `OVERFLOW=` is ALWAYS printed -- `OVERFLOW=0` on a normal run -- so a missing
@@ -2075,6 +2077,11 @@ PREMERGE_DEFER_FILES="${PREMERGE_DEFER_FILES%% *}"
 # would re-create the silent drop by reading it as "nothing overflowed".
 case "$PREMERGE_DEFER_OVERFLOW" in ''|*[!0-9]*) printf 'error: defer line carries no OVERFLOW= count: %s\n' "$PREMERGE_DEFER_LINE" >&2; exit 74 ;; esac
 case "$PREMERGE_DEFER_SUGGESTION" in ''|*[!0-9]*) printf 'error: defer line carries no SUGGESTION= count: %s\n' "$PREMERGE_DEFER_LINE" >&2; exit 74 ;; esac
+# BLOCKER= is what the CLASS= arms below branch on, so it gets the same
+# treatment: always printed, therefore a missing or non-numeric field is a
+# contract break. Defaulting it to 0 would hand the "no blocker was ever a
+# candidate" arm to a line that never said so.
+case "$PREMERGE_DEFER_BLOCKER" in ''|*[!0-9]*) printf 'error: defer line carries no BLOCKER= count: %s\n' "$PREMERGE_DEFER_LINE" >&2; exit 74 ;; esac
 # FILES= is how many ISSUES the dispatch below will open, because the filer
 # groups by owning file. Like OVERFLOW= it is always printed, so a missing or
 # non-numeric field is a contract break rather than a zero.
@@ -2087,19 +2094,42 @@ case "$PREMERGE_DEFER_FILES" in ''|*[!0-9]*) printf 'error: defer line carries n
 # fit (#722). `SUGGESTION == 0 && OVERFLOW > 0` still means the envelope is
 # ENTIRELY blockers and the dropped rows certainly are too, so it keeps its own
 # louder line -- an operator must never read the mild sentence over that state.
-# The mild arm therefore retires its blanket blocker reassurance and points at
-# `BLOCKER=` on the line below instead, which is the only field that answers it.
+#
+# `CLASS=` IS THE ONLY PARSEABLE PART OF THE LINE, SO IT MAY ONLY CLAIM WHAT THE
+# RUN CAN PROVE. Correcting the prose after the em dash and leaving the token at
+# `cleanup` left the machine-readable half asserting the very thing the prose had
+# just retired: on the worked example above -- one file of 40 cleanup rows plus a
+# blocker, one file of 30 blockers, `TOTAL=64 BLOCKER=24 SUGGESTION=40 FILES=2
+# OVERFLOW=7` -- all seven dropped rows are blockers, and a scraper keying on
+# `CLASS=` filed them as cleanup.
+#
+# `cleanup` therefore survives only in the state where it is a fact rather than
+# an inference: `PREMERGE_SURVIVORS != 1` means `defer` ran WITHOUT
+# `--include-blockers`, so its entire candidate set was this attempt's carried
+# suggestions plus the Phase 4b lens rows -- and lib/premerge-findings.py
+# normalises every lens row to `suggestion` unconditionally -- with `BLOCKER=0`
+# on the line corroborating it. No blocker was ever a candidate there, so no
+# dropped row can be one. Everywhere else the class of the dropped set is
+# genuinely unknown and the token says `unknown` rather than guessing the benign
+# answer; the sentence points at `BLOCKER=`, the only field that answers it.
+#
+# DEFER_FILES= is printed BEFORE this block, not between it and the defer line:
+# the mild arm tells the operator to read `BLOCKER=` on the line below, so the
+# defer line has to actually be the next line.
+printf 'PREMERGE DEFER_FILES=%s — the dispatch will open at most that many issues, one per file, and no more than max_new=10 of them\n' \
+  "$PREMERGE_DEFER_FILES" >&2
 if [ "$PREMERGE_DEFER_OVERFLOW" -gt 0 ]; then
-  if [ "$PREMERGE_DEFER_SUGGESTION" -gt 0 ]; then
-    printf 'PREMERGE DEFER_OVERFLOW=%s CLASS=cleanup — %s rows did not fit the 64-row envelope; blocker-bearing files were admitted first, but file grouping no longer proves every blocker fit — check BLOCKER= on the line below against the blockers this run reported\n' \
+  if [ "$PREMERGE_DEFER_SUGGESTION" -eq 0 ]; then
+    printf 'PREMERGE DEFER_OVERFLOW=%s CLASS=blocker — the 64-row envelope was filled ENTIRELY by blockers and %s further rows did not fit; some dropped rows may be blockers\n' \
+      "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_OVERFLOW" >&2
+  elif [ "$PREMERGE_SURVIVORS" != "1" ] && [ "$PREMERGE_DEFER_BLOCKER" -eq 0 ]; then
+    printf 'PREMERGE DEFER_OVERFLOW=%s CLASS=cleanup — %s rows did not fit the 64-row envelope; this run deferred no blockers at all, so every dropped row is a cleanup row\n' \
       "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_OVERFLOW" >&2
   else
-    printf 'PREMERGE DEFER_OVERFLOW=%s CLASS=blocker — the 64-row envelope was filled ENTIRELY by blockers and %s further rows did not fit; some dropped rows may be blockers\n' \
+    printf 'PREMERGE DEFER_OVERFLOW=%s CLASS=unknown — %s rows did not fit the 64-row envelope; blocker-bearing files were admitted first, but file grouping no longer proves every blocker fit, so a dropped row may be a blocker — check BLOCKER= on the line below against the blockers this run reported\n' \
       "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_OVERFLOW" >&2
   fi
 fi
-printf 'PREMERGE DEFER_FILES=%s — the dispatch will open at most that many issues, one per file, and no more than max_new=10 of them\n' \
-  "$PREMERGE_DEFER_FILES" >&2
 printf '%s\n' "$PREMERGE_DEFER_LINE" >&2
 ```
 
@@ -2166,19 +2196,24 @@ What happens now:
 - **The count is reported, never swallowed.** Surface `OVERFLOW=<n>` in the run
   summary. Silently dropping is the defect; reporting is what makes the drop
   legitimate rather than a repeat of the thing being fixed.
-- **The two overflow classes are reported differently, and neither promises more
-  than it can.** `SUGGESTION == 0 && OVERFLOW > 0` means the envelope was filled
-  entirely by blockers and the dropped rows certainly are blockers too; it keeps
-  the severe sentence, and an operator must never be shown the mild one over that
-  state. What the mild arm may no longer say is *every blocker was kept*. Files
-  are the unit now, and a blocker-bearing file carries its own cleanup rows into
-  the envelope with it — so cleanup can survive while a blocker is dropped, and
-  `SUGGESTION > 0` no longer witnesses anything about blockers. Run the shipped
-  rule over one file holding 40 cleanup rows plus a blocker and one holding 30
-  blockers and it prints `TOTAL=64 BLOCKER=24 SUGGESTION=40 FILES=2 OVERFLOW=7`:
-  all seven dropped rows are blockers. `BLOCKER=` on the defer line is the only
-  field that answers "did every blocker fit", and the mild arm points at it
-  rather than guessing.
+- **The overflow classes are reported differently, and none promises more than it
+  can — the `CLASS=` token included.** `SUGGESTION == 0 && OVERFLOW > 0` means the
+  envelope was filled entirely by blockers and the dropped rows certainly are
+  blockers too; it keeps the severe `CLASS=blocker` sentence, and an operator must
+  never be shown a milder one over that state. What the mild arm may no longer say
+  is *every blocker was kept*. Files are the unit now, and a blocker-bearing file
+  carries its own cleanup rows into the envelope with it — so cleanup can survive
+  while a blocker is dropped, and `SUGGESTION > 0` no longer witnesses anything
+  about blockers. Run the shipped rule over one file holding 40 cleanup rows plus
+  a blocker and one holding 30 blockers and it prints `TOTAL=64 BLOCKER=24
+  SUGGESTION=40 FILES=2 OVERFLOW=7`: all seven dropped rows are blockers. So the
+  token retired with the sentence. `CLASS=cleanup` is now printed only where it is
+  provable — the run deferred without `--include-blockers`, so no blocker was ever
+  a candidate and `BLOCKER=0` says so — and every other overflow reports
+  `CLASS=unknown`. `BLOCKER=` on the defer line is the only field that answers
+  "did every blocker fit", and that arm points at it rather than guessing; the
+  defer line is printed immediately after it so *the line below* is literally the
+  line below.
 
 **The blocker rows are the new thing here, and they needed a producer, not a
 louder promise.** `_encode_aggregate` used to pin every row to `suggestion`, so

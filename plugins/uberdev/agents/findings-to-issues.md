@@ -595,7 +595,8 @@ Explicit forbidden patterns:
 
      Both fields describe the set actually being FILED. Whenever a later
      step removes members — the per-member forgery drop in Step 8c.4, the
-     closed-index split in Step 8d — you must then
+     per-member secret-scan repair in Step 8c.7, the closed-index split in
+     Step 8d — you must then
      re-derive the primary member and `group_tier` over the members that remain.
      A group whose only blocker was removed must not still render
      `**Tier:** BLOCKER`, page the author or emit `Blocks:`: that pages a human
@@ -607,11 +608,49 @@ Explicit forbidden patterns:
    groups by name instead would reorder the whole plan when one filename
    changes.
 
+   **The marker-forgery screen is APPLIED HERE, not first at the write phase.**
+   Step 8c.4 drops a member whose own normalised summary carries one of the
+   four forgeable marker literals, and that verdict is a pure function of the
+   member's own text: it needs no GitHub lookup, and nothing between this step
+   and the write can change it. Evaluate it while the groups are being built,
+   so the `members[]` and `group_tier` this step publishes already exclude
+   every forged row, and a group left with no surviving member never exists for
+   Step 6 at all. Step 8c.4 stays the SINGLE normative statement of the screen
+   — its four literals, its reason string, its `blocked_by_dedupe[]` accounting
+   and its pre-write re-assertion; this step applies that rule and does not
+   restate it, because a second copy of a predicate is a second copy to drift.
+
+   Reaching the screen for the first time inside the write loop is what the cap
+   cannot survive. A file whose only blocker is a forged row ranks
+   `group_tier_rank(BLOCKER)=3` at Step 6, takes a slot inside `max_new` and
+   displaces a genuine blocker group past the cap; the drop then demotes it to
+   SUGGESTION — but the slot is spent, the displaced blocker is already counted
+   in `overflow_count`, and `halted_due_to_overflow` was decided against a tier
+   this same run had just invalidated. Net: a real blocker deferred, a
+   cleanup-only issue filed in its place, and a halt signal derived from a tier
+   that no longer exists. Screening first costs nothing and makes the cap's
+   input final.
+
+   Nothing after Step 6 may lower a `group_tier` behind the cap's back, and
+   nothing does. Step 8c.6 drops prose fences and then omits trailing members
+   LOWEST rank first, so it can never remove the primary member and therefore
+   never moves `group_tier`. Step 8c.7's secret-scan repair CAN remove any
+   member, but only inside a group the cap already admitted — it never revives
+   a deferred group and never touches a truncated one. Step 8d's closed-index
+   split re-derives a lower tier for the subset it files, and it is the one
+   removal that cannot be hoisted: which members are already recorded is not
+   knowable until the dedupe lookup runs. It, too, only shrinks a group the cap
+   admitted. The overflow guard reads the tiers of the TRUNCATED groups, which
+   none of these three can reach.
+
 6. **Apply MAX_NEW cap.** Sort the **file groups** from Step 5.5 by
    `(group_tier_rank desc, file_path asc)` where `group_tier_rank(BLOCKER)=3,
    group_tier_rank(CRITICAL)=2, group_tier_rank(MAJOR)=1,
    group_tier_rank(SUGGESTION)=0`. Take the first `max_new` groups; record the
-   remainder as `overflow_count`.
+   remainder as `overflow_count`. The `group_tier` this sort reads is the
+   POST-SCREEN one Step 5.5 publishes — the Step 8c.4 marker-forgery drop has
+   already run — so no group is admitted or deferred on a tier a later step
+   removes, and neither the cap nor the overflow guard below is ever recomputed.
 
    **`max_new` counts FILES, not rows (#722).** The cap can therefore no longer
    truncate a file's findings halfway: a file is either filed with every one of
@@ -678,9 +717,29 @@ Explicit forbidden patterns:
    at `max_new=10` that floor is 70 calls' worth of budget against three label
    writes plus at most twenty issue writes.
 
-8. **Per-file loop (write phase).** For each **group** in the capped list, in
-   deterministic order. Sleep 1 second between iterations to stay polite to the
-   API:
+8. **Per-file loop (write phase).** Bind the slug's default ONCE, before
+   anything in this step is computed from it:
+
+   ```bash
+   finding_marker_slug="${finding_marker_slug:-review-pr}"
+   ```
+
+   Every other reference in this file spells that fallback inline —
+   `${finding_marker_slug:-review-pr}` at Step 7, at the marker check in `b`,
+   at the forgery literals in `c.4`, and at sanitiser step 4 — so a dispatch
+   that leaves the slug unbound would otherwise make the container fingerprint
+   of `a` disagree with the marker it is written into: `FP` would key on
+   `":$file_path"` while the marker stored beside it reads `review-pr`. A later
+   run of the same caller WITH the slug bound would compute
+   `sha256("review-pr:$file_path")[:16]`, match nothing, and open a SECOND
+   container issue for the same file — cross-run dedupe stops firing, and says
+   nothing while it does. Binding it here is what makes the bare
+   `"$finding_marker_slug"` in `a` the same value those inline fallbacks
+   produce; it is not shorthand for them, and it must not be re-spelled with a
+   second `:-` default, which would make two recipes out of one.
+
+   Then, for each **group** in the capped list, in deterministic order. Sleep 1
+   second between iterations to stay polite to the API:
 
    a. Compute the two fingerprints. The **container** fingerprint is the
       issue's identity and is keyed on the file alone:
@@ -699,7 +758,26 @@ Explicit forbidden patterns:
       across labels would make one fleet's issue look like another's dedupe hit.
       The member recipe is unchanged and stays the per-finding authority.
 
-   b. Dedupe lookup (fail-CLOSED): capture stderr alongside stdout so the diagnostic survives on failure — `MATCH=$(gh issue list --label "${finding_label:-review-pr-finding}" --state all --search "$FP in:body" --json number,state,url,body --limit 5 2>&1)`; capture `rc=$?`. If `rc != 0` OR `MATCH` does not parse as JSON (validate via `printf '%s' "$MATCH" | jq empty 2>/dev/null`), append `{file: $file_path:$line, reason: "gh issue list rc=$rc — $(printf '%s' "$MATCH" | head -c 200)"}` — `$line` being the primary member's — to `blocked_by_dedupe[]` and continue to the next GROUP (#722) — NEVER create the issue on lookup failure. The `--label "${finding_label:-review-pr-finding}"` filter narrows to issues this agent created; the `--search "$FP in:body"` then matches the fingerprint substring. After the search returns, verify the exact HTML-comment marker `<!-- uberdev:${finding_marker_slug:-review-pr}-finding fingerprint=$FP -->` is present in the matched issue's `body` field via local exact-string check before treating it as a dedupe hit (belt-and-braces against GH search tokenisation gaps).
+   b. Dedupe lookup (fail-CLOSED): capture stderr alongside stdout so the diagnostic survives on failure — `MATCH=$(gh issue list --label "${finding_label:-review-pr-finding}" --state all --search "$FP in:body" --json number,state,url,body --limit 100 2>&1)`; capture `rc=$?`. If `rc != 0` OR `MATCH` does not parse as JSON (validate via `printf '%s' "$MATCH" | jq empty 2>/dev/null`), append `{file: $file_path:$line, reason: "gh issue list rc=$rc — $(printf '%s' "$MATCH" | head -c 200)"}` — `$line` being the primary member's — to `blocked_by_dedupe[]` and continue to the next GROUP (#722) — NEVER create the issue on lookup failure. The `--label "${finding_label:-review-pr-finding}"` filter narrows to issues this agent created; the `--search "$FP in:body"` then matches the fingerprint substring. After the search returns, verify the exact HTML-comment marker `<!-- uberdev:${finding_marker_slug:-review-pr}-finding fingerprint=$FP -->` is present in the matched issue's `body` field via local exact-string check before treating it as a dedupe hit (belt-and-braces against GH search tokenisation gaps).
+
+      **The page has to hold the PATH's whole history, not one finding's
+      (#722).** `--limit 5` was safe while the container key was
+      `file:line:summary`: a match was then one finding's entire history, and
+      one finding cannot accumulate issues. Under the FILE key it can — the
+      closed arm of `d` deliberately files a second issue carrying this same
+      container fingerprint every time the user closes the previous one and a
+      later finding appears in that path, so matches accumulate one per
+      close-and-refile cycle, per path, with no upper bound. At `--limit 5`,
+      under the default best-match ordering `--state all` returns, five closed
+      issues are enough to push the OPEN one off the page: `c`'s "first element
+      whose state is open" then finds none, the No-match arm files a duplicate
+      for a file this agent is already tracking, and it does so again on every
+      subsequent run. `100` is the search API's maximum page size, so the
+      lookup is still ONE request and the Step 2 `SEARCH_REMAINING <
+      (max_new + 5)` floor is unchanged — the fix costs nothing in the bucket
+      that funds it. Shadowing returns only past a hundred close-and-refile
+      cycles on a single path, two orders of magnitude beyond the five an
+      ordinary triage cadence reaches.
 
    c. Parse match: if `MATCH` is non-empty JSON array, select the element to
       act on — the first element whose `state` is `"open"` if the array has
@@ -742,6 +820,17 @@ Explicit forbidden patterns:
       change which member is primary, and `c.5` derives `mention_line` /
       `backref_line` from the primary member's `group_tier` — re-derive both
       per Step 5.5 after any drop.
+
+      **It is also APPLIED at Step 5.5, ahead of the Step 6 cap.** The screen
+      reads nothing but the member's own normalised summary, so evaluating it
+      during group construction is free, and it keeps a forged row from
+      inflating the `group_tier` the cap sorts on — a decision Step 6 makes
+      once and never revisits. This sub-step remains the only place the rule is
+      written down, and remains the last gate before `d`: on an honest run it
+      finds nothing left to drop, which is the point. A member that still
+      carries one of the four literals when it reaches here is dropped here,
+      with the same reason string and the same accounting, rather than reaching
+      a write.
 
    c.5. **Tier-aware bindings (RFC 0002 §3.3.2).** Before the state-branching write, derive the tier-specific issue-creation parameters from the per-row `row_tier` (resolved in Step 4):
 
@@ -884,6 +973,49 @@ Explicit forbidden patterns:
       partitioned the group, before that `gh issue create`; it is still applied
       before any write, so this step's position ahead of `d` is unchanged.
 
+   c.7. **Secret-scan repair — per MEMBER before per FILE (#722).** `d` pipes
+      every candidate body through `uberdev_run_secret_scan_stdin` before it
+      writes, and that gate does not move: a body that trips it is never sent
+      to GitHub, not even partially. What changes is what a hit COSTS. Before
+      grouping, one body was one finding and a hit cost exactly that finding.
+      The container change made the identical hit cost every finding in the
+      file, and the trigger is not exotic — reviewer prose quotes the code it
+      is complaining about, and this repo has already shipped a defect where a
+      secret-shaped TEST FIXTURE self-tripped its own pre-push scanner. One
+      quoted string must not suppress the surviving blocker beside it.
+
+      On a group-level scan returning **1** (secret detected), do not skip the
+      group. Re-scan each member's own rendered section — its `###` block in
+      the issue body, its single line in the comment body — through the same
+      function, one member at a time. Every member whose own section returns 1
+      gets `{file: $file_path:$line, reason: "secret-scan-hit"}` appended to
+      `blocked_by_dedupe[]` and is dropped from the group. Then re-derive the
+      primary member and `group_tier` per Step 5.5, re-derive `c.5`'s
+      `mention_line` / `backref_line` / `assignee_args` from that
+      `group_tier`, re-apply the `c.6` body-size budget to the now-shorter
+      body, re-assemble, and scan the result once more. A clean re-scan is
+      written normally, and the members that survived it are counted in
+      `by_severity` like any other written finding.
+
+      Skip the whole FILE GROUP that body belonged to — one
+      `blocked_by_dedupe[]` entry, `reason: "secret-scan-hit"`, naming the
+      primary member's `$file_path:$line` — in exactly three cases:
+
+      - the re-assembled body still returns 1, so the hit is not attributable
+        to any single member;
+      - every member was dropped, so there is nothing left to file;
+      - **any** scan in this step returned **2 or higher**. That code means the
+        SCANNER failed — gitleaks crashed, its configured ruleset was
+        unreadable, the regex fallback errored — and a broken scanner says
+        nothing about any member. Attributing it to one would file the rest of
+        the file on a clean verdict nobody gave. Fail closed on the whole group
+        instead, and never run the per-member pass to "narrow" a scanner
+        failure.
+
+      Exactly ONE repair round. A second would be re-scanning text the first
+      round already proved unattributable, and an unbounded repair loop is how
+      a run stops terminating.
+
    d. **State branching:** every `gh issue create` / `gh issue comment` invocation MUST capture combined stderr+stdout into `CREATE_OUTPUT` and the exit code into `rc`. Step 8f's classifier reads both as preconditions — without this capture the truncation + transient/permanent classification in 8f silently classifies every failure as permanent. Shape: `CREATE_OUTPUT=$(gh issue create ... 2>&1); rc=$?` (or the analogous form for `gh issue comment`).
       - `state == "open"`: build the comment body (see Comment body shape
         below), rendering **every** member of the group and marking each `new`
@@ -892,8 +1024,9 @@ Explicit forbidden patterns:
         the run's blocker accounting is a count of findings written, and a
         comment that mentioned only the new members would drop the recurring
         ones out of that count. Pipe through `uberdev_run_secret_scan_stdin` —
-        on non-zero exit append to `blocked_by_dedupe[]` with
-        `reason: "secret-scan-hit"` and continue; otherwise
+        on non-zero exit take the `c.7` repair, which drops the members whose
+        own line trips the scan and skips the whole group only on the three
+        terminal cases `c.7` names; otherwise
         `CREATE_OUTPUT=$(gh issue comment "$number" --body-file - 2>&1); rc=$?`
         from the sanitised tempfile. Append
         `{url, file, fingerprint, tier: $group_tier, findings: <N>}` to
@@ -949,7 +1082,7 @@ Explicit forbidden patterns:
           the run's entire safety claim, and says nothing while it does.
       - No match: build the issue body (see Issue body shape below — tier-aware
         via `mention_line` / `backref_line` from c.5, driven by `group_tier`);
-        secret-scan;
+        secret-scan, taking the `c.7` repair on a hit;
         `CREATE_OUTPUT=$(gh issue create --label "${finding_label:-review-pr-finding}" "${assignee_args[@]}" --title "$AUTO_TITLE" --body-file - 2>&1); rc=$?`
         from the sanitised tempfile. The title is file-scoped: with two or more
         members it is `[finding] $file_path — $member_count findings`; with
@@ -1263,7 +1396,7 @@ Return `status: REFUSED` with the matching rationale string when:
 - `gh issue list` rc != 0 → append to `blocked_by_dedupe[]`, continue, set `DONE_WITH_CONCERNS`. Never write the issue on lookup failure (fail-CLOSED dedupe).
 - `gh issue create` / `gh issue comment` rc != 0 → append to `blocked_by_dedupe[]`, continue, set `DONE_WITH_CONCERNS`. No retry within run.
 - `gh label create --force` rc != 0 → emit one stderr warning, continue, set `label_provisioned: "fail-soft-skipped"`.
-- Secret-scan hit on candidate body → append to `blocked_by_dedupe[]` with `reason: "secret-scan-hit"`, skip the whole FILE GROUP that body belonged to (#722), set `DONE_WITH_CONCERNS`. Body is NEVER written even partially. The unit moved with the write: one body now carries every finding in one file, so a hit costs that file's issue and the `blocked_by_dedupe[]` entry names the primary member's `$file_path:$line`.
+- Secret-scan hit on candidate body → take the Step 8c.7 repair: append `reason: "secret-scan-hit"` to `blocked_by_dedupe[]` for each member whose OWN rendered section trips the scan, drop those members, re-derive the group per Step 5.5, and re-scan. Set `DONE_WITH_CONCERNS`. Body is NEVER written even partially. If the repaired body still trips, if every member was dropped, or if the scanner ITSELF failed (rc >= 2, which says nothing about any member), skip the whole FILE GROUP that body belonged to (#722) — one entry, naming the primary member's `$file_path:$line`. The unit moved with the write: one body now carries every finding in one file, so an unattributable hit still costs that file's issue, while an attributable one costs only the member that caused it — one quoted fixture no longer suppresses the blocker beside it.
 - `MAX_NEW=10` exceeded → process the first 10 FILE GROUPS, set `overflow_count` to the remaining GROUP count — files deferred, never rows (#722) — and set `DONE_WITH_CONCERNS`. **Broken-feature overflow guard (RFC 0002 §3.3.4):** if any truncated group is BLOCKER/CRITICAL tier, additionally set `halted_due_to_overflow=true` AND `halted=true` — the parent halts and surfaces the cliff to the user. Pure-MAJOR overflow does not halt (silent truncation as before).
 
 **Halt semantics (RFC 0002 §3.3.5 — supersedes the pre-v0.26.0 "NEVER halts" clause).** A well-formed `DONE` or `DONE_WITH_CONCERNS` result halts the parent run iff the return contract has `halted: true`. The child-owned `halted` field records finding-driven policy stops and is set only when:

@@ -667,11 +667,11 @@ def _fix_waves(blockers: "list[dict]", max_per_wave: int) -> "list[list[dict]]":
     return waves
 
 
-# A `file` value that cannot serve as a group key. Paired with the row's own
-# index it is unique per row and never equal to any path, which is the entire
-# contract: `_defer_groups` must not merge two such rows into one group, and
-# `cmd_defer` must be able to tell them from a real path in order to rank them
-# last.
+# A `file` value that cannot serve as a group key -- not a string at all, or the
+# empty string that `_repo_path` refuses. Paired with the row's own index it is
+# unique per row and never equal to any path, which is the entire contract:
+# `_defer_groups` must not merge two such rows into one group, and `cmd_defer`
+# must be able to tell them from a real path in order to drop them.
 _UNUSABLE_FILE = object()
 
 
@@ -700,19 +700,30 @@ def _defer_groups(rows: "list[dict]") -> "list[tuple[object, list[int]]]":
     gate, and because it runs after the cut it still refuses a malformed row that
     SURVIVES, with the same token it always did.
 
-    Any `file` that is not a string gets a sentinel key instead, which is what
-    keeps the sharpest case out of the dict: an object or an array is unhashable,
-    and the `TypeError` a bare `.get` would raise on it is neither of the two
-    answers this verb is contracted to give. Being unique per row, the sentinel
-    also stops two such rows sharing a group. The caller ranks these last, so
-    they are the first rows dropped -- a row with no usable path cannot become an
-    issue under any ranking.
+    Any `file` that is not a NON-EMPTY string gets a sentinel key instead, which
+    is what keeps the sharpest case out of the dict: an object or an array is
+    unhashable, and the `TypeError` a bare `.get` would raise on it is neither of
+    the two answers this verb is contracted to give.
+
+    THE EMPTINESS HALF IS NOT A NICETY, and it used to be missing. `""` is
+    hashable, so an empty-`file` row grouped like a real path, sorted among the
+    real paths, survived the cut -- and then cost the ENTIRE envelope at
+    `_encode_aggregate`, whose `_repo_path` refuses it with `file must be a
+    non-empty string`. 64 filable findings lost to one row is the precise trade
+    this function exists to refuse, and `""` walked straight through it. Two
+    empty-`file` rows also shared one group, which is the other half of the
+    sentinel's contract.
+
+    Being unique per row, the sentinel also stops two such rows sharing a group.
+    The caller drops these groups outright -- on EVERY run, not only an
+    overflowing one -- because a row with no usable path cannot become an issue
+    under any ranking.
     """
     by_file: "dict[object, list[int]]" = {}
     order: "list[object]" = []
     for index, row in enumerate(rows):
         value = row.get("file")
-        key = value if isinstance(value, str) else (_UNUSABLE_FILE, index)
+        key = value if isinstance(value, str) and value else (_UNUSABLE_FILE, index)
         if key not in by_file:
             by_file[key] = []
             order.append(key)
@@ -939,6 +950,40 @@ def _carry_prior_suggestions(out_dir: str, attempt: int) -> "list[dict]":
     return carried
 
 
+# The tag that fronts an unhashable field's stand-in. A one-off object, so the
+# stand-in is a TUPLE and can therefore never compare equal to the string or the
+# integer a well-formed row puts in the same slot.
+_UNHASHABLE_FIELD = object()
+
+
+def _hashable_field(value: object) -> object:
+    """One row field, as something a `set` can hold.
+
+    `_suggestion_key` reads `file` and `line` straight off disk: `cmd_defer`
+    unions this attempt's `suggestions` with every earlier attempt's carried
+    rows, and nothing has checked any of them beyond "it is a dict". A JSON
+    OBJECT or ARRAY in either field is unhashable, so building the dedupe set
+    raised `TypeError` -- exit 1 with a full traceback, out of a verb contracted
+    to answer `0 encoded | 74 refused`, and raised BEFORE the cut that was going
+    to discard the row had even run.
+
+    That is the same defect `_defer_groups` keeps out of its dict with a
+    sentinel, arriving one function earlier and on the path most rows take:
+    `_defer_groups` only ever sees rows this union has already returned, so its
+    sentinel could not protect the common case at all.
+
+    The stand-in is the value's canonical JSON behind a tuple tag, which keeps
+    the dedupe honest in BOTH directions -- two rows carrying the same malformed
+    value are still one finding, two carrying different ones are still two --
+    where collapsing every unusable value onto one marker would silently merge
+    them. `dict` and `list` are the only unhashable values `json.loads` can
+    produce, and every row here came from it, so the two arms are exhaustive.
+    """
+    if isinstance(value, (dict, list)):
+        return (_UNHASHABLE_FIELD, _canonical_json(value))
+    return value
+
+
 def _suggestion_key(row: "dict") -> "tuple":
     """The identity the cross-attempt suggestion union dedupes on.
 
@@ -955,10 +1000,15 @@ def _suggestion_key(row: "dict") -> "tuple":
     suggestion path now keys on the same three fields `_normalise_findings`
     already keys its duplicate check on, so the two paths agree about what makes
     two findings the same finding.
+
+    `file` and `line` go through `_hashable_field` because neither has been
+    validated when this runs -- see that function for the traceback it ends. A
+    well-formed row's values pass through untouched, so the dedupe every real
+    finding gets is byte-for-byte the one it always got.
     """
     return (
-        row.get("file"),
-        row.get("line"),
+        _hashable_field(row.get("file")),
+        _hashable_field(row.get("line")),
         _normalised_summary(row["summary"]) if isinstance(row.get("summary"), str) else None,
     )
 
@@ -1544,6 +1594,47 @@ def cmd_defer(args: argparse.Namespace) -> int:
     if args.lens_findings is not None:
         rows.extend(_normalise_lens_findings(_load(args.lens_findings)))
 
+    # A ROW WITH NO USABLE PATH IS DROPPED ON EVERY RUN, NOT ONLY AN OVERFLOWING
+    # ONE.
+    #
+    # This cut used to live inside the `len(rows) > MAX_FINDINGS` branch below,
+    # so the ORDINARY under-cap run -- the common case, and the one Phase 5
+    # reaches on nearly every stack -- had no protection whatsoever: five
+    # suggestions plus one blocker whose `file` is an object exited 74 out of
+    # `_encode_aggregate`, behind the fence's `defer "$@" || exit 74` with no
+    # recovery arm, and the run filed NOTHING. `_defer_groups`' docstring
+    # asserted unconditionally that such a row "cannot become an issue under any
+    # ranking", but ranking only ever happened above 64 rows, so the guarantee
+    # read as covered while the common path lost everything.
+    #
+    # A row the filer cannot turn into an issue is worth exactly as little at 6
+    # rows as it is at 70, and the envelope it takes down with it is worth
+    # exactly as much. So the cut is unconditional, which is also what makes the
+    # ranking below simpler: no group reaching it can be keyed on a sentinel.
+    #
+    # DROPPED AND COUNTED. These rows land in `OVERFLOW=`, so an under-cap run
+    # that discarded something still says so on its output line -- the same
+    # "dropped and reported" the truncation below owes.
+    #
+    # `_encode_aggregate` is untouched by this and stays the single gate: a row
+    # whose `file` IS a usable string but is still malformed (an absolute path, a
+    # missing `failure_scenario`) survives here and refuses there, exactly as it
+    # always did.
+    overflow = 0
+    groups = _defer_groups(rows)
+    unfilable = {
+        index
+        for key, members in groups
+        if not isinstance(key, str)
+        for index in members
+    }
+    if unfilable:
+        overflow += len(unfilable)
+        rows = [row for index, row in enumerate(rows) if index not in unfilable]
+        # Re-group: the cut renumbered every row behind the first drop, and the
+        # ranking below indexes `rows` by exactly these positions.
+        groups = _defer_groups(rows)
+
     # OVERFLOW IS SURVIVABLE, BECAUSE THIS IS THE STEP THAT MUST NOT LOSE THINGS.
     #
     # This used to `fail(...)` above MAX_FINDINGS, and the Phase 5 fence is
@@ -1577,20 +1668,15 @@ def cmd_defer(args: argparse.Namespace) -> int:
     # Kept rows stay in their ORIGINAL relative order, so the only observable
     # difference from an under-cap run is which rows are absent -- downstream's
     # first-occurrence-wins dedupe sees the same ordering it always did.
-    overflow = 0
     if len(rows) > MAX_FINDINGS:
-        groups = _defer_groups(rows)
+        # No sentinel term here: the unusable-path cut above already removed
+        # every group the filer could open no issue for, on this run and on an
+        # under-cap one alike. A term for them here would be permanently dead,
+        # and a dead guard carrying a comment that says it is load-bearing is
+        # how the under-cap hole stayed invisible in the first place.
         ranked = sorted(
             range(len(groups)),
             key=lambda i: (
-                # A group keyed on a sentinel rather than a path is a row
-                # whose `file` is not even a string, so the filer -- which groups
-                # by path -- can open no issue for it under any severity. This
-                # term therefore comes FIRST, ahead of the blocker rule: keeping
-                # such a row hands `_encode_aggregate` a refusal that costs every
-                # filable row in the envelope, which is the loss this branch
-                # exists to refuse. Dropped first, and `OVERFLOW=` still counts it.
-                0 if isinstance(groups[i][0], str) else 1,
                 0
                 if any(rows[j].get("severity") == "blocker" for j in groups[i][1])
                 else 1,
@@ -1636,7 +1722,9 @@ def cmd_defer(args: argparse.Namespace) -> int:
                 )
                 keep.update(fill[:room])
             break
-        overflow = len(rows) - len(keep)
+        # `+=`, not `=`: `rows` is already the post-unusable-cut list, so the
+        # rows that cut discarded are counted once here and never recounted.
+        overflow += len(rows) - len(keep)
         rows = [row for index, row in enumerate(rows) if index in keep]
 
     out_path = os.path.join(run_dir, "deferred-aggregate.md")
