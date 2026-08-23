@@ -467,11 +467,16 @@ def _fingerprint(file_path: str, summary: str) -> str:
     Path plus folded summary is the narrowest pair that is present in BOTH
     reviewer output contracts and stable under the edits the loop itself makes.
 
-    DELIBERATELY NOT the same fingerprint `agents/findings-to-issues.md` Step 8a
-    computes. That one is `file:line:summary` because an ISSUE is about a
-    location, and two bugs on two lines of one file deserve two issues. This one
-    must survive exactly the line movement that one is keyed on. Same 16-hex
-    width, different question -- never substitute one for the other.
+    DELIBERATELY NOT either of the two fingerprints `agents/findings-to-issues.md`
+    computes, even though Step 8a's container key is now path-based too
+    (`sha256(finding_marker_slug:file_path)`, #722) and so shares this one's
+    insensitivity to line movement. Different material, and a different question:
+    that one keys the file-level ISSUE CONTAINER, so every finding in a file
+    collapses onto it by design; this one keys ONE FINDING across re-reviews, so
+    two findings in a file must stay apart or the loop reads a survivor as fixed.
+    The per-MEMBER key alongside it is `path:line:normalised_summary`, which is
+    keyed on exactly the line movement this one has to survive. Same 16-hex
+    width, three different questions -- never substitute one for another.
     """
     material = "%s\x1f%s" % (file_path, _fold_summary(summary))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
@@ -660,6 +665,59 @@ def _fix_waves(blockers: "list[dict]", max_per_wave: int) -> "list[list[dict]]":
             ]
         )
     return waves
+
+
+# A `file` value that cannot serve as a group key. Paired with the row's own
+# index it is unique per row and never equal to any path, which is the entire
+# contract: `_defer_groups` must not merge two such rows into one group, and
+# `cmd_defer` must be able to tell them from a real path in order to rank them
+# last.
+_UNUSABLE_FILE = object()
+
+
+def _defer_groups(rows: "list[dict]") -> "list[tuple[object, list[int]]]":
+    """The deferred rows, grouped by owning file, in first-appearance order.
+
+    The same decision `_fix_waves` makes for the FIXER, made for the FILER: the
+    downstream agent now opens one issue per file (#722), so an envelope carrying
+    half of a file's findings produces an issue that reads as complete and is not.
+
+    Groups carry row INDICES rather than the rows themselves, because the caller
+    admits most groups whole and row-fills exactly one of them. A positional key
+    is what lets it rebuild the kept list in the rows' ORIGINAL relative order --
+    the property `cmd_defer` has always promised -- without leaning on dict
+    identity or equality to tell two rows apart.
+
+    The key is the row's own `file` value and NOT `_repo_path(...)`. Most rows
+    reach this function unvalidated by design: `cmd_defer` reads this attempt's
+    `suggestions` and `blockers` and every earlier attempt's carried suggestions
+    straight off disk, checked for nothing beyond "it is a dict". On an
+    overflowing run most of them are about to be discarded.
+    Validating here made one malformed row in the DROPPED tail cost the entire
+    envelope: exit 74 behind `defer "$@" || exit 74`, a fence with no recovery
+    arm, so a run holding 64 filable findings filed nothing over a row no
+    consumer would ever have seen. `_encode_aggregate` therefore stays the single
+    gate, and because it runs after the cut it still refuses a malformed row that
+    SURVIVES, with the same token it always did.
+
+    Any `file` that is not a string gets a sentinel key instead, which is what
+    keeps the sharpest case out of the dict: an object or an array is unhashable,
+    and the `TypeError` a bare `.get` would raise on it is neither of the two
+    answers this verb is contracted to give. Being unique per row, the sentinel
+    also stops two such rows sharing a group. The caller ranks these last, so
+    they are the first rows dropped -- a row with no usable path cannot become an
+    issue under any ranking.
+    """
+    by_file: "dict[object, list[int]]" = {}
+    order: "list[object]" = []
+    for index, row in enumerate(rows):
+        value = row.get("file")
+        key = value if isinstance(value, str) else (_UNUSABLE_FILE, index)
+        if key not in by_file:
+            by_file[key] = []
+            order.append(key)
+        by_file[key].append(index)
+    return [(key, by_file[key]) for key in order]
 
 
 # --------------------------------------------------------------------------
@@ -1499,10 +1557,17 @@ def cmd_defer(args: argparse.Namespace) -> int:
     # union not at all).
     #
     # So: keep the rows that matter most, say how many did not fit, and exit 0 so
-    # the caller can still dispatch. Blockers first -- a surviving blocker is the
-    # single row this verb exists to preserve, and `findings-to-issues` ranks it
-    # above every cleanup row for the same reason. A blocker is dropped only when
-    # every alternative row is also a blocker.
+    # the caller can still dispatch. Blocker-bearing FILES first -- a surviving
+    # blocker is the single row this verb exists to preserve, and
+    # `findings-to-issues` ranks it above every cleanup row for the same reason.
+    #
+    # The unit is the FILE rather than the row (#722) because that agent now
+    # opens one issue per file, so a cleanup file is displaced before any part of
+    # a blocker file is. What the file unit no longer promises is that a blocker
+    # always survives: blocker-bearing files whose rows together exceed the
+    # envelope now cost each other, where a row cut would have kept every blocker
+    # and dropped only cleanup. That is the price of not filing an issue that
+    # reads as complete and is not, and `OVERFLOW=` reports it either way.
     #
     # NOT silent: `OVERFLOW=<n>` is on the output line, always, and the fence is
     # required to surface it. "Dropped and reported" is a different thing from
@@ -1514,12 +1579,64 @@ def cmd_defer(args: argparse.Namespace) -> int:
     # first-occurrence-wins dedupe sees the same ordering it always did.
     overflow = 0
     if len(rows) > MAX_FINDINGS:
-        by_severity = sorted(
-            range(len(rows)),
-            key=lambda i: 0 if rows[i].get("severity") == "blocker" else 1,
+        groups = _defer_groups(rows)
+        ranked = sorted(
+            range(len(groups)),
+            key=lambda i: (
+                # A group keyed on a sentinel rather than a path is a row
+                # whose `file` is not even a string, so the filer -- which groups
+                # by path -- can open no issue for it under any severity. This
+                # term therefore comes FIRST, ahead of the blocker rule: keeping
+                # such a row hands `_encode_aggregate` a refusal that costs every
+                # filable row in the envelope, which is the loss this branch
+                # exists to refuse. Dropped first, and `OVERFLOW=` still counts it.
+                0 if isinstance(groups[i][0], str) else 1,
+                0
+                if any(rows[j].get("severity") == "blocker" for j in groups[i][1])
+                else 1,
+                i,
+            ),
         )
-        keep = set(by_severity[:MAX_FINDINGS])
-        overflow = len(rows) - MAX_FINDINGS
+        # WHOLE FILES WHILE THEY FIT, THEN ONE SPLIT FILE -- NOT A HARD STOP.
+        #
+        # Row-filling the first file that does not fit is what makes file-atomic
+        # truncation affordable. Stop dead at that file instead and a 4-row file,
+        # two 30-row files and a 5-row blocker file -- 69 rows against a 64-row
+        # envelope -- file 39 rows where the row cut this replaces files 64.
+        # Losing 25 more findings to avoid splitting one file is the same
+        # maximal-loss trade the refusal this branch replaced was making, wearing
+        # a better argument.
+        #
+        # So exactly ONE file is ever split, it is the highest-priority file that
+        # did not fit, and no lower-priority file jumps the cut: the fill spends
+        # the rest of the budget, so the `break` is arithmetic rather than policy.
+        # One file bigger than the whole envelope needs no arm of its own -- it is
+        # this same rule with no whole file admitted ahead of it.
+        keep: "set[int]" = set()
+        used = 0
+        for index in ranked:
+            members = groups[index][1]
+            if used + len(members) <= MAX_FINDINGS:
+                keep.update(members)
+                used += len(members)
+                continue
+            room = MAX_FINDINGS - used
+            if room:
+                # Blockers first WITHIN the split file, for the same reason they
+                # come first between files: blockers are appended to `rows` last,
+                # so a plain leading run of a mixed file would keep its cleanup
+                # and drop the one row this verb exists to preserve. This orders
+                # the SELECTION only; the rebuild below restores original order.
+                fill = sorted(
+                    members,
+                    key=lambda j: (
+                        0 if rows[j].get("severity") == "blocker" else 1,
+                        j,
+                    ),
+                )
+                keep.update(fill[:room])
+            break
+        overflow = len(rows) - len(keep)
         rows = [row for index, row in enumerate(rows) if index in keep]
 
     out_path = os.path.join(run_dir, "deferred-aggregate.md")
@@ -1528,13 +1645,39 @@ def cmd_defer(args: argparse.Namespace) -> int:
         _encode_aggregate(rows, document["pr_number"], document["run_id"], allow_blockers=True),
     )
     blockers = sum(1 for r in rows if r.get("severity") == "blocker")
-    # TOTAL/BLOCKER/SUGGESTION count what is IN the file; OVERFLOW counts what did
-    # not fit, so TOTAL+OVERFLOW is everything the run had to file. `PATH=` stays
-    # LAST because a run dir may contain spaces -- a field appended after it makes
-    # the path unparseable, so new fields are inserted before it, never appended.
+    # This re-derivation stays BELOW the write on purpose, and hoisting it is a
+    # regression even though it looks like a hardening. `_encode_aggregate` is
+    # the gate: it is evaluated as `_atomic_write`'s argument, so it refuses a
+    # malformed surviving row BEFORE the write is entered and nothing lands on
+    # disk. Move this line above the write and it becomes a SECOND gate that can
+    # refuse first -- which sounds safer and is not, because it means weakening
+    # `_encode_aggregate` no longer changes anything observable and the "refused
+    # before publishing" property stops being testable. Left here, it is a
+    # backstop that guarantees rc != 0 either way, and B31 pins the order by
+    # asserting no aggregate exists after the refusal.
+    files = len({_repo_path(r.get("file")) for r in rows})
+    # TOTAL/BLOCKER/SUGGESTION count what is IN the file; FILES is how many
+    # distinct owning files those rows cover -- the file GROUPS the downstream
+    # dispatch will consider now that it groups by file. It gets to at most
+    # `max_new` (10) of them in a run: a group it takes either opens a new issue
+    # or is commented onto an existing issue carrying the same container
+    # fingerprint, and the groups past that cap are not filed AT ALL -- the filer
+    # records them as its own `overflow_count`, they wait for a later run, and a
+    # blocker- or critical-tier group stranded in that tail escalates to
+    # `halted_due_to_overflow`. So FILES is an upper bound on the issues the
+    # dispatch touches and never a count of them, and a FILES above `max_new`
+    # says outright that some of these files do not get filed today.
+    # OVERFLOW is this command's OWN cut -- rows that did not fit MAX_FINDINGS,
+    # dropped before the filer ever sees them, and a different number from the
+    # filer's `overflow_count` -- so TOTAL+OVERFLOW is everything the run had to
+    # file.
+    # `PATH=` stays LAST because a run dir may contain spaces -- a field appended
+    # after it makes the path unparseable, so new fields are inserted before it,
+    # never appended. FILES= specifically goes BEFORE OVERFLOW= so the fence's
+    # existing `${HEAD##* OVERFLOW=}` suffix read stays exact.
     print(
-        "PREMERGE_DEFER TOTAL=%d BLOCKER=%d SUGGESTION=%d OVERFLOW=%d PATH=%s"
-        % (len(rows), blockers, len(rows) - blockers, overflow, out_path)
+        "PREMERGE_DEFER TOTAL=%d BLOCKER=%d SUGGESTION=%d FILES=%d OVERFLOW=%d PATH=%s"
+        % (len(rows), blockers, len(rows) - blockers, files, overflow, out_path)
     )
     return 0
 
