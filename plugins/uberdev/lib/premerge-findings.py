@@ -252,6 +252,14 @@ MAX_LINE = 999_999_999
 MAX_LINE_DIGITS = len(str(MAX_LINE))
 MAX_FINDINGS = 64
 
+# How many paths ONE attempt may add to the next attempt's wave plan from its
+# fixers' `blocked_on_file` returns. Equal to the default `--max-per-wave`, so
+# the widening can never exceed one extra wave's worth of files -- "optional,
+# repeatable" with no cap is unbounded allow-list growth, and by
+# CONVERGE_REPAIR_CEILING attempts a set that grows every round constrains
+# nothing. Overflow is DROPPED, not refused: see `_read_blocked_on`.
+MAX_BLOCKED_ON = 8
+
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 
@@ -334,9 +342,18 @@ def _bounded_text(value: object, limit: int, token: str, what: str) -> str:
 def _repo_path(value: object) -> str:
     """Normalise a repo-relative POSIX path, or refuse.
 
-    Same predicate as `code_fixer_contract.py`'s scope validator, restated here
-    only because this file must reject BEFORE the aggregate is written -- a path
-    that escapes the repo has to die at parse time, not at publish time.
+    LEXICAL ONLY, and that is the whole predicate: `posixpath.normpath` plus the
+    `..`/`.git` first-segment check. It never touches the filesystem, so it is
+    NOT the same predicate as `code_fixer_contract.py`'s scope validator -- that
+    one pairs its lexical half with `beneath()`, a realpath+commonpath
+    containment check. This docstring used to claim the equivalence outright,
+    and the claim was false; a caller reading it as containment would have
+    shipped a symlink escape. Any caller turning a path into a FILESYSTEM
+    AUTHORIZATION decision must run `_beneath_repo_root` as well.
+
+    Restated here rather than imported because this file must reject BEFORE the
+    aggregate is written -- a path that escapes the repo has to die at parse
+    time, not at publish time.
     """
     if not isinstance(value, str) or not value:
         fail("finding_schema_invalid", "file must be a non-empty string")
@@ -352,6 +369,27 @@ def _repo_path(value: object) -> str:
     if first in ("..", ".git"):
         fail("finding_schema_invalid", f"file escapes the repository: {value}")
     return value
+
+
+def _beneath_repo_root(root: str, relative: str) -> bool:
+    """The filesystem half `_repo_path` deliberately does not do.
+
+    Same predicate as `code_fixer_contract.beneath`: realpath BOTH sides, then
+    `commonpath`. A tracked symlink whose path is lexically repo-relative and
+    whose target resolves outside the repo passes `_repo_path` and fails here.
+    No symlink is tracked in this repo today, which is exactly why the check
+    belongs in the code rather than in a sentence about the tree.
+
+    Returns False on any error rather than raising: the caller drops a row it
+    cannot vouch for, and a validator that throws where the caller expected a
+    verdict is a validator that fails open at the call site.
+    """
+    try:
+        root_abs = os.path.realpath(os.path.abspath(root))
+        path_abs = os.path.realpath(os.path.abspath(os.path.join(root, relative)))
+        return os.path.commonpath((root_abs, path_abs)) == root_abs
+    except (TypeError, ValueError, OSError):
+        return False
 
 
 _RUN_ID_RE = re.compile(r"\A[0-9]{8}-[0-9]{6}-[0-9a-f]+\Z")
@@ -1029,6 +1067,114 @@ def _carry_prior_suggestions(out_dir: str, attempt: int) -> "list[dict]":
     return carried
 
 
+def _read_blocked_on(
+    out_dir: str, attempt: int, repo_root: str, already: "set[str]"
+) -> "tuple[list[dict], int]":
+    """Attempt N-1's `blocked_on_file` rows: validated, deduped, capped.
+
+    EXACTLY ONE PREDECESSOR, NEVER A RANGE. `_carry_prior_suggestions` walks
+    `range(1, attempt)` because a suggestion is never fixed and must not be
+    lost. A blocked-on path is the opposite -- it widens the set of files a
+    fixer may edit -- so a union accumulated over every earlier attempt grows
+    monotonically and, by CONVERGE_REPAIR_CEILING, constrains nothing.
+
+    A ROW THAT FAILS VALIDATION IS DROPPED AND COUNTED, NEVER FATAL. Refusing
+    would cost the whole attempt over one malformed row an agent emitted --
+    the trade `_drop_unfilable` already declines. Dropping is also the
+    fail-CLOSED direction: a dropped path is a path no fixer may touch.
+
+    Returns (rows, dropped).
+    """
+    prior = attempt - 1
+    if prior < 1:
+        return [], 0
+    path = os.path.join(out_dir, "blocked-on-%02d.json" % prior)
+    if not os.path.exists(path):
+        return [], 0
+    try:
+        document = _load(path)
+        if not isinstance(document, dict):
+            fail("blocked_on_schema_invalid", "the blocked-on artifact must be a JSON object")
+        if document.get("schema_version") != SCHEMA_VERSION:
+            fail("blocked_on_schema_invalid", f"schema_version must be {SCHEMA_VERSION}")
+        rows = document.get("blocked_on")
+        if not isinstance(rows, list):
+            fail("blocked_on_schema_invalid", "blocked_on must be a JSON array")
+    except Refusal as refusal:
+        # Announced, never silent, and never fatal -- same shape and same
+        # reasoning as `_carry_prior_suggestions`' tolerant arm.
+        print(
+            "premerge-findings: blocked_on_unreadable_skipped: "
+            f"attempt {prior} ({refusal.token}); no path is widened from it",
+            file=sys.stderr,
+        )
+        return [], 0
+
+    kept: "list[dict]" = []
+    seen: "set[str]" = set(already)
+    dropped = 0
+    for record in rows:
+        if not isinstance(record, dict):
+            dropped += 1
+            continue
+        try:
+            target = _repo_path(record.get("file"))
+            origin = _repo_path(record.get("from_file"))
+            reason = _bounded_text(
+                record.get("reason"),
+                MAX_SUMMARY_BYTES,
+                "blocked_on_schema_invalid",
+                "blocked_on reason",
+            )
+        except Refusal:
+            dropped += 1
+            continue
+        # The wave prompt pastes finding objects VERBATIM into an
+        # `<external-untrusted-input>` envelope with no encoder between them,
+        # so a row carrying the tag's own name could close the envelope early
+        # and read as the controller's words. `_canonical_json` solves this for
+        # the aggregate by escaping the markup characters; here the row is
+        # dropped, because nothing downstream re-encodes it.
+        #
+        # ALL THREE reachable strings are checked, not the reason alone.
+        # `target` is the value the AGENT chose and it lands verbatim in the
+        # synthesised finding's `file`; `origin` lands inside the
+        # controller-authored `summary`. Checking one of the three would leave
+        # the most agent-controlled of them unchecked, which is the direction
+        # this drop exists to close.
+        if any(
+            "external-untrusted-input" in value.casefold()
+            for value in (reason, origin, target)
+        ):
+            dropped += 1
+            continue
+        if not _beneath_repo_root(repo_root, target):
+            dropped += 1
+            continue
+        # It must already exist. A widened path that does not is a path no
+        # commit could carry anyway -- the fix commit fence refuses on
+        # untracked files -- so admitting one only grows the allowed set.
+        #
+        # It also closes the separator injection: the allowed set is derived
+        # NEWLINE-separated by `jq -r`, and a `file` carrying an embedded
+        # newline would split into two entries. No such file exists on disk, so
+        # the row dies here.
+        if not os.path.isfile(os.path.join(repo_root, target)):
+            dropped += 1
+            continue
+        if target in seen:
+            dropped += 1
+            continue
+        if len(kept) >= MAX_BLOCKED_ON:
+            dropped += 1
+            continue
+        seen.add(target)
+        kept.append(
+            {"file": target, "from_file": origin, "reason": reason, "attempt": prior}
+        )
+    return kept, dropped
+
+
 # The tag that fronts an unhashable field's stand-in. A one-off object, so the
 # stand-in is a TUPLE and can therefore never compare equal to the string or the
 # integer a well-formed row puts in the same slot.
@@ -1436,6 +1582,60 @@ def cmd_plan(args: argparse.Namespace) -> int:
     # beats being saved by a ranking accident at the end of the run.
     _encode_aggregate(_drop_unfilable(union)[0], pr_number, run_id, allow_blockers=True)
 
+    # THE WIDENING GOES THROUGH `_fix_waves`, NOT AROUND THE SCOPE GUARD.
+    #
+    # The fix-commit fence derives the committable set solely from
+    # `jq -r '.waves[][].file' fix-waves-<NN>.json`. Widening THAT from
+    # agent-returned text would make a path committable while no agent owns it,
+    # and two agents in the next wave could then edit it concurrently against
+    # one un-isolated worktree with the disjointness guard silent. Feeding the
+    # paths in here instead makes each one a first-class wave member with
+    # exactly one owner, and leaves the guard's derivation untouched.
+    if args.carry_blocked and not args.repo_root:
+        fail(
+            "blocked_on_root_missing",
+            "--carry-blocked requires --repo-root: containment is a filesystem check",
+        )
+    blocked, blocked_dropped = (
+        _read_blocked_on(out_dir, attempt, args.repo_root, {f["file"] for f in blockers})
+        if args.carry_blocked
+        else ([], 0)
+    )
+    synthesised: "list[dict]" = []
+    for offset, row in enumerate(blocked, start=1):
+        # CONTROLLER-AUTHORED AND DETERMINISTIC. `summary` feeds `_fingerprint`,
+        # which is the cross-attempt identity `_blocker_fingerprints` counts on;
+        # letting an agent author it would make that identity agent-authored
+        # too. The agent's own words go in `failure_scenario`, where nothing
+        # keys on them.
+        summary = (
+            "cross-file consequence: attempt %d's fixer for %s reported this file "
+            "as one it needed in order to finish the fix" % (row["attempt"], row["from_file"])
+        )
+        synthesised.append(
+            {
+                # After every reviewer finding, so `_fix_waves`' first-appearance
+                # ordering puts the reviewer's own blockers in the earlier waves.
+                "rank": len(findings) + offset,
+                "file": row["file"],
+                # NEVER A LINE. The consequence was observed at coordinates other
+                # wave members have already moved; the reason survives a rewrite
+                # and a line number does not.
+                "line": None,
+                "summary": summary,
+                "failure_scenario": row["reason"],
+                "category": None,
+                "verdict": None,
+                "fingerprint": _fingerprint(row["file"], summary),
+                "severity": "blocker",
+                "severity_source": "controller",
+            }
+        )
+    # Both lists, so `counts.total`, `counts.blocker` and `counts.category_backed`
+    # keep describing the same population the artifact actually holds.
+    findings = findings + synthesised
+    blockers = blockers + synthesised
+
     classified = {
         "schema_version": SCHEMA_VERSION,
         "attempt": attempt,
@@ -1461,6 +1661,13 @@ def cmd_plan(args: argparse.Namespace) -> int:
             # "we filed 9 suggestions" can be told apart from "this review found
             # 9 suggestions" -- under a loop those are different numbers.
             "suggestion_carried": carried_count,
+            # How many paths this attempt's wave plan gained from the PREVIOUS
+            # attempt's `blocked_on_file` returns, and how many rows were
+            # refused or displaced by MAX_BLOCKED_ON on the way in. Reported so
+            # "the reviewer found 3 blockers" can be told apart from "the
+            # reviewer found 1 and the loop carried 2 cross-file consequences".
+            "blocked_on_admitted": len(synthesised),
+            "blocked_on_dropped": blocked_dropped,
         },
         "blockers": blockers,
         "suggestions": suggestions,
@@ -1532,7 +1739,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
     # matches on it): append, never reorder or insert.
     print(
         "PREMERGE_TRIAGE TOTAL=%d BLOCKER=%d SUGGESTION=%d WAVES=%d CATEGORY_BACKED=%d"
-        " ATTEMPT=%d CARRIED=%d"
+        " ATTEMPT=%d CARRIED=%d BLOCKED=%d"
         % (
             len(findings),
             len(blockers),
@@ -1541,6 +1748,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
             classified["counts"]["category_backed"],
             attempt,
             carried_count,
+            len(synthesised),
         )
     )
     return 0
@@ -2120,6 +2328,11 @@ def main(argv: "list[str]") -> int:
     plan.add_argument("--attempt", type=int, default=1)
     plan.add_argument("--head-sha", default=None)
     plan.add_argument("--carry-prior", action="store_true")
+    plan.add_argument("--carry-blocked", action="store_true")
+    # Only required WITH --carry-blocked, and `cmd_plan` refuses the pair rather
+    # than defaulting it: containment is a filesystem check and there is no safe
+    # root to guess. Left optional so every existing call site is unchanged.
+    plan.add_argument("--repo-root", default=None)
     plan.set_defaults(handler=cmd_plan)
 
     gate = sub.add_parser("assert-green", help="the pre-simplify clean gate")
