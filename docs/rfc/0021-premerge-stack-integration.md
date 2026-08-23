@@ -208,7 +208,7 @@ rather than inside it, ~~because `findings-to-issues` fingerprints an issue as
 a new fingerprint — per-attempt filing produces duplicates, not comments.~~
 See §10 A1 for the loop and §10 A2 for 4c.
 
-> **AMENDED 2026-08-23 — see §10 A3.** The conclusion stands; its reason no
+> **AMENDED 2026-08-23 — see §10 A4.** The conclusion stands; its reason no
 > longer does. `findings-to-issues` keys the ISSUE on the owning file, so a
 > second dispatch over the same file comments rather than duplicating. What
 > per-attempt filing costs now is that the members inside that issue are still
@@ -318,7 +318,7 @@ What guards the hazard directly:
    which *is* `file:line:summary` because an issue is about a location. Same
    width, different question.~~
 
-   > **AMENDED 2026-08-23 — see §10 A3.** The "deliberately not" verdict holds
+   > **AMENDED 2026-08-23 — see §10 A4.** The "deliberately not" verdict holds
    > and the singular does not: `agents/findings-to-issues.md` computes **two**
    > fingerprints, so "the fingerprint" names nothing there. It keys a
    > per-FINDING identity on `file:line:summary` because a finding is about a
@@ -532,7 +532,283 @@ suppresses only 4c, and it is worth naming what that costs, because it is defect
 (ii) reinstated on purpose: the run polishes the stack and then bumps the version
 over a tree whose last verification predates the polish.
 
-### A3 — the ISSUE key is per-file, not per-finding (2026-08-23)
+---
+
+### A3 — the loop's termination criterion is wrong in kind (2026-08-23)
+
+A1 built a bounded loop and A2 made its green branch reachable. Both stand. What
+neither addressed is the criterion the loop terminates *on*, and three runs have
+now shown it cannot be reached on the stacks the command exists for.
+
+A1 said, verbatim (`§10 A1`, item 2):
+
+> **Noticing that an attempt achieved nothing.** `STOP_NO_PROGRESS` and
+> `STOP_REGRESSED` are computed by `lib/premerge-findings.py` from **blocker
+> fingerprints** — this attempt's set against the previous attempt's — not from
+> prose and not from a count of tries.
+
+The fingerprint machinery is correct and stays. The defect is upstream of it:
+**the two fingerprint sets being compared are independent samples, not two states
+of one work queue.** Everything below follows from that.
+
+#### The measurement
+
+`/premerge` on PR #731 (packing #727–730) ran the full 4-review / 3-repair loop
+and stopped `STOP_EXHAUSTED`. Blockers per attempt: **10 → 10 → 6 → 8**, with
+`FIXED=10`, `FIXED=10`, `FIXED=6`. An earlier pair of runs on PR #681 filed 19
+and 15 issues; of run 2's 15 findings, **one** re-discovered run 1 and the other
+**fourteen were new defects in code the loop's own fixers had just written.**
+
+Those numbers do not describe a loop that is converging slowly. They describe a
+loop with no fixed point.
+
+#### 1. Phase 1 resamples the whole stack, every attempt
+
+`skills/premerge-pipeline/SKILL.md:584` dispatches
+
+```
+Skill("code-review", args: "<PREMERGE_LEVEL> <PREMERGE_PR>")
+```
+
+against the **entire stack PR**, and it does so once per attempt. At `xhigh` on a
+~3000-line diff that yields roughly ten blockers per pass — not because ten
+blockers are present, but because the reviewer is a *sampler* over "defects a
+careful reader could name in this diff" and that distribution has effectively
+unbounded support at this diff size. `blockers == 0` is not a state the stack can
+be driven into; it is a coin that has to land empty.
+
+The loop then makes its own haystack grow. Every repair adds code, and the next
+attempt reviews that new code at the same depth as the original. The generator's
+rate is roughly constant per unit reviewed and the amount reviewed never shrinks.
+Phase 4c (`:1866`) re-dispatches the same full-PR review a fifth time.
+
+**A stop condition of the form "an LLM found nothing this round" is not
+decidable, and no amount of budget, fan-out or chunking makes it one.**
+
+#### 2. Blockers are resampled; only suggestions have a ledger
+
+`lib/premerge-findings.py` carries **suggestions** across attempts —
+`_carry_prior_suggestions` (`:836`) unions every earlier attempt's suggestion
+rows, deduped on `_suggestion_key` (`:873`). Blockers get no equivalent.
+`_blocker_fingerprints` (`:812`) exists only to *compare* attempt N's set against
+attempt N−1's, and attempt N's set is re-derived wholly from attempt N's fresh
+full-PR review.
+
+So the `FIXED=` and `NEW=` counters on the `PREMERGE_CONVERGE` line are a diff of
+two independent samples, and two very different events are indistinguishable
+inside them:
+
+- a blocker the fixer genuinely repaired, and
+- a blocker the sampler simply did not roll this time,
+
+both count `FIXED`. Symmetrically, a defect that was present at attempt 1 but not
+sampled until attempt 3 counts `NEW`, which is the input `STOP_REGRESSED` reacts
+to. **`FIXED=10/10/6` on PR #731 is not evidence that 26 blockers were fixed. It
+is evidence that 26 fingerprints failed to reappear.**
+
+#### 3. The fixers' own dispositions are collected and discarded
+
+`SKILL.md:805-810` requires every fixer agent to return, per finding:
+
+```
+status: APPLIED | NO_CHANGE | REFUSED
+file: <path>
+outcomes:
+  - rank: <the finding's rank>
+    outcome: fixed | skipped | no_change_needed
+    reason: <one line>
+```
+
+Nothing parses it. `no_change_needed` occurs **nowhere in the plugin outside
+`skills/premerge-pipeline/SKILL.md`**, and inside it only at `:805-809` and
+`:1728-1730` — both times as prompt text being handed to an agent. `APPLIED`
+never appears in `lib/premerge-findings.py` at all. The fix-commit fence reads
+`git status --porcelain` and the wave-scope lists; it never reads what the agents
+said they did.
+
+This is the same class as the `blockingFindings` drop recorded for solve-fleet: a
+subagent contract that specifies a return value nothing consumes. Here it is the
+**only** authoritative per-finding signal in the run, and the loop replaces it
+with another roll of the sampler.
+
+#### 4. The generator is used as the verifier
+
+Verifying "did attempt N's fixes work?" is currently done by asking the same
+unbounded generator to review the whole diff again. Verification therefore costs
+a fresh batch of findings by construction — the act of checking produces new
+work. This is why the loop's cost per attempt does not fall as the queue drains:
+there is no queue, and checking is as expensive as discovering.
+
+#### Design constraints any fix must satisfy
+
+**This section is deliberately not a specification.** An earlier draft of A3
+prescribed four changes; two rounds of review against it produced fourteen
+findings, and the second round's six were all in text the first round's fixes had
+just written — the amendment reproducing, on itself, the defect it documents. Two
+of those were structural rather than cosmetic: the design named `refuted` as a
+gate-closing state while defining a producer only for `fixed`, and it prescribed
+reviewing a two-SHA range through a dispatch surface that accepts only a PR, a
+branch or a path. A design with a state nothing can produce and a keystone
+nothing can invoke is a sketch, and a sketch attracts "you did not specify X"
+without bound.
+
+So what A3 ratifies is the diagnosis above — every pointer in it executed and
+confirmed — plus the constraint set below. Each constraint is a way the obvious
+fix goes wrong, recorded so a later implementation is checked against it instead
+of rediscovering it. Whichever design satisfies all eight is what §10 gets
+amended with next.
+
+**C1 — the reviewed surface must shrink, and the range must be incremental.**
+The generator's yield scales with the surface it is pointed at, so a loop that
+re-points it at the whole stack every attempt cannot terminate. But
+`<HEAD_1>..<HEAD_N>` is cumulative and grows with every repair — a slower version
+of the same growth. Only `<HEAD_{N-1}>..<HEAD_N>` has the shrinking property.
+
+**C2 — a shrinking surface breaks three consumers that read the current
+attempt's findings as if they described the whole stack.** All three must move to
+the ledger in the same change:
+
+* `cmd_assert_green` (`lib/premerge-findings.py:1289-1290`) builds
+  `blockers_remaining=%d` from `len(document["blockers"])` of the current
+  attempt. Point the review at one repair diff and this reads *"no blockers in
+  the last repair"* while `B` still holds ten — empty `reasons`, `VERDICT=green`,
+  `STOP_GREEN`, and Phases 4 and 5 attest to a stack with ten live blockers. The
+  most dangerous consequence of C1 and the easiest to miss.
+* `cmd_converge`'s `fixed` / `appeared` (`:1554-1564`) diff two fingerprint
+  multisets drawn, under C1, from disjoint populations.
+* `cmd_defer` (`:1441`) takes blockers from one `document` while unioning
+  suggestions across attempts (`:1436-1439`), so undispositioned rows of `B`
+  would be filed nowhere — §2's gap reappearing as a consequence of §2's own fix.
+
+**C3 — `STOP_NO_PROGRESS` fires spuriously under C1; it does not go quiet.**
+The predicate is `current_prints == previous_prints and other == previous_other`
+(`:1619-1624`), and empty `Counter`s compare equal. Clean incremental reviews are
+the *common* case, so two in a row halt the loop with `B` undispositioned and the
+budget unspent, reporting that an attempt achieved nothing about a loop that just
+closed rows. The safe-sounding error is to predict these stops fall silent; the
+real failure is that they stop a loop that was working.
+
+**C4 — every gate-closing state needs a producer, and `refuted` is the one that
+has none.** Adjudicating a finding as not-a-defect is a terminal state real
+stacks reach — fixers return `no_change_needed`. But a refuted row has no fix
+hunk, so a verifier defined as *"the finding plus the hunk that claims to fix
+it"* has no input for it. Left unsolved, every stack containing one
+false-positive finding runs to `STOP_EXHAUSTED`.
+
+**C5 — no disposition meaning "not done" may close the gate.** `deferred` and
+`wontfix` are terminal, so a criterion reading *"every row is dispositioned"* is
+satisfied by deferring all ten baseline blockers — strictly weaker than today's
+`blockers_remaining=N` → `not_green`, which is what keeps a run out of Phases 4
+and 5. Closing requires an adjudicated `fixed` or `refuted`, or a per-finding
+operator acknowledgement in the shape `/merge` already uses for
+`--accept-blocker-deferred`.
+
+**C6 — the fixer contract does not speak the ledger's vocabulary, and the gap is
+ambiguous rather than absent.** `SKILL.md:805-810` mandates `status: APPLIED |
+NO_CHANGE | REFUSED` and `outcome: fixed | skipped | no_change_needed`. Against
+ledger states `fixed | refuted | deferred | wontfix` only `fixed` overlaps;
+`skipped` reads as either `deferred` or `wontfix`, `no_change_needed` as either
+`refuted` or already-fixed. A controller-side guess between two readings is not a
+disposition, so the contract must be widened to emit the ledger vocabulary
+directly and say which reading it means.
+
+**C7 — a closed row can be re-opened by a later repair, and under C1 nothing
+looks.** Repair 1 closes row #3; repair 3 refactors the same function and
+reinstates the defect; the incremental review of repair 3 has no knowledge of row
+#3, which stays `fixed`. Either closed rows whose files a later repair touched
+get re-checked, or `STOP_REGRESSED` must be documented as unreachable rather than
+carried as a retained backstop.
+
+**C8 — the incremental review needs a dispatch that exists.** The only reviewer
+the pipeline has is the built-in `code-review` skill (`SKILL.md:584`), whose
+accepted targets are a PR number, a branch, or a path; the no-target default is
+`git diff @{upstream}...HEAD` plus the working tree. A two-SHA range is not in
+that surface. C1 needs a path set derived from the repair diff, a locally-arranged
+checkout the default picks up, or an extension to the target surface — named
+explicitly, because "review the delta" is not yet an invocation.
+
+**On the narrow verifier.** The instinct behind C4 — that checking must be
+cheaper than discovering, and structurally unable to emit new findings — is sound
+and survives. `uberdev:finding-verifier` is the right **shape**: one finding in,
+a bounded document out. It is not reusable as-is. Its contract
+(`shared/finding-verifier-output-v1.md:16`) is a 0-100 score plus
+`reason ∈ {reproduced-from-diff, contradicted-by-diff, pre-existing,
+out-of-scope-line, linter-domain, gate-disabled, over-cap-unverified,
+verifier-unavailable}` — no token means *"the fix addresses it"*, and a repaired
+defect and a never-real defect both land on `contradicted-by-diff`, collapsing
+exactly the `fixed` / `refuted` distinction C4 and C5 depend on. Reuse the shape,
+not the contract.
+
+**On chunked review.** One reviewer per coherent unit, rather than one over the
+whole diff, is a real improvement and belongs to the single baseline pass, where
+it buys coverage at fixed cost. Applied per-attempt it multiplies the generator
+and changes nothing about termination.
+
+#### The general law this run demonstrated
+
+A3's own drafting reproduced the defect twice inside two hours, which makes the
+underlying rule worth stating in a form that outlives `/premerge`:
+
+> **Never terminate a loop on a generative critic's silence. Terminate on a
+> predicate fixed before the loop started.**
+
+A critic asked *"what is wrong with this?"* is sampling from an unbounded set —
+the true-but-unstated is infinite on any nontrivial artifact — so its silence is
+a property of the sample, never of the artifact. Three corollaries, all visible
+in this run:
+
+1. **Separate wrongness from incompleteness.** Wrongness is finite and stays
+   fixed: a false claim, a broken pointer, a misquote. Round 1's eight were
+   wrongness, and round 2 confirmed every one of them repaired. Incompleteness —
+   *"you did not specify X"* — is unbounded, and all six of round 2's findings
+   were that. Only wrongness may drive a fix loop; incompleteness is recorded as
+   scope. C1–C8 above **are** round 2's findings, absorbed as constraints rather
+   than chased as bugs, which is why this section terminates and the previous one
+   did not.
+2. **If the artifact grew during the repair, the next round's findings are about
+   the growth.** This draft went 167 → 237 lines in its fix round and round 2
+   returned 6/6 findings in the new text. That ratio — findings landing in text
+   the previous round wrote, over total findings — is a cheap, computable
+   divergence signal, and at 100% it says stop rather than repair again.
+3. **Sample once; afterwards ask only "is item N resolved?"** Re-asking *"what
+   else is wrong?"* is not the next iteration of a loop, it is a new loop, and it
+   needs its own budget and its own written stopping predicate.
+
+#### What this does not change
+
+The A1 ordering (gate before repair), the line-independent multiset fingerprint,
+the fixer prompt's prohibition on weakening tests, controller-only commits, the
+wave scope guard, and `## The one rule that outranks every other line in this
+file` are all untouched.
+
+**A3 changes no code.** It ratifies the diagnosis and the constraint set; the
+loop that ships today is A1's, unmodified, and stays that way until a design
+satisfying C1–C8 is written and amended in. `STOP_NO_PROGRESS` and
+`STOP_REGRESSED` therefore keep their current inputs and current behaviour —
+C2 and C3 record what happens to them *if* C1 lands, not a change made here.
+
+#### Interim mitigations, no code change
+
+`--converge=1` (rounds 2–3 measurably do not converge on a large stack),
+`--no-issues` when the stack is `/premerge`'s own machinery, `high` rather than
+`xhigh` on a large diff, and a smaller stack. On PR #681, **33 of 39** open
+findings targeted `skills/premerge-pipeline/SKILL.md` and
+`lib/premerge-findings.py`; #711 and #713 named `_ATTEMPT_RE`
+(`lib/premerge-findings.py:232`) and `cmd_converge` (`:1500`) — code that did not
+exist before that same stack's own fix rounds wrote it. Both are on `main` today,
+having landed with the stack in `c7459641`; the point is that the run generated
+findings against its own fresh output, not that the symbols were fictional.
+
+#### Related
+
+#717 (the cross-run issue fingerprint cannot fire), #718 (per-dispatch issue
+budget inside an N-round loop; suggestions never gate but always become work) and
+#719 (the precision corpus is single-label, so no finding has ever been
+adjudicated) are the three already-filed consequences. A3 is the cause they share:
+a review loop with a generator, no sink, and no signal that could tell it to
+generate less.
+
+### A4 — the ISSUE key is per-file, not per-finding (2026-08-23)
 
 Two passages above rest on one premise: that `findings-to-issues` computes a
 single fingerprint, and that it is `file:line:summary`. §8 read, verbatim:
