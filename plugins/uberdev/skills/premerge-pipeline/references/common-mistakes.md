@@ -24,10 +24,61 @@ loudly rather than silently converging on nothing. See
 `## The order within one attempt`.
 
 **Bounding the loop with the counter alone.** `--converge=3` is a runaway
-backstop, not the stop condition. The stop conditions are `STOP_NO_PROGRESS` and
-`STOP_REGRESSED`, and deleting them to "simplify" the loop restores exactly the
-hazard RFC 0021 refused a loop over: three attempts that achieve nothing, the
-third of which quietly edits a test.
+backstop, not the stop condition. The stop conditions are `STOP_NO_PROGRESS`,
+`STOP_REGRESSED` and `STOP_SELF_REFERENTIAL`, and deleting them to "simplify" the
+loop restores exactly the hazard RFC 0021 refused a loop over: three attempts
+that achieve nothing, the third of which quietly edits a test.
+
+**Terminating the loop on the reviewer going quiet.** A critic asked *what is
+wrong with this?* samples from an unbounded set, so an attempt that returns no
+blockers is a property of that sample and never of the stack. Find → fix →
+re-find therefore has no fixed point to reach, which is why a round counter ends
+up doing the stop condition's job. `GROWTH=` is the substitute: the fraction of
+an attempt's blockers that are new **and** sit in a file the previous attempt's
+repair modified — work this loop made for itself. At `1.00` the loop is reviewing
+its own output, and the response to that is to stop, not to repair again.
+
+**Reading `GROWTH=-` as `GROWTH=0.00`.** The dash means the ratio was not
+measured, and four things produce it: (1) attempt 1, which has no previous repair
+to attribute anything to; (2) a previous attempt that committed no edits, so the
+commit fence exited `REASON=no-edits` and wrote no `fix-scope-<NN>.modified`;
+(3) an attempt with no blockers to divide by; and (4) a scope file that is
+present but could not be read. Only the fourth is a fault, and it is the one an
+operator otherwise misses: it announces itself as
+`premerge-findings: repair_scope_unreadable:` on stderr and nowhere else, so a
+`-` on the line is a reason to go and check stderr, not only to note that the
+ratio was undefined. `0.00` by contrast IS a measurement — the previous repair
+authored none of this round's findings, the healthiest reading the signal has.
+Collapsing the two turns "we did not look" into "we looked and it was fine", in
+the run summary an operator reads to decide whether to raise `--converge` or cut
+the stack down.
+
+**Raising `--converge` on a run that stopped `STOP_SELF_REFERENTIAL`.** That stop
+pre-empts `STOP_EXHAUSTED` on purpose, because the two call for opposite moves:
+the budget stop says a loop that was still winning ran out of rounds, and the
+self-referential stop says more rounds would only enlarge the loop's own
+haystack. Cut the stack down or lower the review level instead. Nothing is lost
+either way — it is a not-green stop, so Phase 5 runs with `PREMERGE_SURVIVORS=1`
+and files every surviving blocker as an issue. The claim is "not *this loop's*
+work", never "not work".
+
+**Firing the growth stop on a single round.** It takes two consecutive measured
+attempts at or above `PREMERGE_GROWTH_CEILING`, and the second one is not
+timidity. Every attempt's blocker set is a fresh sample of an unbounded
+generator, and the files most likely to be resampled are exactly the ones the
+last repair touched — so one high round is equally consistent with a convergence
+whose repairs happen to be concentrated in a few files. A detector that fired on
+it would stop loops that were working, and RFC 0021 A3 records that this — not a
+detector falling silent — is the real failure mode.
+
+**Making the growth ratio precise before making it used.** File-level membership
+over-counts: a new finding anywhere in a touched file counts as growth, and a
+round whose repair committed nothing is not measured at all. It is a signal, not
+a proof, and that is deliberate — it is also why the stop needs two consecutive
+rounds rather than one. The precise version needs diff-hunk mapping against a
+review pointed at one repair's delta, and RFC 0021 A3 C8 records that no such
+dispatch exists yet — building it here would replace a working coarse signal with
+a keystone nothing can invoke.
 
 **Reading `converge`'s exit status as success or failure.** `STOP_GREEN` exits 1.
 1 means "stop", 0 means "go round again". Branch on `DECISION=`.
