@@ -523,10 +523,12 @@ A1 built a bounded loop and A2 made its green branch reachable. Both stand. What
 neither addressed is the criterion the loop terminates *on*, and three runs have
 now shown it cannot be reached on the stacks the command exists for.
 
-A1 said, and this is the sentence A3 amends:
+A1 said, verbatim (`§10 A1`, item 2):
 
-> `STOP_NO_PROGRESS` and `STOP_REGRESSED` … stop the moment repairing stops
-> working, and they are computed from blocker **fingerprints**, not from prose.
+> **Noticing that an attempt achieved nothing.** `STOP_NO_PROGRESS` and
+> `STOP_REGRESSED` are computed by `lib/premerge-findings.py` from **blocker
+> fingerprints** — this attempt's set against the previous attempt's — not from
+> prose and not from a count of tries.
 
 The fingerprint machinery is correct and stays. The defect is upstream of it:
 **the two fingerprint sets being compared are independent samples, not two states
@@ -625,24 +627,81 @@ Four changes, together. None is sufficient alone.
 
 **(a) Freeze the review surface.** The full-stack review runs **once**, at
 attempt 1, producing the baseline set `B`. Attempts 2..N review only
-`git diff <HEAD_1>..<HEAD_N>` — the code the loop itself wrote — and only for
-regressions introduced by the repairs. The work list then shrinks monotonically
-instead of being resampled, and the review cost per attempt falls with the size
-of the repair rather than staying pinned to the size of the stack.
+`git diff <HEAD_{N-1}>..<HEAD_N>` — the single repair that attempt N−1 just
+made — for regressions. The range is **incremental, not cumulative**:
+`<HEAD_1>..<HEAD_N>` spans every repair so far and therefore grows monotonically
+with each round, which is a slower version of the same growth §1 diagnoses. With
+the incremental range the work list shrinks monotonically and review cost per
+attempt tracks the size of one repair rather than the size of the stack.
+
+Two consequences inside `lib/premerge-findings.py` that (a) cannot land without:
+
+* **`cmd_converge`'s comparison must change.** It computes
+  `fixed = previous_prints - current_prints` and
+  `appeared = current_prints - previous_prints` over the two attempts' blocker
+  fingerprint multisets (`:1554-1564`). Under (a) those multisets are drawn from
+  **disjoint populations** — attempt 1 from the whole stack, attempt N from one
+  repair diff — so `fixed ≈ |B|` and `appeared = |current|` on every attempt,
+  and neither `STOP_NO_PROGRESS` (`current == previous`) nor `STOP_REGRESSED`
+  (`appeared > 0 and fixed == 0`) can ever fire again. The comparison must be
+  rebased onto the ledger — `B`'s undispositioned count, attempt over attempt —
+  not onto two samples that no longer describe the same surface.
+* **`cmd_defer` must carry blockers across attempts.** It unions *suggestions*
+  across attempts (`_union_suggestions` + `_carry_prior_suggestions`, `:1436-1439`)
+  but takes blockers from a single `document` — the last readable attempt —
+  at `:1441`. Once attempts 2..N stop resampling the stack, that array holds only
+  second-order findings from the repair diff, and every undispositioned row of
+  `B` would be filed nowhere. The blocker path needs the cross-attempt carry that
+  only the suggestion path has today — which is §2's gap reappearing as a
+  consequence of §2's own fix.
 
 **(b) Give every baseline finding a disposition.** `B` becomes a durable
 per-finding ledger with one terminal state each: `fixed | refuted | deferred |
-wontfix`. The fixer agents already emit exactly this vocabulary — Phase 2a starts
-parsing what it asked for, and the ledger, not the next sample, is what records
-that a finding is done. The gate becomes **"every row in `B` is dispositioned"**,
-which is decidable and monotone, in place of **"this round's sample was empty"**,
-which is neither.
+wontfix`.
+
+**The fixers do not emit this vocabulary and the mapping is not one-to-one.**
+What `SKILL.md:805-810` actually mandates is `status: APPLIED | NO_CHANGE |
+REFUSED` plus a per-finding `outcome: fixed | skipped | no_change_needed`. Only
+`fixed` overlaps; `refuted`, `deferred` and `wontfix` have no producer anywhere
+in the plugin, and both `skipped` and `no_change_needed` are ambiguous —
+`skipped` can mean either `deferred` or `wontfix`, `no_change_needed` either
+`refuted` or already-fixed. Since (b) is the decidability keystone of this whole
+amendment, the ambiguity is where it fails if left unstated. The fixer contract
+must be **widened to emit the ledger vocabulary directly**, with the agent
+required to say which of the two readings it means; a controller-side guess
+between `deferred` and `wontfix` is not a disposition, it is a coin flip
+recorded as evidence.
+
+**Not every disposition may close the gate.** `deferred` and `wontfix` are
+terminal states, so a rule reading only *"every row is dispositioned"* is
+satisfied by a fixer wave that defers all ten baseline blockers — a gate
+**strictly weaker** than today's, where a survivor produces
+`reasons: ["blockers_remaining=N"]` and a `not_green` verdict that keeps the run
+out of Phases 4 and 5. The gate closes on **`fixed` (verifier-confirmed per (c))
+or `refuted` (verifier-confirmed)** only. `deferred` and `wontfix` are operator
+decisions: each one holds the gate exactly as a live blocker does unless the run
+carries an explicit per-finding acknowledgement, in the shape `/merge` already
+uses for `--accept-blocker-deferred`. So the criterion is **"every row in `B` is
+`fixed` or `refuted`, or individually acknowledged"** — still decidable, still
+monotone, and no weaker than what it replaces.
 
 **(c) Verify with a narrow verifier, not the generator.** A finding whose fixer
 reported `fixed` is checked by one agent given the finding and the hunk that
 claims to fix it, asked one question: does this address it? It cannot emit new
-findings because it is not asked for any, which is the whole point — the
-`uberdev:finding-verifier` agent already has this shape and this bounded output.
+findings because it is not asked for any, which is the whole point.
+
+`uberdev:finding-verifier` is the right **shape** — one finding in, a bounded
+document out — but it is **not reusable as-is**, and this RFC does not get to
+present it as off-the-shelf. Its output contract
+(`shared/finding-verifier-output-v1.md:16`) is a 0-100 score plus
+`reason ∈ {reproduced-from-diff, contradicted-by-diff, pre-existing,
+out-of-scope-line, linter-domain, gate-disabled, over-cap-unverified,
+verifier-unavailable}`. No token means *"the fix addresses it"*, and a repaired
+defect and a never-real defect both land on `contradicted-by-diff` — which is
+exactly the `fixed` vs `refuted` split (b) is built on. Its prompt also treats
+"the cited line is not one the change modified" as decisive, and under (c) the
+cited line is **always** one the fix modified. (c) therefore needs a new prompt
+and a new reason vocabulary reusing the agent's shape, not the agent's contract.
 
 **(d) Split the gate's two questions.** "Is this packed stack safe to land?" is
 not "is this diff free of anything a reviewer could object to?" The gate asserts:
@@ -661,8 +720,16 @@ and changes nothing about termination.
 The A1 ordering (gate before repair), the line-independent multiset fingerprint,
 the fixer prompt's prohibition on weakening tests, controller-only commits, the
 wave scope guard, and `## The one rule that outranks every other line in this
-file` are all untouched. `STOP_NO_PROGRESS` and `STOP_REGRESSED` remain, but as
-backstops behind a decidable criterion rather than as the criterion.
+file` are all untouched.
+
+`STOP_NO_PROGRESS` and `STOP_REGRESSED` are **kept in name and rebuilt in
+mechanism**. Their current inputs do not survive (a) — see the `cmd_converge`
+consequence above — so they are recomputed from the ledger's undispositioned
+count attempt over attempt: no rows closed since the previous attempt is
+`STOP_NO_PROGRESS`, and an attempt whose repairs re-opened a previously closed
+row is `STOP_REGRESSED`. They stay backstops behind a decidable criterion rather
+than serving as the criterion, but "unchanged" would be the wrong word for
+them.
 
 #### Interim mitigations, no code change
 
@@ -670,8 +737,11 @@ backstops behind a decidable criterion rather than as the criterion.
 `--no-issues` when the stack is `/premerge`'s own machinery, `high` rather than
 `xhigh` on a large diff, and a smaller stack. On PR #681, **33 of 39** open
 findings targeted `skills/premerge-pipeline/SKILL.md` and
-`lib/premerge-findings.py`; two of them (#711, #713) named symbols that do not
-exist on `main`, because that run's own fix rounds had written them.
+`lib/premerge-findings.py`; #711 and #713 named `_ATTEMPT_RE`
+(`lib/premerge-findings.py:232`) and `cmd_converge` (`:1500`) — code that did not
+exist before that same stack's own fix rounds wrote it. Both are on `main` today,
+having landed with the stack in `c7459641`; the point is that the run generated
+findings against its own fresh output, not that the symbols were fictional.
 
 #### Related
 
