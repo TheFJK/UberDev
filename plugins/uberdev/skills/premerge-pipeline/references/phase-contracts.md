@@ -1,6 +1,6 @@
 # Premerge — phase contracts and their reasoning
 
-Reference for `skills/premerge-pipeline/SKILL.md`. Four contracts the phases depend on but do not need in context to run: how Phase 0 differs from `/review-pr` Phase 0, what a failed push may print and what the stack PR carries, how severity is derived from a reviewer that emits none, and what `PREMERGE_PUSHED` is at each gate call site.
+Reference for `skills/premerge-pipeline/SKILL.md`. Three contracts the phases depend on but do not need in context to run: how Phase 0 differs from `/review-pr` Phase 0, what a failed push may print and what the stack PR carries, and what `PREMERGE_PUSHED` is at each gate call site. The severity rule is the one contract that must NOT live here — `## The severity rule` below says where it is and why.
 
 ### What `/premerge` does differently from `/review-pr` Phase 0
 
@@ -97,67 +97,14 @@ supersession comment: no label, no close, no merge, no assignee change.
 
 ## The severity rule
 
-The built-in reviewer emits **no severity field in either contract**. `/premerge`
-derives one, and this is the entire derivation:
-
-> **`blocker`** — the finding names a concrete path to wrong output, a crash, data
-> loss, a security hole, or a broken build/CI invariant. Its `failure_scenario`
-> describes observable misbehaviour with inputs or state that reach it.
->
-> **`suggestion`** — everything else: duplicated logic, needless complexity,
-> wasted work, wrong abstraction altitude, a convention violation, a missing test.
-> Real, worth doing, not worth holding the stack for.
-
-Two constraints on applying it:
-
-1. **When the finding carries a `category`, the category decides and your
-   judgement does not get a vote.** `lib/premerge-findings.py` maps the reviewer's
-   own cleanup vocabulary to `suggestion` and everything else to `blocker`, and it
-   **exits non-zero** on a severity that contradicts the category. This is not
-   advisory: the free-judgement path exists only where no machine-checkable signal
-   does, and it collapses to the checked path the instant one appears.
-
-   The cleanup vocabulary is **this exact set** — apply it literally, do not
-   paraphrase it, and do not extend it:
-
-   ```text premerge-cleanup-categories
-   reuse  simplification  simplify  efficiency  performance  altitude
-   conventions  convention  style  documentation  docs
-   test-coverage  tests  naming  readability
-   ```
-
-   Every other slug is correctness-class, so the severity you write for a
-   finding carrying one **must** be `blocker`. (`CLEANUP_CATEGORIES` in
-   `lib/premerge-findings.py` is the enforcer and the source of truth; this copy
-   exists because the controller that writes `severity` never opens that file,
-   and a rule it cannot see is a rule it will break.)
-
-   **The block above carries the `premerge-cleanup-categories` tag because a
-   test reads it.** `tests/premerge.test.sh` P3b imports `premerge-findings.py`,
-   evaluates the real `CLEANUP_CATEGORIES`, and compares it set-for-set with
-   these tokens. "Edit the two together" was the whole enforcement before, and a
-   prose instruction is not one: the only test touching the constant was a grep
-   that the identifier exists, which stays green whichever copy drifts — and the
-   copy the controller actually reads is this one, the copy with nothing behind
-   it. Drift here is `severity_contradicts_category`: `plan` exits 74 having
-   written nothing, and the whole attempt dies because the reviewer used a
-   synonym. Do not retag or reflow the block without updating that row.
-2. **An unfamiliar category is treated as correctness-class, and reading that
-   the other way costs the whole attempt.** The asymmetry itself is deliberate: a
-   novel *correctness* slug silently demoted to `suggestion` ships the bug. But
-   the price of the safe direction is not "one needless fixer dispatch". A slug
-   that is not in the set above, written up as `suggestion` because it *reads*
-   like a cleanup, is `severity_contradicts_category` — `plan` **exits 74 before
-   writing anything**, which per `## Phase 2 — TRIAGE` is a hard stop for the
-   attempt, not a fall-through. The needless fixer dispatch is what you get from
-   classifying it `blocker`, as the rule requires: that is the cheap outcome, and
-   it is the one to pick.
-
-`verdict` is **confidence, not severity** — `CONFIRMED` vs `PLAUSIBLE` says how
-sure the reviewer is that the mechanism is real, not how much it matters. Never
-map `PLAUSIBLE` to `suggestion`. At `xhigh` on Opus-family models no verify pass
-runs at all and `verdict` is absent from every finding, so any rule built on it
-would silently become a no-op exactly where it was supposed to help.
+**Normative in `skills/premerge-pipeline/SKILL.md`, under its own
+`## The severity rule` heading** — the derivation, the two constraints on
+applying it, the tagged `premerge-cleanup-categories` block and the
+`verdict`-is-confidence rule are all there, and deliberately have no copy here.
+It lives there and not here because SKILL.md is the only file loaded eagerly
+when the skill fires, while anything under `references/` is loaded on demand and
+may never be opened in a given run: the controller has to write a `severity` for
+every finding it records, and a rule it cannot see is a rule it will break.
 
 ### What `PREMERGE_PUSHED` is at each call site
 

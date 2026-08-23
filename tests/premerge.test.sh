@@ -264,6 +264,15 @@ echo "== P3b: the CLEANUP_CATEGORIES copy in SKILL.md == the library's real set 
 # Drift is `severity_contradicts_category`: `plan` exits 74 having written
 # nothing, and the attempt dies because the reviewer used a synonym.
 #
+# WHICH copy this reads is itself the assertion, and it is $SKILL — SKILL.md.
+# SKILL.md is the only file loaded eagerly when the skill fires, so it is the
+# only copy the controller is guaranteed to have in front of it; a file under
+# references/ is loaded on demand and may never be opened in a given run. This
+# row used to extract from $SKILL_CONTRACTS, which left the read copy unguarded
+# and guarded a copy nothing reads — #370/#371 one level down: green row,
+# drifted controller. SKILL.md is authoritative for `## The severity rule` and
+# for the block below; references/phase-contracts.md points at it.
+#
 # Cross-platform import (#268 CI): `cd` into the lib dir and hand python3 a
 # RELATIVE filename — a Git Bash absolute path (/d/a/...) is not a path native
 # Windows python can open. `tr -d '\r'`: native-Windows python writes CRLF.
@@ -279,7 +288,7 @@ print('\n'.join(sorted(mod.CLEANUP_CATEGORIES)))
 ") 2>"$P3B_ERR" | tr -d '\r')"
 # The tagged block, split on whitespace. Tagged rather than positional so a
 # reflow of the surrounding prose cannot silently move the anchor.
-P3B_DOC_SET="$(sed -n '/^[[:space:]]*```text premerge-cleanup-categories$/,/^[[:space:]]*```$/p' "$SKILL_CONTRACTS" \
+P3B_DOC_SET="$(sed -n '/^[[:space:]]*```text premerge-cleanup-categories$/,/^[[:space:]]*```$/p' "$SKILL" \
   | sed -e '1d' -e '$d' | tr '[:space:]' '\n' | grep -v '^$' | LC_ALL=C sort -u)"
 P3B_PY_N="$(grep -c . <<<"$P3B_PY_SET")"
 P3B_DOC_N="$(grep -c . <<<"$P3B_DOC_SET")"

@@ -3244,9 +3244,11 @@ echo "== T17: the brainstorm launcher is invoked through bash, with the reason r
 # with nothing noticing. Two halves are locked here:
 #   (a) the shape — every documented launch goes through `bash`, and NO bare form survives at any
 #       indentation, plus the reason recorded where the next editor reads it (the Windows block);
-#   (b) the cross-file citation — orchestrator/SKILL.md quotes a fragment OUT of this file, and it
+#   (b) the cross-file citation — the orchestrator quotes a fragment OUT of this file, and it
 #       used to name a LINE RANGE (`visual-companion.md:118-127`). Editing (a) shifted those lines
 #       and silently invalidated it. Same class as #349 / T9: anchor on a SYMBOL that resolves.
+#       Since #747 that quote lives in orchestrator/references/visual-companion.md rather than in
+#       the orchestrator body, so BOTH files are guarded — see the T17.1a/T17.1b note below.
 #
 # FLOOR, NOT AN EXACT COUNT (deliberate, see #533 review finding 4). The absence row forbids ANY bare
 # invocation, whitespace-tolerantly — that alone fully enforces "every invocation is prefixed". The
@@ -3264,14 +3266,36 @@ ORCH_SKILL="$REPO_ROOT/plugins/uberdev/skills/orchestrator/SKILL.md"
 # toward Anthropic's 500-line ceiling. The citation still belongs to the
 # orchestrator skill; it is just no longer in the body file.
 ORCH_VC_REF="$REPO_ROOT/plugins/uberdev/skills/orchestrator/references/visual-companion.md"
-if [ ! -r "$VC_MD" ] || [ ! -r "$ORCH_SKILL" ]; then
+# The reference file belongs in this pre-flight, not just in the rows: T17.1b reads
+# it with `grep -qF`, and grep on a path that does not exist exits non-zero — which
+# an ABSENCE row scores as "the literal is not present", i.e. a silent PASS. A
+# deleted or unreadable reference file has to fail loudly HERE, where the message
+# can name it, rather than be caught incidentally by T17.2a.
+if [ ! -r "$VC_MD" ] || [ ! -r "$ORCH_SKILL" ] || [ ! -r "$ORCH_VC_REF" ]; then
   echo "  FAIL  T17.0 corpus missing or unreadable — every row below would pass vacuously"
   echo "        visual-companion: $VC_MD"
   echo "        orchestrator:     $ORCH_SKILL"
-  FAIL=$((FAIL + 10))
+  echo "        orchestrator ref: $ORCH_VC_REF"
+  FAIL=$((FAIL + 11))
 else
+  # BOTH files, not a swap. The citation moved into the reference file (#747), so
+  # that is where a line anchor gets reintroduced today; the body file is where the
+  # `:118-127` rot actually happened, and nothing prevents a future edit from
+  # pulling the flow back inline. Guarding one and dropping the other just trades
+  # one blind spot for the other.
+  #
+  # SCOPE, unchanged since #533: this row governs the `visual-companion.md`
+  # citation. Line-anchored citations to OTHER files are a separate, pre-existing
+  # convention in this skill — `merge-pipeline/SKILL.md:343` sits in the body and
+  # was green under this row for its whole life, and `skills/brainstorm/SKILL.md:166`,
+  # `agents/spec-writer.md:30` and `skills/brainstorm/SKILL.md:206-214` moved into
+  # the reference file verbatim from that same body. Widening the literal here would
+  # not be a re-point, it would be a new rule retro-applied to text this row never
+  # covered; that belongs in its own row with its own remediation.
   assert_absent_fixed "$ORCH_SKILL" 'visual-companion.md:' \
-    "T17.1 the orchestrator's cross-file citation carries no line-number anchor"
+    "T17.1a the orchestrator body carries no line-number anchor on that citation"
+  assert_absent_fixed "$ORCH_VC_REF" 'visual-companion.md:' \
+    "T17.1b nor does the reference file the citation moved into"
   assert_grep "$ORCH_VC_REF" 'Unload when returning to terminal' \
     "T17.2a the orchestrator anchors on the step's heading text instead"
   assert_grep "$VC_MD" 'Unload when returning to terminal' \

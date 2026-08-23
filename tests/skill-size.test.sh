@@ -52,25 +52,35 @@ fi
 
 LIMIT=500
 
-# name<TAB>ceiling. Measured, never rounded. See the ratchet note above.
+# name<TAB>ceiling<TAB>why this row is still over LIMIT. Measured, never rounded.
+# See the ratchet note above.
 #
-# Every row here is a skill whose body is still dominated by executable fences —
-# `bash uberdev-executable` blocks that a test extracts and runs — so the prose
-# extraction that took each of these down could not take it under LIMIT without
-# relocating shipped code, which is a different change with a different blast
-# radius. The reference files those bodies now point at are real: the bytes moved
-# verbatim, and the tests that assert on them were re-pointed at the file that
-# holds them.
+# No single excuse covers all nine rows, so each row carries its own, and every
+# number in them came from `wc -l` and a fence count rather than from assertion.
+# Six of the nine are bodies where more than half the lines sit inside fenced
+# blocks — shipped code, several of those fences extracted and executed by other
+# tests in this suite — so taking those under LIMIT means relocating executable
+# code, which is a different change with a different blast radius. The other
+# three are mostly contract prose, where the split is open work rather than an
+# impossibility, and the row says so.
+#
+# One constraint applies to every row, and it is why a split can be WRONG rather
+# than merely unfinished. Only SKILL.md is loaded eagerly when a skill fires; a
+# `references/*.md` is read only if the model decides to open it. So text the
+# pipeline itself acts on at runtime cannot live behind a reference file —
+# extracting it there does not shrink the debt, it deletes a rule. Reference
+# extraction is right for material a reader consults on demand, and wrong for
+# material the runtime obeys.
 WAIVERS="$(cat <<'EOF'
-premerge-pipeline	2274
-merge-pipeline	1778
-subagent-driven-dev	1019
-orchestrator	1012
-cluster-pipeline	1012
-finish-branch	984
-review-fleet	800
-post-impl-review	797
-writing-skills	744
+premerge-pipeline	2323	~54% fenced; rose 2274->2323 re-inlining the severity rule the controller reads at runtime
+merge-pipeline	1778	~27% fenced, no references/ yet — prose extraction is open work
+subagent-driven-dev	1019	~64% fenced — one ~450-line bash block plus dispatch examples
+orchestrator	1012	~53% fenced, 26 executable blocks; 2 reference files already split out
+cluster-pipeline	1012	~90% fenced — almost entirely shipped bash
+finish-branch	984	~75% fenced; 1 reference file already split out
+review-fleet	800	13 fenced lines of 800 — all contract prose, no references/ yet
+post-impl-review	797	~71% fenced; 1 reference file already split out
+writing-skills	744	~19% fenced, no references/ yet — prose extraction is open work
 EOF
 )"
 
@@ -99,8 +109,12 @@ pass() { echo "  PASS  $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL  $1"; FAIL=$((FAIL + 1)); }
 
 waiver_for() {  # <skill-name> -> ceiling on stdout, empty when unwaived
-  local want="$1" name ceiling
-  while IFS="$(printf '\t')" read -r name ceiling; do
+  # `reason` is read into its own variable deliberately: with only two variables
+  # the LAST one absorbs the rest of the line, so the trailing reason field would
+  # arrive glued to the number and every waived skill would classify as
+  # `bad-ceiling`. Same shape as the S5 probe table's trailing description.
+  local want="$1" name ceiling reason
+  while IFS="$(printf '\t')" read -r name ceiling reason; do
     [ -n "$name" ] || continue
     if [ "$name" = "$want" ]; then
       printf '%s' "$ceiling"
@@ -153,7 +167,7 @@ $SKILL_FILES
 EOF
 
 echo "== S3: every waiver names a skill that exists =="
-while IFS="$(printf '\t')" read -r name ceiling; do
+while IFS="$(printf '\t')" read -r name ceiling reason; do
   [ -n "$name" ] || continue
   if [ -r "$SKILLS_ROOT/$name/SKILL.md" ]; then
     pass "S3 waiver '$name' names a live skill"
