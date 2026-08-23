@@ -50,6 +50,15 @@
 #          (#700), a defer overflow is survivable and loud (#690), and the
 #          grouped-filing contract reads the same way in every place it is
 #          stated at all (#722)
+#   P18  — every `git push` in an executable fence captures git's stderr and
+#          hands it to a typed `error:` line. Universal, not four site greps: a
+#          sixth push site is covered the day it is written (#724)
+#   P19  — PREMERGE_RERUN_FLAKY_CAP is declared once and RUN at the value
+#          declared. The fence re-assigns the number, so editing the Constants
+#          block -- the only copy the prose points at -- changed nothing at
+#          runtime and no test noticed (#724)
+#   P20  — every backticked heading reference in the Constants block resolves to
+#          a heading that exists in this file (#724)
 #   P16  — repo-agnosticism: Phase 5's bump probes the TARGET repo (not the
 #          plugin install), passes that root through to bump-version.sh, and
 #          skips with a typed reason elsewhere; Phase 0 publishes the private
@@ -923,6 +932,249 @@ elif [ "$DEFER_CAP_UNIQ" != 1 ]; then
 else
   echo "  PASS  P17/#722: all $DEFER_CAP_COUNT stated max_new caps agree on $(sed -n 1p <<<"$DEFER_CAPS")"; PASS=$((PASS + 1))
 fi
+
+echo "== P18: every git push in this file explains its own failure (#724) =="
+# Four of the five pushes ended `>/dev/null 2>&1 || exit 2`. A non-fast-forward,
+# an expired token or a protected-branch rule made the fence exit 2 having printed
+# nothing at all -- mid-run, inside an autonomous loop, with no PREMERGE FIX
+# COMMIT= line and no cause. The fifth printed a typed line but still sent git's
+# own words to /dev/null.
+#
+# The rule asserted here is UNIVERSAL rather than four site greps: every git push
+# in every fence captures stderr and hands it to a typed `error:` line, so a sixth
+# push site is covered the day someone writes it.
+#
+# What "every git push" means, spelled out, because a census whose recogniser is
+# vague is wrong in BOTH directions (#724): a line counts when it holds `git`,
+# then git's own global options, then `push` AS A WHOLE WORD. So `git push` alone
+# at the end of a line — the bare push to the configured upstream — counts. It did
+# not while the filter looked for the literal `push ` with a trailing space, which
+# left the one push shape carrying no error handling at all as the one shape the
+# audit could not see. And in the other direction `git` and `push` merely
+# co-occurring is not a push: a hint printf naming `git fetch … push again` is
+# prose ABOUT pushing, and it used to be counted and reported as a site swallowing
+# git's stderr. Both directions were measured against this file before the
+# recogniser was changed.
+#
+# The boundary: a push spelled through a variable (`"$GIT" push`) or hidden behind
+# a helper function is invisible to this. No fence ships either today, and the one
+# that grew one would be worth a row of its own.
+#
+# Scoped to $FENCES, never the whole file: SKILL.md holds code AND the prose
+# documenting it, and a whole-file grep for the capture idiom is satisfied by the
+# paragraph explaining the capture idiom after the code is gone. The line numbers
+# a failure reports are therefore $FENCES line numbers, not SKILL.md ones.
+PUSH_AUDIT="$(awk -v SQ="'" -v HMAX=25 '
+  # TRAILING whitespace is stripped as well as leading, because `line == "}"` is
+  # the one EXACT compare here and this suite also runs on windows, where the
+  # checkout is CRLF (/.gitattributes is scoped to plugins/uberdev/hooks/**). A
+  # `}\r` that missed that compare would leave the walk inside the handler
+  # forever — which the `unclosed=` field reports directly now, on whatever
+  # platform it happens, instead of being inferred from `total` sagging.
+  function strip(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+  # A line is a push when it holds `git`, then the global options git accepts,
+  # then `push` as a WHOLE WORD -- the recogniser the header above describes. The
+  # candidate is padded with a space on each side so a push at the very start or
+  # the very end of a line needs no `^`/`$` special-case in the pattern.
+  #
+  # A dynamic regex carrying POSIX classes is not a new bet on the awks this
+  # suite runs under -- tests/epipe-guard.test.sh assembles EPIPE_RE the same way
+  # and passes it through `awk -v` on both CI jobs -- but that file also treats
+  # "unsupported POSIX class in a dynamic regex on some awk" as a real failure
+  # mode, and it is right to. Here that failure is not silent: an awk that
+  # refuses this pattern prints nothing, every field below is unreadable, and all
+  # four rows FAIL rather than one of them reporting a clean census.
+  function is_push(s) { return (" " s " ") ~ PUSHRE }
+  BEGIN {
+    PUSHRE = "[^[:alnum:]_]git([[:space:]]+-[^[:space:]]*([[:space:]]+[^[:space:]-][^[:space:]]*)?)*[[:space:]]+push[^[:alnum:]_-]"
+    MARK = "2>&1 1>/dev/null)\" || {"
+  }
+  {
+    line = strip($0)
+    if (inh) {
+      if (index(line, "printf " SQ "error:") == 1) seen = 1
+      if (line == "}") { if (!seen) untyped = untyped " " start; inh = 0; next }
+      # THE WALK IS BOUNDED, and that is what makes the census and the `untyped=`
+      # row mean anything. Unbounded, a handler whose close this cannot match
+      # hands it the REST OF THE FILE: every later push site is eaten as body -- the
+      # census then under-counts -- and the first typed printf and bare `}` it
+      # meets, in any later fence, belonging to anything at all, close the walk
+      # and let it report clean. Measured, both halves, on this file.
+      #
+      # So the walk gives up at the next push site, or after HMAX lines, and says
+      # so under `unclosed=`. HMAX is ~2x the longest handler shipped here (the
+      # rebase arm, 11 body lines); the point of the number is that overrunning it
+      # is a RED, so being generous with it costs nothing.
+      if ((substr(line, 1, 1) != "#" && is_push(line)) || NR - start >= HMAX) {
+        unclosed = unclosed " " start; inh = 0
+      } else next
+    }
+    if (substr(line, 1, 1) == "#") next
+    if (!is_push(line)) next
+    total++
+    idx = index(line, MARK)
+    if (idx == 0) { swallowed = swallowed " " NR; next }
+    # Whatever follows `|| {` ON THE PUSH LINE is a handler written on one line.
+    # It closes there, so it is judged there. Walking forward for a bare `}` that
+    # will never come is exactly how a handler of `{ exit 2; }` -- a push that
+    # prints NOTHING, the defect this whole section exists to catch -- used to
+    # score `total=5 swallowed=- untyped=-` with the file at 206 passed 0 failed.
+    # An END-of-input guard alone did not fix that either: the walk left the fence
+    # and closed on a handler in the NEXT one, taking its typed line on the way.
+    start = NR
+    tail = strip(substr(line, idx + length(MARK)))
+    seen = (index(tail, "printf " SQ "error:") > 0)
+    if (tail ~ /}$/) { if (!seen) untyped = untyped " " start; next }
+    inh = 1
+  }
+  # And a walk that reaches EOF still inside a handler measured nothing from
+  # `start` on. `unclosed` is reported whether or not a typed line was seen,
+  # because `seen` stops being evidence once the walk is lost: the printf that
+  # set it may belong to any code after the handler.
+  END {
+    if (inh) unclosed = unclosed " " start
+    printf "total=%d swallowed=%s untyped=%s unclosed=%s\n", total, (swallowed == "" ? "-" : swallowed), (untyped == "" ? "-" : untyped), (unclosed == "" ? "-" : unclosed)
+  }
+' "$FENCES")"
+PUSH_TOTAL="${PUSH_AUDIT#total=}"; PUSH_TOTAL="${PUSH_TOTAL%% *}"
+case "$PUSH_TOTAL" in ''|*[!0-9]*) PUSH_TOTAL=0 ;; esac
+if [ "$PUSH_TOTAL" -ge 5 ]; then
+  echo "  PASS  P18: the audit found all $PUSH_TOTAL push sites (anti-vacuity)"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  P18: only $PUSH_TOTAL push site(s) found — the audit below is vacuous"; FAIL=$((FAIL + 1))
+fi
+case "$PUSH_AUDIT" in
+  *"swallowed=-"*) echo "  PASS  P18: no push discards git's explanation"; PASS=$((PASS + 1)) ;;
+  *) echo "  FAIL  P18: push(es) swallowing git's stderr — $PUSH_AUDIT"; FAIL=$((FAIL + 1)) ;;
+esac
+case "$PUSH_AUDIT" in
+  *"untyped=-"*) echo "  PASS  P18: every push failure prints a typed error: line"; PASS=$((PASS + 1)) ;;
+  *) echo "  FAIL  P18: push handler(s) printing no typed error: line — $PUSH_AUDIT"; FAIL=$((FAIL + 1)) ;;
+esac
+# The two rows above are only worth their PASS while the walk reached the end of
+# every handler it entered. This row is what makes that a claim rather than an
+# assumption; the $FENCES line number it prints is where the walk got stuck.
+case "$PUSH_AUDIT" in
+  *"unclosed=-"*) echo "  PASS  P18: every push handler's close was found — the census measured all of them"; PASS=$((PASS + 1)) ;;
+  *) echo "  FAIL  P18: the audit never found the close of the push handler(s) it entered — $PUSH_AUDIT"; FAIL=$((FAIL + 1)) ;;
+esac
+# The rebase arm is the one push that rewrites remote history and the one whose
+# failure is genuinely ambiguous: a lease rejection is the safety mechanism firing
+# correctly, an expired token is not. Same discrimination commands/review-pr.md
+# makes, and the same lease + --force-if-includes pair agents/ci-rebase-handler.md
+# calls the single sanctioned exception to never-force.
+#
+# What the flag row pins is CONSISTENCY with that sanctioned pair, not a second
+# refusal: `git push --help` documents --force-if-includes as a "no-op" alongside
+# an explicit-form `--force-with-lease=<refname>:<expect>`, which is the form the
+# row above at P17/#697 pins as a fixed string. The safety property is carried by
+# the LEASE. Saying so here keeps this file from becoming the next place the
+# overclaim lives -- which is the defect class #724 exists to close.
+#
+# BOTH ROWS ARE SCOPED TO THE FENCE'S CODE, not its raw body. The paragraph that
+# explains the flag names it twice, so `assert_in "$PUBLISH_FENCE"` stays green
+# with the flag DELETED from the push line — measured, not assumed. Same reason
+# the #706 rows and the #708 row above strip comments before probing, and the
+# same prose-satisfies-grep failure #724 exists to close.
+PUBLISH_FENCE_CODE="$(printf '%s\n' "$PUBLISH_FENCE" | grep -vE '^[[:space:]]*#' || :)"
+assert_in "$PUBLISH_FENCE_CODE" '--force-if-includes' \
+  "P18/#724: the force-push pairs the lease with --force-if-includes"
+assert_in "$PUBLISH_FENCE_CODE" 'stale info|fetch first|non-fast-forward' \
+  "P18/#724: a lease rejection is told apart from a generic push failure"
+
+echo "== P19: RERUN_FLAKY_CAP is declared once and RUN at the value declared (#724) =="
+# PREMERGE_AGGREGATE_SOURCE has three declaration sites AND P4 above to assert
+# they agree. PREMERGE_VERSION_MANIFEST has two executable sites and the P16 rows
+# that compare them with each other, with /goal's _UBERDEV_GOAL_VERSION_MANIFEST
+# and with the Constants row — that half of #724's second item was already
+# covered, and a second comparison here would be the very drift class the issue
+# registers. PREMERGE_RERUN_FLAKY_CAP had the sites and no test: the fence
+# RE-ASSIGNS the number, so editing the Constants block — which reads like the
+# SSOT and is the only copy the prose points at — changed nothing at runtime.
+#
+# The Constants row is spaced (`NAME = 1`) and the executable copy is not
+# (`NAME=1`). That is what tells the documentation apart from the program here.
+#
+# Unlike P18 and P20 this section is green on both sides of #724's fix, and that
+# is correct: it is a DRIFT detector, which is exactly what the issue's second
+# acceptance item asks for. It reds the day one copy moves without the other.
+DOC_CAP="$(sed -n 's/^PREMERGE_RERUN_FLAKY_CAP[[:space:]][[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*$/\1/p' "$SKILL" | sed -n '1p')"
+FENCE_CAPS="$(sed -n 's/^PREMERGE_RERUN_FLAKY_CAP=\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$FENCES")"
+FENCE_CAP_COUNT="$(grep -c . <<<"$FENCE_CAPS")"
+FENCE_CAP="$(sort -u <<<"$FENCE_CAPS")"
+FENCE_CAP_UNIQ="$(grep -c . <<<"$FENCE_CAP")"
+if [ -z "$DOC_CAP" ]; then
+  echo "  FAIL  P19: the Constants block declares no PREMERGE_RERUN_FLAKY_CAP"; FAIL=$((FAIL + 1))
+elif [ "$FENCE_CAP_COUNT" -lt 1 ]; then
+  echo "  FAIL  P19: no fence assigns PREMERGE_RERUN_FLAKY_CAP — the cap is prose with nothing behind it"; FAIL=$((FAIL + 1))
+elif [ "$FENCE_CAP_UNIQ" != 1 ]; then
+  echo "  FAIL  P19: the executable copies of PREMERGE_RERUN_FLAKY_CAP disagree:"; sed 's/^/          /' <<<"$FENCE_CAPS"
+  FAIL=$((FAIL + 1))
+elif [ "$FENCE_CAP" != "$DOC_CAP" ]; then
+  echo "  FAIL  P19: Constants says '$DOC_CAP', the fence runs '$FENCE_CAP'"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  P19: the fence runs the cap the Constants block declares ($DOC_CAP)"; PASS=$((PASS + 1))
+fi
+# Anti-vacuity: the cap must be CONSUMED, not merely assigned. An assignment
+# nothing compares against is how it became prose in the first place.
+assert_in "$RERUN_FENCE" '[ "$PREMERGE_RERUNS_USED" -ge "$PREMERGE_RERUN_FLAKY_CAP" ]' \
+  "P19: and the fence compares the run's spent reruns against it"
+
+echo "== P20: the Constants block's cross-references resolve (#724) =="
+# PREMERGE_CI_SETTLE_SECS's comment pointed at `## The CI settle window`; the
+# section is `###`. A pointer into your own file is worth having only while it
+# lands, and this one survived a rewrite of the very section it names.
+#
+# Generic on purpose: EVERY backticked heading reference on EVERY row that
+# assigns a PREMERGE_ constant must match a heading line in this file byte for
+# byte, so the next constant that grows a pointer is covered without another row.
+#
+# "EVERY" is load-bearing twice over, and the first spelling of this extraction
+# was narrower than its own comment on both counts (#724):
+#
+#   * ALL refs on the row, not the last. A greedy `.*` before the capture kept
+#     only the final backticked ref, so a row carrying two — the first dangling,
+#     the second resolving — passed. Measured on this file.
+#   * BOTH assignment spellings. Requiring whitespace before `=` skipped the real
+#     `PREMERGE_AGGREGATE_SOURCE= premerge-aggregate` row, so a pointer added
+#     there would never have been checked. Requiring none also takes in the
+#     fences' own `NAME=value` lines, which is a superset and the right one: a
+#     dangling pointer is a dangling pointer wherever the constant is assigned.
+CONST_REFS="$(awk '
+  /^PREMERGE_[A-Z_]*[[:space:]]*=/ {
+    rest = $0
+    while (match(rest, /`#+[[:space:]][^`]*`/)) {
+      print substr(rest, RSTART + 1, RLENGTH - 2)
+      rest = substr(rest, RSTART + RLENGTH)
+    }
+  }
+' "$SKILL")"
+CONST_REF_COUNT="$(grep -c . <<<"$CONST_REFS")"
+if [ "$CONST_REF_COUNT" -ge 1 ]; then
+  echo "  PASS  P20: the Constants block carries $CONST_REF_COUNT heading reference(s) (anti-vacuity)"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  P20: no heading reference found in the Constants block — the row below is vacuous"; FAIL=$((FAIL + 1))
+fi
+# Heredoc, not a pipe: the loop's reader is the EPIPE class tests/epipe-guard.test.sh
+# bans, and grep -qxF reads a FILE so it has no writer to poison. The body and the
+# EOF_P20_REFS terminator must stay at column 0 — indenting them would prepend
+# whitespace to every reference and red this row for the wrong reason.
+P20_DANGLING=""
+while IFS= read -r P20_REF; do
+  [ -n "$P20_REF" ] || continue
+  grep -qxF -e "$P20_REF" "$SKILL" || P20_DANGLING="$P20_DANGLING [$P20_REF]"
+done <<EOF_P20_REFS
+$CONST_REFS
+EOF_P20_REFS
+if [ -z "$P20_DANGLING" ]; then
+  echo "  PASS  P20: every Constants cross-reference names a heading that exists"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  P20: dangling Constants cross-reference(s):$P20_DANGLING"; FAIL=$((FAIL + 1))
+fi
+# And the judgement #724 asked for is written down, so the next audit does not
+# re-file a constant whose consumer is the controller by design.
+assert_fixed "$SKILL" '`PREMERGE_CI_SETTLE_SECS` is consumed by the **controller**' \
+  "P20: the settle constant's consumer is stated, not left to be re-discovered"
 
 echo ""
 echo "== Summary =="
