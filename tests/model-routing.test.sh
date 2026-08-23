@@ -47,6 +47,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -199,6 +200,117 @@ for route, roles in expected_route_groups.items():
         check(row["sandbox_ceiling"] == ("workspace-write" if role in workspace_write_roles else "read-only"), f"wrong sandbox for {role}")
         check(row["delegation_mode"] == "leaf", f"{role} must be leaf")
 check(policy["delegation_contracts"]["leaf"] == {"features_multi_agent": False, "agents_max_depth": 0}, "leaf enforcement contract drifted")
+
+# --- #749: sandbox_ceiling's first read-site whose subject is OUTSIDE the policy ---
+# `sandbox_ceiling` was a dead contract. It is VALIDATED -- lib/model_routing.py
+# enum-checks every row against _SELECTABLE_SANDBOXES -- and it is ASSERTED, by
+# the loop above, against `workspace_write_roles`: a hardcoded twin of the same
+# claim, transcribed into this file. Nothing projected it into a tool grant and
+# nothing compared it with the agent cards. Two independent "read-only" claims
+# existed -- the policy row and the card -- and neither reached the runtime nor
+# checked the other. That is what let 31 of the 38 read-only-ceiling roles ship
+# with every tool granted while this suite and
+# tests/testers-agent-contract.test.sh both printed PASS.
+#
+# The block below reads policy[...]["sandbox_ceiling"] and compares it against
+# plugins/uberdev/agents/*.md. Deriving read_only_roles from
+# `workspace_write_roles` instead would reproduce the defect exactly: that set
+# is the transcription, not the field.
+#
+# WHAT `tools:` ACTUALLY DOES, stated precisely -- a comment that claims a
+# ceiling which does not exist is the same defect as a policy field that never
+# reaches one. The key restricts which TOOL NAMES an agent may call. A
+# parenthesised argument inside an entry is not matched against a filesystem
+# path; `Write(<path>)` is not a file-permission rule (only `Edit(path)` is
+# matched by those). So this block asserts that a role DECLARES a tools: list at
+# all -- never that a pattern inside one bounds where the agent may write.
+#
+# What is asserted, and what deliberately is NOT:
+#   * NOT: that every read-only role carries a `tools:` declaration. Writing one
+#     for the rest is a per-agent judgement, not a mechanical sweep -- each agent
+#     must still be able to call the tools it actually calls. The six Phase 1
+#     review lenses write a result file /uberdev:review-pr validates from disk
+#     (plugins/uberdev/shared/phase1-reviewer-output-v1.md), so any list written
+#     for them has to include `Write`; one that omits it breaks Phase 1 for every
+#     PR. #749 fixed the eight testers-* personas; the rest is the larger sweep
+#     that issue defers, and the waiver below is its worklist.
+#   * YES: no agent card may declare `allowed-tools:` AT ALL. On an agent that
+#     key is inert. It stays correct under plugins/uberdev/commands/, which this
+#     check does not look at.
+#   * YES: every read-only role either declares `tools:` or is NAMED below. The
+#     waiver is SHRINK-ONLY: a role that gains `tools:` while still listed is a
+#     FAILURE, so the list cannot rot into a permanent exemption, and a NEW agent
+#     shipped with no declaration reds instead of silently joining them.
+FRONTMATTER_RE = re.compile(r"(?s)\A---\n(.*?)\n---\n")
+declares_tools = set()
+declares_allowed_tools = set()
+for agent_path in sorted((ROOT / "plugins/uberdev/agents").glob("*.md")):
+    matched = FRONTMATTER_RE.match(agent_path.read_text(encoding="utf-8"))
+    check(matched is not None, f"{agent_path.name}: no --- frontmatter block")
+    block = matched.group(1)
+    named = re.search(r"(?m)^name:[ \t]*(\S+)", block)
+    role = named.group(1).strip() if named else agent_path.stem
+    if re.search(r"(?m)^tools:", block):
+        declares_tools.add(role)
+    if re.search(r"(?m)^allowed-tools:", block):
+        declares_allowed_tools.add(role)
+
+check(not declares_allowed_tools,
+      "agent cards declaring the inert slash-command key 'allowed-tools:' "
+      f"(an agent card is read for 'tools:'): {sorted(declares_allowed_tools)!r}")
+
+read_only_roles = {role for role, row in policy["roles"].items()
+                   if row["sandbox_ceiling"] == "read-only"}
+testers_roles = {role for role in read_only_roles if role.startswith("testers-")}
+# Both counts are ANTI-VACUITY anchors for the subset assertions below, not
+# release ratchets: `A <= B` is trivially true when A is empty, so an emptied
+# read_only_roles or testers_roles would turn the real checks green by leaving
+# them no subject. If one reds, re-derive the census -- do not just bump it.
+check(len(read_only_roles) == 38,
+      f"expected 38 read-only-ceiling roles in the policy, got {len(read_only_roles)} -- "
+      "a role's sandbox_ceiling moved; re-derive the waiver below before changing this")
+check(len(testers_roles) == 8, f"expected 8 testers-* read-only roles, got {len(testers_roles)}")
+
+# The #749 worklist: a read-only ceiling in the policy that no `tools:`
+# declaration mirrors. SHRINK-ONLY -- the stale-waiver row below is the ratchet.
+# Deliberately NOT size-locked: deleting a name as an agent gains a tools: list
+# is the intended success path, and a length assertion would red on it with a
+# message that reads like a defect and force a two-place edit.
+UNENFORCED_READ_ONLY_WAIVER = {
+    "ci-failure-classifier", "code-reviewer", "code-simplifier", "comment-analyzer",
+    "convention-compliance", "finding-verifier", "findings-to-issues",
+    "merge-strategy-decider", "plan-reviewer", "pr-test-analyzer",
+    "research-patterns", "research-prior-art", "silent-failure-hunter",
+    "spec-compliance-reviewer", "spec-reviewer", "trust-trail-evaluator",
+    "type-design-analyzer", "uberthink-arbiter", "uberthink-falsifier",
+    "uberthink-frame", "uberthink-generator", "uberthink-moderator",
+    "uberthink-synthesizer",
+}
+# ORDER MATTERS. `check` raises on the first failure, so a row placed after one
+# that subsumes its trigger can never fire -- and a guard that cannot fail is the
+# defect #749 is about. The testers-in-waiver row therefore comes FIRST: waiving
+# a persona that still declares tools: would otherwise be swallowed by the
+# stale-waiver row, and waiving one that does not would be swallowed by the
+# testers-enforcement row, leaving this message permanently dead. Each of the
+# five rows below owns a mutation no earlier row reaches.
+check(not (testers_roles & UNENFORCED_READ_ONLY_WAIVER),
+      "a testers-* persona was added to the #749 waiver, which re-opens the issue it closed: "
+      f"{sorted(testers_roles & UNENFORCED_READ_ONLY_WAIVER)!r}")
+check(UNENFORCED_READ_ONLY_WAIVER <= read_only_roles,
+      "waiver names something that is not a read-only-ceiling role: "
+      f"{sorted(UNENFORCED_READ_ONLY_WAIVER - read_only_roles)!r}")
+stale_waiver = UNENFORCED_READ_ONLY_WAIVER & declares_tools
+check(not stale_waiver,
+      "waiver is STALE -- these roles now declare tools: and must be deleted from it: "
+      f"{sorted(stale_waiver)!r}")
+check(testers_roles <= declares_tools,
+      "a testers-* persona lost its tools: declaration, which re-opens #749: "
+      f"{sorted(testers_roles - declares_tools)!r}")
+unprojected = read_only_roles - declares_tools - UNENFORCED_READ_ONLY_WAIVER
+check(not unprojected,
+      "a read-only sandbox_ceiling is neither mirrored by a tools: declaration nor waived "
+      "(declare the tools: key, or name the role in UNENFORCED_READ_ONLY_WAIVER): "
+      f"{sorted(unprojected)!r}")
 
 # The policy schema is closed and JSON duplicate keys never silently win. These
 # mutations used to enter through validate_catalog(policy, ...); load_policy /
