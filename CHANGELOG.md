@@ -109,9 +109,23 @@ unfilable row would still raise a false blocker-overflow alarm under it.
 
 ### Known issues
 
-The `/premerge` convergence loop stopped `STOP_EXHAUSTED` on this stack with
-blockers still live; they are filed as issues with a `Blocks:` backref rather
-than fixed here. See the issues linked from the stack PR.
+The `/premerge` convergence loop ran six review attempts and five repair rounds
+over this stack. Blockers per attempt were **10 / 10 / 6 / 8 / 8**, every round
+fixing all of what it was handed — the count never fell. The loop was stopped by
+the growth-ratio criterion of RFC 0021 §10 A3, not by its budget: **8 of attempt
+5's 8 blockers landed in text an earlier round had written**, which is the state
+A3 names as the loop reviewing its own output.
+
+The ten issues filed at the loop's first stop (#732–741) were all subsequently
+resolved within the same run and have been closed, each verified by executing its
+own predicate against this branch rather than by re-review. No finding surfaced by
+the run is known to be outstanding — but that is a statement about what was
+sampled, never a claim that the stack is defect-free, and A3 is explicit that a
+generative critic's silence could not establish the stronger claim anyway.
+
+Phase 4 (the three simplify lenses) did **not** run: it is gated on a green clean
+gate, and a green gate under the current criterion requires exactly the
+critic-silence signal A3 rules out.
 
 ## [0.54.0] — 2026-08-22
 
