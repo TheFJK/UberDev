@@ -22,7 +22,7 @@ model_hint: inherit   # audit-trail aid
 
 ## Process
 
-1. **Duplicate search.** `gh search issues --repo "$repo_slug" "<top keywords>" --limit 10 --state all --json number,title,state,url`. Keep entries whose title genuinely overlaps with `description`; discard noise.
+1. **Duplicate search.** `gh search issues --repo "$repo_slug" "<top keywords>" --limit 10 --json number,title,state,url`. Keep entries whose title genuinely overlaps with `description`; discard noise. **Pass no `--state` flag:** omitting it already searches open *and* closed, which is exactly the intent here, and the per-entry `state` field in `--json` is what separates the two. Never add `--state all` — `gh search issues` accepts only `{open|closed}` and rejects `all` outright (`invalid argument "all" for "--state" flag`, exit 1, zero results), unlike `gh issue list --state all`, which is valid. The two commands do not share the flag's value set.
 2. **Label list.** `gh label list --repo "$repo_slug" --limit 100 --json name,description`. Pick the base label (`bug` for `fix`, `enhancement` for `feat`) **only if it exists**, then add context labels by matching description keywords to real label names. Never invent labels.
 3. **Scope validation.** Search for `commitlint.config.{js,cjs,mjs,ts}` under `working_dir` (max-depth 3, skip `node_modules`). If found, `Read` it and extract the `scope-enum` array. The valid scope is the closest match to a description keyword from that array. If `commitlint.config.*` is missing, fall back to the conventional-commits hardcoded set: `feat fix refactor test docs chore`. `commitlint_present` reflects which path was taken.
 
@@ -45,7 +45,7 @@ summary: |
 
 ## Failure modes
 
-- **`gh search issues` fails** — return `status: DONE_WITH_CONCERNS`, set `duplicates: []`, document in `summary`. The dispatcher proceeds without a `## Possible duplicates` section.
+- **`gh search issues` fails** — return `status: DONE_WITH_CONCERNS`, set `duplicates: []`, and **name the duplicate search explicitly in `summary`** with the one-line reason. `summary` is the only field that separates this from a search that ran and matched nothing — `duplicates: []` is byte-identical either way — and `/issue` Phase 2 reads it to classify the duplicate state PROVEN vs UNKNOWN. A `DONE_WITH_CONCERNS` whose `summary` is silent about which probe degraded is off-contract and classifies UNKNOWN. This does **not** degrade quietly: `/issue` re-dispatches this agent exactly once, and if the search still has not demonstrably completed the Phase 5 gate fails closed — it halts and asks the user before anything is created.
 - **`gh label list` fails** — return `status: DONE_WITH_CONCERNS` with `valid_labels: []`. The dispatcher creates the issue with no `--label` flags.
 - **No matching scope-enum entry** — set `valid_scope` to the closest match and note the substitution in `summary`.
 

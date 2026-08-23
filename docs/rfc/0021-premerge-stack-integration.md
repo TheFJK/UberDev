@@ -203,10 +203,19 @@ fix-commit fence refuses without a `not_green` gate verdict for its own attempt,
 so the inverted order fails loudly instead of silently converging on nothing.
 
 Suggestions leave the loop at Phase 5
-rather than inside it, because `findings-to-issues` fingerprints an issue as
+rather than inside it, ~~because `findings-to-issues` fingerprints an issue as
 `file:line:summary` and a fix that shifts a line by one gives the same suggestion
-a new fingerprint — per-attempt filing produces duplicates, not comments.
+a new fingerprint — per-attempt filing produces duplicates, not comments.~~
 See §10 A1 for the loop and §10 A2 for 4c.
+
+> **AMENDED 2026-08-23 — see §10 A3.** The conclusion stands; its reason no
+> longer does. `findings-to-issues` keys the ISSUE on the owning file, so a
+> second dispatch over the same file comments rather than duplicating. What
+> per-attempt filing costs now is that the members inside that issue are still
+> re-listed as new on every attempt, turning one issue into a per-attempt
+> transcript — and each dispatch spends `MAX_NEW` and rate-limit budget to do
+> it. Filing once is what keeps the issue a statement about the file rather
+> than a log.
 
 `/review-pr` runs its simplify pass at Phase 2, before it has probed CI at all.
 That ordering is fine for a single PR being iterated on. It is wrong for a stack
@@ -304,10 +313,18 @@ What guards the hazard directly:
    The fingerprint is `path` plus a case-folded, punctuation-stripped `summary`,
    and it is deliberately **not** `file:line`. A fix moves lines, including inside
    other findings' hunks, so a line-keyed identity reports every survivor as
-   brand new — the loop would observe infinite progress and never stop. It is
+   brand new — the loop would observe infinite progress and never stop. ~~It is
    also deliberately not the fingerprint `agents/findings-to-issues.md` computes,
    which *is* `file:line:summary` because an issue is about a location. Same
-   width, different question.
+   width, different question.~~
+
+   > **AMENDED 2026-08-23 — see §10 A3.** The "deliberately not" verdict holds
+   > and the singular does not: `agents/findings-to-issues.md` computes **two**
+   > fingerprints, so "the fingerprint" names nothing there. It keys a
+   > per-FINDING identity on `file:line:summary` because a finding is about a
+   > location, and a per-ISSUE identity on the owning file alone because an
+   > issue is now about a file. The loop fingerprint above is deliberately
+   > neither. Same 16-hex width, three different questions.
 
 **The counter survives, demoted to a runaway backstop.** `--converge=<n>` takes
 `1..6` (`CONVERGE_REPAIR_CEILING`), default `3`; anything outside that range is a
@@ -514,3 +531,62 @@ into one, would make the undo unrepresentable.
 suppresses only 4c, and it is worth naming what that costs, because it is defect
 (ii) reinstated on purpose: the run polishes the stack and then bumps the version
 over a tree whose last verification predates the polish.
+
+### A3 — the ISSUE key is per-file, not per-finding (2026-08-23)
+
+Two passages above rest on one premise: that `findings-to-issues` computes a
+single fingerprint, and that it is `file:line:summary`. §8 read, verbatim:
+
+> Suggestions leave the loop at Phase 5 rather than inside it, because
+> `findings-to-issues` fingerprints an issue as `file:line:summary` and a fix
+> that shifts a line by one gives the same suggestion a new fingerprint —
+> per-attempt filing produces duplicates, not comments.
+
+and A1 above read, verbatim:
+
+> It is also deliberately not the fingerprint `agents/findings-to-issues.md`
+> computes, which *is* `file:line:summary` because an issue is about a location.
+> Same width, different question.
+
+Both are retained struck rather than rewritten, as the record of what was decided
+here. Both **conclusions** survive intact — suggestions still leave the loop at
+Phase 5, and the loop fingerprint is still deliberately not one of that agent's.
+It is the premise underneath them that no longer holds.
+
+**There are three fingerprints across the two files, not two (#722).** The agent
+now computes two where it used to compute one, and the loop's own key is the
+third:
+
+| Fingerprint | Where | Material | Question it answers |
+| --- | --- | --- | --- |
+| loop | `lib/premerge-findings.py` — `_fingerprint` | `path` + a case-folded, punctuation-stripped `summary` | is this the same blocker I already tried to fix? |
+| member | `agents/findings-to-issues.md` — Step 8a | `file_path`, `line`, `normalised_summary` | is this the same FINDING? |
+| container | `agents/findings-to-issues.md` — Step 8a | `sha256("<finding_marker_slug>:<file_path>")[:16]` | which ISSUE owns this finding? |
+
+All three are 16 hex characters wide, which is the whole trap: they substitute
+for one another and neither a reader nor a parser notices.
+
+**What it changes for §8.** A second dispatch over a file the agent has already
+filed against now matches the container and **comments** — the duplicate §8 named
+is gone. Filing inside the loop is still wrong, for the reasons the amended note
+there gives: the members are re-listed as new on every attempt, so one issue
+becomes a per-attempt transcript; each dispatch spends `MAX_NEW` and rate-limit
+budget doing it; and `defer` re-`os.replace`s the aggregate under an in-flight
+dispatch, which that agent refuses as `input-malformed`. Phase 5, once, is
+unchanged, and so is the phase order it sits in.
+
+**What it changes for A1 — nothing, and the reason matters.** The container key is
+path-based too, so it shares the loop fingerprint's insensitivity to line
+movement, and the tempting conclusion is that the two may now be one value. They
+may not. The container is *meant* to collapse every finding in a file onto one
+identity — that collapse is what makes the second dispatch a comment. The loop
+key has to do the opposite and keep two findings in one file apart, or, in
+`_fingerprint`'s own words, the loop reads a survivor as fixed. The member key is
+the mirror hazard: it is keyed on exactly the line movement the loop exists to
+survive. Different material, three different questions — never substitute one for
+another.
+
+`skills/premerge-pipeline/SKILL.md` (`### 2b — File the suggestions`,
+`## Phase 3b — CONVERGE`, `## Common Mistakes`) and
+`_fingerprint`'s docstring state the same distinction at the code. This amendment
+is what keeps the design authority from outranking them with the retired premise.

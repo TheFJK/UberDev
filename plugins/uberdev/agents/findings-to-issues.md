@@ -748,6 +748,24 @@ Explicit forbidden patterns:
    produce; it is not shorthand for them, and it must not be re-spelled with a
    second `:-` default, which would make two recipes out of one.
 
+   Bind the cap's default here too, in exactly that shape and for the same
+   class of reason: `max_new` is an input field, and the arithmetic below
+   dereferences it as a bare shell variable.
+
+   ```bash
+   max_new="${max_new:-10}"
+   ```
+
+   `10` is the documented fixed value for every variant in the origin table, so
+   this binds the value that is already contractual rather than minting a
+   second one. Unbound, the arithmetic below fails in both directions: under
+   `set -u` it errors and the write phase dies before its first group, and
+   without `set -u` bash reads the unset name as `0`, which turns
+   `SEARCH_REMAINING - max_new - 5` into `SEARCH_REMAINING - 5` and the `-gt`
+   cap on the next line into a comparison against `0` that can never fire. The
+   reserve would then hand the migration probes the Step 2 floor was refused
+   under — the exact guarantee the comment below claims it never spends.
+
    Bind the migration probe's Search-bucket reserve here too, once, from the
    `SEARCH_REMAINING` integer Step 2 already parsed — it is the budget the
    legacy-key fallback in `d` spends, and it exists so that fallback can never
@@ -825,14 +843,46 @@ Explicit forbidden patterns:
       `number,state,url` — identity, which is all `c` selects on — and `c`
       fetches the body of the ONE element it selected. Narrowing to
       `--state open` at the old page size would bound the payload too, and is
-      the wrong fix: the `state == "closed"` arm of `d` exists precisely to
+      the wrong fix: the `MATCH_STATE == "CLOSED"` arm of `d` exists precisely to
       split a group against a CLOSED issue's index, so a lookup blind to closed
       issues would make every already-resolved finding a no-match and re-file
       it. Bounding the projection keeps the page AND the closed arm.
 
    c. Parse match: if `MATCH` is non-empty JSON array, select the element to
-      act on — the first element whose `state` is `"open"` if the array has
-      one, otherwise the first element — and extract its `state` and `number`.
+      act on — the first element whose `state` is open if the array has
+      one, otherwise the first element — and extract its `number` plus its
+      UPPER-CASED state as `MATCH_STATE`. Select once, in one expression, so
+      the element `d` branches on is the element whose body this step verified:
+
+      ```bash
+      # gh emits state UPPER-CASE ("OPEN" / "CLOSED"), so upper-case BOTH sides
+      # before comparing rather than trusting either to arrive in one casing.
+      MATCH_ELEM=$(printf '%s' "$MATCH" | jq -c '(map(select((.state // "") | ascii_upcase == "OPEN")) | first) // .[0]')
+      number=$(printf '%s' "$MATCH_ELEM" | jq -r '.number')
+      MATCH_STATE=$(printf '%s' "$MATCH_ELEM" | jq -r '(.state // "") | ascii_upcase')
+      ```
+
+      **`MATCH_STATE` is the ONE state value anything downstream reads, and it
+      is upper-case by construction.** Every branch in `d` spells it
+      `MATCH_STATE == "OPEN"` / `MATCH_STATE == "CLOSED"` — the same casing
+      `skills/merge-pipeline/SKILL.md`'s `state == "OPEN"` pre-condition
+      already uses against the same API. Nothing below re-reads `.state` off
+      the raw element, because a second read is a second chance to compare an
+      un-folded value. A predicate written against a bare lower-case `"open"`
+      matches nothing at all: the open-preference silently degrades to `.[0]`,
+      a closed issue shadows the open one, and `d` takes its closed arm — the
+      exact regression the preference below exists to prevent, arriving as a
+      no-op rather than as an error.
+
+      `OPEN` and `CLOSED` are the whole of GitHub's issue-state enum, so `d`'s
+      two state arms are exhaustive over what `gh` can return. A `MATCH_STATE`
+      that is neither is therefore not a third state to branch on but a lookup
+      nobody can classify — the `// ""` guard above firing on an element with
+      no `state` field. Append
+      `{file: $file_path:$line, reason: "unclassifiable issue state"}` to
+      `blocked_by_dedupe[]` and continue to the next GROUP: the same
+      fail-CLOSED rule as `b` and the body fetch, for the same reason. Falling
+      through all three arms of `d` would write nothing and say nothing.
 
       Then fetch that element's body, and only that element's:
       `MATCH_BODY=$(gh issue view "$number" --json body --jq .body 2>&1)`;
@@ -858,7 +908,7 @@ Explicit forbidden patterns:
       The container key is the file, so it outlives any single issue: one path
       can legitimately hold a CLOSED issue for the findings that were fixed and
       an OPEN one for findings raised after that issue was closed — which is
-      exactly what the `state == "closed"` split in `d` files. Taking the
+      exactly what the `MATCH_STATE == "CLOSED"` split in `d` files. Taking the
       array's first element regardless would let the closed issue shadow the
       open one and re-file every finding already tracked there, turning a
       re-run into a duplicate. Under the pre-#722 `file:line:summary` key a
@@ -1027,12 +1077,12 @@ Explicit forbidden patterns:
       operator sees the loss. Never omit the header block or any of the four
       trailing markers.
 
-      The `state == "open"` comment body is measured the same way and against
-      the same 60000 bytes; it carries one line per member and no prose
+      The `MATCH_STATE == "OPEN"` comment body is measured the same way and
+      against the same 60000 bytes; it carries one line per member and no prose
       fences, so it degrades straight to omitting trailing members, under the
       same `blocked_by_dedupe[]` accounting.
 
-      The `state == "closed"` split in `d` is the one write shape this step
+      The `MATCH_STATE == "CLOSED"` split in `d` is the one write shape this step
       cannot measure exactly (#722): it creates a body covering only the
       members NOT in the matched issue's `fingerprints=` index, and which
       members those are is not known until the index read inside `d`. What is
@@ -1088,7 +1138,7 @@ Explicit forbidden patterns:
       a run stops terminating.
 
    d. **State branching:** every `gh issue create` / `gh issue comment` invocation MUST capture combined stderr+stdout into `CREATE_OUTPUT` and the exit code into `rc`. Step 8f's classifier reads both as preconditions — without this capture the truncation + transient/permanent classification in 8f silently classifies every failure as permanent. Shape: `CREATE_OUTPUT=$(gh issue create ... 2>&1); rc=$?` (or the analogous form for `gh issue comment`).
-      - `state == "open"`: build the comment body (see Comment body shape
+      - `MATCH_STATE == "OPEN"`: build the comment body (see Comment body shape
         below), rendering **every** member of the group and marking each `new`
         or `recurring` against the `fingerprints=` list in the matched issue's
         `body` field. Every member is rendered, including the recurring ones —
@@ -1103,7 +1153,7 @@ Explicit forbidden patterns:
         `{url, file, fingerprint, tier: $group_tier, findings: <N>}` to
         `commented_urls[]`, where `file` is `$file_path:$primary_line` and
         `fingerprint` is the container fingerprint.
-      - `state == "closed"`: **split the group against the closed issue's
+      - `MATCH_STATE == "CLOSED"`: **split the group against the closed issue's
         index — NEVER skip the group whole (#722).** "The user resolved it" is
         a claim about the findings that issue actually recorded, and under the
         old `file:line:summary` key a match WAS those findings, so skipping
@@ -1111,7 +1161,7 @@ Explicit forbidden patterns:
         finding the path will ever produce, so skipping whole suppresses every
         FUTURE finding in that file, permanently and for as long as the issue
         stays closed. Partition instead, using the machinery the
-        `state == "open"` arm above already uses: read the `fingerprints=`
+        `MATCH_STATE == "OPEN"` arm above already uses: read the `fingerprints=`
         list from the `<!-- uberdev-finding-index -->` line of the matched
         issue's `body` field and test each member's `MEMBER_FP` against it.
         - Member IS in the list — it was recorded on the issue the user
@@ -1126,12 +1176,17 @@ Explicit forbidden patterns:
         - Member is NOT in the list — it did not exist when the user closed
           that issue, so nothing about it was resolved and it has never been
           filed anywhere. Those members take the **No match** arm below as
-          their own new container: one `gh issue create` carrying the same
-          container fingerprint, whose `fingerprints=` index records exactly
-          them, and whose `group_tier`, title and header block are re-derived
-          over that subset per Step 5.5. They count in `by_severity` like any
-          other written finding. This is why `c` prefers an open match: the
-          issue filed here is the open one a later run must find.
+          their own new container, entering it at its `gh issue create` and
+          **never at the `d.legacy` probe** (see that sub-step's reachability
+          rule): one `gh issue create` carrying the same container fingerprint,
+          whose `fingerprints=` index records exactly them, and whose
+          `group_tier`, title and header block are re-derived over that subset
+          per Step 5.5. They count in `by_severity` like any other written
+          finding. This is why `c` prefers an open match: the issue filed here
+          is the open one a later run must find — and it is why the probe is
+          skipped, because an adoption here would leave that open container
+          uncreated and hand this file's container `$FP` to an unrelated issue
+          instead.
         - **Never route a not-in-list member to `skipped_closed[]`.** The
           damage would not be lossy-but-visible, it would be SILENT in every
           place an operator or a machine could catch it: `skipped_closed[]` is
@@ -1151,7 +1206,9 @@ Explicit forbidden patterns:
           parse failure instead of a policy. Fail towards filing. An issue the
           user closes a second time costs one click; a dropped BLOCKER costs
           the run's entire safety claim, and says nothing while it does.
-      - No match: **first take the `d.legacy` fallback below.** If it adopts an
+      - No match: **first take the `d.legacy` fallback below**, subject to that
+        sub-step's own reachability rule — which is where the one exception to
+        this "first" lives, so it is not restated here. If it adopts an
         existing issue, this arm is finished and no `gh issue create` runs.
         Otherwise build the issue body (see Issue body shape below — tier-aware
         via `mention_line` / `backref_line` from c.5, driven by `group_tier`);
@@ -1166,8 +1223,25 @@ Explicit forbidden patterns:
         `created_urls[]`, with `file` and `fingerprint` as in the comment arm.
 
    d.legacy. **Legacy-key fallback — a bounded, self-retiring migration
-      (#728).** Reached ONLY from the No-match arm, and only while
-      `LEGACY_PROBE_BUDGET > 0`.
+      (#728).** Reached ONLY from a GENUINE No-match — one where `b`'s lookup
+      surfaced no issue carrying this container key, whether because the search
+      returned nothing or because `c`'s marker verification rejected the
+      element it selected — and only while `LEGACY_PROBE_BUDGET > 0`.
+
+      **The `MATCH_STATE == "CLOSED"` split does NOT reach it.** That arm also
+      routes its not-in-list members through the No-match arm, but enters it at
+      the `gh issue create`. There the container lookup DID match, so the
+      fail-OPEN rationale below — "the container lookup has ALREADY returned
+      nothing, so the only thing at stake is whether a legacy twin gets
+      adopted" — is simply untrue on that path, and the adoption it licenses is
+      the wrong write: it would comment on some unrelated legacy issue and
+      re-stamp that issue's marker with THIS file's container `$FP`, leaving
+      the closed issue and the adopted one both carrying one container key —
+      so the next run's `b` finds two and cannot tell which is the container.
+      The split needs the NEW open container it says it needs. Skipping the
+      probe costs nothing it was funded for: this path already has a container
+      issue under the current key, which is exactly the state the migration
+      exists to reach.
 
       The container recipe changed from `sha256(path:line:normalised_summary)`
       to `sha256(slug:path)`. Every issue already open carries the OLD key in
@@ -1214,7 +1288,7 @@ Explicit forbidden patterns:
       must never be held hostage to a body edit; the body edit is only what
       spares the NEXT run a probe.
 
-      **Adopt** = hand the group to the `state == "open"` arm of `d` against
+      **Adopt** = hand the group to the `MATCH_STATE == "OPEN"` arm of `d` against
       that issue number, unchanged: comment rendering every member, marked
       against the `fingerprints=` list in the fetched body — a legacy body has
       no `<!-- uberdev-finding-index -->` line, so the list is EMPTY by the
@@ -1236,7 +1310,7 @@ Explicit forbidden patterns:
         is `1` and the list is `$LEGACY_FP` because that is precisely what the
         legacy body accounts for: the one finding it was filed for. The
         members just added by the comment are NOT in it, exactly as the
-        `state == "open"` arm already leaves them.
+        `MATCH_STATE == "OPEN"` arm already leaves them.
 
       Every other byte of the body is preserved. Assemble it into the same
       `mktemp` tempfile shape every other write uses, pipe it through
@@ -1502,7 +1576,7 @@ about a fence the summary never carries, and rule 4 is the per-member refusal
 of step 8c.4, which already tests the normalised `summary` for all four marker
 literals.
 
-## Comment body shape (state==open branch)
+## Comment body shape (MATCH_STATE==OPEN branch)
 
 When an existing open issue is found, the agent appends a comment (not a new issue body). The comment body inserts only:
 
@@ -1587,10 +1661,11 @@ Empty arrays are emitted as `[]`. `rationale` is empty string `""` on non-REFUSE
 - `overflow_count` — count of FILES beyond `max_new` that were not filed this
   run (#722). It counted rows before grouping; it counts files now, and every
   rendering of it must say so. Because a file is filed whole or deferred whole,
-  the cap can no longer truncate one file's findings halfway. The one shipped
-  rendering still carrying the old unit is `commands/review-pr.md`'s Step 7
-  summary row, which is outside the file set #722 declares and is therefore a
-  known follow-up, not a satisfied requirement.
+  the cap can no longer truncate one file's findings halfway. Both shipped
+  renderings in `commands/review-pr.md` — the Phase 2.5 description and the
+  Step 7 summary row — now say FILE GROUPS rather than findings, so this is a
+  satisfied requirement rather than a follow-up; a future rendering that
+  reintroduces the row unit is a new defect, not a known one.
 - `findings` (per-URL field on `created_urls` / `commented_urls`) — how many
   findings that issue's body accounts for. `tier` on those two arrays is the
   GROUP tier; on `skipped_closed[]`, which stays one entry per member, `tier`
@@ -1614,7 +1689,8 @@ Return `status: REFUSED` with the matching rationale string when:
 
 - `gh issue list` rc != 0 → append to `blocked_by_dedupe[]`, continue, set `DONE_WITH_CONCERNS`. Never write the issue on lookup failure (fail-CLOSED dedupe).
 - `gh issue view` rc != 0 on the one-body fetch in Step 8c → append to `blocked_by_dedupe[]`, continue, set `DONE_WITH_CONCERNS`. Same fail-CLOSED rule and same reason: a match whose body cannot be read cannot be marker-verified or split against its index.
-- Legacy dedupe probe (Step 8d.legacy) rc != 0, unparseable, empty, or its marker check failing → one bounded stderr warning, then the group files normally through `gh issue create`. Deliberately fail-OPEN, and NOT a `blocked_by_dedupe[]` entry: the container lookup has already returned nothing, so nothing is blocked and nothing is skipped. Secret-scan hit or `gh issue edit` rc != 0 on the re-stamp → one bounded stderr warning; the comment already posted stands and NO second issue is created. The path re-probes next run: one wasted search, never a duplicate.
+- `MATCH_STATE` neither `OPEN` nor `CLOSED` in Step 8c → append to `blocked_by_dedupe[]`, continue, set `DONE_WITH_CONCERNS`. Same fail-CLOSED rule: `d`'s two state arms are exhaustive over GitHub's issue-state enum, so an unclassifiable value is a lookup nobody can act on, not a third arm.
+- Legacy dedupe probe (Step 8d.legacy) rc != 0, unparseable, empty, or its marker check failing → one bounded stderr warning, then the group files normally through `gh issue create`. Deliberately fail-OPEN, and NOT a `blocked_by_dedupe[]` entry: it is reached only from a genuine No-match, where the container lookup has already returned nothing, so nothing is blocked and nothing is skipped. Secret-scan hit or `gh issue edit` rc != 0 on the re-stamp → one bounded stderr warning; the comment already posted stands and NO second issue is created. The path re-probes next run: one wasted search, never a duplicate.
 - `gh issue create` / `gh issue comment` rc != 0 → append to `blocked_by_dedupe[]`, continue, set `DONE_WITH_CONCERNS`. No retry within run.
 - `gh label create --force` rc != 0 → emit one stderr warning, continue, set `label_provisioned: "fail-soft-skipped"`.
 - Secret-scan hit on candidate body → take the Step 8c.7 repair: append `reason: "secret-scan-hit"` to `blocked_by_dedupe[]` for each member whose OWN rendered section trips the scan, drop those members, re-derive the group per Step 5.5, and re-scan. Set `DONE_WITH_CONCERNS`. Body is NEVER written even partially. If the repaired body still trips, if every member was dropped, or if the scanner ITSELF failed (rc >= 2, which says nothing about any member), skip the whole FILE GROUP that body belonged to (#722) — one entry, naming the primary member's `$file_path:$line`. The unit moved with the write: one body now carries every finding in one file, so an unattributable hit still costs that file's issue, while an attributable one costs only the member that caused it — one quoted fixture no longer suppresses the blocker beside it.
