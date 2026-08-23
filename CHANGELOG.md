@@ -4,6 +4,58 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.55.1] — 2026-08-23
+
+Progressive disclosure for the five biggest skill bodies, plus a CI ratchet that
+keeps the count going down. Closes #747.
+
+### Changed — five oversize `SKILL.md` bodies now point at reference files
+
+Anthropic's skills documentation caps a skill body at 500 lines and says to move
+detailed reference material into separate files. Ten of thirty UberDev skills
+were over that, and five of the ten had no supporting files at all — so the
+entire body landed in context on invocation and stayed there across turns.
+
+Reference material, worked rationale and decision records moved out of the five
+zero-disclosure bodies into sibling `references/*.md` files the body points at by
+path. **The moved bytes are unchanged** — this is a relocation, not a rewrite:
+
+| Skill | Before | After | New reference files |
+|---|---:|---:|---|
+| `premerge-pipeline` | 2,666 | 2,274 | `phase-contracts.md`, `finding-overflow.md`, `common-mistakes.md` |
+| `orchestrator` | 1,095 | 1,012 | `visual-companion.md`, `tiers-and-recovery.md` |
+| `finish-branch` | 1,024 | 984 | `options-and-integration.md` |
+| `post-impl-review` | 900 | 797 | `contracts.md` |
+| `turbox-fleet` | 669 | **471** | `return-contracts.md`, `rationale.md`, `design-path.md` |
+
+`turbox-fleet` is the one that clears 500 outright. The other four are still
+dominated by executable `uberdev-executable` fences that tests extract and run;
+taking those under the limit means relocating shipped shell, which is a separate
+change with a different blast radius, so they ship waived at their new — lower —
+line counts.
+
+### Added — `tests/skill-size.test.sh`, the 500-line ratchet
+
+Wired into both CI jobs. Every `SKILL.md` must be at or under 500 lines unless it
+carries a waiver, and each waiver pins the **measured** count at the moment it
+was written, so:
+
+- a waived skill that grows past its pin reds — a waiver is not a licence;
+- a waived skill that shrinks under 500 also reds, telling you to delete its row,
+  so an earned-out ceiling cannot quietly drift back up;
+- a waiver naming a skill that no longer exists reds.
+
+The list can therefore only ever get shorter. The gate also executes its own
+classifier against synthetic rows, so a rule that stopped refusing reds on the
+commit that broke it rather than printing a screen of green.
+
+### Fixed — two cross-file citations that had drifted
+
+`skills/review-fleet/workflow.js` credited a quotation to
+`post-impl-review/SKILL.md`, and the orchestrator's visual-companion citation
+named its own body; both now name the file that actually holds the text. Both
+were caught by `tests/docs-accuracy.test.sh`, not by inspection.
+
 ## [0.55.0] — 2026-08-23
 
 Packs #727, #728, #729 and #730 as one stack. `/issue` becomes autopilot with a
