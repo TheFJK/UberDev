@@ -764,7 +764,11 @@ def _drop_unfilable(rows: "list[dict]") -> "tuple[list[dict], int]":
 # the deferred-findings envelope handed to agents/findings-to-issues.md
 # --------------------------------------------------------------------------
 def _encode_aggregate(
-    rows: "list[dict]", pr_number: int, run_id: str, allow_blockers: bool = False
+    rows: "list[dict]",
+    pr_number: int,
+    run_id: str,
+    allow_blockers: bool = False,
+    partial_files: "dict[str, int] | None" = None,
 ) -> bytes:
     """One line of canonical JSON inside the untrusted-input envelope.
 
@@ -772,6 +776,37 @@ def _encode_aggregate(
     (open tag + newline, one compact sorted-key JSON line, newline + close tag +
     newline) so the agent's existing envelope parser reads it with no new arm.
     Only the `source` and the per-finding key set differ, and both are declared.
+
+    `partial_files` DECLARES THE ONE ROW SHAPE THAT IS NOT FIXED, and it exists
+    because `cmd_defer`'s truncation is file-atomic in every group but one. The
+    boundary group is row-filled to reach exactly `MAX_FINDINGS`, so it reaches
+    the filer holding only SOME of its file's findings -- and that filer opens
+    one issue per file (#722), renders `## Findings (n)` and its per-member
+    `uberdev-finding-index count=n` marker from the rows it was handed, and
+    footers the issue with "closing resolves exactly the findings listed". Handed
+    a split group with nothing marking it split, it writes precisely the artifact
+    file-atomic truncation was introduced to prevent: an issue that reads as
+    complete and is not. `OVERFLOW=` on `cmd_defer`'s stdout line does say the run
+    cut something, but that line is read by a shell fence; the person reading the
+    issue never sees it, and on the next run the cut rows arrive as a SECOND
+    issue for a file whose first issue claimed to be the whole of it.
+
+    So a row whose owning file was split carries one extra key,
+    `file_findings_omitted`: an integer >= 1, how many of THAT file's findings did
+    not fit this envelope. Presence is the flag and the value is the count, so
+    the two can never disagree with each other.
+
+    THE KEY IS ADDITIVE AND ABSENT BY DEFAULT. `partial_files` defaults to None,
+    no whole group's row ever carries it, and an under-cap run -- the common case
+    -- publishes the same bytes it published before. A consumer that has never
+    heard of the key reads exactly the document it read yesterday. That tolerance
+    is contract rather than luck: `agents/findings-to-issues.md` Step 1 scopes
+    "duplicate, extra, or missing keys are `input-malformed`" to the two
+    review-v2 sources and exempts `premerge-aggregate` from the schema-v2 key set
+    by name, so an optional key here is legal for the one consumer that exists.
+    Publishing the fact is this file's half; RENDERING it -- a partial-count in
+    the heading and a footer that stops promising completeness -- is the filer's,
+    and lives in that agent.
 
     EVERY ROW IS RE-VALIDATED, even one that "came from" `_normalise_findings`.
     Not all of them did: `cmd_defer` feeds this function rows read straight off
@@ -830,19 +865,34 @@ def _encode_aggregate(
             fail("aggregate_source_edge_invalid", str(edge))
         if edge not in edges_present:
             edges_present.append(edge)
-        findings.append(
-            {
-                "detail": detail,
-                "scope": {
-                    "line": line if line is not None else 1,
-                    "operation": "modify_existing",
-                    "path": path,
-                },
-                "severity": severity,
-                "source_edges": [edge],
-                "summary": summary,
-            }
-        )
+        row = {
+            "detail": detail,
+            "scope": {
+                "line": line if line is not None else 1,
+                "operation": "modify_existing",
+                "path": path,
+            },
+            "severity": severity,
+            "source_edges": [edge],
+            "summary": summary,
+        }
+        # THE ONE OPTIONAL KEY -- see the docstring. Looked up by `path` and not
+        # by a second `finding.get("file")` read: `_repo_path` returns its
+        # argument unmodified (it refuses outright anything `posixpath.normpath`
+        # would rewrite), so `path` IS the string `_defer_groups` grouped on and
+        # this lookup cannot miss because of normalisation.
+        #
+        # The count is validated like every other value that reaches the
+        # envelope. It is `cmd_defer`'s arithmetic today, but "the caller is
+        # trusted" is how this function acquired the unchecked rows its docstring
+        # above is about, and a `"5"` here would publish a string where the filer
+        # reads a number.
+        omitted = partial_files.get(path) if partial_files else None
+        if omitted is not None:
+            if isinstance(omitted, bool) or not isinstance(omitted, int) or omitted < 1:
+                fail("aggregate_partial_count_invalid", f"{path}: {omitted!r}")
+            row["file_findings_omitted"] = omitted
+        findings.append(row)
     document = {
         "contributors": [
             {"confidence": "n/a", "id": edge_id, "verdict": "COMPLETE"}
@@ -1700,6 +1750,13 @@ def cmd_defer(args: argparse.Namespace) -> int:
     # the first drop, and the ranking below indexes `rows` by exactly these
     # positions.
     groups = _defer_groups(rows)
+    # Which files reach the filer holding only PART of their findings, and how
+    # many of each one's findings were left behind. Empty here and filled only by
+    # the truncation below, which is what keeps an under-cap run's envelope
+    # byte-identical to the one this verb has always written --
+    # `_encode_aggregate` emits the key for a file named in this map and for no
+    # other.
+    partial_files: "dict[str, int]" = {}
 
     # OVERFLOW IS SURVIVABLE, BECAUSE THIS IS THE STEP THAT MUST NOT LOSE THINGS.
     #
@@ -1788,6 +1845,35 @@ def cmd_defer(args: argparse.Namespace) -> int:
                 )
                 keep.update(fill[:room])
             break
+        # THE SPLIT FILE IS MARKED SPLIT, AND THE MARK IS DERIVED FROM THE CUT
+        # THAT HAPPENED RATHER THAN FROM THE RULE ABOVE.
+        #
+        # Without it the row-fill hands the filer a group it cannot tell from a
+        # whole one, and that filer opens ONE issue per file: 25 of a 30-finding
+        # file become `## Findings (25)` under a footer promising that closing
+        # the issue resolves exactly the findings listed, with the other five
+        # reported only as `OVERFLOW=5` on a line no issue reader sees. An
+        # issue that reads as complete and is not is the exact defect file-atomic
+        # truncation was introduced to prevent, and the boundary group is the one
+        # place the rule cannot deliver it -- so the group carries the fact
+        # instead of the envelope pretending it is not there.
+        #
+        # Restating the loop's policy here ("flag the group the `break` stopped
+        # on") would be a second copy of the rule, and a copy drifts the moment
+        # the loop changes: it would still mark one group while the loop split
+        # two, and the unmarked one is filed as complete all over again. Counting
+        # kept-vs-total per group cannot drift, because it reads the outcome.
+        #
+        # A group with ZERO kept rows is not partial, it is ABSENT: the filer
+        # opens no issue for it, so there is no complete-looking artifact to
+        # correct. Those rows are what `OVERFLOW=` is for.
+        for key, members in groups:
+            kept_here = sum(1 for member in members if member in keep)
+            if kept_here and kept_here < len(members):
+                # `key` is a non-empty `str` on every group that reaches here:
+                # the unusable-path cut above removed every sentinel-keyed row
+                # from `rows` BEFORE `_defer_groups` grouped the survivors.
+                partial_files[key] = len(members) - kept_here
         # `+=`, not `=`: `rows` is already the post-unusable-cut list, so the
         # rows that cut discarded are counted once here and never recounted.
         overflow += len(rows) - len(keep)
@@ -1796,7 +1882,13 @@ def cmd_defer(args: argparse.Namespace) -> int:
     out_path = os.path.join(run_dir, "deferred-aggregate.md")
     _atomic_write(
         out_path,
-        _encode_aggregate(rows, document["pr_number"], document["run_id"], allow_blockers=True),
+        _encode_aggregate(
+            rows,
+            document["pr_number"],
+            document["run_id"],
+            allow_blockers=True,
+            partial_files=partial_files,
+        ),
     )
     blockers = sum(1 for r in rows if r.get("severity") == "blocker")
     # This re-derivation stays BELOW the write on purpose, and hoisting it is a

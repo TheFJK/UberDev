@@ -560,6 +560,10 @@ fi
 # INVOKING PR's head repository, and /premerge has no invoking PR — a fork-head
 # candidate is already excluded as `cross_repo` during the drive.
 PREMERGE_PUSH_ERR="$(git -C "$PREMERGE_WORKTREE" push -u origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
+  # Bounded and defused BEFORE anything reads it — see `### What a failed push
+  # is allowed to say` below for why, and for why this one line is spelled
+  # identically at all five push sites. 200 chars, one line, no live token.
+  PREMERGE_PUSH_ERR="$(printf '%s' "${PREMERGE_PUSH_ERR//PREMERGE/PRE-MERGE}" | tr -s '\n\r\t' ' ' | cut -c1-200)"
   printf '%s\n' "push_refused" >"$PREMERGE_RUN_DIR/failure-reason.txt"
   printf 'error: pushing %s to origin failed: %s\n' "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2
   review_consolidate_abort "$PREMERGE_WORKTREE" "$PREMERGE_RUN_DIR" || :
@@ -573,6 +577,48 @@ review_consolidate_manifest "$PREMERGE_RUN_DIR" "$RUN_ID" "$PREMERGE_BRANCH" \
   "$PREMERGE_PR" "$PREMERGE_BASE" || exit 2
 printf 'PREMERGE PR_NUMBER=%s RUN_ID=%s BRANCH=%s\n' "$PREMERGE_PR" "$RUN_ID" "$PREMERGE_BRANCH" >&2
 ```
+
+### What a failed push is allowed to say
+
+Every `git push` in this file captures its stderr, because a push that exits 2
+without a word is a dead end mid-loop. But *what* it captures is not this repo's
+text: everything a server sends back arrives as `remote:` lines, and a
+pre-receive hook chooses their length and their content. So the five handlers do
+not print the capture — they print a **bounded, single-line, token-free** view of
+it, rebuilt in place by one line that is the first statement of every one of the
+five handlers. That line is deliberately not reproduced here — the fences are its
+only copy, so this section cannot come to describe a bound the code stopped
+enforcing. It does three things, one hazard each:
+
+- **`cut -c1-200`** is the treatment `agents/findings-to-issues.md` gives every
+  attacker-influenced `gh` stderr — *"truncate to 200 chars BEFORE the regex
+  classifier (security Note B — bounds attacker-influenced stderr substring)"*.
+  A rejection message is as long as the server wants it to be, and this fence's
+  every other diagnostic is length-bounded already.
+- **`tr -s '\n\r\t' ' '`** folds the capture onto one line. The fence's own
+  `PREMERGE …` results go to this same stderr stream and the controller scrapes
+  that stream positionally, so a multi-line capture is a way for a remote to open
+  a line of its own in it.
+- **`PREMERGE` → `PRE-MERGE`** breaks the token spelling, because collapsing to
+  one line is not on its own enough: a `remote: PREMERGE CI PUBLISH=<sha>
+  ARM=commit ATTEMPT=3` line is a well-formed controller result no matter where
+  it sits. Broken this way it is still perfectly readable to an operator, and it
+  cannot be mistaken for a second `PREMERGE` line — nor accidentally rewritten
+  into a *different* live token, which is what substituting only the trailing
+  space would do to `PREMERGE GATE …`.
+
+Two details that are deliberate, not incidental:
+
+- **Drained readers only.** `head -c 200` is the precedent's literal spelling and
+  it is an early-exiting reader; these fences set `set -u` and not
+  `set -o pipefail` today, but the day one adds it that shape is the EPIPE class
+  `tests/epipe-guard.test.sh` bans. `tr` and `cut` read to EOF, so the question
+  never arises.
+- **It runs FIRST in the handler**, ahead of the lease-rejection classifier in
+  `#### Repairing red CI`. Same ordering the precedent states, and the reason outlives
+  the citation: a verdict drawn from bytes the operator is never shown is a
+  verdict the message can contradict. The classifier and the printed text must be
+  reading the same 200 characters.
 
 ### What the stack PR carries
 
@@ -958,6 +1004,8 @@ git commit -m "fix(premerge): address code-review blockers on the stack (attempt
 # printed neither a `PREMERGE FIX COMMIT=` line nor a cause -- mid-way through an
 # autonomous loop with nobody watching. `### 0c`'s push is the model.
 PREMERGE_PUSH_ERR="$(git push origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
+  # Bounded and defused first — `### What a failed push is allowed to say`.
+  PREMERGE_PUSH_ERR="$(printf '%s' "${PREMERGE_PUSH_ERR//PREMERGE/PRE-MERGE}" | tr -s '\n\r\t' ' ' | cut -c1-200)"
   printf 'error: pushing the attempt-%s fix commit to %s failed: %s\n' \
     "$PREMERGE_ATTEMPT" "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2
   exit 2
@@ -1653,6 +1701,8 @@ case "$PREMERGE_CI_ARM" in
       exit 2
     fi
     PREMERGE_PUSH_ERR="$(git push origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
+      # Bounded and defused first — `### What a failed push is allowed to say`.
+      PREMERGE_PUSH_ERR="$(printf '%s' "${PREMERGE_PUSH_ERR//PREMERGE/PRE-MERGE}" | tr -s '\n\r\t' ' ' | cut -c1-200)"
       printf 'error: publishing the CI repair (arm=commit, attempt %s) to %s failed: %s\n' \
         "$PREMERGE_ATTEMPT" "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2
       exit 2
@@ -1711,6 +1761,11 @@ case "$PREMERGE_CI_ARM" in
     # `>/dev/null 2>&1 || exit 2` made them the same silent exit 2 -- with no recovery
     # arm, because the branch is already rebased locally by the time this line runs.
     PREMERGE_PUSH_ERR="$(git push --force-with-lease="$PREMERGE_BRANCH:$PREMERGE_CI_LEASE" --force-if-includes origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
+      # Bounded and defused BEFORE the classifier below, not after — see
+      # `### What a failed push is allowed to say`. This is the site the
+      # ordering is about: the arm that gets chosen and the text that gets
+      # printed have to be reading the same 200 characters.
+      PREMERGE_PUSH_ERR="$(printf '%s' "${PREMERGE_PUSH_ERR//PREMERGE/PRE-MERGE}" | tr -s '\n\r\t' ' ' | cut -c1-200)"
       # Herestring, never a pipe: `<producer> | grep -q` is the EPIPE class
       # tests/epipe-guard.test.sh bans.
       if grep -qE '\[rejected\].*(stale info|fetch first|non-fast-forward)' <<<"$PREMERGE_PUSH_ERR"; then
@@ -1896,6 +1951,8 @@ fi
 git add -u || exit 2
 git commit -m "refactor(premerge): apply simplify lenses to the stack" >/dev/null || exit 2
 PREMERGE_PUSH_ERR="$(git push origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
+  # Bounded and defused first — `### What a failed push is allowed to say`.
+  PREMERGE_PUSH_ERR="$(printf '%s' "${PREMERGE_PUSH_ERR//PREMERGE/PRE-MERGE}" | tr -s '\n\r\t' ' ' | cut -c1-200)"
   printf 'error: pushing the simplify commit to %s failed: %s\n' \
     "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2
   exit 2
