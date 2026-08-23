@@ -519,6 +519,82 @@ else
   esac
 fi
 
+echo "== S15: every sharded job dumps its plan bytes before it runs =="
+# The od -c dump is the evidence this issue turned on: with it the next
+# delimiter defect is one grep away in the job log, and without it the next one
+# is invisible exactly as this one was. The step is a single line of YAML and
+# nothing else in this suite would notice it going away -- S10 replays the
+# harness, not the job's step list, so a job that had lost its dump would still
+# pass every row above. The expected shard count is read out of the job's own
+# matrix, so a job resharded from 6 to 8 fails here rather than quietly dumping
+# a plan for a shard count it no longer has.
+#
+# THE NEEDLE IS QUALIFIED, and that is not fussiness. `ci-shard-diagnose.sh
+# dump` occurs TWICE inside each of these jobs -- once as the step, once inside
+# the SHARD-COVERAGE tail's own "Dump the plan bytes with:" hint -- so a row
+# keyed on the bare string is satisfied by the prose that merely mentions the
+# step and stays green after the step itself is deleted. Every needle below
+# carries the `run:` prefix, which only the step has.
+S15_PLAN_RE='^[[:space:]]+run:[[:space:]]+bash tests/ci-shard-env[.]sh '
+S15_DUMP_RE='^[[:space:]]+run:[[:space:]]+bash tests/ci-shard-diagnose[.]sh dump '
+S15_HARNESS_RE='^[[:space:]]+run_one '
+s15_dump_line_of() { # $1 = job key -> that job's dump step, leading indent stripped
+  # The trailing CR is stripped because this fixture runs on windows-latest too,
+  # and /.gitattributes:44-51 deliberately scopes `eol=lf` to
+  # plugins/uberdev/hooks/** -- nothing pins the checkout of this workflow, so
+  # whether its lines arrive LF or CRLF on that runner is the runner's
+  # core.autocrlf, not this repo's decision. Only the exact-equality row needs
+  # it: the two helpers below count commas and report line numbers, neither of
+  # which a line terminator can move. This normalises a CHECKOUT artifact and
+  # weakens nothing -- the CR that this issue is about is in the plan the packer
+  # emits at runtime, and S13/S14 are what hold that.
+  awk -v JOB="$1" -v PAT="$S15_DUMP_RE" '
+    $0 ~ ("^  " JOB ":[[:space:]]*$") { in_job = 1; next }
+    in_job && /^  [[:alnum:]_-]+:[[:space:]]*$/ { exit }
+    in_job && $0 ~ PAT { sub(/^[[:space:]]*/, ""); sub(/\r$/, ""); print; exit }
+  ' "$WORKFLOW"
+}
+s15_matrix_shards_of() { # $1 = job key -> how many shards the job's matrix declares
+  awk -v JOB="$1" '
+    $0 ~ ("^  " JOB ":[[:space:]]*$") { in_job = 1; next }
+    in_job && /^  [[:alnum:]_-]+:[[:space:]]*$/ { exit }
+    in_job && /^[[:space:]]+shard:[[:space:]]*\[/ { print gsub(/,/, ",") + 1; exit }
+  ' "$WORKFLOW"
+}
+s15_lineno_of() { # $1 = job key, $2 = ERE -> line number of its first match inside the job
+  awk -v JOB="$1" -v PAT="$2" '
+    $0 ~ ("^  " JOB ":[[:space:]]*$") { in_job = 1; next }
+    in_job && /^  [[:alnum:]_-]+:[[:space:]]*$/ { exit }
+    in_job && $0 ~ PAT { print NR; exit }
+  ' "$WORKFLOW"
+}
+for s15_job in shape-checks supervision-smoke-macos shape-checks-windows; do
+  s15_shards="$(s15_matrix_shards_of "$s15_job")"
+  s15_line="$(s15_dump_line_of "$s15_job")"
+  s15_want="run: bash tests/ci-shard-diagnose.sh dump $s15_job $s15_shards \"\${{ matrix.shard }}\""
+  if [ -z "$s15_shards" ]; then
+    bad "S15: $s15_job declares no shard matrix — the expected shard count cannot be read"
+  elif [ "$s15_line" = "$s15_want" ]; then
+    ok "S15: $s15_job dumps its plan bytes for all $s15_shards shards"
+  else
+    bad "S15: $s15_job's dump step is missing or drifted — want [$s15_want], got [$s15_line]"
+  fi
+  # POSITION IS PART OF THE WIRING, and no amount of matching on the line's TEXT
+  # can see it. A dump placed before the planning step would od an unset
+  # variable and report that absence as the finding; one placed after the
+  # harness would print the bytes of a job that had already decided. The three
+  # landmarks are therefore compared as line numbers inside the job's own block.
+  s15_plan_at="$(s15_lineno_of "$s15_job" "$S15_PLAN_RE")"
+  s15_dump_at="$(s15_lineno_of "$s15_job" "$S15_DUMP_RE")"
+  s15_harness_at="$(s15_lineno_of "$s15_job" "$S15_HARNESS_RE")"
+  if [ -n "$s15_plan_at" ] && [ -n "$s15_dump_at" ] && [ -n "$s15_harness_at" ] &&
+     [ "$s15_plan_at" -lt "$s15_dump_at" ] && [ "$s15_dump_at" -lt "$s15_harness_at" ]; then
+    ok "S15: $s15_job dumps between planning (:$s15_plan_at) and the harness (:$s15_harness_at)"
+  else
+    bad "S15: $s15_job's dump is not between the planning step and the harness — plan=[$s15_plan_at] dump=[$s15_dump_at] harness=[$s15_harness_at]"
+  fi
+done
+
 echo ""
 echo "== Summary =="
 echo "  passed: $PASS"
