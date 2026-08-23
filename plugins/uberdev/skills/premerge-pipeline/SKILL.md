@@ -752,8 +752,15 @@ PREMERGE_TRIAGE TOTAL=<n> BLOCKER=<n> SUGGESTION=<n> WAVES=<n> CATEGORY_BACKED=<
 removing, so only the latest review's blocker set means anything. **Suggestions
 are never fixed by the loop** — so a suggestion the reviewer raised on attempt 1
 and did not repeat on attempt 3 is not resolved, it is unmentioned, and filing
-only the last pass's list would silently drop it. The aggregate is the union
-across attempts, deduped by fingerprint.
+only the last pass's list would silently drop it.
+
+**`plan` counts that union; it does not file it.** `CARRIED` is how many earlier
+attempts' suggestions survive the dedupe into this attempt's union, and it is the
+only thing `--carry-prior` produces here — `plan` writes `classified.json`,
+`classified-<NN>.json`, `fix-waves.json` and `fix-waves-<NN>.json`, and **no
+aggregate at all**. The aggregate that gets filed is built once, after the loop
+settles, by the Phase 5 `defer` verb, from the same per-attempt evidence through
+the same union helper. See `### 2b`.
 
 **A refused `plan` is a hard stop for the attempt, never a fall-through.** It
 exits 74 *before writing anything*, which leaves the previous attempt's
@@ -955,28 +962,36 @@ mechanical:
   a fix that shifts a line by one gives the same suggestion a new fingerprint. Per
   attempt filing therefore creates *duplicates*, not comments.
 - That agent snapshots the aggregate's `(device, inode, size, mtime)` before
-  parsing and re-checks it before its first GitHub write. `plan` publishes through
-  `os.replace`, which changes the inode — so a re-plan while a dispatch is in
-  flight makes the agent refuse `input-malformed`.
+  parsing and re-checks it before its first GitHub write. `defer` publishes through
+  `os.replace`, which changes the inode — so a second `defer` while a dispatch is
+  in flight makes the agent refuse `input-malformed`.
 
 **This section defines WHY the filing waits; `### 5-file` is the only place that
 defines the dispatch, and it is dispatched exactly once.** Do not read a second
 `aggregate_path` out of this section — there is deliberately none here.
 
 > **The canonical `aggregate_path` is the `PATH=` value the Phase 5 `defer` fence
-> prints, and nothing else.** It is `deferred-aggregate.md`.
-> `suggestions-aggregate.md` is `plan --carry-prior`'s *intermediate* — the
-> cross-attempt suggestion union, with no surviving blockers and no un-applied
-> lens rows in it, because neither has been produced yet at the time `plan` runs.
-> Dispatching that file files zero blockers and zero simplify-lens rows: the two
-> "promise with no producer" losses `defer` exists to close, re-opened by naming
-> the wrong input. Dispatching *both* runs `findings-to-issues` twice on one
-> `edge_id`, burning the `max_new = 10` budget and the rate-limit probe twice and
-> filing the suggestion rows a second time under fingerprints the first pass has
-> already consumed.
+> prints, and nothing else.** It is `deferred-aggregate.md`, and it is the run's
+> **only** aggregate — the run dir holds no second envelope that could be
+> dispatched by mistake.
 >
-> This is not hypothetical. It happened: a run followed this section's path and
-> the Phase 5 dispatch filed only the suggestion rows.
+> It used to. `plan --carry-prior` also wrote a `suggestions-aggregate.md` on
+> every attempt: the cross-attempt suggestion union, with no surviving blockers
+> and no un-applied lens rows in it, because neither has been produced yet at the
+> time `plan` runs. Dispatching it filed zero blockers and zero simplify-lens
+> rows — the two "promise with no producer" losses `defer` exists to close,
+> re-opened by naming the wrong input. **This is not hypothetical: it happened.**
+> A run followed this section's path and the Phase 5 dispatch filed only the
+> suggestion rows.
+>
+> Nothing ever read that file, so it is no longer written (#725). `plan` still
+> *counts* the union — that is what `CARRIED` reports — and `defer` rebuilds it
+> from the same `classified-<NN>.json` evidence through the same union helper.
+> The dispatch-the-wrong-file failure is now unreachable rather than merely
+> documented, and dispatching *twice* — which would run `findings-to-issues` on
+> one `edge_id` twice, burning the `max_new = 10` budget and the rate-limit probe
+> twice and re-filing suggestion rows under fingerprints the first pass already
+> consumed — needs a second dispatch of the same file to reach at all.
 
 When that one dispatch runs, the agent's own machinery does the rest: the 16-hex
 fingerprint dedupe, the fail-closed `gh issue list` lookup, the `--body-file -`

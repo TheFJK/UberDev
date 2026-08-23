@@ -228,8 +228,15 @@ GATE_REASONS_WAITABLE = frozenset(
 )
 GATE_REASONS_ROUTABLE = GATE_REASONS_REPAIRABLE | GATE_REASONS_WAITABLE
 
+# NO `_ATTEMPT_RE` COMPANION HERE, DELIBERATELY. There was one -- a
+# `\A[0-9]{2}\Z` that nothing ever matched against -- and its only effect was to
+# tell a reader that the `-NN` attempt suffix is parsed and validated somewhere.
+# It is not: the suffix is FORMATTED (`"%02d" % attempt`) and never read back,
+# and the attempt number itself arrives as an int that `cmd_plan`, `cmd_defer`
+# and `cmd_converge` each bound numerically against their own ceiling. A
+# validator with no call site is a claim nobody can contradict, which is the
+# defect class this module's own docstring is about.
 _SHA1_RE = re.compile(r"\A[0-9a-f]{40}\Z")
-_ATTEMPT_RE = re.compile(r"\A[0-9]{2}\Z")
 
 # Bounds mirrored from lib/code_fixer_contract.py so a document that passes here
 # cannot be rejected downstream for a length the two files disagree about.
@@ -700,13 +707,17 @@ def _encode_aggregate(
         )
         # The row's OWN severity, not a hardcoded one.
         #
-        # It used to be pinned to "suggestion", which is correct for the
-        # per-attempt cleanup aggregate and is why `plan` still passes
-        # `allow_blockers=False`. But it also meant `/premerge` had no way to
-        # file the one finding that matters most -- a blocker the loop could not
-        # clear -- so that finding was printed into a summary and lost. A promise
-        # with no producer is the defect this command already shipped once; the
-        # fix is a producer, not a louder promise.
+        # It used to be pinned to "suggestion". That meant `/premerge` had no way
+        # to file the one finding that matters most -- a blocker the loop could
+        # not clear -- so that finding was printed into a summary and lost. A
+        # promise with no producer is the defect this command already shipped
+        # once; the fix is a producer, not a louder promise.
+        #
+        # `allow_blockers` DEFAULTS CLOSED and `cmd_defer` is the one caller that
+        # opens it. Not a vestige of a second caller: the default is the opt-in
+        # gate itself, so a future caller that has no business filing blockers
+        # gets the refusal by writing nothing, and admitting them stays a
+        # deliberate act at the call site.
         severity = finding.get("severity", "suggestion")
         if severity not in SEVERITIES:
             fail("aggregate_severity_invalid", str(severity))
@@ -897,11 +908,12 @@ def _suggestion_key(row: "dict") -> "tuple":
 def _union_suggestions(base: "list[dict]", carried: "list[dict]") -> "list[dict]":
     """The cross-attempt suggestion union -- ONE implementation, two callers.
 
-    `cmd_plan` builds it for `suggestions-aggregate.md` and `cmd_defer` builds it
-    for `deferred-aggregate.md`, and the second one's comment used to assert the
-    two were "byte-for-byte" the same ordering. An equivalence between two copies,
+    `cmd_plan` builds it to report `CARRIED=` and `cmd_defer` builds it to write
+    `deferred-aggregate.md`, and the second one's comment used to assert the two
+    were "byte-for-byte" the same ordering. An equivalence between two copies,
     held by a sentence, is a thing this repo has watched drift rather than a thing
-    that stays true; one function makes the claim structural instead.
+    that stays true; one function makes the claim structural instead -- which is
+    what lets `plan` report a count for a union it does not itself write out.
 
     Latest attempt's rows first, then earlier attempts oldest-first, deduped by
     `_suggestion_key` with the first occurrence winning -- so a suggestion raised
@@ -944,11 +956,19 @@ def _append_converge_row(run_dir: str, row: "dict") -> None:
         fail("output_failed", f"{_converge_ledger(run_dir)}: {exc}")
 
 
-def _count_wait_rows(run_dir: str, attempt: int) -> int:
-    """How many WAIT_CI decisions this attempt has already recorded."""
+def _count_wait_rows(rows: "list[dict]", attempt: int) -> int:
+    """How many WAIT_CI decisions this attempt has already recorded.
+
+    Takes the ALREADY-READ rows. Both this reducer and `_last_converge_row`
+    used to open and re-parse `converge.jsonl` themselves, so one `converge`
+    invocation ran `json.loads` over every row of the ledger twice -- and the
+    ledger is longest (dozens of rows) on exactly the runs that spent their
+    WAIT_CI budget, i.e. the ones already waiting on something slow. One read,
+    two reductions.
+    """
     return sum(
         1
-        for row in _read_converge_rows(run_dir)
+        for row in rows
         if row.get("attempt") == attempt and row.get("decision") == "WAIT_CI"
     )
 
@@ -990,7 +1010,7 @@ def _read_converge_rows(run_dir: str) -> "list[dict]":
     return rows
 
 
-def _read_converge_row(run_dir: str, attempt: int) -> "dict | None":
+def _last_converge_row(rows: "list[dict]", attempt: int) -> "dict | None":
     """The last ledger row recorded for one attempt.
 
     A SCAN, not a peek at the tail. `WAIT_CI` deliberately does not consume a
@@ -998,9 +1018,13 @@ def _read_converge_row(run_dir: str, attempt: int) -> "dict | None":
     tail-only reader would then see attempt N where it expected N-1, conclude
     that no previous reasons were recorded, and lose the ability to ever answer
     STOP_NO_PROGRESS. The loop would run to its backstop on every CI hiccup.
+
+    Named for what it does now: it reduces rows the caller already read. It was
+    `_read_converge_row`, and it did its own read -- the second full parse of the
+    ledger in one `converge` invocation. See `_count_wait_rows`.
     """
     found = None
-    for row in _read_converge_rows(run_dir):
+    for row in rows:
         if row.get("attempt") == attempt:
             found = row
     return found
@@ -1173,10 +1197,16 @@ def cmd_plan(args: argparse.Namespace) -> int:
     # review's blocker set is meaningful. A suggestion is never fixed by the
     # loop, so a suggestion the reviewer mentioned on attempt 1 and did not
     # repeat on attempt 3 is not resolved -- it is unmentioned, and filing only
-    # the last pass's list would silently drop it. Union by fingerprint.
+    # the last pass's list would silently drop it.
+    #
+    # COUNTED HERE, FILED BY `defer`. This verb builds the union to report
+    # `CARRIED=` and `counts.suggestion_carried` -- the numbers that tell an
+    # operator "we filed 9" apart from "this review found 9" -- and writes no
+    # aggregate of its own. `cmd_defer` rebuilds the same union from the same
+    # `classified-NN.json` evidence, through the same `_union_suggestions`, and
+    # that one is the file Phase 5 dispatches.
     carried = _carry_prior_suggestions(out_dir, attempt) if args.carry_prior else []
-    aggregate_suggestions = _union_suggestions(suggestions, carried)
-    carried_count = len(aggregate_suggestions) - len(suggestions)
+    carried_count = len(_union_suggestions(suggestions, carried)) - len(suggestions)
 
     classified = {
         "schema_version": SCHEMA_VERSION,
@@ -1240,16 +1270,27 @@ def cmd_plan(args: argparse.Namespace) -> int:
     ):
         _atomic_write(os.path.join(out_dir, name), payload)
 
-    # The aggregate keeps its single stable name: it is an INPUT to a
-    # findings-to-issues dispatch that happens once, after the loop settles, and
-    # that agent re-checks the file's (device, inode, size, mtime) between
-    # parsing and its first GitHub write. Re-planning while a dispatch is in
-    # flight changes the inode and the agent refuses -- which is why the SKILL
-    # dispatches it after the last attempt, never inside the loop.
-    _atomic_write(
-        os.path.join(out_dir, "suggestions-aggregate.md"),
-        _encode_aggregate(aggregate_suggestions, pr_number, run_id),
-    )
+    # NO `suggestions-aggregate.md`. This verb used to encode the cross-attempt
+    # union into one, on every attempt -- up to eight rewrites per run of a file
+    # with no reader anywhere: `defer` never opens it, the SKILL's Phase 5
+    # dispatch names `deferred-aggregate.md`, and tests/premerge.test.sh asserts
+    # the SKILL can never name this one as an `aggregate_path`.
+    #
+    # It was worse than idle. The one time a run DID dispatch it, it filed only
+    # the suggestion rows: surviving blockers and un-applied simplify-lens rows
+    # do not exist yet when `plan` runs, and those two losses are the whole
+    # reason `cmd_defer` was written. A published file that looks like the
+    # aggregate and is missing the rows that matter is a trap, and the cheapest
+    # way to disarm it is to not publish it. Nothing is lost: every attempt's
+    # suggestions stay on disk in its own `classified-NN.json`, which is what
+    # `_carry_prior_suggestions` reads, and that is what makes the union
+    # reconstructible at defer time.
+    #
+    # `defer` writes the run's ONE aggregate, once, after the loop settles --
+    # which is also what keeps `agents/findings-to-issues.md` happy: it re-checks
+    # its input's (device, inode, size, mtime) between parsing and its first
+    # GitHub write, and `os.replace` under a dispatch in flight changes the inode
+    # and makes it refuse.
 
     # The one line the fence reads. Emitted on stdout so a caller that only
     # wants the counts never has to parse the artifacts.
@@ -1417,18 +1458,19 @@ def cmd_defer(args: argparse.Namespace) -> int:
     # THE SAME UNION `plan --carry-prior` COMPUTES, because this is the aggregate
     # that actually gets dispatched.
     #
-    # `plan` unions every attempt's cleanup findings into
-    # `suggestions-aggregate.md`; this verb read one attempt's `suggestions`
-    # array and wrote `deferred-aggregate.md`, and SKILL.md `### 5-file` hands
-    # findings-to-issues the `defer` PATH. So the union was computed, tested, and
-    # then filed from the wrong file: a suggestion raised on attempt 1 and not
-    # repeated on attempt 3 is unmentioned, not resolved, and it was silently
-    # dropped -- the exact loss `--carry-prior` exists to prevent.
+    # `plan` used to union every attempt's cleanup findings into a
+    # `suggestions-aggregate.md` of its own while this verb read one attempt's
+    # `suggestions` array into `deferred-aggregate.md` -- and SKILL.md
+    # `### 5-file` hands findings-to-issues the `defer` PATH. So the union was
+    # computed, tested, and then filed from the wrong file: a suggestion raised
+    # on attempt 1 and not repeated on attempt 3 is unmentioned, not resolved,
+    # and it was silently dropped -- the exact loss `--carry-prior` exists to
+    # prevent.
     #
-    # `_union_suggestions` is now the ONE implementation both verbs call, so
-    # "the two aggregates cannot disagree about which findings survived the run"
-    # is a property of the code rather than a sentence asking you to believe two
-    # copies still match.
+    # `_union_suggestions` is now the ONE implementation both verbs call, and
+    # there is only ONE aggregate file left -- this one. "The aggregates cannot
+    # disagree about which findings survived the run" is a property of the code
+    # rather than a sentence asking you to believe two copies still match.
     #
     # `_read_attempt` proves these are ARRAYS; nothing proved their elements were
     # objects, and every line below calls `.get()` on them. Same class as the
@@ -1578,10 +1620,18 @@ def cmd_converge(args: argparse.Namespace) -> int:
     # That is an unbounded autonomous loop under a command that promises it will
     # not loop forever. The ledger already records every WAIT_CI row, so the
     # bound can enforce itself rather than depending on caller discipline.
-    observed_waits = _count_wait_rows(run_dir, attempt)
+    #
+    # ONE read, both reductions. This verb needs two different one-pass answers
+    # out of `converge.jsonl` -- this attempt's WAIT_CI count and the previous
+    # attempt's last row -- and each reducer used to open and re-parse the whole
+    # ledger for itself. Read it here, where the argument validation and the
+    # attempt-evidence reads above have already had their chance to refuse, so
+    # the order in which failures surface is unchanged.
+    ledger_rows = _read_converge_rows(run_dir)
+    observed_waits = _count_wait_rows(ledger_rows, attempt)
     wait_passes = max(args.wait_passes, observed_waits)
 
-    last_row = _read_converge_row(run_dir, attempt - 1) if attempt > 1 else None
+    last_row = _last_converge_row(ledger_rows, attempt - 1) if attempt > 1 else None
     previous_other = (
         frozenset(last_row.get("reasons_other") or []) if isinstance(last_row, dict) else None
     )
