@@ -514,3 +514,170 @@ into one, would make the undo unrepresentable.
 suppresses only 4c, and it is worth naming what that costs, because it is defect
 (ii) reinstated on purpose: the run polishes the stack and then bumps the version
 over a tree whose last verification predates the polish.
+
+---
+
+### A3 — the loop's termination criterion is wrong in kind (2026-08-23)
+
+A1 built a bounded loop and A2 made its green branch reachable. Both stand. What
+neither addressed is the criterion the loop terminates *on*, and three runs have
+now shown it cannot be reached on the stacks the command exists for.
+
+A1 said, and this is the sentence A3 amends:
+
+> `STOP_NO_PROGRESS` and `STOP_REGRESSED` … stop the moment repairing stops
+> working, and they are computed from blocker **fingerprints**, not from prose.
+
+The fingerprint machinery is correct and stays. The defect is upstream of it:
+**the two fingerprint sets being compared are independent samples, not two states
+of one work queue.** Everything below follows from that.
+
+#### The measurement
+
+`/premerge` on PR #731 (packing #727–730) ran the full 4-review / 3-repair loop
+and stopped `STOP_EXHAUSTED`. Blockers per attempt: **10 → 10 → 6 → 8**, with
+`FIXED=10`, `FIXED=10`, `FIXED=6`. An earlier pair of runs on PR #681 filed 19
+and 15 issues; of run 2's 15 findings, **one** re-discovered run 1 and the other
+**fourteen were new defects in code the loop's own fixers had just written.**
+
+Those numbers do not describe a loop that is converging slowly. They describe a
+loop with no fixed point.
+
+#### 1. Phase 1 resamples the whole stack, every attempt
+
+`skills/premerge-pipeline/SKILL.md:584` dispatches
+
+```
+Skill("code-review", args: "<PREMERGE_LEVEL> <PREMERGE_PR>")
+```
+
+against the **entire stack PR**, and it does so once per attempt. At `xhigh` on a
+~3000-line diff that yields roughly ten blockers per pass — not because ten
+blockers are present, but because the reviewer is a *sampler* over "defects a
+careful reader could name in this diff" and that distribution has effectively
+unbounded support at this diff size. `blockers == 0` is not a state the stack can
+be driven into; it is a coin that has to land empty.
+
+The loop then makes its own haystack grow. Every repair adds code, and the next
+attempt reviews that new code at the same depth as the original. The generator's
+rate is roughly constant per unit reviewed and the amount reviewed never shrinks.
+Phase 4c (`:1866`) re-dispatches the same full-PR review a fifth time.
+
+**A stop condition of the form "an LLM found nothing this round" is not
+decidable, and no amount of budget, fan-out or chunking makes it one.**
+
+#### 2. Blockers are resampled; only suggestions have a ledger
+
+`lib/premerge-findings.py` carries **suggestions** across attempts —
+`_carry_prior_suggestions` (`:836`) unions every earlier attempt's suggestion
+rows, deduped on `_suggestion_key` (`:873`). Blockers get no equivalent.
+`_blocker_fingerprints` (`:812`) exists only to *compare* attempt N's set against
+attempt N−1's, and attempt N's set is re-derived wholly from attempt N's fresh
+full-PR review.
+
+So the `FIXED=` and `NEW=` counters on the `PREMERGE_CONVERGE` line are a diff of
+two independent samples, and two very different events are indistinguishable
+inside them:
+
+- a blocker the fixer genuinely repaired, and
+- a blocker the sampler simply did not roll this time,
+
+both count `FIXED`. Symmetrically, a defect that was present at attempt 1 but not
+sampled until attempt 3 counts `NEW`, which is the input `STOP_REGRESSED` reacts
+to. **`FIXED=10/10/6` on PR #731 is not evidence that 26 blockers were fixed. It
+is evidence that 26 fingerprints failed to reappear.**
+
+#### 3. The fixers' own dispositions are collected and discarded
+
+`SKILL.md:805-809` requires every fixer agent to return, per finding:
+
+```
+status: APPLIED | NO_CHANGE | REFUSED
+outcomes:
+  - rank: <the finding's rank>
+    outcome: fixed | skipped | no_change_needed
+    reason: <one line>
+```
+
+Nothing parses it. `no_change_needed` occurs **nowhere in the plugin outside
+`skills/premerge-pipeline/SKILL.md`**, and inside it only at `:805-809` and
+`:1728-1730` — both times as prompt text being handed to an agent. `APPLIED`
+never appears in `lib/premerge-findings.py` at all. The fix-commit fence reads
+`git status --porcelain` and the wave-scope lists; it never reads what the agents
+said they did.
+
+This is the same class as the `blockingFindings` drop recorded for solve-fleet: a
+subagent contract that specifies a return value nothing consumes. Here it is the
+**only** authoritative per-finding signal in the run, and the loop replaces it
+with another roll of the sampler.
+
+#### 4. The generator is used as the verifier
+
+Verifying "did attempt N's fixes work?" is currently done by asking the same
+unbounded generator to review the whole diff again. Verification therefore costs
+a fresh batch of findings by construction — the act of checking produces new
+work. This is why the loop's cost per attempt does not fall as the queue drains:
+there is no queue, and checking is as expensive as discovering.
+
+#### The decision
+
+Four changes, together. None is sufficient alone.
+
+**(a) Freeze the review surface.** The full-stack review runs **once**, at
+attempt 1, producing the baseline set `B`. Attempts 2..N review only
+`git diff <HEAD_1>..<HEAD_N>` — the code the loop itself wrote — and only for
+regressions introduced by the repairs. The work list then shrinks monotonically
+instead of being resampled, and the review cost per attempt falls with the size
+of the repair rather than staying pinned to the size of the stack.
+
+**(b) Give every baseline finding a disposition.** `B` becomes a durable
+per-finding ledger with one terminal state each: `fixed | refuted | deferred |
+wontfix`. The fixer agents already emit exactly this vocabulary — Phase 2a starts
+parsing what it asked for, and the ledger, not the next sample, is what records
+that a finding is done. The gate becomes **"every row in `B` is dispositioned"**,
+which is decidable and monotone, in place of **"this round's sample was empty"**,
+which is neither.
+
+**(c) Verify with a narrow verifier, not the generator.** A finding whose fixer
+reported `fixed` is checked by one agent given the finding and the hunk that
+claims to fix it, asked one question: does this address it? It cannot emit new
+findings because it is not asked for any, which is the whole point — the
+`uberdev:finding-verifier` agent already has this shape and this bounded output.
+
+**(d) Split the gate's two questions.** "Is this packed stack safe to land?" is
+not "is this diff free of anything a reviewer could object to?" The gate asserts:
+baseline blockers all dispositioned, CI green, `mergeable` clean. Second-order
+defects born in fixer code get **one** bounded pass, and whatever survives it is
+filed and the stack still parks. A gate that refuses to park until an LLM runs out
+of objections is a gate that never parks.
+
+Chunked review — one reviewer per coherent unit rather than one over the whole
+diff — is a real improvement and belongs to **(a)**'s single baseline pass, where
+it buys coverage at fixed cost. Applied per-attempt it multiplies the generator
+and changes nothing about termination.
+
+#### What this does not change
+
+The A1 ordering (gate before repair), the line-independent multiset fingerprint,
+the fixer prompt's prohibition on weakening tests, controller-only commits, the
+wave scope guard, and `## The one rule that outranks every other line in this
+file` are all untouched. `STOP_NO_PROGRESS` and `STOP_REGRESSED` remain, but as
+backstops behind a decidable criterion rather than as the criterion.
+
+#### Interim mitigations, no code change
+
+`--converge=1` (rounds 2–3 measurably do not converge on a large stack),
+`--no-issues` when the stack is `/premerge`'s own machinery, `high` rather than
+`xhigh` on a large diff, and a smaller stack. On PR #681, **33 of 39** open
+findings targeted `skills/premerge-pipeline/SKILL.md` and
+`lib/premerge-findings.py`; two of them (#711, #713) named symbols that do not
+exist on `main`, because that run's own fix rounds had written them.
+
+#### Related
+
+#717 (the cross-run issue fingerprint cannot fire), #718 (per-dispatch issue
+budget inside an N-round loop; suggestions never gate but always become work) and
+#719 (the precision corpus is single-label, so no finding has ever been
+adjudicated) are the three already-filed consequences. A3 is the cause they share:
+a review loop with a generator, no sink, and no signal that could tell it to
+generate less.
