@@ -38,21 +38,55 @@ would have halted `/issue` on 100% of invocations. The flag is gone; a bare
 `findings-to-issues` now keys the issue container on
 `sha256("<slug>:<file_path>")[:16]` and groups findings by owning file, so a
 second dispatch over the same file COMMENTS rather than opening a second issue.
-A bounded, self-retiring legacy probe adopts and re-stamps issues filed under the
-retired per-finding key, so the re-key does not duplicate the existing backlog.
 
-`overflow_count` now counts FILE GROUPS, and every rendering of it says so —
-`commands/review-pr.md`'s operator summary included, at all four sites.
+**Upgrading needs a one-time manual reconciliation — the agent deliberately does
+not do it for you.** The pre-0.55.0 container key was
+`sha256("<path>:<line>:<summary>")[:16]`, so no issue filed before this release
+can match the new one. On the first run after upgrading, every affected path
+takes the no-match arm once and gains ONE new container issue listing every
+current finding in that file — including the findings its old per-finding issues
+were opened for, which those issues are therefore wholly superseded by. Retire
+them by hand, once:
+
+    gh issue list --label review-pr-finding --state open \
+      --search "created:<2026-08-23" --json number,title,url
+
+Review that list, apply `finding:true-positive` / `finding:false-positive` per
+the resolution footer as for any other finding issue, and close each entry. The
+query returning `[]` is the end of the migration: it is bounded by the size of
+your pre-existing backlog, it happens once, and every issue it names has a live
+superseding container to read instead.
+
+There is **no** legacy-key probe, no adoption and no fallback search. The
+automated version could adopt only ONE legacy issue per path, which left any
+others open under legacy markers, unreachable by later runs and re-tracked as
+comments on the adopted container — the same defect live in two open issues,
+permanently, behind a migration query that could never return `[]`. Retiring
+those means CLOSING a human's issue, which the agent has no standing and no
+`gh issue close` grant to do, so the automated path structurally could not
+finish the migration it started. `agents/findings-to-issues.md` Step 8
+`d.reconcile` is the normative statement of the procedure and of that reasoning.
+
+`overflow_count` now counts FILE GROUPS, not findings, and both operator-facing
+renderings in `commands/review-pr.md` — the Phase 2.5 sub-phase description and
+the Step 7 summary row — say so.
 
 ### Changed — `/premerge`'s defer envelope is file-atomic
 
 `defer` admits whole files, blocker-bearing ones first, and reports `FILES=`
-alongside `TOTAL=`/`BLOCKER=`/`SUGGESTION=`/`OVERFLOW=`. Because a blocker-bearing
-file drags its own cleanup rows into the envelope, `SUGGESTION > 0` no longer
-witnesses that every blocker fit — the overflow report gained a third `CLASS=`
-arm (`unknown`) for the state that cannot be proven either way, and the severe
-arm is now gated on `TOTAL > 0` so an empty envelope cannot raise a false
-blocker-overflow alarm.
+alongside `TOTAL=`/`BLOCKER=`/`SUGGESTION=`/`OVERFLOW=`. At most one file is ever
+split — the highest-priority file that did not fit whole is row-filled with the
+rest of the 64-row envelope rather than stopping the fill dead, and its shortfall
+travels to the filer as `file_findings_omitted` so the issue cannot read as
+complete when it is not.
+
+Because a blocker-bearing file drags its own cleanup rows into the envelope,
+`SUGGESTION > 0` no longer witnesses that every blocker fit — the overflow report
+gained a third `CLASS=` arm (`unknown`) for the state that cannot be proven
+either way, and the severe arm is now gated on `TOTAL == 64` — a FULL envelope,
+which is the only state in which the cap can have displaced a blocker. `TOTAL > 0`
+witnesses merely a non-empty one, and an under-cap run that dropped a single
+unfilable row would still raise a false blocker-overflow alarm under it.
 
 ### Fixed
 
@@ -68,9 +102,10 @@ blocker-overflow alarm.
   every refusal to after the repair budget was spent. It now shares
   `_drop_unfilable` with `cmd_defer`, so the early check can never be stricter
   than the late one.
-- `README.md` and RFC 0021 describe the shipped halt set and the shipped
-  container key; RFC 0021 records the change as an `A3` amendment rather than a
-  silent rewrite.
+- `README.md`'s `/issue` section describes the shipped two-verdict halt set, and
+  RFC 0021 records the container re-key as its §10 `A3` amendment — the two
+  passages the re-key invalidates are retained struck rather than silently
+  rewritten.
 
 ### Known issues
 

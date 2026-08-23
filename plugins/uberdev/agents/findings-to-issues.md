@@ -204,8 +204,12 @@ BOTH path inputs are absent, refuse with `status: REFUSED`, rationale
 Read, Bash (limited to: `gh issue list`, `gh issue view`, `gh issue create`, `gh issue comment`, `gh issue edit`, `gh label create`, `gh repo view`, `gh pr view`, `gh api /rate_limit`, `git rev-parse`, `realpath`, `sha256sum`, `mktemp`, `printf`, `jq`, `sleep`, `grep`, `awk`, `sed`, `cat`, `source`). No Edit, no Write, no WebFetch, no WebSearch, no Task (no re-entrant fanout). No `git push`, no `git commit` — this agent NEVER mutates the worktree.
 
 `gh issue view` is read-only and fetches ONE body per call — the write loop's
-verification walk (Step 8c) fetches at most `VERIFY_FETCH_MAX` of them per
-group, never a page of bodies in one request. `gh issue edit` is the narrowest
+verification walk (Step 8c) examines at most `VERIFY_FETCH_MAX` candidates per
+group, plus a run-scoped `VERIFY_RETRY_BUDGET` of re-reads of a candidate whose
+first fetch failed, never a page of bodies in one request. Re-reading is safe
+precisely because the call is read-only: it is the property that makes the
+bounded retry legitimate here and still forbids one on `gh issue create` /
+`gh issue comment`. `gh issue edit` is the narrowest
 write on this list and exists for exactly one caller — the `fingerprints=`
 index append on the `MATCH_STATE == "OPEN"` arm of Step 8d, which records the
 members a comment just delivered so a later close covers them. It may only ever
@@ -800,11 +804,17 @@ Explicit forbidden patterns:
    writes, at most twenty issue writes (per group: one `gh issue create` or one
    `gh issue comment`, plus at most one second write — the closed-index split's
    `gh issue create`, or the open arm's `gh issue edit` index append, never
-   both), one `gh pr view`, and the at most `VERIFY_FETCH_MAX=3` `gh issue view`
-   body fetches per group in Step 8c: 54 calls against 70 in the worst case.
+   both), one `gh pr view`, the at most `VERIFY_FETCH_MAX=3` `gh issue view`
+   body fetches per group in Step 8c, and that step's `VERIFY_RETRY_BUDGET=6`
+   re-reads: 60 calls against 70 in the worst case.
    That cap on the body fetches is what keeps this arithmetic finite — `b`'s
    page holds up to a hundred elements, and verifying every one of them would
-   spend the core bucket a search hit at a time.
+   spend the core bucket a search hit at a time. The retry allowance is bounded
+   per RUN and not per group for the same arithmetic: six re-reads shared across
+   the dispatch add six calls, while six per group would add sixty and put the
+   worst case past the floor that funds it. Both numbers are chosen so this
+   count stays under `2 * max_new + 50`, and a change to either is a change to
+   this sum — Step 2's floor is not to be widened to accommodate one.
 
 8. **Per-file loop (write phase).** Bind the slug's default ONCE, before
    anything in this step is computed from it:
@@ -842,14 +852,33 @@ Explicit forbidden patterns:
    shell reads the unset name as `0`, so every comparison against it silently
    inverts.
 
+   Bind the verification walk's RUN-scoped retry allowance here as well, for a
+   reason of shape rather than of contract — it is the one value in `c` that
+   must NOT reset per group:
+
+   ```bash
+   VERIFY_RETRY_BUDGET=6
+   ```
+
+   `c`'s `VERIFY_FETCH_MAX` is a per-GROUP bound and is bound inside the loop
+   with the rest of that step's locals; this counter is the whole run's ceiling
+   on RETRIED body reads, so binding it inside the loop would hand every group
+   a fresh six and make the ceiling unbounded across a dispatch. It is the same
+   enclosing-variable shape `c.5` already uses for `PR_AUTHOR_RESOLVED`, and
+   for the same reason: state that exists to stop a per-group cost from
+   multiplying by the number of groups has to outlive the group. `6` is chosen
+   against Step 7's core-bucket arithmetic — see the worst-case count there —
+   and is what keeps the retries inside the floor Step 2 already enforces
+   rather than requiring a wider one.
+
    **Every value this step needs, this step binds — nothing is carried in from
    another step's shell.** Each numbered step in this file is its own Bash
    invocation, so a name Step 2 assigned (`CORE_REMAINING`, `SEARCH_REMAINING`,
    `RATE_LIMIT_JSON`) is simply not in scope here, and referencing one is not a
    stale read but an unset one: under `set -u` the write phase dies before its
    first group and files nothing, and without `set -u` the name reads as `0`
-   and whatever it guarded is silently disabled. Both bindings above exist for
-   that reason and neither is decoration. If a future sub-step needs a
+   and whatever it guarded is silently disabled. All three bindings above exist
+   for that reason and none is decoration. If a future sub-step needs a
    rate-limit figure, it re-probes for it or does without — it must never
    compute from a Step-2 variable, and no sub-step below does.
 
@@ -939,16 +968,23 @@ Explicit forbidden patterns:
       # and `{"url":"…"}` both collapse to the same empty string.
       MATCH_N=$(printf '%s' "$MATCH" | jq -r 'if type == "array" then length else "NaN" end')
       # Candidates in preference order — every OPEN element in page order, then
-      # every CLOSED one — keeping only elements that carry BOTH fields this
-      # step reads, with the types it reads them at. One "<number> <STATE>"
-      # line each.
+      # every CLOSED one — keeping only elements that carry ALL THREE fields
+      # this step reads, with the types it reads them at. One
+      # "<number> <STATE> <url>" line each. `url` is here because the closed
+      # arm of `d` reports, per member, the issue that RECORDED it, and under
+      # the index union below that is not always the candidate `number` binds.
       MATCH_CANDIDATES=$(printf '%s' "$MATCH" | jq -r '
         if type == "array" then
-          ( map(select((.number | type) == "number" and (.state | type) == "string"))
+          ( map(select((.number | type) == "number" and (.state | type) == "string"
+                       and (.url | type) == "string"))
             | ( map(select(.state | ascii_upcase == "OPEN"))
               + map(select(.state | ascii_upcase != "OPEN")) )
-            | .[] | "\(.number) \(.state | ascii_upcase)" )
+            | .[] | "\(.number) \(.state | ascii_upcase) \(.url)" )
         else empty end')
+      # Per-GROUP: how many CANDIDATES the walk may examine. It counts
+      # candidates, never HTTP calls — a retried fetch below re-reads the SAME
+      # candidate and must not consume a slot, or a flaky link would silently
+      # shorten the walk and turn a decoy into a No-match.
       VERIFY_FETCH_MAX=3
       ```
 
@@ -964,8 +1000,8 @@ Explicit forbidden patterns:
         output naming the cause.
       - `MATCH_N` is not a non-negative integer (`NaN`, i.e. `b` accepted JSON
         that is not an array), or it is positive while `MATCH_CANDIDATES` is
-        empty (every element lacked a usable `number` or `state`) — a lookup
-        nobody can classify. Append
+        empty (every element lacked a usable `number`, `state` or `url`) — a
+        lookup nobody can classify. Append
         `{file: $file_path:$line, reason: "unclassifiable issue state"}` to
         `blocked_by_dedupe[]` and continue to the next GROUP: the same
         fail-CLOSED rule as `b` and the body fetch, for the same reason.
@@ -975,10 +1011,28 @@ Explicit forbidden patterns:
       Neither the label nor `in:body` proves ownership, so the FIRST element is
       only a guess at the container. Walk the candidate lines in order, at most
       `VERIFY_FETCH_MAX` of them, and for each one fetch that element's body and
-      only that element's:
-      `MATCH_BODY=$(gh issue view "$number" --json body --jq .body 2>&1)`;
-      capture `rc=$?`. If `rc != 0`, append
-      `{file: $file_path:$line, reason: "gh issue view rc=$rc — $(printf '%s' "$MATCH_BODY" | head -c 200)"}`
+      only that element's — with a bounded retry, because a READ that failed
+      once has told you nothing about the issue behind it:
+
+      ```bash
+      # One CANDIDATE, at most three ATTEMPTS. Retries are drawn from the
+      # RUN-scoped VERIFY_RETRY_BUDGET bound in this step's preamble and never
+      # from VERIFY_FETCH_MAX, so a flaky link costs calls and not candidates.
+      attempt=1
+      while true; do
+        MATCH_BODY=$(gh issue view "$number" --json body --jq .body 2>&1)
+        rc=$?
+        if [ "$rc" -eq 0 ]; then break; fi
+        if [ "$attempt" -ge 3 ]; then break; fi
+        if [ "$VERIFY_RETRY_BUDGET" -le 0 ]; then break; fi
+        VERIFY_RETRY_BUDGET=$((VERIFY_RETRY_BUDGET - 1))
+        sleep "$attempt"          # 1s, then 2s
+        attempt=$((attempt + 1))
+      done
+      ```
+
+      If `rc != 0` once that loop has ended, append
+      `{file: $file_path:$line, reason: "gh issue view rc=$rc after $attempt attempt(s) — $(printf '%s' "$MATCH_BODY" | head -c 200)"}`
       to `blocked_by_dedupe[]` and continue to the next GROUP — the same
       fail-CLOSED rule as `b`, for the same reason: without the body neither
       the marker nor the `fingerprints=` index can be read, and acting on a
@@ -987,29 +1041,117 @@ Explicit forbidden patterns:
       unanswered question about the very issue that might be the container, and
       walking past it is how the duplicate gets filed.
 
+      **Why RETRY here and never on a write.** Both failure directions are
+      real and they are not symmetric, so neither one gets to be the whole
+      answer. Treat an unread body as "no container exists" and the run re-files
+      the file's entire backlog against an issue that was there all along — an
+      unbounded, self-repeating loss that no operator sees because the run looks
+      clean. Route every unread body straight to `blocked_by_dedupe[]` and the
+      opposite harm appears: that array is what sets `DONE_WITH_CONCERNS`, and
+      the parent's `require_clean` validator
+      (`code_fixer_contract.validate_persistence_result`) refuses any status
+      other than `DONE` — a validator this agent does not own and must not be
+      re-specified around — so ONE 502 out of the up-to-`VERIFY_FETCH_MAX`
+      reads per group aborts a dispatch whose every issue was filed, and it does
+      it on exactly the runs where `require_clean` is true, which are the runs
+      where a blocker was deferred. The treatment is the retry, and it is
+      available here for a reason that does not generalise: `gh issue view` is
+      IDEMPOTENT. Re-reading a body cannot create, duplicate or mutate anything,
+      so a second attempt costs one API call and risks nothing — which is
+      precisely why Step 8f still forbids retrying `gh issue create` /
+      `gh issue comment`, where a retried call that in fact succeeded files the
+      issue twice. Neither the fail-CLOSED verdict nor its `blocked_by_dedupe[]`
+      entry is weakened: a body that is still unreadable after three attempts
+      blocks its group exactly as before, and the entry now carries the attempt
+      count so an operator can tell a single blip from a broken endpoint. What
+      changes is only how often a transient read reaches that verdict at all.
+      The budget is deliberately run-scoped rather than per-group: a per-group
+      allowance multiplies by `max_new` and would push the worst-case core spend
+      past the floor Step 2 enforces, and the failure this treats — an
+      occasional blip — does not scale with the number of groups.
+
       Verify the exact HTML-comment marker
       `<!-- uberdev:${finding_marker_slug:-review-pr}-finding fingerprint=$FP -->`
       is present in `MATCH_BODY` via local exact-string check (belt-and-braces
       against GH search tokenisation gaps). The FIRST candidate that carries it
       is the container: bind `number`, bind `MATCH_STATE` to that candidate's
-      upper-cased state, keep its `MATCH_BODY`, and stop walking. Every rule
+      upper-cased state, keep its `MATCH_BODY`. Every rule
       below that says "the matched issue's `body` field" means that
       `MATCH_BODY`. A candidate that fails the check is not a hit and is not the
       end of the search — continue to the next candidate.
 
-      Two terminal cases close the walk:
+      **An OPEN hit ends the walk; a CLOSED hit does not (#722).** Bind and stop
+      when `MATCH_STATE` is `OPEN`: `d`'s open arm renders every member and
+      settles `new` versus `recurring` against that one issue's index, so a
+      member some closed sibling also recorded costs a mislabelled line in a
+      comment and never a second issue.
+
+      When `MATCH_STATE` is `CLOSED` the bound candidate answers WHICH issue,
+      not WHAT the path has already recorded, and those are different questions.
+      Because every OPEN candidate precedes every CLOSED one in the candidate
+      order, reaching a CLOSED hit already proves no open container carries this
+      marker — so the remaining candidates are all closed, and `b` reasons at
+      length about why they accumulate: the closed arm of `d` files a fresh
+      container carrying this same `$FP` every time the user closes the previous
+      one and a later finding lands in the path, one per close-and-refile cycle,
+      each recording a DIFFERENT member subset. Splitting against the index of
+      whichever one the page happened to rank first classifies every member
+      recorded on any of the others as never-filed and re-opens an issue for
+      findings the user already resolved and closed. So keep walking the
+      remaining CLOSED candidates under the same `VERIFY_FETCH_MAX` budget and
+      accumulate their indices:
+
+      ```bash
+      # Both are per-GROUP and are (re-)initialised HERE, at the CLOSED bind,
+      # so no previous group's union can leak into this one.
+      # "<member_fp> <url>" per line. First writer wins, so a member is
+      # attributed to the earliest-listed closed issue that recorded it.
+      CLOSED_INDEX_UNION=""
+      CLOSED_UNION_COMPLETE=1   # 0 once a closed candidate goes unexamined
+      # ...then, for the bound candidate FIRST and each further marker-carrying
+      # CLOSED candidate after it, for each 16-hex token of that body's
+      # `fingerprints=` list — $candidate_url being the third field of that
+      # candidate's own MATCH_CANDIDATES line:
+      grep -q -- "^$fp " <<<"$CLOSED_INDEX_UNION" \
+        || CLOSED_INDEX_UNION="$CLOSED_INDEX_UNION$fp $candidate_url"$'\n'
+      ```
+
+      Every candidate feeding the union is marker-verified on its own body by
+      the same exact-string check — the union widens what the split reads, never
+      what counts as this container. A closed candidate that does NOT carry the
+      marker contributes nothing, and a marker-carrying one whose index line is
+      missing or unparseable contributes nothing either, under the same
+      treat-as-EMPTY rule `d` states for a single body: it is one issue's
+      absence of a record, not a reason to discard the records other closed
+      containers do hold.
+
+      Terminal cases of the walk:
 
       - **Every candidate was examined and none carried the marker** — a genuine
         **No match**: the search hits all merely quote the fingerprint. Take
         that arm of `d`.
-      - **`VERIFY_FETCH_MAX` was reached with candidates still unexamined** —
-        the container may be one of them. Append
+      - **`VERIFY_FETCH_MAX` was reached with the container still
+        UNIDENTIFIED** — it may be one of the unexamined candidates. Append
         `{file: $file_path:$line, reason: "container-verification-unresolved"}`
         to `blocked_by_dedupe[]` and continue to the next GROUP. Filing here
         would be guessing against an unread body, and the guess repeats every
         run; a visible entry and `DONE_WITH_CONCERNS` is the fail-CLOSED answer,
         and it only fires when more than `VERIFY_FETCH_MAX` labelled issues
         mention this exact 16-hex value and none of the first three owns it.
+      - **`VERIFY_FETCH_MAX` was reached AFTER a CLOSED container was
+        identified, with closed candidates still unexamined** — set
+        `CLOSED_UNION_COMPLETE=0`, emit one bounded stderr warning naming
+        `$file_path` and the unexamined count, and take `d`'s
+        `MATCH_STATE == "CLOSED"` arm with the PARTIAL union. This is
+        deliberately NOT the fail-CLOSED case above and must not be folded into
+        it: the container is known, the group is being written, and the open
+        question is only whether a member was already recorded somewhere. That
+        is the question `d`'s closed arm answers by **failing towards filing** —
+        the identical direction it takes for an unreadable index, and for the
+        identical reason it states there: a second close costs one click, a
+        dropped BLOCKER costs the run's whole safety claim. The cost is bounded
+        and does not repeat: the re-filed subset becomes an OPEN container
+        carrying this `$FP`, which every later run finds first.
 
       A decoy is what makes this walk load-bearing, and it need not be hostile:
       one labelled issue quoting the container fingerprint in prose — a triage
@@ -1047,7 +1189,11 @@ Explicit forbidden patterns:
       the stopping rule moved. It used to stop at that element and treat a
       failed marker check as proof of No-match; it now continues to the next
       candidate, so an unrelated issue quoting this fingerprint delays the
-      answer instead of deciding it.
+      answer instead of deciding it. The index union moved that stopping rule a
+      second time and in one direction only — past the CLOSED hit, never past an
+      OPEN one — so the open preference itself is untouched: an open container,
+      when one exists, is still found first, bound, and written to before any
+      closed sibling is read at all.
 
    c.4. **Per-member forgery carve-out**, applied **before the
       state-branching write**: if a member's `summary`
@@ -1376,28 +1522,62 @@ Explicit forbidden patterns:
         member reads `new` again next run and is re-appended — so the
         read-modify-write is sound without a lock, and adding one would be
         inventing coordination this agent has no primitive for.
-      - `MATCH_STATE == "CLOSED"`: **split the group against the closed issue's
-        index — NEVER skip the group whole (#722).** "The user resolved it" is
+      - `MATCH_STATE == "CLOSED"`: **split the group against the UNION of every
+        marker-verified closed container's index — NEVER skip the group whole
+        (#722), and never split against one of them.** "The user resolved it" is
         a claim about the findings that issue actually recorded, and under the
         old `file:line:summary` key a match WAS those findings, so skipping
         whole was right. Under the file key a closed issue matches every
         finding the path will ever produce, so skipping whole suppresses every
         FUTURE finding in that file, permanently and for as long as the issue
         stays closed. Partition instead, using the machinery the
-        `MATCH_STATE == "OPEN"` arm above already uses: read the `fingerprints=`
-        list from the `<!-- uberdev-finding-index -->` line of the matched
-        issue's `body` field and test each member's `MEMBER_FP` against it.
-        - Member IS in the list — it was recorded on the issue the user
-          closed, so it is genuinely resolved. Append **one entry per member**
+        `MATCH_STATE == "OPEN"` arm above already uses: test each member's
+        `MEMBER_FP` against the list — and **the list is
+        `CLOSED_INDEX_UNION`**, the accumulator `c` built by reading the
+        `fingerprints=` list off the `<!-- uberdev-finding-index -->` line of
+        EVERY closed candidate that carried this container's marker, never the
+        one index of whichever candidate the page ranked first.
+
+          **The union is the list, and one index is not (#722).** A path
+          accumulates closed containers one per close-and-refile cycle — the
+          same accumulation `b` raises `--limit` to 100 for, and it is this arm
+          that creates them — and each records a different member subset,
+          because each was filed for the findings outstanding when it was
+          opened. `c` orders candidates OPEN-first and then CLOSED in the page
+          order GitHub's best-match ranking returns, so "whichever closed
+          container the walk hit first" is arbitrary among them. Splitting
+          against that one index classifies every member recorded on any of the
+          others as never-filed, and this arm's own not-in-list branch then
+          opens a brand-new container for findings the user has already
+          resolved and closed. Reading one index and calling it the path's
+          record is the same mistake as reading one candidate and calling it the
+          container, one level down.
+
+          A PARTIAL union — `CLOSED_UNION_COMPLETE=0`, because
+          `VERIFY_FETCH_MAX` ran out with closed candidates still unread — is
+          used as-is, with no `blocked_by_dedupe[]` entry. It is the
+          treat-as-EMPTY rule below applied to a subset rather than to the whole
+          line, and it takes the same direction for the same reason: fail
+          towards filing. The container is identified either way, so nothing
+          here is a guess about WHICH issue; the only cost is that a member
+          recorded solely on an unread closed sibling is re-filed once.
+
+        - Member IS in the list — it was recorded on a closed container for
+          this path, so it is genuinely resolved. Append **one entry per member**
           to `skipped_closed[]` —
           `{url, file: "$file_path:$line", fingerprint: <member_fp>, tier: <member_tier>}`
-          — never one entry for the group. The blocker accounting downstream
+          — never one entry for the group. `url` is the url the union carries
+          FOR THAT MEMBER — the closed issue that actually records it, which is
+          not always the candidate `number` is bound to — because the whole
+          information content of the entry is where the operator goes to see the
+          resolution. The blocker accounting downstream
           counts `skipped_closed[]` entries carrying `tier: "BLOCKER"` one for
           one against the number of blockers the fixer deferred, so collapsing a
           file's three closed blockers into a single entry makes that bound fail
           and refuses the parent run.
-        - Member is NOT in the list — it was neither in that issue's body nor
-          added to its index by a comment before it was closed, so nothing
+        - Member is NOT in the list — it was in no closed container's body and
+          was added to no closed container's index by a comment before it was
+          closed, so nothing
           about it was resolved and it has never been filed anywhere. Those
           members take the **No match** arm below as their own new container:
           one `gh issue create` carrying the same container fingerprint,
@@ -1431,11 +1611,15 @@ Explicit forbidden patterns:
           getting it wrong is unrecoverable: the line may carry an `omitted=`
           token after `fingerprints=`, and a reader that swallows the remainder
           fails the 16-hex parse, falls to the EMPTY rule below, and re-files
-          every member this issue already records, silently and on every run.
-        - If the matched body carries no `<!-- uberdev-finding-index -->` line,
-          or its `fingerprints=` value does not parse as a comma-separated list
-          of 16-hex tokens, treat the list as **EMPTY** — every member is
-          not-in-list and gets filed. Never treat an unreadable index as
+          every member that issue already records, silently and on every run.
+        - If a contributing body carries no `<!-- uberdev-finding-index -->`
+          line, or its `fingerprints=` value does not parse as a comma-separated
+          list of 16-hex tokens, that body contributes **nothing** to the union
+          — and if no body contributes anything, treat the list as **EMPTY**:
+          every member is not-in-list and gets filed. The rule is per BODY and
+          not per union: one closed container with a mangled index must not discard
+          the records its siblings hold, which would re-file members two indices
+          plainly account for. Never treat an unreadable index as
           matching everything: that is the silent drop above, reached through a
           parse failure instead of a policy. Fail towards filing. An issue the
           user closes a second time costs one click; a dropped BLOCKER costs
@@ -1649,7 +1833,11 @@ renders. A later comment on this issue appends its new members to the same list
 (Step 8d, `MATCH_STATE == "OPEN"`), so the list can outgrow the rendered
 `## Findings (N)` sections — deliberately: the closed-index split reads this
 line and never the comments, so a member the index omits is a member closing
-this issue cannot resolve. Emit it as the line immediately AFTER the meta
+this issue cannot resolve. That split reads the line on EVERY closed container
+carrying the path's marker and unions them, because a path accumulates one such
+container per close-and-refile cycle and each records a different subset; the
+line is therefore this issue's share of the path's record, never the whole of
+it. Emit it as the line immediately AFTER the meta
 trailer, never between the fingerprint marker and that trailer — the precision
 miner reads those two positionally. Its prefix is chosen to diverge from both
 existing marker scans well before either ends: the miner matches
@@ -1946,9 +2134,9 @@ Return `status: REFUSED` with the matching rationale string when:
 ## Failure-mode summary (NOT REFUSAL)
 
 - `gh issue list` rc != 0 → append to `blocked_by_dedupe[]`, continue, set `DONE_WITH_CONCERNS`. Never write the issue on lookup failure (fail-CLOSED dedupe).
-- `gh issue view` rc != 0 on any body fetch of Step 8c's verification walk → append to `blocked_by_dedupe[]`, continue, set `DONE_WITH_CONCERNS`. Same fail-CLOSED rule and same reason: a candidate whose body cannot be read cannot be marker-verified or split against its index, and walking past it is how a duplicate gets filed.
+- `gh issue view` rc != 0 on any body fetch of Step 8c's verification walk, **after up to three attempts drawn from the run-scoped `VERIFY_RETRY_BUDGET`** → append to `blocked_by_dedupe[]` (the reason carries the attempt count), continue, set `DONE_WITH_CONCERNS`. Same fail-CLOSED rule and same reason: a candidate whose body cannot be read cannot be marker-verified or split against its index, and walking past it is how a duplicate gets filed. The retry is what keeps a single transient 502 from reaching this verdict at all — `gh issue view` is idempotent, so re-reading risks nothing, and a run whose issues were all filed no longer returns `DONE_WITH_CONCERNS` (and no longer fails a parent's `require_clean` check) because one read blipped. It does NOT soften the verdict: a body still unreadable after the retries blocks its group exactly as before.
 - Step 8c cannot classify the result set — `MATCH` is JSON but not an array, or it is a non-empty array in which no element carries both a numeric `number` and a string `state` → append `reason: "unclassifiable issue state"` to `blocked_by_dedupe[]`, continue, set `DONE_WITH_CONCERNS`. An EMPTY array is NOT this case: `[]` is the ordinary No-match of a first run and takes `d`'s No-match arm, which is why Step 8c branches on the array LENGTH before it looks at any element.
-- Step 8c reaches `VERIFY_FETCH_MAX` with candidates still unexamined → append `reason: "container-verification-unresolved"` to `blocked_by_dedupe[]`, continue, set `DONE_WITH_CONCERNS`. Fail-CLOSED: the container may be one of the unread ones, and filing against that guess would repeat every run. A candidate list fully examined with no marker hit is a genuine No-match instead, and files.
+- Step 8c reaches `VERIFY_FETCH_MAX` with the container still UNIDENTIFIED → append `reason: "container-verification-unresolved"` to `blocked_by_dedupe[]`, continue, set `DONE_WITH_CONCERNS`. Fail-CLOSED: the container may be one of the unread ones, and filing against that guess would repeat every run. A candidate list fully examined with no marker hit is a genuine No-match instead, and files. Reaching the same cap AFTER a CLOSED container has been identified is a different case and is NOT this one: the container is known, only the index union is short, so Step 8c sets `CLOSED_UNION_COMPLETE=0`, warns on stderr and lets `d`'s closed arm fail towards filing — no `blocked_by_dedupe[]` entry, and no `DONE_WITH_CONCERNS` earned by a run that wrote everything it had.
 - Secret-scan hit, over-budget body, or `gh issue edit` rc != 0 on the `fingerprints=` index append (Step 8d, `MATCH_STATE == "OPEN"`) → one bounded stderr warning; the comment already posted stands. Deliberately NOT a `blocked_by_dedupe[]` entry: the findings WERE written, and that array is what the run did not file. The next run re-reads the same index, marks the same members `new` again, and retries the edit — self-healing, and never a duplicate issue.
 - `gh issue create` / `gh issue comment` rc != 0 → append to `blocked_by_dedupe[]`, continue, set `DONE_WITH_CONCERNS`. No retry within run.
 - `gh label create --force` rc != 0 → emit one stderr warning, continue, set `label_provisioned: "fail-soft-skipped"`.

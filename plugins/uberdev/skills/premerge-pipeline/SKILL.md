@@ -585,16 +585,15 @@ without a word is a dead end mid-loop. But *what* it captures is not this repo's
 text: everything a server sends back arrives as `remote:` lines, and a
 pre-receive hook chooses their length and their content. So the five handlers do
 not print the capture — they print a **bounded, single-line, token-free** view of
-it, rebuilt in place by one line that is the first statement of every one of the
-five handlers. That line is deliberately not reproduced here — the fences are its
-only copy, so this section cannot come to describe a bound the code stopped
-enforcing. It does three things, one hazard each:
+it, rebuilt in place by one line. That line is deliberately not reproduced here —
+the fences are its only copy, so this section cannot come to describe a bound the
+code stopped enforcing. It does three things, one hazard each:
 
-- **`cut -c1-200`** is the treatment `agents/findings-to-issues.md` gives every
-  attacker-influenced `gh` stderr — *"truncate to 200 chars BEFORE the regex
-  classifier (security Note B — bounds attacker-influenced stderr substring)"*.
-  A rejection message is as long as the server wants it to be, and this fence's
-  every other diagnostic is length-bounded already.
+- **`cut -c1-200`** is the bound `agents/findings-to-issues.md` puts on every
+  attacker-influenced `gh` stderr — *"bounds attacker-influenced stderr
+  substring"* (its security Note B). A rejection message is as long as the
+  server wants it to be, and this fence's every other diagnostic is
+  length-bounded already.
 - **`tr -s '\n\r\t' ' '`** folds the capture onto one line. The fence's own
   `PREMERGE …` results go to this same stderr stream and the controller scrapes
   that stream positionally, so a multi-line capture is a way for a remote to open
@@ -607,18 +606,38 @@ enforcing. It does three things, one hazard each:
   into a *different* live token, which is what substituting only the trailing
   space would do to `PREMERGE GATE …`.
 
-Two details that are deliberate, not incidental:
+Three details that are deliberate, not incidental:
 
 - **Drained readers only.** `head -c 200` is the precedent's literal spelling and
   it is an early-exiting reader; these fences set `set -u` and not
   `set -o pipefail` today, but the day one adds it that shape is the EPIPE class
-  `tests/epipe-guard.test.sh` bans. `tr` and `cut` read to EOF, so the question
-  never arises.
-- **It runs FIRST in the handler**, ahead of the lease-rejection classifier in
-  `#### Repairing red CI`. Same ordering the precedent states, and the reason outlives
-  the citation: a verdict drawn from bytes the operator is never shown is a
-  verdict the message can contradict. The classifier and the printed text must be
-  reading the same 200 characters.
+  `tests/epipe-guard.test.sh` bans. `tr` and `cut` read to EOF — and so does the
+  rebase arm's classifier, which is a bare `grep -E` with no `-q`, `-m` or `-l`
+  for exactly that reason. The question never arises.
+- **The bound is a property of what gets PRINTED, not of what gets classified.**
+  In four handlers that makes it the first statement, because printing is all
+  they do. The rebase arm in `#### Repairing red CI` also *classifies*, and there
+  the bound runs after the classifier and immediately before the print. Bounding
+  first was tried, and the argument for it does not survive being executed: the
+  precedent bounds a `gh` stderr whose marker is at the head, while git puts
+  `To <remote>` and every server `remote:` line ahead of
+  `! [rejected] … (stale info)` — and with a 43-character branch name spelled
+  twice inside that one line, **two** banner lines already push the marker past
+  character 200. Run against the shipped handler under both `bash` and `zsh`: a
+  plain rejection classified as a lease rejection, the same rejection behind two
+  `remote:` lines classified as a generic failure. That is the one failure mode
+  this arm exists to name being reported as the one it exists to tell it apart
+  from, with the branch already rebased locally and no recovery arm. Flattening
+  first failed in the opposite direction — every line joined into one, so
+  `\[rejected\].*(stale info|…)` could bridge two originally unrelated lines and
+  call an ordinary failure a lease rejection. `grep` is line-oriented, so
+  classifying the capture as git wrote it closes both.
+- **The verdict and the message still read the same bytes.** That was the old
+  ordering's reason for itself, and it is honoured more strictly now rather than
+  dropped: a verdict drawn from bytes the operator is never shown is a verdict
+  the message can contradict, so the rejection arm prints the **matched line** —
+  bounded, flattened and defused like everything else — while the generic arm,
+  which matched nothing, prints the head of the capture.
 
 ### What the stack PR carries
 
@@ -1761,14 +1780,18 @@ case "$PREMERGE_CI_ARM" in
     # `>/dev/null 2>&1 || exit 2` made them the same silent exit 2 -- with no recovery
     # arm, because the branch is already rebased locally by the time this line runs.
     PREMERGE_PUSH_ERR="$(git push --force-with-lease="$PREMERGE_BRANCH:$PREMERGE_CI_LEASE" --force-if-includes origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
-      # Bounded and defused BEFORE the classifier below, not after — see
-      # `### What a failed push is allowed to say`. This is the site the
-      # ordering is about: the arm that gets chosen and the text that gets
-      # printed have to be reading the same 200 characters.
+      # CLASSIFY THE RAW CAPTURE; BOUND ONLY WHAT IS PRINTED. The ordering and
+      # the measurements are in `### What a failed push is allowed to say`.
+      # Bounding first hid the marker this arm exists to name, behind git's
+      # `To <remote>` line and the server's `remote:` banner; flattening first
+      # let `.*` bridge two unrelated lines. grep is line-oriented and drained,
+      # and reads a herestring, never a pipe -- the EPIPE class this repo bans.
+      PREMERGE_PUSH_HIT="$(grep -E '\[rejected\].*(stale info|fetch first|non-fast-forward)' <<<"$PREMERGE_PUSH_ERR")" || PREMERGE_PUSH_HIT=""
+      # Then bound and defuse exactly what is PRINTED: the matched line when
+      # there is one, so the operator reads the bytes the verdict came from.
+      PREMERGE_PUSH_ERR="${PREMERGE_PUSH_HIT:-$PREMERGE_PUSH_ERR}"
       PREMERGE_PUSH_ERR="$(printf '%s' "${PREMERGE_PUSH_ERR//PREMERGE/PRE-MERGE}" | tr -s '\n\r\t' ' ' | cut -c1-200)"
-      # Herestring, never a pipe: `<producer> | grep -q` is the EPIPE class
-      # tests/epipe-guard.test.sh bans.
-      if grep -qE '\[rejected\].*(stale info|fetch first|non-fast-forward)' <<<"$PREMERGE_PUSH_ERR"; then
+      if [ -n "$PREMERGE_PUSH_HIT" ]; then
         printf 'error: the lease on %s was REJECTED -- origin moved since %s was pinned. The local branch is already rebased, so re-run /premerge rather than forcing: %s\n' \
           "$PREMERGE_BRANCH" "$PREMERGE_CI_LEASE" "$PREMERGE_PUSH_ERR" >&2
       else
@@ -2145,10 +2168,10 @@ case "$PREMERGE_DEFER_BLOCKER" in ''|*[!0-9]*) printf 'error: defer line carries
 # groups by owning file. Like OVERFLOW= it is always printed, so a missing or
 # non-numeric field is a contract break rather than a zero.
 case "$PREMERGE_DEFER_FILES" in ''|*[!0-9]*) printf 'error: defer line carries no FILES= count: %s\n' "$PREMERGE_DEFER_LINE" >&2; exit 74 ;; esac
-# TOTAL= is the WITNESS that the envelope is non-empty, which is what the severe
-# arm below turns on, so it is validated like the fields it stands beside. The
+# TOTAL= is the WITNESS that the envelope is FULL, which is what the severe arm
+# below turns on, so it is validated like the fields it stands beside. The
 # opening case-glob proves the literal `TOTAL=` is present; only this proves the
-# value is a number. Skipping it would not fail loudly either: `[ "" -gt 0 ]` is
+# value is a number. Skipping it would not fail loudly either: `[ "" -eq 64 ]` is
 # a shell ERROR, not a false, and an `if` swallows the non-zero status -- so a
 # malformed count would silently route every overflow away from the severe arm,
 # which is the exact direction a guard must never fail.
@@ -2158,27 +2181,36 @@ case "$PREMERGE_DEFER_TOTAL" in ''|*[!0-9]*) printf 'error: defer line carries n
 # Blocker-bearing FILES are admitted first, which is weaker than the row-level
 # "blockers first" this arm was written against: a blocker file carries its own
 # cleanup rows in with it, so `SUGGESTION > 0` no longer proves every blocker
-# fit (#722). `TOTAL > 0 && SUGGESTION == 0 && OVERFLOW > 0` still means the
-# envelope is ENTIRELY blockers, so it keeps its own louder line -- an operator
-# must never read the mild sentence over that state.
+# fit (#722). A FULL envelope holding nothing but blockers still keeps its own
+# louder line -- an operator must never read the mild sentence over that state.
 #
-# `TOTAL > 0` IS LOAD-BEARING AND IS NOT A TAUTOLOGY. `SUGGESTION == 0` was a
-# sound stand-in for "entirely blockers" only while `OVERFLOW > 0` implied a
-# FULL envelope, and it no longer does: the unusable-path cut in
-# lib/premerge-findings.py runs on EVERY run, not just an overflowing one, so a
-# row the filer could open no issue for is dropped and counted in `OVERFLOW=`
-# with the envelope nowhere near its bound. Executed against the shipped
-# library, a run whose only deferred row has a non-string `file` prints
-# `TOTAL=0 BLOCKER=0 SUGGESTION=0 FILES=0 OVERFLOW=1` -- an EMPTY envelope
-# holding no blockers and one dropped SUGGESTION. `SUGGESTION == 0` is
-# vacuously true there, and the severe arm read it as proof and announced a
-# blocker overflow that never happened. Since `TOTAL = BLOCKER + SUGGESTION`,
-# `TOTAL > 0 && SUGGESTION == 0` is exactly "the envelope holds rows and every
-# one of them is a blocker" -- the fact the sentence asserts, back on the line
-# that carries it. An empty envelope proves nothing about what was dropped, so
-# it falls through to the arms below, which answer from the CANDIDATE SET
-# (`PREMERGE_SURVIVORS`) rather than from the envelope and stay correct at
-# `TOTAL=0`.
+# `TOTAL == 64` IS THE WITNESS OF A FULL ENVELOPE. `TOTAL > 0` IS NOT.
+# `SUGGESTION == 0` is a sound stand-in for "every row in here is a blocker",
+# because `TOTAL = BLOCKER + SUGGESTION`. But the severe sentence also asserts
+# the envelope was FILLED, and nothing except `TOTAL == MAX_FINDINGS` witnesses
+# that. `OVERFLOW > 0` used to imply it and no longer does: the unusable-path
+# cut in lib/premerge-findings.py runs on EVERY run, not just an overflowing
+# one, so a row the filer could open no issue for is dropped and counted in
+# `OVERFLOW=` with the envelope nowhere near its bound. Executed against the
+# shipped library, two blockers in `a.py` plus one suggestion whose `file` is a
+# JSON object print `TOTAL=2 BLOCKER=2 SUGGESTION=0 FILES=1 OVERFLOW=1` -- 2 of
+# 64 rows held, the dropped row a suggestion, no blocker dropped at all -- and
+# `TOTAL > 0` handed exactly that run the blocker-overflow alarm. An envelope
+# that is not full proves nothing about what was dropped, so it falls through to
+# the arms below, which answer from the CANDIDATE SET (`PREMERGE_SURVIVORS`)
+# rather than from the envelope and stay correct at any `TOTAL`. The bound is 64
+# because `MAX_FINDINGS` is, in lib/premerge-findings.py; the sentences spell it
+# out for the same reason they always have.
+#
+# `TOTAL` ALSO SAYS WHY THE ROWS WENT, AND THE SENTENCES MUST SAY WHICH. The cap
+# spends its whole budget when it cuts -- the boundary file is row-filled to
+# exactly `MAX_FINDINGS` -- so a displaced row implies `TOTAL == 64`, and a
+# `TOTAL` below that proves the cap displaced nothing and every dropped row is
+# one the filer could open no issue for. "did not fit the 64-row envelope" is
+# therefore false on exactly the new drop path: three valid suggestions plus
+# four rows with no usable `file` print `TOTAL=3 BLOCKER=0 SUGGESTION=3 FILES=3
+# OVERFLOW=4`, nowhere near the bound and nothing displaced by it. Both
+# populations are `OVERFLOW=`, so every arm reports which one it is reading.
 #
 # `CLASS=` IS THE ONLY PARSEABLE PART OF THE LINE, SO IT MAY ONLY CLAIM WHAT THE
 # RUN CAN PROVE. Correcting the prose after the em dash and leaving the token at
@@ -2204,15 +2236,24 @@ case "$PREMERGE_DEFER_TOTAL" in ''|*[!0-9]*) printf 'error: defer line carries n
 printf 'PREMERGE DEFER_FILES=%s — the dispatch will open at most that many issues, one per file, and no more than max_new=10 of them\n' \
   "$PREMERGE_DEFER_FILES" >&2
 if [ "$PREMERGE_DEFER_OVERFLOW" -gt 0 ]; then
-  if [ "$PREMERGE_DEFER_TOTAL" -gt 0 ] && [ "$PREMERGE_DEFER_SUGGESTION" -eq 0 ]; then
-    printf 'PREMERGE DEFER_OVERFLOW=%s CLASS=blocker — the 64-row envelope was filled ENTIRELY by blockers and %s further rows did not fit; some dropped rows may be blockers\n' \
-      "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_OVERFLOW" >&2
+  # WHY the rows went, decided once and said by whichever arm is taken. 64 is
+  # `MAX_FINDINGS` in lib/premerge-findings.py, and it is the ONLY witness of a
+  # full envelope -- see the block above.
+  PREMERGE_DEFER_FULL=0
+  PREMERGE_DEFER_WHY="dropped as unfilable (the envelope holds $PREMERGE_DEFER_TOTAL of 64 rows, so the cap displaced nothing)"
+  if [ "$PREMERGE_DEFER_TOTAL" -eq 64 ]; then
+    PREMERGE_DEFER_FULL=1
+    PREMERGE_DEFER_WHY="displaced by the cap or dropped as unfilable"
+  fi
+  if [ "$PREMERGE_DEFER_FULL" = "1" ] && [ "$PREMERGE_DEFER_SUGGESTION" -eq 0 ]; then
+    printf 'PREMERGE DEFER_OVERFLOW=%s CLASS=blocker — the 64-row envelope was filled ENTIRELY by blockers and %s further rows were %s; some dropped rows may be blockers\n' \
+      "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_WHY" >&2
   elif [ "$PREMERGE_SURVIVORS" != "1" ] && [ "$PREMERGE_DEFER_BLOCKER" -eq 0 ]; then
-    printf 'PREMERGE DEFER_OVERFLOW=%s CLASS=cleanup — %s rows did not fit the 64-row envelope; this run deferred no blockers at all, so every dropped row is a cleanup row\n' \
-      "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_OVERFLOW" >&2
+    printf 'PREMERGE DEFER_OVERFLOW=%s CLASS=cleanup — %s rows were %s; this run deferred no blockers at all, so every dropped row is a cleanup row\n' \
+      "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_WHY" >&2
   else
-    printf 'PREMERGE DEFER_OVERFLOW=%s CLASS=unknown — %s rows did not fit the 64-row envelope; blocker-bearing files were admitted first, but file grouping no longer proves every blocker fit, so a dropped row may be a blocker — check BLOCKER= on the line below against the blockers this run reported\n' \
-      "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_OVERFLOW" >&2
+    printf 'PREMERGE DEFER_OVERFLOW=%s CLASS=unknown — %s rows were %s; blocker-bearing files are admitted first, but neither that ranking nor the unfilable cut proves every blocker survived, so a dropped row may be a blocker — check BLOCKER= on the line below against the blockers this run reported\n' \
+      "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_WHY" >&2
   fi
 fi
 printf '%s\n' "$PREMERGE_DEFER_LINE" >&2
@@ -2225,11 +2266,13 @@ PREMERGE_DEFER TOTAL=<n> BLOCKER=<n> SUGGESTION=<n> FILES=<n> OVERFLOW=<n> PATH=
 ```
 
 `TOTAL`, `BLOCKER` and `SUGGESTION` describe the rows that ARE in the written
-aggregate; `OVERFLOW` is how many were dropped — the ones that did not fit **and**
+aggregate; `OVERFLOW` is how many were dropped — the ones the cap displaced **and**
 the ones the filer could open no issue for, which are cut on every run, so
-`OVERFLOW > 0` does not imply the envelope was full. `TOTAL` is therefore the only
-field on the line that witnesses the envelope is non-empty, and the fence reads it
-as one. `TOTAL + OVERFLOW` is everything
+`OVERFLOW > 0` does not imply the envelope was full. `TOTAL` is the only field on
+the line that witnesses whether it was: the cap spends its whole budget when it
+cuts, so `TOTAL == 64` iff a row was displaced, and below that every dropped row
+is an unfilable one. The fence reads it as exactly that, in both jobs — which arm
+to take, and which of the two populations to name. `TOTAL + OVERFLOW` is everything
 the run had to file. `FILES` is how many distinct owning files those rows cover —
 one issue each up to the dispatch's `max_new`, because the filer groups by file
 and that cap counts files too. Above the cap `FILES` is an upper bound and not a
@@ -2285,28 +2328,43 @@ What happens now:
 - **The count is reported, never swallowed.** Surface `OVERFLOW=<n>` in the run
   summary. Silently dropping is the defect; reporting is what makes the drop
   legitimate rather than a repeat of the thing being fixed.
-- **`OVERFLOW=` is not only the envelope cut, and the fence must not read it as
-  one.** A row whose `file` is not a usable string can become no issue under any
-  ranking, so `defer` drops it on **every** run rather than only an overflowing
-  one — and counts it in `OVERFLOW=` so the drop is stated instead of hidden.
-  `OVERFLOW > 0` therefore no longer implies the envelope was full, or even that
-  it holds anything: a run whose only deferred row has a non-string `file` prints
-  `TOTAL=0 BLOCKER=0 SUGGESTION=0 FILES=0 OVERFLOW=1`. Any arm reasoning about
-  what the envelope contains needs its own witness that the envelope is
-  non-empty, and `TOTAL=` on the same line is it.
+- **`OVERFLOW=` counts two populations, and every sentence about it must name
+  which one.** A row whose `file` is not a usable string can become no issue
+  under any ranking, so `defer` drops it on **every** run rather than only an
+  overflowing one — and counts it in `OVERFLOW=` so the drop is stated instead of
+  hidden. `OVERFLOW > 0` therefore no longer implies the envelope was full, or
+  even that it holds anything: a run whose only deferred row has a non-string
+  `file` prints `TOTAL=0 BLOCKER=0 SUGGESTION=0 FILES=0 OVERFLOW=1`. `TOTAL=` on
+  the same line is what separates the two, in both directions: the cap spends its
+  whole budget when it cuts — the boundary file is row-filled to exactly
+  `MAX_FINDINGS` — so a displaced row implies `TOTAL == 64`, and a `TOTAL` below
+  that proves the cap displaced nothing and every dropped row is one the filer
+  could open no issue for. So **no arm says *"did not fit the 64-row envelope"***,
+  which is false on exactly the new drop path and false twice over: three valid
+  suggestions plus four rows with no usable `file` print `TOTAL=3 BLOCKER=0
+  SUGGESTION=3 FILES=3 OVERFLOW=4` — nowhere near 64, nothing displaced by it.
+  Each arm reports *displaced by the cap or dropped as unfilable* on a full
+  envelope and *dropped as unfilable*, with the row count, below one. An arm
+  reasoning about what the envelope CONTAINS needs `TOTAL=` as its witness
+  besides.
 - **The overflow classes are reported differently, and none promises more than it
-  can — the `CLASS=` token included.** `TOTAL > 0 && SUGGESTION == 0 &&
-  OVERFLOW > 0` means the envelope was filled entirely by blockers; it keeps the
+  can — the `CLASS=` token included.** `TOTAL == 64 && SUGGESTION == 0 &&
+  OVERFLOW > 0` means the envelope was FILLED entirely by blockers; it keeps the
   severe `CLASS=blocker` sentence, and an operator must never be shown a milder one
-  over that state. `TOTAL > 0` is the half that is easy to drop and must not be:
-  `TOTAL = BLOCKER + SUGGESTION`, so it is what turns `SUGGESTION == 0` from
-  vacuously true on an empty envelope into "every row in here is a blocker". Guard
-  the arm on `SUGGESTION == 0` alone and the empty-envelope line above takes it,
-  announcing a blocker overflow over a dropped *suggestion* — and because `CLASS=`
+  over that state. `TOTAL == 64` is the half that is easy to get wrong and must
+  not be: `TOTAL = BLOCKER + SUGGESTION`, so `SUGGESTION == 0` proves every row
+  *in* the envelope is a blocker — and nothing except `TOTAL == MAX_FINDINGS`
+  proves the envelope was FULL, which is the other half of what that sentence
+  asserts. Guard the arm on `SUGGESTION == 0` alone, or on `TOTAL > 0 &&
+  SUGGESTION == 0`, and a run that never overflowed takes it: two blockers in
+  `a.py` plus one suggestion whose `file` is a JSON object print `TOTAL=2
+  BLOCKER=2 SUGGESTION=0 FILES=1 OVERFLOW=1`, where all three of the severe
+  sentence's claims are false — 2 of 64 rows held, the dropped row a suggestion,
+  no blocker dropped at all. Because `CLASS=`
   is the only parseable part of the line, a scraper records the alarm as real. An
-  empty envelope witnesses nothing about the dropped rows, so it falls through to
-  the arms that answer from the **candidate set** rather than from the envelope,
-  and those stay correct at `TOTAL=0`. What the mild arm may no longer say
+  envelope that is not full witnesses nothing about the dropped rows, so it falls
+  through to the arms that answer from the **candidate set** rather than from the
+  envelope, and those stay correct at any `TOTAL`. What the mild arm may no longer say
   is *every blocker was kept*. Files are the unit now, and a blocker-bearing file
   carries its own cleanup rows into the envelope with it — so cleanup can survive
   while a blocker is dropped, and `SUGGESTION > 0` no longer witnesses anything
@@ -2451,7 +2509,9 @@ Print the run summary and **stop**:
   clean gate    green | not_green (<reasons>)
   simplify      applied <n> / deferred <n> | skipped (<reason>) | reverted (<reason>)
   issues filed  <n> created, <n> commented, <n> deduped  (<n> blocker, <n> suggestion)
-                  <n> rows did not fit the 64-row envelope (cleanup | BLOCKER-class)
+                  <n> owning files — one issue each, at most max_new=10 of them
+                  <n> rows dropped, CLASS=blocker | cleanup | unknown
+                    (displaced by the cap or dropped as unfilable)
   version       v<X.Y.Z> | skipped (<reason>)
 
   <stack PR URL>
@@ -2469,6 +2529,17 @@ The trace is `converge.jsonl` — one row per decision, append-only, in the run
 directory. `CATEGORY_BACKED` still belongs in the review row: it says how much of
 the blocker/suggestion split rested on a machine-checked signal, and under a loop
 that number governs how much of the whole run's work was correctly aimed.
+
+**The two `issues filed` sub-rows are transcribed from the defer fence, not
+re-derived.** They are its `PREMERGE DEFER_FILES=` and
+`PREMERGE DEFER_OVERFLOW= CLASS=` lines, and the summary must carry the same
+three tokens the fence can print, `unknown` included — that token is the whole
+point of the row. It means *a dropped row may be a blocker and this run cannot
+prove otherwise*, so collapsing it into `blocker` or `cleanup` reports a
+certainty nobody has. Omit the dropped-rows sub-row entirely when `OVERFLOW=0`;
+the fence prints nothing then either. And keep the reason clause honest per
+`#### When the envelope overflows`: rows are displaced by the cap only on a full
+envelope, and below one every dropped row is an unfilable one.
 
 Never offer to merge, never ask whether to merge, never dispatch `/merge`.
 
