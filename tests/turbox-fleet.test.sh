@@ -38,7 +38,19 @@ set -u; set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CMD="$REPO_ROOT/plugins/uberdev/commands/turbox.md"
-SKILL="$REPO_ROOT/plugins/uberdev/skills/turbox-fleet/SKILL.md"
+SKILL_DIR="$REPO_ROOT/plugins/uberdev/skills/turbox-fleet"
+SKILL="$SKILL_DIR/SKILL.md"
+# #747 — the SKILL is SKILL.md PLUS the reference files its body points at.
+# Progressive disclosure moved whole sections out of the body to keep it under
+# Anthropic's 500-line ceiling, and a rule the skill still states is still
+# stated BY THE SKILL wherever it now lives. So every content assertion below
+# reads the whole set; only the two frontmatter rows read "$SKILL" alone,
+# because frontmatter is a property of the body file itself. Globbed, not
+# listed, so a new reference file is covered the moment it is added.
+SKILL_SET=( "$SKILL" )
+for _ref in "$SKILL_DIR"/references/*.md; do
+  [ -r "$_ref" ] && SKILL_SET+=( "$_ref" )
+done
 LIB="$REPO_ROOT/plugins/uberdev/lib/turbox-fleet.sh"
 LAUNCHER="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
 RFC="$REPO_ROOT/docs/rfc/0020-turbox-standard-mode-fleet.md"
@@ -52,6 +64,15 @@ done
 
 PASS=0; FAIL=0
 ck() { if eval "$2"; then echo "  PASS  $1"; PASS=$((PASS+1)); else echo "  FAIL  $1"; FAIL=$((FAIL+1)); fi; }
+
+# `grep -c` over MULTIPLE files prints `path:count` per file, so a bare command
+# substitution yields several words and `[ ... -eq 0 ]` becomes a shell ERROR,
+# not a false -- and `if` swallows that status, so every count row would pass
+# vacuously. Sum the per-file counts instead. `$NF` rather than `$2` so a colon
+# in a checkout path cannot shift the field, and the pipe cannot EPIPE because
+# `grep -c` reads to EOF.
+skill_count()  { grep -c  "$@" "${SKILL_SET[@]}" | awk -F: '{t+=$NF} END{print t+0}'; }
+skill_countE() { grep -cE "$@" "${SKILL_SET[@]}" | awk -F: '{t+=$NF} END{print t+0}'; }
 
 echo "== TX1: command file structure + the no-Workflow invariant =="
 ck "has description frontmatter"   "grep -q '^description:' '$CMD'"
@@ -79,75 +100,75 @@ echo "== TX3: pipeline skill structure =="
 ck "skill has name frontmatter"     "grep -q '^name: turbox-fleet' '$SKILL'"
 ck "skill has description"          "grep -q '^description:' '$SKILL'"
 for phase in 0 1 2 3 4 5 6 7; do
-  ck "has '## Phase $phase'"        "grep -q '^## Phase $phase ' '$SKILL'"
+  ck "has '## Phase $phase'"        "grep -q '^## Phase $phase ' \"\${SKILL_SET[@]}\""
 done
-ck "has an Inputs section"          "grep -q '^## Inputs' '$SKILL'"
-ck "has an Invariants section"      "grep -q '^## Invariants' '$SKILL'"
-ck "has Return contracts"           "grep -q '^## Return contracts' '$SKILL'"
-ck "has Circuit breakers"           "grep -q '^## Circuit breakers' '$SKILL'"
+ck "has an Inputs section"          "grep -q '^## Inputs' \"\${SKILL_SET[@]}\""
+ck "has an Invariants section"      "grep -q '^## Invariants' \"\${SKILL_SET[@]}\""
+ck "has Return contracts"           "grep -q '^## Return contracts' \"\${SKILL_SET[@]}\""
+ck "has Circuit breakers"           "grep -q '^## Circuit breakers' \"\${SKILL_SET[@]}\""
 
 echo "== TX4: the lane's REASON is stated, not assumed =="
-ck "states Workflow agents have no Task tool" "grep -q 'no \`Task\` tool' '$SKILL'"
-ck "states the Workflow lane is sequential"   "grep -qi 'sequential per-task loop' '$SKILL'"
-ck "names wave-parallel implementation"       "grep -qi 'wave-parallel' '$SKILL'"
-ck "names the Owns file allowlist"            "grep -q 'Owns (file allowlist)' '$SKILL'"
+ck "states Workflow agents have no Task tool" "grep -q 'no \`Task\` tool' \"\${SKILL_SET[@]}\""
+ck "states the Workflow lane is sequential"   "grep -qi 'sequential per-task loop' \"\${SKILL_SET[@]}\""
+ck "names wave-parallel implementation"       "grep -qi 'wave-parallel' \"\${SKILL_SET[@]}\""
+ck "names the Owns file allowlist"            "grep -q 'Owns (file allowlist)' \"\${SKILL_SET[@]}\""
 ck "warns against silently reverting to /turbo" \
-   "grep -qi 'silently reverted to' '$SKILL'"
+   "grep -qi 'silently reverted to' \"\${SKILL_SET[@]}\""
 
 echo "== TX5: controller-only git + explicit-path staging =="
-ck "states the two-writers rule"        "grep -qi 'two or more concurrent writers' '$SKILL'"
-ck "implementers never run git"         "grep -qi 'implementers never run git' '$SKILL'"
-ck "routes every commit via stage-commit" "grep -q 'stage-commit' '$SKILL'"
+ck "states the two-writers rule"        "grep -qi 'two or more concurrent writers' \"\${SKILL_SET[@]}\""
+ck "implementers never run git"         "grep -qi 'implementers never run git' \"\${SKILL_SET[@]}\""
+ck "routes every commit via stage-commit" "grep -q 'stage-commit' \"\${SKILL_SET[@]}\""
 ck "names the refused stage-everything forms" \
-   "grep -q 'refuses \`-A\`, \`--all\`' '$SKILL'"
+   "grep -q 'refuses \`-A\`, \`--all\`' \"\${SKILL_SET[@]}\""
 # Fragment chosen to sit inside one line: the sentence wraps in the skill, and
 # grep is line-oriented, so a longer needle would assert the line breaks rather
 # than the rule.
 ck "forbids prose-reconstructed staging lists" \
-   "grep -qi 'reconstructed from its prose' '$SKILL'"
+   "grep -qi 'reconstructed from its prose' \"\${SKILL_SET[@]}\""
 # The negative control: a skill that told the controller to stage everything
 # would defeat the lib's refusal by never reaching it.
 ck "skill never instructs a bare 'git add -A'" \
-   "[ \$(grep -c 'git add -A' '$SKILL') -eq 0 ]"
+   "[ \$(skill_count 'git add -A') -eq 0 ]"
 
 echo "== TX6: dispatch-before-wait is stated where it matters =="
-ck "invariant names ONE message"        "grep -q 'in \*\*ONE message\*\*' '$SKILL'"
+ck "invariant names ONE message"        "grep -q 'in \*\*ONE message\*\*' \"\${SKILL_SET[@]}\""
 ck "research phase batches every gated issue" \
-   "grep -q 'ALL risk-gated issues in ONE message' '$SKILL'"
-ck "impl phase dispatches a whole wave" "grep -q 'Every task of wave \*k\*, for every issue, in ONE message' '$SKILL'"
-ck "delivery dispatches all issues"     "grep -q 'all issues in one message' '$SKILL'"
+   "grep -q 'ALL risk-gated issues in ONE message' \"\${SKILL_SET[@]}\""
+ck "impl phase dispatches a whole wave" "grep -q 'Every task of wave \*k\*, for every issue, in ONE message' \"\${SKILL_SET[@]}\""
+ck "delivery dispatches all issues"     "grep -q 'all issues in one message' \"\${SKILL_SET[@]}\""
 
 echo "== TX7: return contracts =="
-ck "implementer fence has status:"      "grep -q '^status: DONE' '$SKILL'"
-ck "implementer fence has paths:"       "grep -q '^paths:' '$SKILL'"
-ck "implementer fence has tests:"       "grep -q '^tests:' '$SKILL'"
-ck "implementer fence has blocker:"     "grep -q '^blocker: null' '$SKILL'"
-ck "reviewer fence has verdict:"        "grep -q '^verdict: APPROVE' '$SKILL'"
-ck "reviewer fence has report_path:"    "grep -q '^report_path:' '$SKILL'"
-ck "delivery fence has pr_number:"      "grep -q '^pr_number:' '$SKILL'"
-ck "an unparseable fence is a blocker"  "grep -qi 'unparseable block is a blocker' '$SKILL'"
-ck "names NOT_APPLICABLE sentinel"      "grep -q 'NOT_APPLICABLE' '$SKILL'"
-ck "names UNREVIEWED and counts it"     "grep -q 'UNREVIEWED' '$SKILL'"
+ck "implementer fence has status:"      "grep -q '^status: DONE' \"\${SKILL_SET[@]}\""
+ck "implementer fence has paths:"       "grep -q '^paths:' \"\${SKILL_SET[@]}\""
+ck "implementer fence has tests:"       "grep -q '^tests:' \"\${SKILL_SET[@]}\""
+ck "implementer fence has blocker:"     "grep -q '^blocker: null' \"\${SKILL_SET[@]}\""
+ck "reviewer fence has verdict:"        "grep -q '^verdict: APPROVE' \"\${SKILL_SET[@]}\""
+ck "reviewer fence has report_path:"    "grep -q '^report_path:' \"\${SKILL_SET[@]}\""
+ck "delivery fence has pr_number:"      "grep -q '^pr_number:' \"\${SKILL_SET[@]}\""
+ck "an unparseable fence is a blocker"  "grep -qi 'unparseable block is a blocker' \"\${SKILL_SET[@]}\""
+ck "names NOT_APPLICABLE sentinel"      "grep -q 'NOT_APPLICABLE' \"\${SKILL_SET[@]}\""
+ck "names UNREVIEWED and counts it"     "grep -q 'UNREVIEWED' \"\${SKILL_SET[@]}\""
 
 echo "== TX8: circuit breakers are named in BOTH the skill and the lib =="
 for cb in TB1 TB2 TB3 TB4; do
-  ck "skill names $cb"                  "grep -q '$cb' '$SKILL'"
+  ck "skill names $cb"                  "grep -q '$cb' \"\${SKILL_SET[@]}\""
 done
 ck "lib names TB1 (project-agents)"     "grep -q 'TB1' '$LIB'"
 ck "lib names TB2 (budget-spend)"       "grep -q 'TB2' '$LIB'"
-ck "skill reads caps from loop-cap"     "grep -q 'loop-cap' '$SKILL'"
-ck "skill forbids restating a cap"      "grep -qi 'Never restate a cap' '$SKILL'"
+ck "skill reads caps from loop-cap"     "grep -q 'loop-cap' \"\${SKILL_SET[@]}\""
+ck "skill forbids restating a cap"      "grep -qi 'Never restate a cap' \"\${SKILL_SET[@]}\""
 # Every cap the lib defines must have a CONSUMER in the skill. A cap nothing
 # reads is a dead contract — the class this project audits for by counting read
 # sites per schema property, not by reading the declaration.
 for loop in fix_rounds retest_rounds context_rounds; do
   ck "the '$loop' cap is actually consumed by a phase" \
-     "grep -q -- '--loop $loop' '$SKILL'"
+     "grep -q -- '--loop $loop' \"\${SKILL_SET[@]}\""
 done
 ck "NEEDS_CONTEXT is in the implementer status vocabulary" \
-   "grep -q 'NEEDS_CONTEXT' '$SKILL'"
+   "grep -q 'NEEDS_CONTEXT' \"\${SKILL_SET[@]}\""
 ck "NEEDS_CONTEXT and BLOCKED are kept distinct" \
-   "grep -qi 'must not be collapsed' '$SKILL'"
+   "grep -qi 'must not be collapsed' \"\${SKILL_SET[@]}\""
 
 echo "== TX9: launcher parses --standard and refuses --backend =="
 ck "STANDARD_MODE initialised"          "grep -q '^STANDARD_MODE=0' '$LAUNCHER'"
@@ -186,7 +207,7 @@ for sub in loop-cap round-permitted issue-concurrency project-agents \
 done
 # Anti-drift in the other direction: the skill must not invoke a subcommand the
 # lib does not have. Every `bash \"\$LIB\" <sub>` in the skill is checked.
-missing_subs="$(grep -oE 'bash "\$LIB" [a-z-]+' "$SKILL" | awk '{print $3}' | sort -u | while read -r s; do
+missing_subs="$(grep -hoE 'bash "\$LIB" [a-z-]+' "${SKILL_SET[@]}" | awk '{print $3}' | sort -u | while read -r s; do
   grep -qE "^[[:space:]]+$s\)" "$LIB" || echo "$s"
 done)"
 ck "skill invokes no unknown subcommand (found: '${missing_subs:-none}')" "[ -z '$missing_subs' ]"
@@ -239,7 +260,7 @@ tx_roster() {
   grep -oE -e "$tx_cite_re" -e "$tx_dispatch_re" \
     | sed -e 's/.*uberdev://' -e 's/`$//' -e '/[<>]/d' | sort -u
 }
-named_agents="$(tx_roster < "$SKILL")"
+named_agents="$(cat "${SKILL_SET[@]}" | tx_roster)"
 ck "the skill names at least 6 agent types (found: $(printf '%s' "$named_agents" | grep -c .))" \
    "[ \$(printf '%s' \"\$named_agents\" | grep -c .) -ge 6 ]"
 # Membership, positive: the post-collapse roster, one row per name.
@@ -306,10 +327,10 @@ ck "RFC number 0020 is unique"          "[ \$(ls '$REPO_ROOT/docs/rfc/' | grep -
 echo "== TX14: the lib is an executable, never sourced (the zsh trap) =="
 ck "lib has a bash shebang"             "[ \$(head -1 '$LIB' | grep -c '^#!/usr/bin/env bash') -ge 1 ]"
 ck "lib documents the never-source rule" "grep -q 'never a sourced library' '$LIB'"
-ck "skill documents the never-source rule" "grep -qi 'executable\*\*, never sourced' '$SKILL'"
+ck "skill documents the never-source rule" "grep -qi 'executable\*\*, never sourced' \"\${SKILL_SET[@]}\""
 # A `. \$LIB` / `source \$LIB` anywhere in the skill would run the body under
 # the Bash tool's /bin/zsh, which is the class this project keeps re-hitting.
-ck "skill never sources the lib"        "[ \$(grep -cE '(^|[^a-z])(source|\.) +\"?\\\$LIB' '$SKILL') -eq 0 ]"
+ck "skill never sources the lib"        "[ \$(skill_countE '(^|[^a-z])(source|\.) +\"?\\\$LIB') -eq 0 ]"
 ck "command never sources the lib"      "[ \$(grep -cE '(^|[^a-z])(source|\.) +\"?\\\$LIB' '$CMD') -eq 0 ]"
 
 echo "== TX15: the issue-body channel is locked end to end =="
@@ -327,17 +348,17 @@ ck "the cap defaults to 64 KiB in ONE place"    "[ \$(grep -c 'UBERDEV_ISSUE_BOD
 ck "launcher writes it O_EXCL"                  "[ \$(grep -c 'O_EXCL' '$LAUNCHER') -ge 1 ]"
 ck "launcher writes it at 0600"                 "[ \$(grep -c '0o600' '$LAUNCHER') -ge 1 ]"
 ck "manifest carries issue_body_file"           "[ \$(grep -c 'issue_body_file' '$LAUNCHER') -ge 2 ]"
-ck "skill names issue_body_file"                "[ \$(grep -c 'issue_body_file' '$SKILL') -ge 3 ]"
-ck "skill states context_file is NOT the body"  "grep -q 'NOT the issue body' '$SKILL'"
+ck "skill names issue_body_file"                "[ \$(skill_count 'issue_body_file') -ge 3 ]"
+ck "skill states context_file is NOT the body"  "grep -q 'NOT the issue body' \"\${SKILL_SET[@]}\""
 # The regression that shipped: three sites told the controller to read the issue
 # body out of context_file. None may come back.
-ck "no site reads the body from context_file"   "[ \$(grep -c 'issue body from its .context_file' '$SKILL') -eq 0 ]"
-ck "controller is told not to re-fetch it"      "[ \$(grep -c 're-fetch the body' '$SKILL') -ge 1 ]"
-ck "controller is told not to open it itself"   "[ \$(grep -c 'never open the file' '$SKILL') -ge 1 ]"
-ck "an absent issue_body_file is audited"       "grep -q 'issue_body_missing' '$SKILL'"
-ck "not-dispatched-here note names spec-reviewer" "grep -q 'agents/spec-reviewer.md' '$SKILL'"
-ck "not-dispatched-here note names spec-writer"   "grep -q 'agents/spec-writer.md' '$SKILL'"
-ck "research phase names the inputs it passes"  "grep -q 'The security lens gets the same three inputs' '$SKILL'"
+ck "no site reads the body from context_file"   "[ \$(skill_count 'issue body from its .context_file') -eq 0 ]"
+ck "controller is told not to re-fetch it"      "[ \$(skill_count 're-fetch the body') -ge 1 ]"
+ck "controller is told not to open it itself"   "[ \$(skill_count 'never open the file') -ge 1 ]"
+ck "an absent issue_body_file is audited"       "grep -q 'issue_body_missing' \"\${SKILL_SET[@]}\""
+ck "not-dispatched-here note names spec-reviewer" "grep -q 'agents/spec-reviewer.md' \"\${SKILL_SET[@]}\""
+ck "not-dispatched-here note names spec-writer"   "grep -q 'agents/spec-writer.md' \"\${SKILL_SET[@]}\""
+ck "research phase names the inputs it passes"  "grep -q 'The security lens gets the same three inputs' \"\${SKILL_SET[@]}\""
 # #623 renamed the six research-* cards onto the wire keys the orchestrator was
 # already sending. This controller is the SECOND dispatcher of those same cards
 # and nothing else in the suite compares it against them, so the rename could --
@@ -345,18 +366,18 @@ ck "research phase names the inputs it passes"  "grep -q 'The security lens gets
 # DIRECTORY that the card no longer accepts, while all 120 CI tests stayed green.
 # The cross-dispatcher comparator lives in orchestrator-plan-flatten.test.sh
 # (F2h); these rows are the turbox-side half, in the file that owns this prose.
-ck "phase 2 passes the summary_path wire key"   "grep -q 'summary_path' '$SKILL'"
-ck "phase 2 never passes a summary DIRECTORY"   "[ \$(grep -c 'summary_dir' '$SKILL') -eq 0 ]"
-ck "the one surviving lens names its artifact"  "grep -q 'research/security.md' '$SKILL'"
+ck "phase 2 passes the summary_path wire key"   "grep -q 'summary_path' \"\${SKILL_SET[@]}\""
+ck "phase 2 never passes a summary DIRECTORY"   "[ \$(skill_count 'summary_dir') -eq 0 ]"
+ck "the one surviving lens names its artifact"  "grep -q 'research/security.md' \"\${SKILL_SET[@]}\""
 # The spec-card note is operative instruction, not commentary. It used to say
 # both cards were STALE; after #656 they are simply not dispatched here, and
 # they stay correct for the lanes that do dispatch them. A controller told a
 # live card is wrong will override a card that is now right, so the note has to
 # say not-here rather than not-valid -- and this row is what holds it to that.
 ck "the two spec cards are marked not-dispatched-here" \
-   "grep -q 'Neither card is dispatched on this lane' '$SKILL'"
-ck "research cards are NOT called stale"        "[ \$(grep -c 'cards declare' '$SKILL') -eq 0 ]"
-ck "no deferral pointer to the closed #623"     "[ \$(grep -c '#623' '$SKILL') -eq 0 ]"
+   "grep -q 'Neither card is dispatched on this lane' \"\${SKILL_SET[@]}\""
+ck "research cards are NOT called stale"        "[ \$(skill_count 'cards declare') -eq 0 ]"
+ck "no deferral pointer to the closed #623"     "[ \$(skill_count '#623') -eq 0 ]"
 
 echo "== TX16: the design path is two rungs, and no spec artifact survives =="
 # #656 collapsed Phase 2's fan-out and Phase 3's five rungs into
@@ -365,7 +386,7 @@ echo "== TX16: the design path is two rungs, and no spec artifact survives =="
 # NAMED, the first three here say it is WIRED -- to a rung, to an output path,
 # and to a requirements document -- and the fourth is the negative control that
 # says the thing it replaced is actually gone.
-ck "the design rung dispatches design-planner"  "grep -q 'uberdev:design-planner' '$SKILL'"
+ck "the design rung dispatches design-planner"  "grep -q 'uberdev:design-planner' \"\${SKILL_SET[@]}\""
 # Scoped to the Phase 3 section on purpose. The same token appears in Phase 4's
 # `plan-tasks --plan` line, which predates the collapse -- so a whole-file grep
 # is vacuous: it stays green on a skill whose design rung binds no `plan_path`
@@ -381,7 +402,7 @@ ck "the design rung dispatches design-planner"  "grep -q 'uberdev:design-planner
 # silently vacuous again — green while asserting nothing. Repair a red TX3 by
 # restoring the heading, never by relaxing either pattern.
 ck "the design rung writes plan.md in the run dir" \
-   "[ \$(awk '/^## Phase 3 /,/^## Phase 4 /' '$SKILL' | grep -c '<runDirAbs>/issue-<N>/plan.md') -ge 1 ]"
+   "[ \$(skill_count '<runDirAbs>/issue-<N>/plan.md') -ge 1 ]"
 # Both reviewer rungs read the issue body as their requirements document on this
 # lane -- Phase 3's plan-reviewer and Phase 5's spec-compliance-reviewer. The
 # count is >= 2 because ONE of them stating it is the half-migration that would
@@ -389,13 +410,13 @@ ck "the design rung writes plan.md in the run dir" \
 # exist. The `.` in the pattern spans the backticks and the apostrophe: needles
 # here carry no `$`, because ck() evals them (see the TX15 preamble).
 ck "spec_path is bound to the issue body at BOTH reviewer rungs" \
-   "[ \$(grep -cE 'spec_path. is that issue.s .issue_body_file. path' '$SKILL') -ge 2 ]"
+   "[ \$(skill_countE 'spec_path. is that issue.s .issue_body_file. path') -ge 2 ]"
 # The negative control. Without it the collapse is asserted, not proven: every
 # row above would still pass on a skill that ALSO kept the spec rungs. This is
 # the row that reds until the last mention in Phase 3, Phase 4b' and Phase 5 is
 # gone, which is why it cannot land before them.
 ck "no spec artifact is written or read on this lane" \
-   "[ \$(grep -c 'spec.md' '$SKILL') -eq 0 ]"
+   "[ \$(skill_count 'spec.md') -eq 0 ]"
 
 echo "== TX17: a REFUSED Owns value never adopts the list below it (#670) =="
 # `split_paths` used to return `[]` for TWO different facts: "the label carried

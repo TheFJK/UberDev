@@ -28,11 +28,14 @@ done < "$MANIFEST"
 # dropped lib/worktree_receipts.py with the codex dispatch backend; back to 38
 # with lib/review-push-target.sh, the Phase 3 same-repository push gate #395
 # moved out of the command markdown; 39 with agents/convention-compliance.md,
-# the seventh Phase 1 reviewer #433 added).
+# the seventh Phase 1 reviewer #433 added). 44 with
+# skills/post-impl-review/references/contracts.md, the reference file #747
+# split out of that skill's body — the body points at it by path, so a copy
+# set without it ships a dangling pointer.
 #
 count=$(grep -cvE '^\s*(#|$)' "$MANIFEST")
-[ "$count" -eq 43 ] && ok "M2 manifest lists exactly 43 files" \
-  || no "M2 manifest lists $count files (expected 43)"
+[ "$count" -eq 44 ] && ok "M2 manifest lists exactly 44 files" \
+  || no "M2 manifest lists $count files (expected 44)"
 
 # M3 — excluded files are NOT listed (goal-state, hooks, aliases)
 for bad in lib/goal-state.sh lib/aliases-sync.sh \

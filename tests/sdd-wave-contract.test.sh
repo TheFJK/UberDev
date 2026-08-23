@@ -606,6 +606,12 @@ sweep_path = Path(sys.argv[5])
 SDD = "plugins/uberdev/skills/subagent-driven-dev/SKILL.md"
 TBX_LIB = "plugins/uberdev/lib/turbox-fleet.sh"
 TBX_SKILL = "plugins/uberdev/skills/turbox-fleet/SKILL.md"
+# #747 — the TB1..TB4 circuit-breaker table moved out of the turbox-fleet
+# body into a reference file when the skill was cut under the 500-line
+# ceiling. The sweep already covered it (it greps plugins/uberdev
+# recursively), but the register keys on an exact path, so site 12 has to
+# name where the caps actually live now.
+TBX_RETURNS = "plugins/uberdev/skills/turbox-fleet/references/return-contracts.md"
 FLEET_JS = "plugins/uberdev/skills/solve-fleet/workflow.js"
 FLEET_SKILL = "plugins/uberdev/skills/solve-fleet/SKILL.md"
 RFC20 = "docs/rfc/0020-turbox-standard-mode-fleet.md"
@@ -649,7 +655,7 @@ REGISTER = [
     (9, "prose", SDD, [("fix_rounds", r"max fix_rounds=([0-9]+) per task", 2, 0)]),
     (10, "prose", SDD, [("fix_rounds", r"max fix_rounds=([0-9]+) per task", 2, 1)]),
     (11, "prose", SDD, [("fix_rounds", r"the task's `fix_rounds` cap \(([0-9]+)\)", 1, 0)]),
-    (12, "prose", TBX_SKILL, [
+    (12, "prose", TBX_RETURNS, [
         ("fix_rounds", r"\(`fix_rounds` ([0-9]+), `retest_rounds` [0-9]+, `context_rounds` [0-9]+\)", 1, 0),
         ("retest_rounds", r"\(`fix_rounds` [0-9]+, `retest_rounds` ([0-9]+), `context_rounds` [0-9]+\)", 1, 0),
         ("context_rounds", r"\(`fix_rounds` [0-9]+, `retest_rounds` [0-9]+, `context_rounds` ([0-9]+)\)", 1, 0),
@@ -976,7 +982,7 @@ $drift_detail" ;;
 }
 
 c6_probe "executable" "$TBX_LIB_REL" 'TURBOX_FIX_ROUNDS=3' 'TURBOX_FIX_ROUNDS=4'
-c6_probe "prose" 'plugins/uberdev/skills/turbox-fleet/SKILL.md' '(`fix_rounds` 3,' '(`fix_rounds` 4,'
+c6_probe "prose" 'plugins/uberdev/skills/turbox-fleet/references/return-contracts.md' '(`fix_rounds` 3,' '(`fix_rounds` 4,'
 
 # ---------------------------------------------------------------------------
 # Executed-row floor. The floor reads $ROWS, not $EXPECTED_ROWS: comparing two

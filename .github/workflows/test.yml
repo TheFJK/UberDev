@@ -261,6 +261,7 @@ jobs:
           run_one bash tests/orchestrator-child-inputs.test.sh
           run_one bash tests/sdd-child-inputs.test.sh
           run_one bash tests/sdd-wave-contract.test.sh
+          run_one bash tests/skill-size.test.sh
           run_one bash tests/review-child-inputs.test.sh
           run_one bash tests/routed-provider-bypass.test.sh
           run_one bash tests/run-tree-callsite-contract.test.sh
@@ -782,6 +783,7 @@ jobs:
           run_one bash tests/dispatch-fallback.test.sh
           run_one bash tests/dispatch-background.test.sh
           run_one bash tests/child-dispatch-receipts.test.sh
+          run_one bash tests/skill-size.test.sh
           run_one bash tests/atomic-move.test.sh
           run_one bash tests/review-child-handoff.test.sh --windows-path-only
           run_one bash tests/dispatch-wezterm.test.sh

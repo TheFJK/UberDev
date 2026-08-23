@@ -72,14 +72,24 @@ fi
 n=$(grep -cE '^### Phase 5\.5:' "$SKILL" || true)
 assert_eq "AC4 Phase 5.5 section absent (#92)" "0" "$n"
 
-# AC4b — structural ordering: Phase 5 -> Phase 6 -> Logging (post-#92)
+# AC4b — structural ordering: Phase 5 -> Phase 6 -> the trailing reference
+# section (post-#92). #747 moved the Logging contract itself into
+# references/tiers-and-recovery.md when the body was cut toward Anthropic's
+# 500-line ceiling, so the body's last section is now the pointer that names it.
+# Both halves are asserted: the ORDER here, and the CONTENT in AC4c below —
+# checking only the pointer would let the logging contract disappear entirely.
 order=$(awk '
-  /^### Phase 5: /   { f = 1 }
-  /^### Phase 6:/    { if (f) p = 1 }
-  /^## Logging/      { l = 1; exit }
+  /^### Phase 5: /                                { f = 1 }
+  /^### Phase 6:/                                 { if (f) p = 1 }
+  /^## Tier profiles, failure recovery, logging/  { l = 1; exit }
   END                { print (p && l) ? "ok" : "fail" }
 ' "$SKILL")
-assert_eq "AC4b Phase 5 -> Phase 6 -> Logging order" "ok" "$order"
+assert_eq "AC4b Phase 5 -> Phase 6 -> the trailing reference section" "ok" "$order"
+
+# AC4c — the Logging contract still exists, in the file the pointer names.
+SKILL_TIERS_REF="$(dirname "$SKILL")/references/tiers-and-recovery.md"
+n=$(grep -cE '^## Logging$' "$SKILL_TIERS_REF" || true)
+assert_eq "AC4c the Logging contract survives in tiers-and-recovery.md" "1" "$n"
 
 # Extract the Phase 6 section body (### Phase 6: ... up to the next `## ` heading)
 # once so AC5/AC6/AC7 can all scope their searches to it. Scoping is what makes

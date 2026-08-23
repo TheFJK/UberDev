@@ -1,6 +1,6 @@
 # tools/prkit/manifest.txt — prkit PR-phase copy set (RFC 0014 §5.3).
 # Paths are relative to plugins/uberdev/. Blank lines and #-comments ignored.
-# Keep in sync with tests/prkit-manifest.test.sh (count-locked at 42).
+# Keep in sync with tests/prkit-manifest.test.sh (count-locked at 44).
 
 # --- commands (3) ---
 commands/review-pr.md
@@ -27,6 +27,11 @@ agents/finding-verifier.md
 
 # --- skills (2 + skill-local lib) ---
 skills/post-impl-review/SKILL.md
+# #747 — the reviewer roster, the fanout-cap precedence, the evidence-failure
+# taxonomy, the convention citation gate and the integration contract moved out
+# of that body into this reference file. SKILL.md now points at it by path, so
+# copying the body without it would ship a dangling pointer.
+skills/post-impl-review/references/contracts.md
 skills/merge-pipeline/SKILL.md
 skills/merge-pipeline/lib/discover.sh
 

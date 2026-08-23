@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# tests/skill-size.test.sh — the SKILL.md size ratchet (#747).
+#
+# Anthropic's skills documentation states the ceiling plainly: "Keep SKILL.md
+# under 500 lines. Move detailed reference material to separate files." The cost
+# is recurring, not one-off — once a skill loads, its body stays in context
+# across turns — and auto-compaction re-attaches an invoked skill at only its
+# first 5,000 tokens, inside a 25,000-token budget shared with every other skill
+# invoked in the same session. So an oversize body is not merely expensive: it is
+# the part of a long pipeline that silently stops being in context on exactly the
+# runs that need it most. That is why this file exists as a CI gate rather than a
+# style note.
+#
+# Rows:
+#   S1  every SKILL.md on disk is at or under LIMIT, unless it carries a waiver
+#   S2  every WAIVED skill is at or under its own pinned ceiling
+#   S3  every waiver names a skill that exists (no rot)
+#   S4  anti-vacuity: the sweep actually found skills to measure
+#   S5  anti-vacuity for the RULE: the shipped classifier is executed against
+#       synthetic rows, so a gate that stopped refusing reds here
+#
+# THE WAIVER LIST IS THE RATCHET, AND IT ONLY EVER SHRINKS.
+#
+# Each ceiling is the measured line count at the moment the waiver was written,
+# NOT a round number and NOT headroom. Three things follow, and all three are
+# enforced below rather than left as a convention:
+#
+#   * A waived skill that GROWS past its pin reds. Adding to an oversize body is
+#     the thing this gate exists to stop, and a waiver is not a licence.
+#   * A waived skill that shrinks BELOW LIMIT also reds — with a message saying
+#     to delete its row. A waiver that has been earned out but stays on the list
+#     is a ceiling nobody is holding, and it would let the skill grow back to its
+#     pin unnoticed.
+#   * A waiver for a skill that no longer exists reds. A dead row makes the list
+#     look longer than the debt actually is.
+#
+# To lower a ceiling: split prose out into `references/*.md`, re-measure with
+# `wc -l`, and pin the NEW number. Never raise one.
+#
+# Portable by construction: bash + find + wc + sort only. No python, no mktemp,
+# no git — so it runs unchanged on both the ubuntu and the windows CI jobs.
+set -u
+set -o pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SKILLS_ROOT="$REPO_ROOT/plugins/uberdev/skills"
+
+if [ ! -d "$SKILLS_ROOT" ]; then
+  echo "FATAL: skills root missing or unreadable: $SKILLS_ROOT" >&2
+  exit 2
+fi
+
+LIMIT=500
+
+# name<TAB>ceiling. Measured, never rounded. See the ratchet note above.
+#
+# Every row here is a skill whose body is still dominated by executable fences —
+# `bash uberdev-executable` blocks that a test extracts and runs — so the prose
+# extraction that took each of these down could not take it under LIMIT without
+# relocating shipped code, which is a different change with a different blast
+# radius. The reference files those bodies now point at are real: the bytes moved
+# verbatim, and the tests that assert on them were re-pointed at the file that
+# holds them.
+WAIVERS="$(cat <<'EOF'
+premerge-pipeline	2274
+merge-pipeline	1778
+subagent-driven-dev	1019
+orchestrator	1012
+cluster-pipeline	1012
+finish-branch	984
+review-fleet	800
+post-impl-review	797
+writing-skills	744
+EOF
+)"
+
+PASS=0
+FAIL=0
+
+# The whole decision, in one place, so §S5 below can EXECUTE it against synthetic
+# inputs rather than transcribing a copy of it. A probe that re-implements the
+# rule it is checking is permanently green no matter what the shipped rule does.
+classify() {  # <lines> <ceiling-or-empty> -> verdict token on stdout
+  local lines="$1" ceiling="$2"
+  if [ -z "$ceiling" ]; then
+    if [ "$lines" -le "$LIMIT" ]; then printf 'ok'; else printf 'over-limit'; fi
+    return 0
+  fi
+  case "$ceiling" in
+    ''|*[!0-9]*) printf 'bad-ceiling'; return 0 ;;
+  esac
+  if   [ "$lines" -le "$LIMIT" ];   then printf 'waiver-earned'
+  elif [ "$lines" -le "$ceiling" ]; then printf 'waived'
+  else                                   printf 'over-ceiling'
+  fi
+}
+
+pass() { echo "  PASS  $1"; PASS=$((PASS + 1)); }
+fail() { echo "  FAIL  $1"; FAIL=$((FAIL + 1)); }
+
+waiver_for() {  # <skill-name> -> ceiling on stdout, empty when unwaived
+  local want="$1" name ceiling
+  while IFS="$(printf '\t')" read -r name ceiling; do
+    [ -n "$name" ] || continue
+    if [ "$name" = "$want" ]; then
+      printf '%s' "$ceiling"
+      return 0
+    fi
+  done <<EOF
+$WAIVERS
+EOF
+  return 0
+}
+
+echo "== S1/S2: every SKILL.md is at or under 500 lines, or under its pinned waiver =="
+
+MEASURED=0
+# Sorted so the report order is stable across filesystems — an unstable row order
+# makes a CI diff unreadable and hides which skill actually moved.
+SKILL_FILES="$(find "$SKILLS_ROOT" -name SKILL.md | sort)"
+
+while IFS= read -r skill_file; do
+  [ -n "$skill_file" ] || continue
+  # `wc -l < file` (redirect, not argument) so the count arrives bare: passing the
+  # path makes wc print "<count> <path>", and on a checkout whose path contains a
+  # space — this project's own does — a later `[ "$n" -gt ... ]` on that string is
+  # a shell ERROR, which `if` swallows. A guard that errors instead of failing is
+  # a guard that passes.
+  lines="$(wc -l < "$skill_file" | tr -d '[:space:]')"
+  case "$lines" in
+    ''|*[!0-9]*)
+      fail "S1 $skill_file: line count is unreadable ('$lines') — refusing to read that as compliant"
+      continue
+      ;;
+  esac
+  MEASURED=$((MEASURED + 1))
+
+  skill_dir="$(dirname "$skill_file")"
+  name="$(basename "$skill_dir")"
+  ceiling="$(waiver_for "$name")"
+
+  case "$(classify "$lines" "$ceiling")" in
+    ok)             pass "S1 $name: $lines lines (limit $LIMIT)" ;;
+    over-limit)     fail "S1 $name: $lines lines exceeds the $LIMIT-line limit — move reference material into $name/references/*.md and point at it by path, or add a measured waiver row explaining why it cannot split" ;;
+    waived)         pass "S2 $name: $lines lines (waived at $ceiling, still over the $LIMIT-line limit)" ;;
+    waiver-earned)  fail "S2 $name: $lines lines is now within the $LIMIT-line limit — DELETE its waiver row so the ceiling cannot drift back up to $ceiling" ;;
+    over-ceiling)   fail "S2 $name: $lines lines exceeds its pinned ceiling of $ceiling — a waiver is not a licence to grow. Move the addition into $name/references/*.md, or lower the body somewhere else first" ;;
+    bad-ceiling)    fail "S2 $name: waiver ceiling is not a number ('$ceiling')" ;;
+    *)              fail "S2 $name: classify returned no verdict for lines=$lines ceiling=$ceiling" ;;
+  esac
+done <<EOF
+$SKILL_FILES
+EOF
+
+echo "== S3: every waiver names a skill that exists =="
+while IFS="$(printf '\t')" read -r name ceiling; do
+  [ -n "$name" ] || continue
+  if [ -r "$SKILLS_ROOT/$name/SKILL.md" ]; then
+    pass "S3 waiver '$name' names a live skill"
+  else
+    fail "S3 waiver '$name' (ceiling $ceiling) names no skill on disk — delete the row; a dead waiver overstates the remaining debt"
+  fi
+done <<EOF
+$WAIVERS
+EOF
+
+echo "== S4: anti-vacuity =="
+# Without this, a find that matched nothing — a moved skills root, a typo in
+# SKILLS_ROOT — would print no rows and exit 0, reporting a clean sweep over an
+# empty set. The floor is deliberately well below today's count so it does not
+# have to be edited every time a skill is added or retired.
+if [ "$MEASURED" -ge 20 ]; then
+  pass "S4 measured $MEASURED SKILL.md file(s)"
+else
+  fail "S4 measured only $MEASURED SKILL.md file(s) — the sweep found nothing to check, which is not a clean result"
+fi
+
+echo "== S5: the gate actually fires (mutant probes against the shipped classifier) =="
+# Anti-vacuity for the RULE, not just for the sweep. Every row below drives the
+# same `classify` the sweep above uses, so a rule that stopped refusing would red
+# here on the commit that broke it. Without these, a classifier that returned
+# `ok` unconditionally would print 40 green rows and prove nothing.
+#
+# Columns: <lines> <ceiling|-> <expected verdict> <what it stands for>
+while read -r probe_lines probe_ceiling probe_want probe_desc; do
+  [ -n "$probe_lines" ] || continue
+  [ "$probe_ceiling" = "-" ] && probe_ceiling=""
+  probe_got="$(classify "$probe_lines" "$probe_ceiling")"
+  if [ "$probe_got" = "$probe_want" ]; then
+    pass "S5 $probe_desc -> $probe_got"
+  else
+    fail "S5 $probe_desc -> got '$probe_got', want '$probe_want'"
+  fi
+done <<'EOF'
+499 - ok an unwaived skill just under the limit
+500 - ok an unwaived skill exactly at the limit
+501 - over-limit an unwaived skill one line over the limit
+900 800 over-ceiling a waived skill that grew past its pin
+800 800 waived a waived skill exactly at its pin
+799 800 waived a waived skill that shrank inside its pin
+500 800 waiver-earned a waived skill that reached the limit, so its row must go
+120 800 waiver-earned a waived skill far under the limit
+900 x bad-ceiling a non-numeric ceiling is refused, never read as a pass
+EOF
+
+echo
+echo "== Summary =="
+echo "  passed: $PASS"
+echo "  failed: $FAIL"
+[ "$FAIL" -eq 0 ]
