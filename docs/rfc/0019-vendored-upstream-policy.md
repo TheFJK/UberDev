@@ -216,27 +216,48 @@ Re-measured against each component's **recovered base** (§ Amendment 2026-08-13
 counting both `<` and `>` lines and including the provenance-header line each
 file now carries.
 
-**Measured:** `claude-plugins-official` at the per-row `Base` column, on 2026-08-13, counting `<` plus `>` lines including the provenance header.
+**Measured:** `claude-plugins-official` at the per-row `Base` column, on 2026-08-23, counting `<` plus `>` lines including the provenance header.
 
 | Component | Upstream path | Base | Diff lines | Stance |
 | --- | --- | --- | ---: | --- |
-| `agents/comment-analyzer.md` | `plugins/pr-review-toolkit/agents/comment-analyzer.md` | `4ca561f` | 56 | fork |
-| `agents/silent-failure-hunter.md` | `plugins/pr-review-toolkit/agents/silent-failure-hunter.md` | `4ca561f` | 57 | fork |
-| `agents/pr-test-analyzer.md` | `plugins/pr-review-toolkit/agents/pr-test-analyzer.md` | `4ca561f` | 58 | fork |
-| `agents/type-design-analyzer.md` | `plugins/pr-review-toolkit/agents/type-design-analyzer.md` | `4ca561f` | 64 | fork |
-| `agents/code-reviewer.md` | `plugins/pr-review-toolkit/agents/code-reviewer.md` | `4ca561f` | 81 | fork |
-| `agents/code-simplifier.md` | `plugins/code-simplifier/agents/code-simplifier.md` | `ceb9b72` | 154 | fork |
+| `agents/comment-analyzer.md` | `plugins/pr-review-toolkit/agents/comment-analyzer.md` | `4ca561f` | 58 | fork |
+| `agents/silent-failure-hunter.md` | `plugins/pr-review-toolkit/agents/silent-failure-hunter.md` | `4ca561f` | 59 | fork |
+| `agents/pr-test-analyzer.md` | `plugins/pr-review-toolkit/agents/pr-test-analyzer.md` | `4ca561f` | 60 | fork |
+| `agents/type-design-analyzer.md` | `plugins/pr-review-toolkit/agents/type-design-analyzer.md` | `4ca561f` | 66 | fork |
+| `agents/code-reviewer.md` | `plugins/pr-review-toolkit/agents/code-reviewer.md` | `4ca561f` | 83 | fork |
+| `agents/code-simplifier.md` | `plugins/code-simplifier/agents/code-simplifier.md` | `ceb9b72` | 116 | fork |
 
-All six stay `fork`, and the verdict is unchanged — but the **reason recorded
-here was measurably wrong for five of them**, and stating a true reason is the
-point of writing one down. The claim was that UberDev had rewritten every
-`description` frontmatter into the named-lens contract. Measured against the
-recovered bases, the frontmatter of `comment-analyzer`, `pr-test-analyzer`,
-`silent-failure-hunter` and `type-design-analyzer` is **byte-identical to
-upstream** — upstream's auto-trigger examples still ship verbatim — and
-`code-reviewer`'s frontmatter differs by exactly two lines, both of them
-`model: opus` → `model: inherit`. Only `code-simplifier` was rewritten as
-described (42 frontmatter lines).
+All six stay `fork`, and the verdict is unchanged.
+
+**This table carries live numbers, not a frozen snapshot.** §4.2's cells are
+preserved because the #534 amendment re-measured at a *different* upstream rev,
+so both tables can be labelled and correctly not compared. The #746
+re-measurement sits at the **same** bases as the 2026-08-13 one, and two tables
+at one base would both reconcile against a single register value with one of
+them necessarily wrong — so the cells above are updated in place and the label
+re-dated. The superseded 2026-08-13 figures were 56 / 57 / 58 / 64 / 81 / 154.
+
+**What the 2026-08-13 measurement found, and what changed since.** The reason
+recorded here before that measurement was measurably wrong for five of the six,
+and stating a true reason is the point of writing one down. The claim had been
+that UberDev rewrote every `description` frontmatter into the named-lens
+contract. Measured against the recovered bases on 2026-08-13, the frontmatter of
+`comment-analyzer`, `pr-test-analyzer`, `silent-failure-hunter` and
+`type-design-analyzer` was **byte-identical to upstream** — upstream's
+auto-trigger examples still shipped verbatim — and `code-reviewer`'s frontmatter
+differed by exactly two lines, both of them `model: opus` → `model: inherit`.
+Only `code-simplifier` had been rewritten as described (42 frontmatter lines).
+
+As of **#746 (2026-08-23)** that holds for none of them: all six `description`
+fields are now UberDev-owned one-line routing statements with upstream's
+`<example>` dispatch demos removed. An agent `description` is resident in the
+system prompt of every session — it is the delegation router, so it can never be
+lazy-loaded — which made upstream's example-heavy shape cost roughly 1.3k
+always-on chars per agent for scaffolding a Claude 5 model does not need.
+`code-simplifier` is the one row whose count **fell** (154 → 116): its
+description was already UberDev-owned prose, so compressing it removed local
+lines rather than adding them. The other five rose by exactly 2 — one
+description line replaced, one provenance-header line rewritten.
 
 What actually makes all six not drop-in is the **body**: upstream's own
 output-format section is replaced by the `phase1-reviewer-v1` result-file

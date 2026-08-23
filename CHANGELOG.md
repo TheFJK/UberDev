@@ -4,6 +4,75 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.55.1] — 2026-08-23
+
+Closes #746. Halves the always-resident cost of the agent register and puts a
+CI ratchet under it. PATCH: no behaviour changes, no interface changes — the
+dispatch contract each `description` states is preserved; only its length is not.
+
+### Changed — agent descriptions cut from 23,871 to 11,720 resident chars
+
+An agent's `description` frontmatter is the one part of an agent that sits in
+the system prompt of **every session**, whether or not that agent ever runs: it
+is how the model decides when to delegate, so it can never be lazy-loaded.
+Everything else in the file is paid for only on dispatch. The register carried
+23,871 resolved description chars (~5,967 est. tokens, every session and every
+subagent), of which ~10k was `<example>` dispatch-demo blocks in eight files.
+For scale, Anthropic's reference `code-reviewer` description is ~150 chars;
+ours was 1,984.
+
+[The new rules of context engineering for Claude 5 generation models](https://claude.com/blog/the-new-rules-of-context-engineering-for-claude-5-generation-models)
+names *Give Claude examples → Design interfaces* and *Repeat yourself → Simple
+tool descriptions* as two of its six shifts, and reports that Anthropic removed
+over 80% of Claude Code's own system prompt for Claude 5 models "with no
+measurable loss". Dispatch-trigger demonstrations are exactly that scaffolding,
+and they are also the wrong place for it: dispatch has already happened by the
+time an agent reads its own file, so the demos were dropped rather than
+relocated to the body.
+
+Ten descriptions were rewritten to one specialty statement plus one when-to-use
+clause. Every load-bearing clause survives verbatim in substance —
+`code-simplifier` keeps its named-lens-only gating rule, `convention-compliance`
+keeps its quote-the-rule-or-do-not-report rule, `plan-reviewer` keeps its verdict
+vocabulary and its runs-before-any-code distinction. Net: **12,151 chars
+(~3,037 est. tokens) recovered from every session**, a 50% cut.
+
+### Fixed — eight agent frontmatter blocks did not parse as YAML
+
+Bare colon-space inside a plain scalar ends the scalar, so a strict YAML consumer
+rejects the whole mapping and drops `name`, `model` and `description` with it —
+the same class as #744. Eight of the 47 agents were in that state: six of the
+eight `<example>`-carrying files, whose demos embed `Context: `, `user: ` and
+`assistant: `; plus `findings-to-issues` (`Blocks: PR-N`) and `ci-code-fixer`
+(`fix(ci): `), which carry no examples at all. The two `<example>` carriers that
+escaped did so incidentally — `code-simplifier` used a `|` block scalar, and
+`plan-reviewer`'s demos happen to write `Context.` with a period. All 47 now
+parse; the new fixture's first row is what keeps it that way.
+
+### Added — `tests/agent-description-budget.test.sh`
+
+Four asserts plus an anti-vacuity row, wired into both the ubuntu and windows
+shape-checks jobs: strict-YAML parse (A1), no `<example>` in any description
+(A2), a 500-char per-agent cap (A3), and a pinned 12,500-char total budget (A4).
+A4 exists because A3 alone is defeated by growth spread thinly across 47 files;
+like the version locks it is a hardcoded literal, so raising it is a diff a human
+approves. A0 pins the corpus size, because the other four are loops over a glob
+and a glob that matches nothing passes all of them. All five rows were verified
+by mutation.
+
+### Changed — vendored register re-measured (RFC 0019 §4.3)
+
+Six of the ten rewritten agents are vendored from `claude-plugins-official`.
+Their `measured_diff_lines` were re-measured at the same recorded bases with the
+method the register itself records — reproducing all six 2026-08-13 figures
+exactly as a control first — giving 58 / 59 / 60 / 66 / 83 / 116 (was
+56 / 57 / 58 / 64 / 81 / 154). Five `stance_reason` entries asserted the
+`description` was byte-identical to upstream; that was true when written and is
+now false, so it was corrected rather than left to read as evidence. §4.3's table
+is updated in place rather than superseded by a second table: unlike #534's, this
+re-measurement is at the *same* bases, and two tables at one base would both
+reconcile against one register value.
+
 ## [0.55.0] — 2026-08-23
 
 Packs #727, #728, #729 and #730 as one stack. `/issue` becomes autopilot with a

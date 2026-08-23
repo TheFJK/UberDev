@@ -63,7 +63,7 @@
     },
     {
       "path": "agents/convention-compliance.md",
-      "reason": "This prompt did not EXIST when the numbers were measured: #433 created it at 2026-08-11T01:53:48Z and measured_at is 2026-08-11T01:41:26Z. There are therefore no measured bytes to stamp, and it carries no prompt_digests entry: recording its current digest would assert that the published figures were measured against this prompt, which never happened. Declared here instead, and re-measured with --refresh once the convention lens has adjudicated findings to mine."
+      "reason": "This prompt did not EXIST when the numbers were measured: #433 created it at 2026-08-11T01:53:48Z and measured_at is 2026-08-11T01:41:26Z. There are therefore no measured bytes to stamp, and it carries no prompt_digests entry: recording its current digest would assert that the published figures were measured against this prompt, which never happened. Declared here instead, and re-measured with --refresh once the convention lens has adjudicated findings to mine. Re-stamped at #746, which compressed this agent's `description` frontmatter; the reason above is unaffected \u2014 the prompt still did not exist at `measured_at`, so there are still no measured bytes to stamp."
     },
     {
       "path": "agents/pr-test-analyzer.md",
@@ -96,7 +96,7 @@
   },
   "schema_version": 1,
   "unmeasured_digests": {
-    "agents/convention-compliance.md": "08d6375803e6798aeeecfdd1dc1aac78a3335eb8f3ae38a867a5043f7106a433",
+    "agents/convention-compliance.md": "1d8d5cb06e3dbf2c9f202d5b38c99885eb349a05eefdeeb054d560e1fe811b3d",
     "shared/finding-confidence-rubric-v1.md": "3e35f1646384bf446b4670ff7b9eef81f311c23e2e0189ec062c975d101f6192"
   }
 }
