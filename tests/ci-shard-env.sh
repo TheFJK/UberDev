@@ -50,11 +50,16 @@ if [ -z "$ci_shard_env_plan" ]; then
   exit 2
 fi
 
-# CR REFUSAL, NOT CR REMOVAL (#753). On windows-latest the packer's stdout is
-# a text stream, so every line it prints is terminated CRLF: the $( ) capture
-# above strips the trailing LF and leaves the CR, the `tr` below converts the
-# interior LFs and leaves every CR, and the GITHUB_ENV file's final CRLF is
-# consumed as one line terminator. The harness then receives
+# CR REFUSAL, NOT CR REMOVAL (#753). The working model is that on
+# windows-latest the packer's stdout is a text stream, so every line it prints
+# is terminated CRLF: the $( ) capture above strips the trailing LF and leaves
+# the CR, the `tr` below converts the interior LFs and leaves every CR, and the
+# GITHUB_ENV file's final CRLF is consumed as one line terminator. That
+# PRODUCING half is modelled, not measured — see "What is settled, and what is
+# still a model" in plugins/uberdev/docs/testing.md for its refutation
+# condition. What such a plan then does downstream is NOT modelled: it is
+# settled by execution on any host, and it is the failure this refusal exists
+# to prevent. The harness receives
 # `a<CR> b<CR> ... y<CR> z` and its `case " $PLAN " in *" $name "*` membership
 # test matches only `z`. Six shards ran one fixture each and reported green.
 #

@@ -101,14 +101,18 @@ jobs:
       - name: Dump shard plan bytes
         # DIAGNOSTIC, NEVER A GATE (#753). The plan crosses a $GITHUB_ENV file
         # between the step above and the step below: this repo's shell writes
-        # it, the runner reads it back. On windows-latest that boundary is
-        # where a trailing CR disappears while the interior ones survive, which
-        # is the shape that makes the harness membership test match only the
-        # last entry of the plan and reports a green job that ran one fixture.
-        # A dump of ONE side cannot tell that apart from a plan with no CR at
-        # all, so this step dumps both and probes each planned name through the
-        # harness's own rule. It exits 0 by design; the gates are the CR
-        # refusal in tests/ci-shard-env.sh and the SHARD-COVERAGE tail below.
+        # it, the runner reads it back. The working model is that on
+        # windows-latest that boundary is where a trailing CR disappears while
+        # the interior ones survive, which is the shape that makes the harness
+        # membership test match only the last entry of the plan and reports a
+        # green job that ran one fixture. A dump of ONE side cannot tell that
+        # apart from a plan with no CR at all, so this step dumps both and
+        # probes each planned name through the harness's own rule. It exits 0
+        # by design; the gates are the CR refusal in tests/ci-shard-env.sh and
+        # the SHARD-COVERAGE tail below. That producing half is MODELLED, not
+        # measured — this step is where a Windows runner settles it; see "What
+        # is settled, and what is still a model" in
+        # plugins/uberdev/docs/testing.md for the refutation condition.
         run: bash tests/ci-shard-diagnose.sh dump shape-checks 6 "${{ matrix.shard }}"
       - name: Run shape-check tests
         # SYNC: this list MUST match the windows-latest job below, PLUS the
@@ -424,14 +428,18 @@ jobs:
       - name: Dump shard plan bytes
         # DIAGNOSTIC, NEVER A GATE (#753). The plan crosses a $GITHUB_ENV file
         # between the step above and the step below: this repo's shell writes
-        # it, the runner reads it back. On windows-latest that boundary is
-        # where a trailing CR disappears while the interior ones survive, which
-        # is the shape that makes the harness membership test match only the
-        # last entry of the plan and reports a green job that ran one fixture.
-        # A dump of ONE side cannot tell that apart from a plan with no CR at
-        # all, so this step dumps both and probes each planned name through the
-        # harness's own rule. It exits 0 by design; the gates are the CR
-        # refusal in tests/ci-shard-env.sh and the SHARD-COVERAGE tail below.
+        # it, the runner reads it back. The working model is that on
+        # windows-latest that boundary is where a trailing CR disappears while
+        # the interior ones survive, which is the shape that makes the harness
+        # membership test match only the last entry of the plan and reports a
+        # green job that ran one fixture. A dump of ONE side cannot tell that
+        # apart from a plan with no CR at all, so this step dumps both and
+        # probes each planned name through the harness's own rule. It exits 0
+        # by design; the gates are the CR refusal in tests/ci-shard-env.sh and
+        # the SHARD-COVERAGE tail below. That producing half is MODELLED, not
+        # measured — this step is where a Windows runner settles it; see "What
+        # is settled, and what is still a model" in
+        # plugins/uberdev/docs/testing.md for the refutation condition.
         run: bash tests/ci-shard-diagnose.sh dump supervision-smoke-macos 2 "${{ matrix.shard }}"
       - name: Run focused supervision smoke tests
         # The two dispatch-* fixtures below also run on ubuntu and Windows, but
@@ -612,14 +620,18 @@ jobs:
       - name: Dump shard plan bytes
         # DIAGNOSTIC, NEVER A GATE (#753). The plan crosses a $GITHUB_ENV file
         # between the step above and the step below: this repo's shell writes
-        # it, the runner reads it back. On windows-latest that boundary is
-        # where a trailing CR disappears while the interior ones survive, which
-        # is the shape that makes the harness membership test match only the
-        # last entry of the plan and reports a green job that ran one fixture.
-        # A dump of ONE side cannot tell that apart from a plan with no CR at
-        # all, so this step dumps both and probes each planned name through the
-        # harness's own rule. It exits 0 by design; the gates are the CR
-        # refusal in tests/ci-shard-env.sh and the SHARD-COVERAGE tail below.
+        # it, the runner reads it back. The working model is that on
+        # windows-latest that boundary is where a trailing CR disappears while
+        # the interior ones survive, which is the shape that makes the harness
+        # membership test match only the last entry of the plan and reports a
+        # green job that ran one fixture. A dump of ONE side cannot tell that
+        # apart from a plan with no CR at all, so this step dumps both and
+        # probes each planned name through the harness's own rule. It exits 0
+        # by design; the gates are the CR refusal in tests/ci-shard-env.sh and
+        # the SHARD-COVERAGE tail below. That producing half is MODELLED, not
+        # measured — this step is where a Windows runner settles it; see "What
+        # is settled, and what is still a model" in
+        # plugins/uberdev/docs/testing.md for the refutation condition.
         run: bash tests/ci-shard-diagnose.sh dump shape-checks-windows 6 "${{ matrix.shard }}"
       - name: Run shape-check tests
         # This list MUST match the ubuntu-latest job above MINUS the ubuntu-only
