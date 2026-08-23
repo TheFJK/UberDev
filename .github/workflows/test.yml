@@ -162,7 +162,10 @@ jobs:
           # planning step instead of silently running the whole suite six times.
           fail=0
           failed=""
+          shard_routed=0
+          shard_ran=0
           run_one() {
+            run_one_routed=0
             if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
               # Keyed on the argument that IS a fixture path, found by scanning.
               # Neither the first nor the last argument works: the interpreter
@@ -187,11 +190,16 @@ jobs:
                 esac
               done
               if [ -n "$run_one_fixture" ]; then
+                shard_routed=$((shard_routed + 1))
+                run_one_routed=1
                 case " ${UBERDEV_SHARD_PLAN} " in
                   *" ${run_one_fixture} "*) : ;;
                   *) echo "--- SKIP $* (shard ${UBERDEV_SHARD:-?}/${UBERDEV_SHARDS:-?})"; return 0 ;;
                 esac
               fi
+            fi
+            if [ "$run_one_routed" -eq 1 ]; then
+              shard_ran=$((shard_ran + 1))
             fi
             echo "--- RUN  $*"
             if "$@"; then
@@ -335,6 +343,52 @@ jobs:
           run_one bash tests/premerge.test.sh
           run_one bash tests/premerge-findings.test.sh
           run_one bash tests/premerge-phase5.test.sh
+          # SHARD-COVERAGE (#753) -- a shard that ran fewer fixtures than its
+          # plan named must not be able to report green. A skip is not a
+          # failure, so before this tail existed six windows-latest shards
+          # executed one fixture each and the job passed.
+          #
+          # Guarded on the plan being SET. Unset means "run everything", which
+          # is the documented default above and the one the standalone
+          # extraction of this harness relies on; that path runs against no
+          # plan and must keep exiting 0.
+          #
+          # The denominator is `wc -w`, which splits on ANY whitespace, while
+          # the membership gate above splits on spaces only. That asymmetry is
+          # the point: a plan whose separators carry a stray byte routes almost
+          # nothing while `wc -w` still reports its true length, so the guard
+          # disagrees with the corruption instead of inheriting it. Re-deriving
+          # the length the way the gate derives it would make this vacuous.
+          #
+          # No echo below may name a tests/<name>.test.{sh,py} path: the
+          # fixture extractor greps this block for exactly that shape once
+          # full-line comments are stripped, so an echo carrying one would be
+          # read back as a wiring line and enter every shard plan.
+          if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
+            shard_plan_len="$(printf '%s' "$UBERDEV_SHARD_PLAN" | wc -w | tr -d ' ')"
+            echo "=== SHARD-COVERAGE shard=${UBERDEV_SHARD:-?}/${UBERDEV_SHARDS:-?} plan=$shard_plan_len routed=$shard_routed ran=$shard_ran"
+            case "$shard_plan_len" in
+              ''|*[!0-9]*|0)
+                # A plan that is set but measures no entries would make the
+                # comparison below read `0 -ne 0` and buy a green job that ran
+                # nothing -- the same silent green this tail exists to refuse.
+                # A non-numeric length is worse: `[` exits 2, which `if` reads
+                # as false, so the guard would pass BY erroring out.
+                echo "=== SHARD-COVERAGE FAIL: the plan is set but its length reads [$shard_plan_len]."
+                fail=$((fail + 1))
+                failed="${failed}${failed:+ | }SHARD-COVERAGE(plan length unreadable)"
+                ;;
+              *)
+                if [ "$shard_ran" -ne "$shard_plan_len" ]; then
+                  echo "=== SHARD-COVERAGE FAIL: planned $shard_plan_len fixture(s), ran $shard_ran."
+                  echo "    A shard that runs fewer fixtures than its plan reports green, because a skip is not a failure."
+                  echo "    Dump the plan bytes with: bash tests/ci-shard-diagnose.sh dump <job-key> <shards> <shard>"
+                  fail=$((fail + 1))
+                  failed="${failed}${failed:+ | }SHARD-COVERAGE($shard_ran/$shard_plan_len)"
+                fi
+                ;;
+            esac
+          fi
           if [ "$fail" -ne 0 ]; then
             echo "=== $fail test file(s) FAILED: $failed"
             exit 1
@@ -410,7 +464,10 @@ jobs:
           # planning step instead of silently running the whole suite six times.
           fail=0
           failed=""
+          shard_routed=0
+          shard_ran=0
           run_one() {
+            run_one_routed=0
             if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
               # Keyed on the argument that IS a fixture path, found by scanning.
               # Neither the first nor the last argument works: the interpreter
@@ -435,11 +492,16 @@ jobs:
                 esac
               done
               if [ -n "$run_one_fixture" ]; then
+                shard_routed=$((shard_routed + 1))
+                run_one_routed=1
                 case " ${UBERDEV_SHARD_PLAN} " in
                   *" ${run_one_fixture} "*) : ;;
                   *) echo "--- SKIP $* (shard ${UBERDEV_SHARD:-?}/${UBERDEV_SHARDS:-?})"; return 0 ;;
                 esac
               fi
+            fi
+            if [ "$run_one_routed" -eq 1 ]; then
+              shard_ran=$((shard_ran + 1))
             fi
             echo "--- RUN  $*"
             if "$@"; then
@@ -459,6 +521,52 @@ jobs:
           run_one bash tests/dispatch-wezterm.test.sh
           run_one bash tests/review-pr-workflow.test.sh
           run_one bash tests/atomic-move.test.sh
+          # SHARD-COVERAGE (#753) -- a shard that ran fewer fixtures than its
+          # plan named must not be able to report green. A skip is not a
+          # failure, so before this tail existed six windows-latest shards
+          # executed one fixture each and the job passed.
+          #
+          # Guarded on the plan being SET. Unset means "run everything", which
+          # is the documented default above and the one the standalone
+          # extraction of this harness relies on; that path runs against no
+          # plan and must keep exiting 0.
+          #
+          # The denominator is `wc -w`, which splits on ANY whitespace, while
+          # the membership gate above splits on spaces only. That asymmetry is
+          # the point: a plan whose separators carry a stray byte routes almost
+          # nothing while `wc -w` still reports its true length, so the guard
+          # disagrees with the corruption instead of inheriting it. Re-deriving
+          # the length the way the gate derives it would make this vacuous.
+          #
+          # No echo below may name a tests/<name>.test.{sh,py} path: the
+          # fixture extractor greps this block for exactly that shape once
+          # full-line comments are stripped, so an echo carrying one would be
+          # read back as a wiring line and enter every shard plan.
+          if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
+            shard_plan_len="$(printf '%s' "$UBERDEV_SHARD_PLAN" | wc -w | tr -d ' ')"
+            echo "=== SHARD-COVERAGE shard=${UBERDEV_SHARD:-?}/${UBERDEV_SHARDS:-?} plan=$shard_plan_len routed=$shard_routed ran=$shard_ran"
+            case "$shard_plan_len" in
+              ''|*[!0-9]*|0)
+                # A plan that is set but measures no entries would make the
+                # comparison below read `0 -ne 0` and buy a green job that ran
+                # nothing -- the same silent green this tail exists to refuse.
+                # A non-numeric length is worse: `[` exits 2, which `if` reads
+                # as false, so the guard would pass BY erroring out.
+                echo "=== SHARD-COVERAGE FAIL: the plan is set but its length reads [$shard_plan_len]."
+                fail=$((fail + 1))
+                failed="${failed}${failed:+ | }SHARD-COVERAGE(plan length unreadable)"
+                ;;
+              *)
+                if [ "$shard_ran" -ne "$shard_plan_len" ]; then
+                  echo "=== SHARD-COVERAGE FAIL: planned $shard_plan_len fixture(s), ran $shard_ran."
+                  echo "    A shard that runs fewer fixtures than its plan reports green, because a skip is not a failure."
+                  echo "    Dump the plan bytes with: bash tests/ci-shard-diagnose.sh dump <job-key> <shards> <shard>"
+                  fail=$((fail + 1))
+                  failed="${failed}${failed:+ | }SHARD-COVERAGE($shard_ran/$shard_plan_len)"
+                fi
+                ;;
+            esac
+          fi
           if [ "$fail" -ne 0 ]; then
             echo "=== $fail test file(s) FAILED: $failed"
             exit 1
@@ -752,7 +860,10 @@ jobs:
           # planning step instead of silently running the whole suite six times.
           fail=0
           failed=""
+          shard_routed=0
+          shard_ran=0
           run_one() {
+            run_one_routed=0
             if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
               # Keyed on the argument that IS a fixture path, found by scanning.
               # Neither the first nor the last argument works: the interpreter
@@ -777,11 +888,16 @@ jobs:
                 esac
               done
               if [ -n "$run_one_fixture" ]; then
+                shard_routed=$((shard_routed + 1))
+                run_one_routed=1
                 case " ${UBERDEV_SHARD_PLAN} " in
                   *" ${run_one_fixture} "*) : ;;
                   *) echo "--- SKIP $* (shard ${UBERDEV_SHARD:-?}/${UBERDEV_SHARDS:-?})"; return 0 ;;
                 esac
               fi
+            fi
+            if [ "$run_one_routed" -eq 1 ]; then
+              shard_ran=$((shard_ran + 1))
             fi
             echo "--- RUN  $*"
             if "$@"; then
@@ -863,6 +979,52 @@ jobs:
           run_one bash tests/contract-markers.test.sh
           run_one bash tests/schema-property-reads.test.sh
           run_one bash tests/premerge.test.sh
+          # SHARD-COVERAGE (#753) -- a shard that ran fewer fixtures than its
+          # plan named must not be able to report green. A skip is not a
+          # failure, so before this tail existed six windows-latest shards
+          # executed one fixture each and the job passed.
+          #
+          # Guarded on the plan being SET. Unset means "run everything", which
+          # is the documented default above and the one the standalone
+          # extraction of this harness relies on; that path runs against no
+          # plan and must keep exiting 0.
+          #
+          # The denominator is `wc -w`, which splits on ANY whitespace, while
+          # the membership gate above splits on spaces only. That asymmetry is
+          # the point: a plan whose separators carry a stray byte routes almost
+          # nothing while `wc -w` still reports its true length, so the guard
+          # disagrees with the corruption instead of inheriting it. Re-deriving
+          # the length the way the gate derives it would make this vacuous.
+          #
+          # No echo below may name a tests/<name>.test.{sh,py} path: the
+          # fixture extractor greps this block for exactly that shape once
+          # full-line comments are stripped, so an echo carrying one would be
+          # read back as a wiring line and enter every shard plan.
+          if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
+            shard_plan_len="$(printf '%s' "$UBERDEV_SHARD_PLAN" | wc -w | tr -d ' ')"
+            echo "=== SHARD-COVERAGE shard=${UBERDEV_SHARD:-?}/${UBERDEV_SHARDS:-?} plan=$shard_plan_len routed=$shard_routed ran=$shard_ran"
+            case "$shard_plan_len" in
+              ''|*[!0-9]*|0)
+                # A plan that is set but measures no entries would make the
+                # comparison below read `0 -ne 0` and buy a green job that ran
+                # nothing -- the same silent green this tail exists to refuse.
+                # A non-numeric length is worse: `[` exits 2, which `if` reads
+                # as false, so the guard would pass BY erroring out.
+                echo "=== SHARD-COVERAGE FAIL: the plan is set but its length reads [$shard_plan_len]."
+                fail=$((fail + 1))
+                failed="${failed}${failed:+ | }SHARD-COVERAGE(plan length unreadable)"
+                ;;
+              *)
+                if [ "$shard_ran" -ne "$shard_plan_len" ]; then
+                  echo "=== SHARD-COVERAGE FAIL: planned $shard_plan_len fixture(s), ran $shard_ran."
+                  echo "    A shard that runs fewer fixtures than its plan reports green, because a skip is not a failure."
+                  echo "    Dump the plan bytes with: bash tests/ci-shard-diagnose.sh dump <job-key> <shards> <shard>"
+                  fail=$((fail + 1))
+                  failed="${failed}${failed:+ | }SHARD-COVERAGE($shard_ran/$shard_plan_len)"
+                fi
+                ;;
+            esac
+          fi
           if [ "$fail" -ne 0 ]; then
             echo "=== $fail test file(s) FAILED: $failed"
             exit 1
