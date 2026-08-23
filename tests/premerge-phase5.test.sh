@@ -17,6 +17,9 @@
 #   B5  a pre-existing NON-COVERING policy is refused here, loudly, instead of
 #       wedging five fences later as "the working tree is not clean"
 #   B6  the policy does not blanket the repo's own .uberdev config root
+#   B7  the `--converge` upper bound is EXECUTED — the shipped argument parser
+#       accepts the library's CONVERGE_REPAIR_CEILING and refuses one past it,
+#       so raising the library value reds until the fence follows (#724)
 #
 # Every case runs bytes EXTRACTED from SKILL.md. Nothing here is a transcription
 # of the shipped logic: a test that executes its own copy of the code is green
@@ -36,12 +39,14 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SKILL="$REPO_ROOT/plugins/uberdev/skills/premerge-pipeline/SKILL.md"
 CONSOLIDATE="$REPO_ROOT/plugins/uberdev/lib/review-consolidate.sh"
 BUMP="$REPO_ROOT/plugins/uberdev/lib/bump-version.sh"
+LIB="$REPO_ROOT/plugins/uberdev/lib/premerge-findings.py"
 MANIFEST='plugins/uberdev/.claude-plugin/plugin.json'
 
-for f in "$SKILL" "$CONSOLIDATE" "$BUMP"; do
+for f in "$SKILL" "$CONSOLIDATE" "$BUMP" "$LIB"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
 command -v git >/dev/null 2>&1 || { echo "FATAL: git is required by ${0##*/}" >&2; exit 2; }
+command -v python3 >/dev/null 2>&1 || { echo "FATAL: python3 is required by ${0##*/}" >&2; exit 2; }
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -245,6 +250,132 @@ if git -C "$CFG" check-ignore -q .uberdev/config.yaml; then
   bad "B6: the policy now ignores the repo's committed .uberdev/config.yaml"
 else
   ok "B6: the committed config file is untouched by the policy"
+fi
+
+echo "== B7: the --converge ceiling is EXECUTED against the library's constant =="
+# #724. Four copies of this number exist: lib/premerge-findings.py's
+# CONVERGE_REPAIR_CEILING (the enforcer), the SKILL's Constants row, the argument
+# fence's `-gt` condition, and the refusal message. tests/premerge-findings.test.sh
+# B15b compares the Constants row and the refusal message against the evaluated
+# constant by reading bytes (and commands/premerge.md's prose besides), but
+# NOTHING read the condition -- so raising the library value left the suite green
+# while the fence still refused the new top of the range with a message promising
+# it.
+#
+# So this case RUNS the shipped condition. ARG_BLOCK is the premerge-scan fence
+# sliced to its argument parser -- from the first default assignment through the
+# heredoc that feeds the loop -- which is exactly the part that can execute
+# without a repo, a run dir or gh: every refusal in the parser exits before the
+# fence reaches `git rev-parse --show-toplevel`. Nothing here transcribes the
+# condition; a test that executes its own copy of the code is green forever.
+#
+# THE SLICE IS BOUNDED AT BOTH ENDS, and that is the safety property, not tidiness
+# -- the premise above holds for the PARSER and for nothing past it. Two anchors
+# choose what runs, and when the closing one stops matching the slice keeps
+# growing into fences that make branches, write run dirs and call gh.
+#
+# The first draft bounded it below only. Renaming the terminator to `EOF_ARGS` in
+# a scratch copy grew the slice from 67 lines to 167 with BOTH guards still
+# passing (a floor cannot see growth, and the `-gt` bound is still inside the
+# wider slice), and `run_converge` then ran that widened slice against the
+# LAUNCHING CWD. Every call the parser does not refuse -- two of the three tokens
+# this case tries, since `--converge=7` exits at the range check having written
+# nothing -- ran on past the parser into the fence's setup: it created
+# `.uberdev/premerge/`, wrote a `.gitignore` of `*` and a run dir holding a
+# `discovery-audit.jsonl`, and only then died on
+# `UBERDEV_PREMERGE_PLUGIN_ROOT: unbound variable`. Which is the shape of the
+# hazard rather than a detail of it: the further a call gets, the more it leaves
+# behind. Measured in a throwaway repo, not imagined (#724).
+#
+# So: the extractor PROVES it reached the terminator (awk exits 3 when it never
+# does, which also covers the opening anchor moving -- no anchor, no terminator),
+# the line count is a BAND and not a floor, and nothing is EXECUTED unless both
+# hold. A renamed terminator now reds here, saying that, before anything runs.
+arg_block() {  # arg_block -> the slice on stdout; rc 3 if the terminator was never reached
+  fence_body premerge-scan | awk '
+    !inb && index($0, "PREMERGE_LEVEL=xhigh") == 1 { inb = 1 }
+    inb { print }
+    inb && $0 == "EOF_PREMERGE_ARGS" { hit = 1; exit }
+    END { if (!hit) exit 3 }
+  '
+}
+ARG_BLOCK="$(arg_block)"; ARG_BLOCK_RC=$?
+ARG_BLOCK_LINES="$(grep -c . <<<"$ARG_BLOCK")"
+ARG_BLOCK_OK=1
+if [ "$ARG_BLOCK_RC" -eq 0 ]; then
+  ok "B7: the slice ends where the parser does, at EOF_PREMERGE_ARGS"
+else
+  ARG_BLOCK_OK=0
+  bad "B7: the slice never reached EOF_PREMERGE_ARGS (awk rc=$ARG_BLOCK_RC) -- the terminator moved or was renamed, so the slice is unbounded and will NOT be run"
+fi
+# The upper end is loose on purpose: the parser legitimately grew 61 -> 67 lines
+# while #724 was being written. This is a guard against a slice that ran away,
+# never a line-count lock on a file people are expected to edit.
+if [ "$ARG_BLOCK_LINES" -ge 40 ] && [ "$ARG_BLOCK_LINES" -le 110 ]; then
+  ok "B7: extracted $ARG_BLOCK_LINES lines of argument parser"
+else
+  ARG_BLOCK_OK=0
+  bad "B7: the argument-parser slice yielded $ARG_BLOCK_LINES lines, outside the 40..110 band -- an anchor moved; every row below would be meaningless"
+fi
+case "$ARG_BLOCK" in
+  *"PREMERGE_CONVERGE_ARG\" -gt "*) ok "B7: the slice contains the bound it is here to execute" ;;
+  *) bad "B7: the slice does not contain the --converge bound -- the parser moved" ;;
+esac
+
+# EVALUATE the library's ceiling, never parse it: the constant may be built by any
+# expression, and tests/premerge.test.sh P3b states that rule for this repo.
+CEILING="$(python3 -I -B -c '
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("pmf", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(module.CONVERGE_REPAIR_CEILING)
+' "$LIB")"
+case "$CEILING" in
+  ''|*[!0-9]*) bad "B7: could not evaluate CONVERGE_REPAIR_CEILING from $LIB (got '$CEILING')"; CEILING="" ;;
+  *)           ok "B7: the library's enforced ceiling evaluates to $CEILING" ;;
+esac
+
+# The block is interpolated as a VALUE into the bash -c program text; a variable
+# expansion is not re-scanned for command substitution, so the parser's own
+# `$( ... | tr ... )` heredoc runs in the CHILD, which is the point.
+run_converge() {  # run_converge <token> -> child's rc; output on stdout
+  ARGUMENTS="$1" bash -c "set -u
+$ARG_BLOCK
+printf 'PARSED CONVERGE=%s\n' \"\$PREMERGE_CONVERGE\"" 2>&1
+}
+
+if [ "$ARG_BLOCK_OK" != 1 ]; then
+  # Not a stand-down that hides anything: the FAIL above has already reddened the
+  # file, and refusing to run an unbounded slice is the point of measuring it.
+  echo "  ----  B7: the slice is not bounded (see the FAIL above) -- NOT executing it"
+elif [ -n "$CEILING" ]; then
+  OUT="$(run_converge "--converge=$CEILING")"; RC=$?
+  if [ "$RC" -eq 0 ] && [ "$OUT" = "PARSED CONVERGE=$CEILING" ]; then
+    ok "B7: --converge=$CEILING (the library's ceiling) is ACCEPTED by the fence"
+  else
+    bad "B7: the fence refuses the ceiling the library enforces (rc=$RC): $OUT"
+  fi
+
+  OUT="$(run_converge "--converge=$((CEILING + 1))")"; RC=$?
+  if [ "$RC" -eq 0 ]; then
+    bad "B7: the fence ACCEPTED --converge=$((CEILING + 1)), one past the library's ceiling: $OUT"
+  else
+    ok "B7: --converge=$((CEILING + 1)) is refused (exit $RC)"
+    case "$OUT" in
+      *"1..$CEILING"*) ok "B7: and the refusal names the range the library enforces" ;;
+      *)               bad "B7: the refusal does not say 1..$CEILING: $OUT" ;;
+    esac
+  fi
+
+  # Anti-vacuity on the low end: a parser that refused everything would satisfy
+  # the refusal row above for entirely the wrong reason.
+  OUT="$(run_converge "--converge=1")"; RC=$?
+  if [ "$RC" -eq 0 ] && [ "$OUT" = "PARSED CONVERGE=1" ]; then
+    ok "B7: --converge=1 still parses -- the refusal is bounded, not blanket"
+  else
+    bad "B7: --converge=1 was refused (rc=$RC): $OUT"
+  fi
 fi
 
 echo ""

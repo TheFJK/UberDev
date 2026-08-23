@@ -228,8 +228,15 @@ GATE_REASONS_WAITABLE = frozenset(
 )
 GATE_REASONS_ROUTABLE = GATE_REASONS_REPAIRABLE | GATE_REASONS_WAITABLE
 
+# NO `_ATTEMPT_RE` COMPANION HERE, DELIBERATELY. There was one -- a
+# `\A[0-9]{2}\Z` that nothing ever matched against -- and its only effect was to
+# tell a reader that the `-NN` attempt suffix is parsed and validated somewhere.
+# It is not: the suffix is FORMATTED (`"%02d" % attempt`) and never read back,
+# and the attempt number itself arrives as an int that `cmd_plan`, `cmd_defer`
+# and `cmd_converge` each bound numerically against their own ceiling. A
+# validator with no call site is a claim nobody can contradict, which is the
+# defect class this module's own docstring is about.
 _SHA1_RE = re.compile(r"\A[0-9a-f]{40}\Z")
-_ATTEMPT_RE = re.compile(r"\A[0-9]{2}\Z")
 
 # Bounds mirrored from lib/code_fixer_contract.py so a document that passes here
 # cannot be rejected downstream for a length the two files disagree about.
@@ -460,11 +467,16 @@ def _fingerprint(file_path: str, summary: str) -> str:
     Path plus folded summary is the narrowest pair that is present in BOTH
     reviewer output contracts and stable under the edits the loop itself makes.
 
-    DELIBERATELY NOT the same fingerprint `agents/findings-to-issues.md` Step 8a
-    computes. That one is `file:line:summary` because an ISSUE is about a
-    location, and two bugs on two lines of one file deserve two issues. This one
-    must survive exactly the line movement that one is keyed on. Same 16-hex
-    width, different question -- never substitute one for the other.
+    DELIBERATELY NOT either of the two fingerprints `agents/findings-to-issues.md`
+    computes, even though Step 8a's container key is now path-based too
+    (`sha256(finding_marker_slug:file_path)`, #722) and so shares this one's
+    insensitivity to line movement. Different material, and a different question:
+    that one keys the file-level ISSUE CONTAINER, so every finding in a file
+    collapses onto it by design; this one keys ONE FINDING across re-reviews, so
+    two findings in a file must stay apart or the loop reads a survivor as fixed.
+    The per-MEMBER key alongside it is `path:line:normalised_summary`, which is
+    keyed on exactly the line movement this one has to survive. Same 16-hex
+    width, three different questions -- never substitute one for another.
     """
     material = "%s\x1f%s" % (file_path, _fold_summary(summary))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
@@ -655,11 +667,108 @@ def _fix_waves(blockers: "list[dict]", max_per_wave: int) -> "list[list[dict]]":
     return waves
 
 
+# A `file` value that cannot serve as a group key -- not a string at all, or the
+# empty string that `_repo_path` refuses. Paired with the row's own index it is
+# unique per row and never equal to any path, which is the entire contract:
+# `_defer_groups` must not merge two such rows into one group, and `cmd_defer`
+# must be able to tell them from a real path in order to drop them.
+_UNUSABLE_FILE = object()
+
+
+def _defer_groups(rows: "list[dict]") -> "list[tuple[object, list[int]]]":
+    """The deferred rows, grouped by owning file, in first-appearance order.
+
+    The same decision `_fix_waves` makes for the FIXER, made for the FILER: the
+    downstream agent now opens one issue per file (#722), so an envelope carrying
+    half of a file's findings produces an issue that reads as complete and is not.
+
+    Groups carry row INDICES rather than the rows themselves, because the caller
+    admits most groups whole and row-fills exactly one of them. A positional key
+    is what lets it rebuild the kept list in the rows' ORIGINAL relative order --
+    the property `cmd_defer` has always promised -- without leaning on dict
+    identity or equality to tell two rows apart.
+
+    The key is the row's own `file` value and NOT `_repo_path(...)`. Most rows
+    reach this function unvalidated by design: `cmd_defer` reads this attempt's
+    `suggestions` and `blockers` and every earlier attempt's carried suggestions
+    straight off disk, checked for nothing beyond "it is a dict". On an
+    overflowing run most of them are about to be discarded.
+    Validating here made one malformed row in the DROPPED tail cost the entire
+    envelope: exit 74 behind `defer "$@" || exit 74`, a fence with no recovery
+    arm, so a run holding 64 filable findings filed nothing over a row no
+    consumer would ever have seen. `_encode_aggregate` therefore stays the single
+    gate, and because it runs after the cut it still refuses a malformed row that
+    SURVIVES, with the same token it always did.
+
+    Any `file` that is not a NON-EMPTY string gets a sentinel key instead, which
+    is what keeps the sharpest case out of the dict: an object or an array is
+    unhashable, and the `TypeError` a bare `.get` would raise on it is neither of
+    the two answers this verb is contracted to give.
+
+    THE EMPTINESS HALF IS NOT A NICETY, and it used to be missing. `""` is
+    hashable, so an empty-`file` row grouped like a real path, sorted among the
+    real paths, survived the cut -- and then cost the ENTIRE envelope at
+    `_encode_aggregate`, whose `_repo_path` refuses it with `file must be a
+    non-empty string`. 64 filable findings lost to one row is the precise trade
+    this function exists to refuse, and `""` walked straight through it. Two
+    empty-`file` rows also shared one group, which is the other half of the
+    sentinel's contract.
+
+    Being unique per row, the sentinel also stops two such rows sharing a group.
+    The caller drops these groups outright -- on EVERY run, not only an
+    overflowing one -- because a row with no usable path cannot become an issue
+    under any ranking.
+    """
+    by_file: "dict[object, list[int]]" = {}
+    order: "list[object]" = []
+    for index, row in enumerate(rows):
+        value = row.get("file")
+        key = value if isinstance(value, str) and value else (_UNUSABLE_FILE, index)
+        if key not in by_file:
+            by_file[key] = []
+            order.append(key)
+        by_file[key].append(index)
+    return [(key, by_file[key]) for key in order]
+
+
+def _drop_unfilable(rows: "list[dict]") -> "tuple[list[dict], int]":
+    """The rows a file-keyed filer could open an issue for, and how many could not.
+
+    ONE implementation, two callers, for the same reason `_union_suggestions` is:
+    `cmd_defer` drops these rows into `OVERFLOW=` and `cmd_plan` has to skip
+    exactly the same ones before it validates the union. A `plan` that refused on
+    a row `defer` is going to discard would abort an attempt that was going to
+    succeed -- the same maximal-loss trade the drop itself exists to refuse -- and
+    an equivalence between two hand-written predicates is a thing this file has
+    watched drift rather than a thing that stays true.
+
+    The decision is `_defer_groups`' KEY, never the row's `file` read a second
+    time: that function is where "not a string, or the empty string `_repo_path`
+    refuses" is defined, and re-deriving it here would be the second copy.
+    """
+    unfilable = {
+        index
+        for key, members in _defer_groups(rows)
+        if not isinstance(key, str)
+        for index in members
+    }
+    if not unfilable:
+        return rows, 0
+    return (
+        [row for index, row in enumerate(rows) if index not in unfilable],
+        len(unfilable),
+    )
+
+
 # --------------------------------------------------------------------------
 # the deferred-findings envelope handed to agents/findings-to-issues.md
 # --------------------------------------------------------------------------
 def _encode_aggregate(
-    rows: "list[dict]", pr_number: int, run_id: str, allow_blockers: bool = False
+    rows: "list[dict]",
+    pr_number: int,
+    run_id: str,
+    allow_blockers: bool = False,
+    partial_files: "dict[str, int] | None" = None,
 ) -> bytes:
     """One line of canonical JSON inside the untrusted-input envelope.
 
@@ -667,6 +776,37 @@ def _encode_aggregate(
     (open tag + newline, one compact sorted-key JSON line, newline + close tag +
     newline) so the agent's existing envelope parser reads it with no new arm.
     Only the `source` and the per-finding key set differ, and both are declared.
+
+    `partial_files` DECLARES THE ONE ROW SHAPE THAT IS NOT FIXED, and it exists
+    because `cmd_defer`'s truncation is file-atomic in every group but one. The
+    boundary group is row-filled to reach exactly `MAX_FINDINGS`, so it reaches
+    the filer holding only SOME of its file's findings -- and that filer opens
+    one issue per file (#722), renders `## Findings (n)` and its per-member
+    `uberdev-finding-index count=n` marker from the rows it was handed, and
+    footers the issue with "closing resolves exactly the findings listed". Handed
+    a split group with nothing marking it split, it writes precisely the artifact
+    file-atomic truncation was introduced to prevent: an issue that reads as
+    complete and is not. `OVERFLOW=` on `cmd_defer`'s stdout line does say the run
+    cut something, but that line is read by a shell fence; the person reading the
+    issue never sees it, and on the next run the cut rows arrive as a SECOND
+    issue for a file whose first issue claimed to be the whole of it.
+
+    So a row whose owning file was split carries one extra key,
+    `file_findings_omitted`: an integer >= 1, how many of THAT file's findings did
+    not fit this envelope. Presence is the flag and the value is the count, so
+    the two can never disagree with each other.
+
+    THE KEY IS ADDITIVE AND ABSENT BY DEFAULT. `partial_files` defaults to None,
+    no whole group's row ever carries it, and an under-cap run -- the common case
+    -- publishes the same bytes it published before. A consumer that has never
+    heard of the key reads exactly the document it read yesterday. That tolerance
+    is contract rather than luck: `agents/findings-to-issues.md` Step 1 scopes
+    "duplicate, extra, or missing keys are `input-malformed`" to the two
+    review-v2 sources and exempts `premerge-aggregate` from the schema-v2 key set
+    by name, so an optional key here is legal for the one consumer that exists.
+    Publishing the fact is this file's half; RENDERING it -- a partial-count in
+    the heading and a footer that stops promising completeness -- is the filer's,
+    and lives in that agent.
 
     EVERY ROW IS RE-VALIDATED, even one that "came from" `_normalise_findings`.
     Not all of them did: `cmd_defer` feeds this function rows read straight off
@@ -700,13 +840,17 @@ def _encode_aggregate(
         )
         # The row's OWN severity, not a hardcoded one.
         #
-        # It used to be pinned to "suggestion", which is correct for the
-        # per-attempt cleanup aggregate and is why `plan` still passes
-        # `allow_blockers=False`. But it also meant `/premerge` had no way to
-        # file the one finding that matters most -- a blocker the loop could not
-        # clear -- so that finding was printed into a summary and lost. A promise
-        # with no producer is the defect this command already shipped once; the
-        # fix is a producer, not a louder promise.
+        # It used to be pinned to "suggestion". That meant `/premerge` had no way
+        # to file the one finding that matters most -- a blocker the loop could
+        # not clear -- so that finding was printed into a summary and lost. A
+        # promise with no producer is the defect this command already shipped
+        # once; the fix is a producer, not a louder promise.
+        #
+        # `allow_blockers` DEFAULTS CLOSED and `cmd_defer` is the one caller that
+        # opens it. Not a vestige of a second caller: the default is the opt-in
+        # gate itself, so a future caller that has no business filing blockers
+        # gets the refusal by writing nothing, and admitting them stays a
+        # deliberate act at the call site.
         severity = finding.get("severity", "suggestion")
         if severity not in SEVERITIES:
             fail("aggregate_severity_invalid", str(severity))
@@ -721,19 +865,34 @@ def _encode_aggregate(
             fail("aggregate_source_edge_invalid", str(edge))
         if edge not in edges_present:
             edges_present.append(edge)
-        findings.append(
-            {
-                "detail": detail,
-                "scope": {
-                    "line": line if line is not None else 1,
-                    "operation": "modify_existing",
-                    "path": path,
-                },
-                "severity": severity,
-                "source_edges": [edge],
-                "summary": summary,
-            }
-        )
+        row = {
+            "detail": detail,
+            "scope": {
+                "line": line if line is not None else 1,
+                "operation": "modify_existing",
+                "path": path,
+            },
+            "severity": severity,
+            "source_edges": [edge],
+            "summary": summary,
+        }
+        # THE ONE OPTIONAL KEY -- see the docstring. Looked up by `path` and not
+        # by a second `finding.get("file")` read: `_repo_path` returns its
+        # argument unmodified (it refuses outright anything `posixpath.normpath`
+        # would rewrite), so `path` IS the string `_defer_groups` grouped on and
+        # this lookup cannot miss because of normalisation.
+        #
+        # The count is validated like every other value that reaches the
+        # envelope. It is `cmd_defer`'s arithmetic today, but "the caller is
+        # trusted" is how this function acquired the unchecked rows its docstring
+        # above is about, and a `"5"` here would publish a string where the filer
+        # reads a number.
+        omitted = partial_files.get(path) if partial_files else None
+        if omitted is not None:
+            if isinstance(omitted, bool) or not isinstance(omitted, int) or omitted < 1:
+                fail("aggregate_partial_count_invalid", f"{path}: {omitted!r}")
+            row["file_findings_omitted"] = omitted
+        findings.append(row)
     document = {
         "contributors": [
             {"confidence": "n/a", "id": edge_id, "verdict": "COMPLETE"}
@@ -870,6 +1029,40 @@ def _carry_prior_suggestions(out_dir: str, attempt: int) -> "list[dict]":
     return carried
 
 
+# The tag that fronts an unhashable field's stand-in. A one-off object, so the
+# stand-in is a TUPLE and can therefore never compare equal to the string or the
+# integer a well-formed row puts in the same slot.
+_UNHASHABLE_FIELD = object()
+
+
+def _hashable_field(value: object) -> object:
+    """One row field, as something a `set` can hold.
+
+    `_suggestion_key` reads `file` and `line` straight off disk: `cmd_defer`
+    unions this attempt's `suggestions` with every earlier attempt's carried
+    rows, and nothing has checked any of them beyond "it is a dict". A JSON
+    OBJECT or ARRAY in either field is unhashable, so building the dedupe set
+    raised `TypeError` -- exit 1 with a full traceback, out of a verb contracted
+    to answer `0 encoded | 74 refused`, and raised BEFORE the cut that was going
+    to discard the row had even run.
+
+    That is the same defect `_defer_groups` keeps out of its dict with a
+    sentinel, arriving one function earlier and on the path most rows take:
+    `_defer_groups` only ever sees rows this union has already returned, so its
+    sentinel could not protect the common case at all.
+
+    The stand-in is the value's canonical JSON behind a tuple tag, which keeps
+    the dedupe honest in BOTH directions -- two rows carrying the same malformed
+    value are still one finding, two carrying different ones are still two --
+    where collapsing every unusable value onto one marker would silently merge
+    them. `dict` and `list` are the only unhashable values `json.loads` can
+    produce, and every row here came from it, so the two arms are exhaustive.
+    """
+    if isinstance(value, (dict, list)):
+        return (_UNHASHABLE_FIELD, _canonical_json(value))
+    return value
+
+
 def _suggestion_key(row: "dict") -> "tuple":
     """The identity the cross-attempt suggestion union dedupes on.
 
@@ -886,10 +1079,15 @@ def _suggestion_key(row: "dict") -> "tuple":
     suggestion path now keys on the same three fields `_normalise_findings`
     already keys its duplicate check on, so the two paths agree about what makes
     two findings the same finding.
+
+    `file` and `line` go through `_hashable_field` because neither has been
+    validated when this runs -- see that function for the traceback it ends. A
+    well-formed row's values pass through untouched, so the dedupe every real
+    finding gets is byte-for-byte the one it always got.
     """
     return (
-        row.get("file"),
-        row.get("line"),
+        _hashable_field(row.get("file")),
+        _hashable_field(row.get("line")),
         _normalised_summary(row["summary"]) if isinstance(row.get("summary"), str) else None,
     )
 
@@ -897,11 +1095,12 @@ def _suggestion_key(row: "dict") -> "tuple":
 def _union_suggestions(base: "list[dict]", carried: "list[dict]") -> "list[dict]":
     """The cross-attempt suggestion union -- ONE implementation, two callers.
 
-    `cmd_plan` builds it for `suggestions-aggregate.md` and `cmd_defer` builds it
-    for `deferred-aggregate.md`, and the second one's comment used to assert the
-    two were "byte-for-byte" the same ordering. An equivalence between two copies,
+    `cmd_plan` builds it to report `CARRIED=` and `cmd_defer` builds it to write
+    `deferred-aggregate.md`, and the second one's comment used to assert the two
+    were "byte-for-byte" the same ordering. An equivalence between two copies,
     held by a sentence, is a thing this repo has watched drift rather than a thing
-    that stays true; one function makes the claim structural instead.
+    that stays true; one function makes the claim structural instead -- which is
+    what lets `plan` report a count for a union it does not itself write out.
 
     Latest attempt's rows first, then earlier attempts oldest-first, deduped by
     `_suggestion_key` with the first occurrence winning -- so a suggestion raised
@@ -944,11 +1143,19 @@ def _append_converge_row(run_dir: str, row: "dict") -> None:
         fail("output_failed", f"{_converge_ledger(run_dir)}: {exc}")
 
 
-def _count_wait_rows(run_dir: str, attempt: int) -> int:
-    """How many WAIT_CI decisions this attempt has already recorded."""
+def _count_wait_rows(rows: "list[dict]", attempt: int) -> int:
+    """How many WAIT_CI decisions this attempt has already recorded.
+
+    Takes the ALREADY-READ rows. Both this reducer and `_last_converge_row`
+    used to open and re-parse `converge.jsonl` themselves, so one `converge`
+    invocation ran `json.loads` over every row of the ledger twice -- and the
+    ledger is longest (dozens of rows) on exactly the runs that spent their
+    WAIT_CI budget, i.e. the ones already waiting on something slow. One read,
+    two reductions.
+    """
     return sum(
         1
-        for row in _read_converge_rows(run_dir)
+        for row in rows
         if row.get("attempt") == attempt and row.get("decision") == "WAIT_CI"
     )
 
@@ -990,7 +1197,7 @@ def _read_converge_rows(run_dir: str) -> "list[dict]":
     return rows
 
 
-def _read_converge_row(run_dir: str, attempt: int) -> "dict | None":
+def _last_converge_row(rows: "list[dict]", attempt: int) -> "dict | None":
     """The last ledger row recorded for one attempt.
 
     A SCAN, not a peek at the tail. `WAIT_CI` deliberately does not consume a
@@ -998,9 +1205,13 @@ def _read_converge_row(run_dir: str, attempt: int) -> "dict | None":
     tail-only reader would then see attempt N where it expected N-1, conclude
     that no previous reasons were recorded, and lose the ability to ever answer
     STOP_NO_PROGRESS. The loop would run to its backstop on every CI hiccup.
+
+    Named for what it does now: it reduces rows the caller already read. It was
+    `_read_converge_row`, and it did its own read -- the second full parse of the
+    ledger in one `converge` invocation. See `_count_wait_rows`.
     """
     found = None
-    for row in _read_converge_rows(run_dir):
+    for row in rows:
         if row.get("attempt") == attempt:
             found = row
     return found
@@ -1173,10 +1384,57 @@ def cmd_plan(args: argparse.Namespace) -> int:
     # review's blocker set is meaningful. A suggestion is never fixed by the
     # loop, so a suggestion the reviewer mentioned on attempt 1 and did not
     # repeat on attempt 3 is not resolved -- it is unmentioned, and filing only
-    # the last pass's list would silently drop it. Union by fingerprint.
+    # the last pass's list would silently drop it.
+    #
+    # COUNTED HERE, FILED BY `defer`. This verb builds the union to report
+    # `CARRIED=` and `counts.suggestion_carried` -- the numbers that tell an
+    # operator "we filed 9" apart from "this review found 9" -- and writes no
+    # aggregate of its own. `cmd_defer` rebuilds the same union from the same
+    # `classified-NN.json` evidence, through the same `_union_suggestions`, and
+    # that one is the file Phase 5 dispatches.
     carried = _carry_prior_suggestions(out_dir, attempt) if args.carry_prior else []
-    aggregate_suggestions = _union_suggestions(suggestions, carried)
-    carried_count = len(aggregate_suggestions) - len(suggestions)
+    union = _union_suggestions(suggestions, carried)
+    carried_count = len(union) - len(suggestions)
+
+    # THE UNION IS CHECKED HERE AND WRITTEN NOWHERE.
+    #
+    # Deleting the `suggestions-aggregate.md` write (see below) also deleted the
+    # only per-attempt validation the CARRIED rows ever got. `_encode_aggregate`
+    # ran on this union on every attempt, so a carried suggestion with an absolute
+    # path or an over-long summary refused at the attempt that produced it.
+    # Nothing replaced it, which moved every such refusal to the Phase 5 `defer`
+    # -- after the whole repair budget has been spent, on the one step whose
+    # entire purpose is that findings outlive the run. A refused `plan` is a hard
+    # stop for the attempt with the previous attempt's artifacts intact (SKILL.md
+    # `## Phase 2`); a refused `defer` is the run's findings, gone. Same
+    # malformation, and the two timings are nowhere near the same cost.
+    #
+    # So the check comes back and the FILE does not. The encoder is called for its
+    # refusals and its bytes are dropped on the floor: calling the REAL one is
+    # what makes this equivalent to what `defer` will do, where restating the
+    # validators here would be one more "two copies that cannot disagree" claim
+    # held up by a sentence. Nothing is published, so `## Phase 2`'s "no aggregate
+    # at all" and the run's one-aggregate property are both untouched.
+    #
+    # NOT STRICTER THAN THE STEP IT STANDS IN FOR, in either place `defer`
+    # deliberately tolerates something:
+    #
+    #   * `_drop_unfilable` first, because `defer` drops a row with no usable
+    #     `file` into `OVERFLOW=` rather than refusing the envelope. Refusing here
+    #     on a row that is going to be discarded there would kill attempts that
+    #     were going to succeed -- the exact trade that drop exists to refuse.
+    #   * `allow_blockers=True`, matching the one caller that writes the envelope.
+    #     This union carries no blocker by construction, so the flag changes
+    #     nothing today; it is here so a stored `severity` this verb never wrote
+    #     cannot make `plan` refuse a document `defer` would happily encode.
+    #
+    # The one cut it does NOT mirror is the MAX_FINDINGS truncation, which can
+    # also discard a malformed row before `_encode_aggregate` sees it. That one is
+    # not reproducible at plan time -- its membership depends on the surviving
+    # blockers and the un-applied lens rows, and neither exists yet -- and the row
+    # it would have hidden is malformed either way. Refusing loudly on attempt N
+    # beats being saved by a ranking accident at the end of the run.
+    _encode_aggregate(_drop_unfilable(union)[0], pr_number, run_id, allow_blockers=True)
 
     classified = {
         "schema_version": SCHEMA_VERSION,
@@ -1240,16 +1498,32 @@ def cmd_plan(args: argparse.Namespace) -> int:
     ):
         _atomic_write(os.path.join(out_dir, name), payload)
 
-    # The aggregate keeps its single stable name: it is an INPUT to a
-    # findings-to-issues dispatch that happens once, after the loop settles, and
-    # that agent re-checks the file's (device, inode, size, mtime) between
-    # parsing and its first GitHub write. Re-planning while a dispatch is in
-    # flight changes the inode and the agent refuses -- which is why the SKILL
-    # dispatches it after the last attempt, never inside the loop.
-    _atomic_write(
-        os.path.join(out_dir, "suggestions-aggregate.md"),
-        _encode_aggregate(aggregate_suggestions, pr_number, run_id),
-    )
+    # NO `suggestions-aggregate.md`. This verb used to encode the cross-attempt
+    # union into one, on every attempt -- up to eight rewrites per run of a file
+    # with no reader anywhere: `defer` never opens it, the SKILL's Phase 5
+    # dispatch names `deferred-aggregate.md`, and tests/premerge.test.sh asserts
+    # the SKILL can never name this one as an `aggregate_path`.
+    #
+    # It was worse than idle. The one time a run DID dispatch it, it filed only
+    # the suggestion rows: surviving blockers and un-applied simplify-lens rows
+    # do not exist yet when `plan` runs, and those two losses are the whole
+    # reason `cmd_defer` was written. A published file that looks like the
+    # aggregate and is missing the rows that matter is a trap, and the cheapest
+    # way to disarm it is to not publish it. Nothing is lost: every attempt's
+    # suggestions stay on disk in its own `classified-NN.json`, which is what
+    # `_carry_prior_suggestions` reads, and that is what makes the union
+    # reconstructible at defer time.
+    #
+    # WHAT STOPPED IS THE PUBLISHING, NOT THE VALIDATION. The union still goes
+    # through `_encode_aggregate` on every attempt, above, with its bytes
+    # discarded -- see that comment for why moving that check to Phase 5 was the
+    # maximal-loss timing and why the plan-side copy is deliberately no stricter.
+    #
+    # `defer` writes the run's ONE aggregate, once, after the loop settles --
+    # which is also what keeps `agents/findings-to-issues.md` happy: it re-checks
+    # its input's (device, inode, size, mtime) between parsing and its first
+    # GitHub write, and `os.replace` under a dispatch in flight changes the inode
+    # and makes it refuse.
 
     # The one line the fence reads. Emitted on stdout so a caller that only
     # wants the counts never has to parse the artifacts.
@@ -1417,18 +1691,19 @@ def cmd_defer(args: argparse.Namespace) -> int:
     # THE SAME UNION `plan --carry-prior` COMPUTES, because this is the aggregate
     # that actually gets dispatched.
     #
-    # `plan` unions every attempt's cleanup findings into
-    # `suggestions-aggregate.md`; this verb read one attempt's `suggestions`
-    # array and wrote `deferred-aggregate.md`, and SKILL.md `### 5-file` hands
-    # findings-to-issues the `defer` PATH. So the union was computed, tested, and
-    # then filed from the wrong file: a suggestion raised on attempt 1 and not
-    # repeated on attempt 3 is unmentioned, not resolved, and it was silently
-    # dropped -- the exact loss `--carry-prior` exists to prevent.
+    # `plan` used to union every attempt's cleanup findings into a
+    # `suggestions-aggregate.md` of its own while this verb read one attempt's
+    # `suggestions` array into `deferred-aggregate.md` -- and SKILL.md
+    # `### 5-file` hands findings-to-issues the `defer` PATH. So the union was
+    # computed, tested, and then filed from the wrong file: a suggestion raised
+    # on attempt 1 and not repeated on attempt 3 is unmentioned, not resolved,
+    # and it was silently dropped -- the exact loss `--carry-prior` exists to
+    # prevent.
     #
-    # `_union_suggestions` is now the ONE implementation both verbs call, so
-    # "the two aggregates cannot disagree about which findings survived the run"
-    # is a property of the code rather than a sentence asking you to believe two
-    # copies still match.
+    # `_union_suggestions` is now the ONE implementation both verbs call, and
+    # there is only ONE aggregate file left -- this one. "The aggregates cannot
+    # disagree about which findings survived the run" is a property of the code
+    # rather than a sentence asking you to believe two copies still match.
     #
     # `_read_attempt` proves these are ARRAYS; nothing proved their elements were
     # objects, and every line below calls `.get()` on them. Same class as the
@@ -1444,6 +1719,45 @@ def cmd_defer(args: argparse.Namespace) -> int:
     if args.lens_findings is not None:
         rows.extend(_normalise_lens_findings(_load(args.lens_findings)))
 
+    # A ROW WITH NO USABLE PATH IS DROPPED ON EVERY RUN, NOT ONLY AN OVERFLOWING
+    # ONE.
+    #
+    # This cut used to live inside the `len(rows) > MAX_FINDINGS` branch below,
+    # so the ORDINARY under-cap run -- the common case, and the one Phase 5
+    # reaches on nearly every stack -- had no protection whatsoever: five
+    # suggestions plus one blocker whose `file` is an object exited 74 out of
+    # `_encode_aggregate`, behind the fence's `defer "$@" || exit 74` with no
+    # recovery arm, and the run filed NOTHING. `_defer_groups`' docstring
+    # asserted unconditionally that such a row "cannot become an issue under any
+    # ranking", but ranking only ever happened above 64 rows, so the guarantee
+    # read as covered while the common path lost everything.
+    #
+    # A row the filer cannot turn into an issue is worth exactly as little at 6
+    # rows as it is at 70, and the envelope it takes down with it is worth
+    # exactly as much. So the cut is unconditional, which is also what makes the
+    # ranking below simpler: no group reaching it can be keyed on a sentinel.
+    #
+    # DROPPED AND COUNTED. These rows land in `OVERFLOW=`, so an under-cap run
+    # that discarded something still says so on its output line -- the same
+    # "dropped and reported" the truncation below owes.
+    #
+    # `_encode_aggregate` is untouched by this and stays the single gate: a row
+    # whose `file` IS a usable string but is still malformed (an absolute path, a
+    # missing `failure_scenario`) survives here and refuses there, exactly as it
+    # always did.
+    rows, overflow = _drop_unfilable(rows)
+    # Grouped AFTER the cut, never before it: the cut renumbered every row behind
+    # the first drop, and the ranking below indexes `rows` by exactly these
+    # positions.
+    groups = _defer_groups(rows)
+    # Which files reach the filer holding only PART of their findings, and how
+    # many of each one's findings were left behind. Empty here and filled only by
+    # the truncation below, which is what keeps an under-cap run's envelope
+    # byte-identical to the one this verb has always written --
+    # `_encode_aggregate` emits the key for a file named in this map and for no
+    # other.
+    partial_files: "dict[str, int]" = {}
+
     # OVERFLOW IS SURVIVABLE, BECAUSE THIS IS THE STEP THAT MUST NOT LOSE THINGS.
     #
     # This used to `fail(...)` above MAX_FINDINGS, and the Phase 5 fence is
@@ -1457,10 +1771,17 @@ def cmd_defer(args: argparse.Namespace) -> int:
     # union not at all).
     #
     # So: keep the rows that matter most, say how many did not fit, and exit 0 so
-    # the caller can still dispatch. Blockers first -- a surviving blocker is the
-    # single row this verb exists to preserve, and `findings-to-issues` ranks it
-    # above every cleanup row for the same reason. A blocker is dropped only when
-    # every alternative row is also a blocker.
+    # the caller can still dispatch. Blocker-bearing FILES first -- a surviving
+    # blocker is the single row this verb exists to preserve, and
+    # `findings-to-issues` ranks it above every cleanup row for the same reason.
+    #
+    # The unit is the FILE rather than the row (#722) because that agent now
+    # opens one issue per file, so a cleanup file is displaced before any part of
+    # a blocker file is. What the file unit no longer promises is that a blocker
+    # always survives: blocker-bearing files whose rows together exceed the
+    # envelope now cost each other, where a row cut would have kept every blocker
+    # and dropped only cleanup. That is the price of not filing an issue that
+    # reads as complete and is not, and `OVERFLOW=` reports it either way.
     #
     # NOT silent: `OVERFLOW=<n>` is on the output line, always, and the fence is
     # required to surface it. "Dropped and reported" is a different thing from
@@ -1470,29 +1791,139 @@ def cmd_defer(args: argparse.Namespace) -> int:
     # Kept rows stay in their ORIGINAL relative order, so the only observable
     # difference from an under-cap run is which rows are absent -- downstream's
     # first-occurrence-wins dedupe sees the same ordering it always did.
-    overflow = 0
     if len(rows) > MAX_FINDINGS:
-        by_severity = sorted(
-            range(len(rows)),
-            key=lambda i: 0 if rows[i].get("severity") == "blocker" else 1,
+        # No sentinel term here: the unusable-path cut above already removed
+        # every group the filer could open no issue for, on this run and on an
+        # under-cap one alike. A term for them here would be permanently dead,
+        # and a dead guard carrying a comment that says it is load-bearing is
+        # how the under-cap hole stayed invisible in the first place.
+        ranked = sorted(
+            range(len(groups)),
+            key=lambda i: (
+                0
+                if any(rows[j].get("severity") == "blocker" for j in groups[i][1])
+                else 1,
+                i,
+            ),
         )
-        keep = set(by_severity[:MAX_FINDINGS])
-        overflow = len(rows) - MAX_FINDINGS
+        # WHOLE FILES WHILE THEY FIT, THEN ONE SPLIT FILE -- NOT A HARD STOP.
+        #
+        # Row-filling the first file that does not fit is what makes file-atomic
+        # truncation affordable. Stop dead at that file instead and a 4-row file,
+        # two 30-row files and a 5-row blocker file -- 69 rows against a 64-row
+        # envelope -- file 39 rows where the row cut this replaces files 64.
+        # Losing 25 more findings to avoid splitting one file is the same
+        # maximal-loss trade the refusal this branch replaced was making, wearing
+        # a better argument.
+        #
+        # So exactly ONE file is ever split, it is the highest-priority file that
+        # did not fit, and no lower-priority file jumps the cut: the fill spends
+        # the rest of the budget, so the `break` is arithmetic rather than policy.
+        # One file bigger than the whole envelope needs no arm of its own -- it is
+        # this same rule with no whole file admitted ahead of it.
+        keep: "set[int]" = set()
+        used = 0
+        for index in ranked:
+            members = groups[index][1]
+            if used + len(members) <= MAX_FINDINGS:
+                keep.update(members)
+                used += len(members)
+                continue
+            room = MAX_FINDINGS - used
+            if room:
+                # Blockers first WITHIN the split file, for the same reason they
+                # come first between files: blockers are appended to `rows` last,
+                # so a plain leading run of a mixed file would keep its cleanup
+                # and drop the one row this verb exists to preserve. This orders
+                # the SELECTION only; the rebuild below restores original order.
+                fill = sorted(
+                    members,
+                    key=lambda j: (
+                        0 if rows[j].get("severity") == "blocker" else 1,
+                        j,
+                    ),
+                )
+                keep.update(fill[:room])
+            break
+        # THE SPLIT FILE IS MARKED SPLIT, AND THE MARK IS DERIVED FROM THE CUT
+        # THAT HAPPENED RATHER THAN FROM THE RULE ABOVE.
+        #
+        # Without it the row-fill hands the filer a group it cannot tell from a
+        # whole one, and that filer opens ONE issue per file: 25 of a 30-finding
+        # file become `## Findings (25)` under a footer promising that closing
+        # the issue resolves exactly the findings listed, with the other five
+        # reported only as `OVERFLOW=5` on a line no issue reader sees. An
+        # issue that reads as complete and is not is the exact defect file-atomic
+        # truncation was introduced to prevent, and the boundary group is the one
+        # place the rule cannot deliver it -- so the group carries the fact
+        # instead of the envelope pretending it is not there.
+        #
+        # Restating the loop's policy here ("flag the group the `break` stopped
+        # on") would be a second copy of the rule, and a copy drifts the moment
+        # the loop changes: it would still mark one group while the loop split
+        # two, and the unmarked one is filed as complete all over again. Counting
+        # kept-vs-total per group cannot drift, because it reads the outcome.
+        #
+        # A group with ZERO kept rows is not partial, it is ABSENT: the filer
+        # opens no issue for it, so there is no complete-looking artifact to
+        # correct. Those rows are what `OVERFLOW=` is for.
+        for key, members in groups:
+            kept_here = sum(1 for member in members if member in keep)
+            if kept_here and kept_here < len(members):
+                # `key` is a non-empty `str` on every group that reaches here:
+                # the unusable-path cut above removed every sentinel-keyed row
+                # from `rows` BEFORE `_defer_groups` grouped the survivors.
+                partial_files[key] = len(members) - kept_here
+        # `+=`, not `=`: `rows` is already the post-unusable-cut list, so the
+        # rows that cut discarded are counted once here and never recounted.
+        overflow += len(rows) - len(keep)
         rows = [row for index, row in enumerate(rows) if index in keep]
 
     out_path = os.path.join(run_dir, "deferred-aggregate.md")
     _atomic_write(
         out_path,
-        _encode_aggregate(rows, document["pr_number"], document["run_id"], allow_blockers=True),
+        _encode_aggregate(
+            rows,
+            document["pr_number"],
+            document["run_id"],
+            allow_blockers=True,
+            partial_files=partial_files,
+        ),
     )
     blockers = sum(1 for r in rows if r.get("severity") == "blocker")
-    # TOTAL/BLOCKER/SUGGESTION count what is IN the file; OVERFLOW counts what did
-    # not fit, so TOTAL+OVERFLOW is everything the run had to file. `PATH=` stays
-    # LAST because a run dir may contain spaces -- a field appended after it makes
-    # the path unparseable, so new fields are inserted before it, never appended.
+    # This re-derivation stays BELOW the write on purpose, and hoisting it is a
+    # regression even though it looks like a hardening. `_encode_aggregate` is
+    # the gate: it is evaluated as `_atomic_write`'s argument, so it refuses a
+    # malformed surviving row BEFORE the write is entered and nothing lands on
+    # disk. Move this line above the write and it becomes a SECOND gate that can
+    # refuse first -- which sounds safer and is not, because it means weakening
+    # `_encode_aggregate` no longer changes anything observable and the "refused
+    # before publishing" property stops being testable. Left here, it is a
+    # backstop that guarantees rc != 0 either way, and B31 pins the order by
+    # asserting no aggregate exists after the refusal.
+    files = len({_repo_path(r.get("file")) for r in rows})
+    # TOTAL/BLOCKER/SUGGESTION count what is IN the file; FILES is how many
+    # distinct owning files those rows cover -- the file GROUPS the downstream
+    # dispatch will consider now that it groups by file. It gets to at most
+    # `max_new` (10) of them in a run: a group it takes either opens a new issue
+    # or is commented onto an existing issue carrying the same container
+    # fingerprint, and the groups past that cap are not filed AT ALL -- the filer
+    # records them as its own `overflow_count`, they wait for a later run, and a
+    # blocker- or critical-tier group stranded in that tail escalates to
+    # `halted_due_to_overflow`. So FILES is an upper bound on the issues the
+    # dispatch touches and never a count of them, and a FILES above `max_new`
+    # says outright that some of these files do not get filed today.
+    # OVERFLOW is this command's OWN cut -- rows that did not fit MAX_FINDINGS,
+    # dropped before the filer ever sees them, and a different number from the
+    # filer's `overflow_count` -- so TOTAL+OVERFLOW is everything the run had to
+    # file.
+    # `PATH=` stays LAST because a run dir may contain spaces -- a field appended
+    # after it makes the path unparseable, so new fields are inserted before it,
+    # never appended. FILES= specifically goes BEFORE OVERFLOW= so the fence's
+    # existing `${HEAD##* OVERFLOW=}` suffix read stays exact.
     print(
-        "PREMERGE_DEFER TOTAL=%d BLOCKER=%d SUGGESTION=%d OVERFLOW=%d PATH=%s"
-        % (len(rows), blockers, len(rows) - blockers, overflow, out_path)
+        "PREMERGE_DEFER TOTAL=%d BLOCKER=%d SUGGESTION=%d FILES=%d OVERFLOW=%d PATH=%s"
+        % (len(rows), blockers, len(rows) - blockers, files, overflow, out_path)
     )
     return 0
 
@@ -1578,10 +2009,18 @@ def cmd_converge(args: argparse.Namespace) -> int:
     # That is an unbounded autonomous loop under a command that promises it will
     # not loop forever. The ledger already records every WAIT_CI row, so the
     # bound can enforce itself rather than depending on caller discipline.
-    observed_waits = _count_wait_rows(run_dir, attempt)
+    #
+    # ONE read, both reductions. This verb needs two different one-pass answers
+    # out of `converge.jsonl` -- this attempt's WAIT_CI count and the previous
+    # attempt's last row -- and each reducer used to open and re-parse the whole
+    # ledger for itself. Read it here, where the argument validation and the
+    # attempt-evidence reads above have already had their chance to refuse, so
+    # the order in which failures surface is unchanged.
+    ledger_rows = _read_converge_rows(run_dir)
+    observed_waits = _count_wait_rows(ledger_rows, attempt)
     wait_passes = max(args.wait_passes, observed_waits)
 
-    last_row = _read_converge_row(run_dir, attempt - 1) if attempt > 1 else None
+    last_row = _last_converge_row(ledger_rows, attempt - 1) if attempt > 1 else None
     previous_other = (
         frozenset(last_row.get("reasons_other") or []) if isinstance(last_row, dict) else None
     )

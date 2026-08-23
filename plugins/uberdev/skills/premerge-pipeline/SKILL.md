@@ -109,7 +109,7 @@ PREMERGE_DEFAULT_LEVEL   = xhigh          # built-in code-review effort
 PREMERGE_LEVELS          = low medium high xhigh max
 PREMERGE_MAX_FIX_WAVE    = 8              # files per fixer wave (one agent per file)
 PREMERGE_MAX_ISSUES      = 10             # findings-to-issues MAX_NEW, RFC 0018 §7
-PREMERGE_CI_SETTLE_SECS  = 45             # see `## The CI settle window` below
+PREMERGE_CI_SETTLE_SECS  = 45             # see `### The CI settle window` below
 PREMERGE_BRANCH_PREFIX   = chore/stack-
 PREMERGE_AGGREGATE_SOURCE= premerge-aggregate
 PREMERGE_VERSION_MANIFEST = plugins/uberdev/.claude-plugin/plugin.json
@@ -124,6 +124,16 @@ PREMERGE_RERUN_FLAKY_CAP = 1              # `gh run rerun` attempts per RUN
 and restated here for the reader. The library is the enforcer — it refuses an
 out-of-range `--max-repairs` rather than clamping it, so these two numbers being
 prose does not make them advisory.
+
+`PREMERGE_CI_SETTLE_SECS` is consumed by the **controller**, not by a fence, and
+that is deliberate. It is named in exactly one instruction — the waitable-reasons
+row of `### 4c — VERIFY`'s table, which says to wait this long and then re-run the
+same Phase 3 gate fence — and that is the same wait `### The decision table`'s
+`WAIT_CI` row routes to. Both are instructions taken by whatever is driving the
+loop. A `sleep` inside a fence would make the wait a property of a shell that has
+to return promptly, and the re-probe ceiling that actually bounds the waiting
+(`PREMERGE_WAIT_CI_CEILING`) is enforced in the library. Read "no fence reads
+this" as the design, not as a dead constant.
 
 **The budget counts REPAIRS, not reviews.** N repairs cost N+1 reviews: the last
 review is the one that verifies the last repair, which is what keeps anything the
@@ -264,6 +274,12 @@ while IFS= read -r PREMERGE_TOKEN; do
           printf 'error: /premerge --converge needs a number, got %s\n' "$PREMERGE_CONVERGE_ARG" >&2
           exit 2 ;;
       esac
+      # The `6` here is the fourth copy of PREMERGE_REPAIR_CEILING, and it used to be
+      # the only one nothing compared: the library declares it, the Constants block
+      # restates it, the refusal message below quotes it, and this condition just
+      # asserted it. tests/premerge-phase5.test.sh B7 now EXECUTES this parser against
+      # the library's evaluated CONVERGE_REPAIR_CEILING, so raising the library value
+      # reds the suite until this line follows.
       if [ "$PREMERGE_CONVERGE_ARG" -lt 1 ] || [ "$PREMERGE_CONVERGE_ARG" -gt 6 ]; then
         printf 'error: /premerge --converge must be 1..6 repair rounds (PREMERGE_REPAIR_CEILING), got %s\n' \
           "$PREMERGE_CONVERGE_ARG" >&2
@@ -543,9 +559,13 @@ fi
 # construction. review_consolidate_push_branch's cross-repo probe is about the
 # INVOKING PR's head repository, and /premerge has no invoking PR — a fork-head
 # candidate is already excluded as `cross_repo` during the drive.
-git -C "$PREMERGE_WORKTREE" push -u origin "$PREMERGE_BRANCH" >/dev/null 2>&1 || {
+PREMERGE_PUSH_ERR="$(git -C "$PREMERGE_WORKTREE" push -u origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
+  # Bounded and defused BEFORE anything reads it — see `### What a failed push
+  # is allowed to say` below for why, and for why this one line is spelled
+  # identically at all five push sites. 200 chars, one line, no live token.
+  PREMERGE_PUSH_ERR="$(printf '%s' "${PREMERGE_PUSH_ERR//PREMERGE/PRE-MERGE}" | tr -s '\n\r\t' ' ' | cut -c1-200)"
   printf '%s\n' "push_refused" >"$PREMERGE_RUN_DIR/failure-reason.txt"
-  printf 'error: pushing %s to origin failed\n' "$PREMERGE_BRANCH" >&2
+  printf 'error: pushing %s to origin failed: %s\n' "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2
   review_consolidate_abort "$PREMERGE_WORKTREE" "$PREMERGE_RUN_DIR" || :
   exit 2
 }
@@ -557,6 +577,67 @@ review_consolidate_manifest "$PREMERGE_RUN_DIR" "$RUN_ID" "$PREMERGE_BRANCH" \
   "$PREMERGE_PR" "$PREMERGE_BASE" || exit 2
 printf 'PREMERGE PR_NUMBER=%s RUN_ID=%s BRANCH=%s\n' "$PREMERGE_PR" "$RUN_ID" "$PREMERGE_BRANCH" >&2
 ```
+
+### What a failed push is allowed to say
+
+Every `git push` in this file captures its stderr, because a push that exits 2
+without a word is a dead end mid-loop. But *what* it captures is not this repo's
+text: everything a server sends back arrives as `remote:` lines, and a
+pre-receive hook chooses their length and their content. So the five handlers do
+not print the capture — they print a **bounded, single-line, token-free** view of
+it, rebuilt in place by one line. That line is deliberately not reproduced here —
+the fences are its only copy, so this section cannot come to describe a bound the
+code stopped enforcing. It does three things, one hazard each:
+
+- **`cut -c1-200`** is the bound `agents/findings-to-issues.md` puts on every
+  attacker-influenced `gh` stderr — *"bounds attacker-influenced stderr
+  substring"* (its security Note B). A rejection message is as long as the
+  server wants it to be, and this fence's every other diagnostic is
+  length-bounded already.
+- **`tr -s '\n\r\t' ' '`** folds the capture onto one line. The fence's own
+  `PREMERGE …` results go to this same stderr stream and the controller scrapes
+  that stream positionally, so a multi-line capture is a way for a remote to open
+  a line of its own in it.
+- **`PREMERGE` → `PRE-MERGE`** breaks the token spelling, because collapsing to
+  one line is not on its own enough: a `remote: PREMERGE CI PUBLISH=<sha>
+  ARM=commit ATTEMPT=3` line is a well-formed controller result no matter where
+  it sits. Broken this way it is still perfectly readable to an operator, and it
+  cannot be mistaken for a second `PREMERGE` line — nor accidentally rewritten
+  into a *different* live token, which is what substituting only the trailing
+  space would do to `PREMERGE GATE …`.
+
+Three details that are deliberate, not incidental:
+
+- **Drained readers only.** `head -c 200` is the precedent's literal spelling and
+  it is an early-exiting reader; these fences set `set -u` and not
+  `set -o pipefail` today, but the day one adds it that shape is the EPIPE class
+  `tests/epipe-guard.test.sh` bans. `tr` and `cut` read to EOF — and so does the
+  rebase arm's classifier, which is a bare `grep -E` with no `-q`, `-m` or `-l`
+  for exactly that reason. The question never arises.
+- **The bound is a property of what gets PRINTED, not of what gets classified.**
+  In four handlers that makes it the first statement, because printing is all
+  they do. The rebase arm in `#### Repairing red CI` also *classifies*, and there
+  the bound runs after the classifier and immediately before the print. Bounding
+  first was tried, and the argument for it does not survive being executed: the
+  precedent bounds a `gh` stderr whose marker is at the head, while git puts
+  `To <remote>` and every server `remote:` line ahead of
+  `! [rejected] … (stale info)` — and with a 43-character branch name spelled
+  twice inside that one line, **two** banner lines already push the marker past
+  character 200. Run against the shipped handler under both `bash` and `zsh`: a
+  plain rejection classified as a lease rejection, the same rejection behind two
+  `remote:` lines classified as a generic failure. That is the one failure mode
+  this arm exists to name being reported as the one it exists to tell it apart
+  from, with the branch already rebased locally and no recovery arm. Flattening
+  first failed in the opposite direction — every line joined into one, so
+  `\[rejected\].*(stale info|…)` could bridge two originally unrelated lines and
+  call an ordinary failure a lease rejection. `grep` is line-oriented, so
+  classifying the capture as git wrote it closes both.
+- **The verdict and the message still read the same bytes.** That was the old
+  ordering's reason for itself, and it is honoured more strictly now rather than
+  dropped: a verdict drawn from bytes the operator is never shown is a verdict
+  the message can contradict, so the rejection arm prints the **matched line** —
+  bounded, flattened and defused like everything else — while the generic arm,
+  which matched nothing, prints the head of the capture.
 
 ### What the stack PR carries
 
@@ -752,8 +833,15 @@ PREMERGE_TRIAGE TOTAL=<n> BLOCKER=<n> SUGGESTION=<n> WAVES=<n> CATEGORY_BACKED=<
 removing, so only the latest review's blocker set means anything. **Suggestions
 are never fixed by the loop** — so a suggestion the reviewer raised on attempt 1
 and did not repeat on attempt 3 is not resolved, it is unmentioned, and filing
-only the last pass's list would silently drop it. The aggregate is the union
-across attempts, deduped by fingerprint.
+only the last pass's list would silently drop it.
+
+**`plan` counts that union; it does not file it.** `CARRIED` is how many earlier
+attempts' suggestions survive the dedupe into this attempt's union, and it is the
+only thing `--carry-prior` produces here — `plan` writes `classified.json`,
+`classified-<NN>.json`, `fix-waves.json` and `fix-waves-<NN>.json`, and **no
+aggregate at all**. The aggregate that gets filed is built once, after the loop
+settles, by the Phase 5 `defer` verb, from the same per-attempt evidence through
+the same union helper. See `### 2b`.
 
 **A refused `plan` is a hard stop for the attempt, never a fall-through.** It
 exits 74 *before writing anything*, which leaves the previous attempt's
@@ -929,7 +1017,18 @@ git add -u || exit 2
 # attempts should say so in its own history — that is the record an operator
 # reads to decide whether the loop earned its keep on this run.
 git commit -m "fix(premerge): address code-review blockers on the stack (attempt $PREMERGE_ATTEMPT)" >/dev/null || exit 2
-git push origin "$PREMERGE_BRANCH" >/dev/null 2>&1 || exit 2
+# git's own words survive the redirect now. `>/dev/null 2>&1 || exit 2` sent the
+# explanation of a non-fast-forward, an expired token or a protected-branch rule
+# to the same place as the progress output, and this fence exited 2 having
+# printed neither a `PREMERGE FIX COMMIT=` line nor a cause -- mid-way through an
+# autonomous loop with nobody watching. `### 0c`'s push is the model.
+PREMERGE_PUSH_ERR="$(git push origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
+  # Bounded and defused first — `### What a failed push is allowed to say`.
+  PREMERGE_PUSH_ERR="$(printf '%s' "${PREMERGE_PUSH_ERR//PREMERGE/PRE-MERGE}" | tr -s '\n\r\t' ' ' | cut -c1-200)"
+  printf 'error: pushing the attempt-%s fix commit to %s failed: %s\n' \
+    "$PREMERGE_ATTEMPT" "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2
+  exit 2
+}
 printf 'PREMERGE FIX COMMIT=%s ATTEMPT=%s\n' "$(git rev-parse HEAD)" "$PREMERGE_ATTEMPT" >&2
 ```
 
@@ -951,36 +1050,49 @@ report it clean without evidence.
 **Runs after the loop settles, not inside it** — Phase 5, once. Two reasons, both
 mechanical:
 
-- `agents/findings-to-issues.md` fingerprints an issue as `file:line:summary`, and
-  a fix that shifts a line by one gives the same suggestion a new fingerprint. Per
-  attempt filing therefore creates *duplicates*, not comments.
+- That agent's per-finding identity is still `file:line:summary`, and a fix that
+  shifts a line by one gives the same finding a new one. Its ISSUE identity is
+  now the file alone, so a second dispatch over the same file comments rather
+  than duplicating — but the members inside it would still be re-listed as new
+  on every attempt, turning one issue into a per-attempt transcript. Filing once
+  is what keeps the issue a statement about the file rather than a log.
 - That agent snapshots the aggregate's `(device, inode, size, mtime)` before
-  parsing and re-checks it before its first GitHub write. `plan` publishes through
-  `os.replace`, which changes the inode — so a re-plan while a dispatch is in
-  flight makes the agent refuse `input-malformed`.
+  parsing and re-checks it before its first GitHub write. `defer` publishes through
+  `os.replace`, which changes the inode — so a second `defer` while a dispatch is
+  in flight makes the agent refuse `input-malformed`.
 
 **This section defines WHY the filing waits; `### 5-file` is the only place that
 defines the dispatch, and it is dispatched exactly once.** Do not read a second
 `aggregate_path` out of this section — there is deliberately none here.
 
 > **The canonical `aggregate_path` is the `PATH=` value the Phase 5 `defer` fence
-> prints, and nothing else.** It is `deferred-aggregate.md`.
-> `suggestions-aggregate.md` is `plan --carry-prior`'s *intermediate* — the
-> cross-attempt suggestion union, with no surviving blockers and no un-applied
-> lens rows in it, because neither has been produced yet at the time `plan` runs.
-> Dispatching that file files zero blockers and zero simplify-lens rows: the two
-> "promise with no producer" losses `defer` exists to close, re-opened by naming
-> the wrong input. Dispatching *both* runs `findings-to-issues` twice on one
-> `edge_id`, burning the `max_new = 10` budget and the rate-limit probe twice and
-> filing the suggestion rows a second time under fingerprints the first pass has
-> already consumed.
+> prints, and nothing else.** It is `deferred-aggregate.md`, and it is the run's
+> **only** aggregate — the run dir holds no second envelope that could be
+> dispatched by mistake.
 >
-> This is not hypothetical. It happened: a run followed this section's path and
-> the Phase 5 dispatch filed only the suggestion rows.
+> It used to. `plan --carry-prior` also wrote a `suggestions-aggregate.md` on
+> every attempt: the cross-attempt suggestion union, with no surviving blockers
+> and no un-applied lens rows in it, because neither has been produced yet at the
+> time `plan` runs. Dispatching it filed zero blockers and zero simplify-lens
+> rows — the two "promise with no producer" losses `defer` exists to close,
+> re-opened by naming the wrong input. **This is not hypothetical: it happened.**
+> A run followed this section's path and the Phase 5 dispatch filed only the
+> suggestion rows.
+>
+> Nothing ever read that file, so it is no longer written (#725). `plan` still
+> *counts* the union — that is what `CARRIED` reports — and `defer` rebuilds it
+> from the same `classified-<NN>.json` evidence through the same union helper.
+> The dispatch-the-wrong-file failure is now unreachable rather than merely
+> documented, and dispatching *twice* — which would run `findings-to-issues` on
+> one `edge_id` twice, burning the `max_new = 10` budget and the rate-limit probe
+> twice and re-filing suggestion rows under fingerprints the first pass already
+> consumed — needs a second dispatch of the same file to reach at all.
 
 When that one dispatch runs, the agent's own machinery does the rest: the 16-hex
 fingerprint dedupe, the fail-closed `gh issue list` lookup, the `--body-file -`
-writes, the rate-limit budget probe and the `MAX_NEW` cap. `/premerge`
+writes, the rate-limit budget probe and the `MAX_NEW` cap — which now counts
+FILES, so it caps how many issues the dispatch opens, not how many findings
+survive it. `/premerge`
 re-implements none of it — a second copy of that logic is exactly the drift this
 repo has been bitten by.
 
@@ -1332,9 +1444,11 @@ computed from blocker **fingerprints**, not from prose.
 findings' hunks — so an identity keyed on the line reports every survivor as
 brand new. The loop would see infinite progress and never stop. `lib/premerge-findings.py`
 hashes `path` + a case-folded, punctuation-stripped `summary` instead, which is
-stable across exactly the edits the loop makes. It is deliberately **not** the
-fingerprint `findings-to-issues` computes — that one is `file:line:summary`
-because an issue is about a location. Same width, different question.
+stable across exactly the edits the loop makes. It is deliberately **not** either
+fingerprint `findings-to-issues` computes. That agent keys a per-finding identity
+on `file:line:summary` because a finding is about a location, and a per-ISSUE
+identity on the owning file alone because an issue is now about a file. Same
+width, three different questions.
 
 ### 3c — Repair, by reason
 
@@ -1605,7 +1719,13 @@ case "$PREMERGE_CI_ARM" in
         "$PREMERGE_CI_STRAY" >&2
       exit 2
     fi
-    git push origin "$PREMERGE_BRANCH" >/dev/null 2>&1 || exit 2
+    PREMERGE_PUSH_ERR="$(git push origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
+      # Bounded and defused first — `### What a failed push is allowed to say`.
+      PREMERGE_PUSH_ERR="$(printf '%s' "${PREMERGE_PUSH_ERR//PREMERGE/PRE-MERGE}" | tr -s '\n\r\t' ' ' | cut -c1-200)"
+      printf 'error: publishing the CI repair (arm=commit, attempt %s) to %s failed: %s\n' \
+        "$PREMERGE_ATTEMPT" "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2
+      exit 2
+    }
     printf 'PREMERGE CI PUBLISH=%s ARM=commit ATTEMPT=%s\n' "$(git rev-parse HEAD)" "$PREMERGE_ATTEMPT" >&2
     ;;
   rebase)
@@ -1643,7 +1763,43 @@ case "$PREMERGE_CI_ARM" in
       printf 'PREMERGE CI REBASE_DROPPED BEFORE=%s AFTER=%s (commits already on %s)\n' \
         "$PREMERGE_COUNT_BEFORE" "$PREMERGE_COUNT_AFTER" "$PREMERGE_BASE" >&2
     fi
-    git push --force-with-lease="$PREMERGE_BRANCH:$PREMERGE_CI_LEASE" origin "$PREMERGE_BRANCH" >/dev/null 2>&1 || exit 2
+    # `--force-if-includes` pairs with the explicit-form lease. `commands/review-pr.md`
+    # ships exactly this pair and `agents/ci-rebase-handler.md` calls it the single
+    # sanctioned exception to the never-force invariant, so this site spells it the
+    # same way rather than inventing a second form. Be honest about what each half
+    # does, though: `git push --help` documents `--force-if-includes` as a "no-op"
+    # when it is given alongside `--force-with-lease=<refname>:<expect>`, which is
+    # the form this line uses and the one tests/premerge.test.sh pins. The safety
+    # property here is carried entirely by the LEASE -- the remote tip must still be
+    # the SHA the controller captured before the agent ran. The flag is consistency
+    # with the repo's sanctioned pattern, not a second independent refusal.
+    #
+    # And the stderr is CAPTURED, because this is the one push in this file that
+    # REWRITES REMOTE HISTORY and the one whose failure is genuinely ambiguous: a lease
+    # rejection is the safety mechanism firing correctly, an expired token is not, and
+    # `>/dev/null 2>&1 || exit 2` made them the same silent exit 2 -- with no recovery
+    # arm, because the branch is already rebased locally by the time this line runs.
+    PREMERGE_PUSH_ERR="$(git push --force-with-lease="$PREMERGE_BRANCH:$PREMERGE_CI_LEASE" --force-if-includes origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
+      # CLASSIFY THE RAW CAPTURE; BOUND ONLY WHAT IS PRINTED. The ordering and
+      # the measurements are in `### What a failed push is allowed to say`.
+      # Bounding first hid the marker this arm exists to name, behind git's
+      # `To <remote>` line and the server's `remote:` banner; flattening first
+      # let `.*` bridge two unrelated lines. grep is line-oriented and drained,
+      # and reads a herestring, never a pipe -- the EPIPE class this repo bans.
+      PREMERGE_PUSH_HIT="$(grep -E '\[rejected\].*(stale info|fetch first|non-fast-forward)' <<<"$PREMERGE_PUSH_ERR")" || PREMERGE_PUSH_HIT=""
+      # Then bound and defuse exactly what is PRINTED: the matched line when
+      # there is one, so the operator reads the bytes the verdict came from.
+      PREMERGE_PUSH_ERR="${PREMERGE_PUSH_HIT:-$PREMERGE_PUSH_ERR}"
+      PREMERGE_PUSH_ERR="$(printf '%s' "${PREMERGE_PUSH_ERR//PREMERGE/PRE-MERGE}" | tr -s '\n\r\t' ' ' | cut -c1-200)"
+      if [ -n "$PREMERGE_PUSH_HIT" ]; then
+        printf 'error: the lease on %s was REJECTED -- origin moved since %s was pinned. The local branch is already rebased, so re-run /premerge rather than forcing: %s\n' \
+          "$PREMERGE_BRANCH" "$PREMERGE_CI_LEASE" "$PREMERGE_PUSH_ERR" >&2
+      else
+        printf 'error: force-pushing the rebased %s to origin failed: %s\n' \
+          "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2
+      fi
+      exit 2
+    }
     printf 'PREMERGE CI PUBLISH=%s ARM=rebase ATTEMPT=%s COMMITS=%s\n' \
       "$(git rev-parse HEAD)" "$PREMERGE_ATTEMPT" "$PREMERGE_COUNT_AFTER" >&2
     ;;
@@ -1817,7 +1973,13 @@ fi
 
 git add -u || exit 2
 git commit -m "refactor(premerge): apply simplify lenses to the stack" >/dev/null || exit 2
-git push origin "$PREMERGE_BRANCH" >/dev/null 2>&1 || exit 2
+PREMERGE_PUSH_ERR="$(git push origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
+  # Bounded and defused first — `### What a failed push is allowed to say`.
+  PREMERGE_PUSH_ERR="$(printf '%s' "${PREMERGE_PUSH_ERR//PREMERGE/PRE-MERGE}" | tr -s '\n\r\t' ' ' | cut -c1-200)"
+  printf 'error: pushing the simplify commit to %s failed: %s\n' \
+    "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2
+  exit 2
+}
 printf 'PREMERGE SIMPLIFY COMMIT=%s ATTEMPT=%s\n' "$(git rev-parse HEAD)" "$PREMERGE_ATTEMPT" >&2
 ```
 
@@ -1986,25 +2148,112 @@ PREMERGE_DEFER_HEAD="${PREMERGE_DEFER_LINE%% PATH=*}"
 PREMERGE_DEFER_OVERFLOW="${PREMERGE_DEFER_HEAD##* OVERFLOW=}"
 PREMERGE_DEFER_SUGGESTION="${PREMERGE_DEFER_HEAD##* SUGGESTION=}"
 PREMERGE_DEFER_SUGGESTION="${PREMERGE_DEFER_SUGGESTION%% *}"
+PREMERGE_DEFER_BLOCKER="${PREMERGE_DEFER_HEAD##* BLOCKER=}"
+PREMERGE_DEFER_BLOCKER="${PREMERGE_DEFER_BLOCKER%% *}"
+PREMERGE_DEFER_FILES="${PREMERGE_DEFER_HEAD##* FILES=}"
+PREMERGE_DEFER_FILES="${PREMERGE_DEFER_FILES%% *}"
+PREMERGE_DEFER_TOTAL="${PREMERGE_DEFER_HEAD##* TOTAL=}"
+PREMERGE_DEFER_TOTAL="${PREMERGE_DEFER_TOTAL%% *}"
 # `OVERFLOW=` is ALWAYS printed -- `OVERFLOW=0` on a normal run -- so a missing
 # or non-numeric field is a contract break, not a zero. Falling back to 0 here
 # would re-create the silent drop by reading it as "nothing overflowed".
 case "$PREMERGE_DEFER_OVERFLOW" in ''|*[!0-9]*) printf 'error: defer line carries no OVERFLOW= count: %s\n' "$PREMERGE_DEFER_LINE" >&2; exit 74 ;; esac
 case "$PREMERGE_DEFER_SUGGESTION" in ''|*[!0-9]*) printf 'error: defer line carries no SUGGESTION= count: %s\n' "$PREMERGE_DEFER_LINE" >&2; exit 74 ;; esac
+# BLOCKER= is what the CLASS= arms below branch on, so it gets the same
+# treatment: always printed, therefore a missing or non-numeric field is a
+# contract break. Defaulting it to 0 would hand the "no blocker was ever a
+# candidate" arm to a line that never said so.
+case "$PREMERGE_DEFER_BLOCKER" in ''|*[!0-9]*) printf 'error: defer line carries no BLOCKER= count: %s\n' "$PREMERGE_DEFER_LINE" >&2; exit 74 ;; esac
+# FILES= is how many ISSUES the dispatch below will open, because the filer
+# groups by owning file. Like OVERFLOW= it is always printed, so a missing or
+# non-numeric field is a contract break rather than a zero.
+case "$PREMERGE_DEFER_FILES" in ''|*[!0-9]*) printf 'error: defer line carries no FILES= count: %s\n' "$PREMERGE_DEFER_LINE" >&2; exit 74 ;; esac
+# TOTAL= is the WITNESS that the envelope is FULL, which is what the severe arm
+# below turns on, so it is validated like the fields it stands beside. The
+# opening case-glob proves the literal `TOTAL=` is present; only this proves the
+# value is a number. Skipping it would not fail loudly either: `[ "" -eq 64 ]` is
+# a shell ERROR, not a false, and an `if` swallows the non-zero status -- so a
+# malformed count would silently route every overflow away from the severe arm,
+# which is the exact direction a guard must never fail.
+case "$PREMERGE_DEFER_TOTAL" in ''|*[!0-9]*) printf 'error: defer line carries no TOTAL= count: %s\n' "$PREMERGE_DEFER_LINE" >&2; exit 74 ;; esac
 [ -s "$PREMERGE_DEFER_PATH" ] || { printf 'error: defer named an aggregate that is missing or empty: %s\n' "$PREMERGE_DEFER_PATH" >&2; exit 74; }
 
-# Blockers are kept FIRST, so `SUGGESTION > 0` proves every blocker fit. The one
-# state in which a blocker may have been dropped is therefore
-# `SUGGESTION == 0 && OVERFLOW > 0`, and it gets its own, louder line: an
-# operator must never read "10 cleanup rows did not fit" and be looking at
-# discarded correctness findings.
+# Blocker-bearing FILES are admitted first, which is weaker than the row-level
+# "blockers first" this arm was written against: a blocker file carries its own
+# cleanup rows in with it, so `SUGGESTION > 0` no longer proves every blocker
+# fit (#722). A FULL envelope holding nothing but blockers still keeps its own
+# louder line -- an operator must never read the mild sentence over that state.
+#
+# `TOTAL == 64` IS THE WITNESS OF A FULL ENVELOPE. `TOTAL > 0` IS NOT.
+# `SUGGESTION == 0` is a sound stand-in for "every row in here is a blocker",
+# because `TOTAL = BLOCKER + SUGGESTION`. But the severe sentence also asserts
+# the envelope was FILLED, and nothing except `TOTAL == MAX_FINDINGS` witnesses
+# that. `OVERFLOW > 0` used to imply it and no longer does: the unusable-path
+# cut in lib/premerge-findings.py runs on EVERY run, not just an overflowing
+# one, so a row the filer could open no issue for is dropped and counted in
+# `OVERFLOW=` with the envelope nowhere near its bound. Executed against the
+# shipped library, two blockers in `a.py` plus one suggestion whose `file` is a
+# JSON object print `TOTAL=2 BLOCKER=2 SUGGESTION=0 FILES=1 OVERFLOW=1` -- 2 of
+# 64 rows held, the dropped row a suggestion, no blocker dropped at all -- and
+# `TOTAL > 0` handed exactly that run the blocker-overflow alarm. An envelope
+# that is not full proves nothing about what was dropped, so it falls through to
+# the arms below, which answer from the CANDIDATE SET (`PREMERGE_SURVIVORS`)
+# rather than from the envelope and stay correct at any `TOTAL`. The bound is 64
+# because `MAX_FINDINGS` is, in lib/premerge-findings.py; the sentences spell it
+# out for the same reason they always have.
+#
+# `TOTAL` ALSO SAYS WHY THE ROWS WENT, AND THE SENTENCES MUST SAY WHICH. The cap
+# spends its whole budget when it cuts -- the boundary file is row-filled to
+# exactly `MAX_FINDINGS` -- so a displaced row implies `TOTAL == 64`, and a
+# `TOTAL` below that proves the cap displaced nothing and every dropped row is
+# one the filer could open no issue for. "did not fit the 64-row envelope" is
+# therefore false on exactly the new drop path: three valid suggestions plus
+# four rows with no usable `file` print `TOTAL=3 BLOCKER=0 SUGGESTION=3 FILES=3
+# OVERFLOW=4`, nowhere near the bound and nothing displaced by it. Both
+# populations are `OVERFLOW=`, so every arm reports which one it is reading.
+#
+# `CLASS=` IS THE ONLY PARSEABLE PART OF THE LINE, SO IT MAY ONLY CLAIM WHAT THE
+# RUN CAN PROVE. Correcting the prose after the em dash and leaving the token at
+# `cleanup` left the machine-readable half asserting the very thing the prose had
+# just retired: on the worked example above -- one file of 40 cleanup rows plus a
+# blocker, one file of 30 blockers, `TOTAL=64 BLOCKER=24 SUGGESTION=40 FILES=2
+# OVERFLOW=7` -- all seven dropped rows are blockers, and a scraper keying on
+# `CLASS=` filed them as cleanup.
+#
+# `cleanup` therefore survives only in the state where it is a fact rather than
+# an inference: `PREMERGE_SURVIVORS != 1` means `defer` ran WITHOUT
+# `--include-blockers`, so its entire candidate set was this attempt's carried
+# suggestions plus the Phase 4b lens rows -- and lib/premerge-findings.py
+# normalises every lens row to `suggestion` unconditionally -- with `BLOCKER=0`
+# on the line corroborating it. No blocker was ever a candidate there, so no
+# dropped row can be one. Everywhere else the class of the dropped set is
+# genuinely unknown and the token says `unknown` rather than guessing the benign
+# answer; the sentence points at `BLOCKER=`, the only field that answers it.
+#
+# DEFER_FILES= is printed BEFORE this block, not between it and the defer line:
+# the mild arm tells the operator to read `BLOCKER=` on the line below, so the
+# defer line has to actually be the next line.
+printf 'PREMERGE DEFER_FILES=%s — the dispatch will open at most that many issues, one per file, and no more than max_new=10 of them\n' \
+  "$PREMERGE_DEFER_FILES" >&2
 if [ "$PREMERGE_DEFER_OVERFLOW" -gt 0 ]; then
-  if [ "$PREMERGE_DEFER_SUGGESTION" -gt 0 ]; then
-    printf 'PREMERGE DEFER_OVERFLOW=%s CLASS=cleanup — %s cleanup rows did not fit the 64-row envelope; every blocker was kept\n' \
-      "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_OVERFLOW" >&2
+  # WHY the rows went, decided once and said by whichever arm is taken. 64 is
+  # `MAX_FINDINGS` in lib/premerge-findings.py, and it is the ONLY witness of a
+  # full envelope -- see the block above.
+  PREMERGE_DEFER_FULL=0
+  PREMERGE_DEFER_WHY="dropped as unfilable (the envelope holds $PREMERGE_DEFER_TOTAL of 64 rows, so the cap displaced nothing)"
+  if [ "$PREMERGE_DEFER_TOTAL" -eq 64 ]; then
+    PREMERGE_DEFER_FULL=1
+    PREMERGE_DEFER_WHY="displaced by the cap or dropped as unfilable"
+  fi
+  if [ "$PREMERGE_DEFER_FULL" = "1" ] && [ "$PREMERGE_DEFER_SUGGESTION" -eq 0 ]; then
+    printf 'PREMERGE DEFER_OVERFLOW=%s CLASS=blocker — the 64-row envelope was filled ENTIRELY by blockers and %s further rows were %s; some dropped rows may be blockers\n' \
+      "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_WHY" >&2
+  elif [ "$PREMERGE_SURVIVORS" != "1" ] && [ "$PREMERGE_DEFER_BLOCKER" -eq 0 ]; then
+    printf 'PREMERGE DEFER_OVERFLOW=%s CLASS=cleanup — %s rows were %s; this run deferred no blockers at all, so every dropped row is a cleanup row\n' \
+      "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_WHY" >&2
   else
-    printf 'PREMERGE DEFER_OVERFLOW=%s CLASS=blocker — the 64-row envelope was filled ENTIRELY by blockers and %s further rows did not fit; some dropped rows may be blockers\n' \
-      "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_OVERFLOW" >&2
+    printf 'PREMERGE DEFER_OVERFLOW=%s CLASS=unknown — %s rows were %s; blocker-bearing files are admitted first, but neither that ranking nor the unfilable cut proves every blocker survived, so a dropped row may be a blocker — check BLOCKER= on the line below against the blockers this run reported\n' \
+      "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_OVERFLOW" "$PREMERGE_DEFER_WHY" >&2
   fi
 fi
 printf '%s\n' "$PREMERGE_DEFER_LINE" >&2
@@ -2013,14 +2262,26 @@ printf '%s\n' "$PREMERGE_DEFER_LINE" >&2
 It prints one line and writes `deferred-aggregate.md`:
 
 ```
-PREMERGE_DEFER TOTAL=<n> BLOCKER=<n> SUGGESTION=<n> OVERFLOW=<n> PATH=<path>
+PREMERGE_DEFER TOTAL=<n> BLOCKER=<n> SUGGESTION=<n> FILES=<n> OVERFLOW=<n> PATH=<path>
 ```
 
 `TOTAL`, `BLOCKER` and `SUGGESTION` describe the rows that ARE in the written
-aggregate; `OVERFLOW` is how many did not fit. `TOTAL + OVERFLOW` is everything
-the run had to file. **`PATH=` is last and its value runs to end of line** — a
-run directory can contain spaces, so parsing it as a whitespace-delimited field
-truncates it, and appending any field after it breaks every reader.
+aggregate; `OVERFLOW` is how many were dropped — the ones the cap displaced **and**
+the ones the filer could open no issue for, which are cut on every run, so
+`OVERFLOW > 0` does not imply the envelope was full. `TOTAL` is the only field on
+the line that witnesses whether it was: the cap spends its whole budget when it
+cuts, so `TOTAL == 64` iff a row was displaced, and below that every dropped row
+is an unfilable one. The fence reads it as exactly that, in both jobs — which arm
+to take, and which of the two populations to name. `TOTAL + OVERFLOW` is everything
+the run had to file. `FILES` is how many distinct owning files those rows cover —
+one issue each up to the dispatch's `max_new`, because the filer groups by file
+and that cap counts files too. Above the cap `FILES` is an upper bound and not a
+forecast: the surplus files are deferred whole and counted in that agent's
+`overflow_count`. `FILES=` is inserted before `OVERFLOW=` so the fence's
+existing suffix read of that field is unchanged.
+**`PATH=` is last and its value runs to end of line** — a run directory can
+contain spaces, so parsing it as a whitespace-delimited field truncates it, and
+appending any field after it breaks every reader.
 
 Then dispatch `subagent_type: uberdev:findings-to-issues` with
 `aggregate_path` = that `PATH`, `edge_id` = `premerge.defer.findings`,
@@ -2045,29 +2306,89 @@ door.
 
 What happens now:
 
-- **Blockers are kept first**, then suggestions, both in their existing relative
-  order, truncated to 64. So a blocker is dropped **only** when blockers alone
-  exceed 64 — at which point no ordering saves them all.
+- **Whole files while they fit, then one row-filled boundary file.** The unit is
+  the owning file, because the filer opens one issue per file and half a file's
+  findings make an issue that reads as complete and is not. Files carrying a
+  blocker are admitted first, then the rest in first-appearance order. The first
+  file that does not fit is **not** skipped, and admission does **not** stop dead
+  there: the leftover budget is row-filled from that one file — blockers within
+  it first — and only then does admission end. The cut is arithmetic rather than
+  policy, so no lower-ranked file jumps it and exactly one file is ever split. A
+  hard stop would file *fewer* rows than the row-level truncation this replaces:
+  a 4-row file, two 30-row files and a 5-row blocker file, cut against a 64-row
+  envelope, would file 39 rows where a row-level cut files 64. That is the same
+  maximal-loss trade the refusal above was making, wearing a better argument. A
+  single file
+  larger than the whole envelope needs no special arm: it is this same rule with
+  no whole file admitted ahead of it. Rows keep their existing relative order
+  inside the envelope.
 - **The aggregate is still written** and `PATH=` still names a real, dispatchable
   file. Overflow is never a refusal and never an exit code; it is a count on the
   line.
 - **The count is reported, never swallowed.** Surface `OVERFLOW=<n>` in the run
   summary. Silently dropping is the defect; reporting is what makes the drop
   legitimate rather than a repeat of the thing being fixed.
-- **The two overflow classes are reported differently.** Because blockers are
-  kept first, `SUGGESTION > 0` proves every blocker fit, so `SUGGESTION == 0 &&
-  OVERFLOW > 0` is the only state in which a dropped row could be a blocker. The
-  first reads "N cleanup rows did not fit"; the second reads "the envelope was
-  filled entirely by blockers and N further rows did not fit". An operator must
-  never be shown the mild sentence over the severe state.
+- **`OVERFLOW=` counts two populations, and every sentence about it must name
+  which one.** A row whose `file` is not a usable string can become no issue
+  under any ranking, so `defer` drops it on **every** run rather than only an
+  overflowing one — and counts it in `OVERFLOW=` so the drop is stated instead of
+  hidden. `OVERFLOW > 0` therefore no longer implies the envelope was full, or
+  even that it holds anything: a run whose only deferred row has a non-string
+  `file` prints `TOTAL=0 BLOCKER=0 SUGGESTION=0 FILES=0 OVERFLOW=1`. `TOTAL=` on
+  the same line is what separates the two, in both directions: the cap spends its
+  whole budget when it cuts — the boundary file is row-filled to exactly
+  `MAX_FINDINGS` — so a displaced row implies `TOTAL == 64`, and a `TOTAL` below
+  that proves the cap displaced nothing and every dropped row is one the filer
+  could open no issue for. So **no arm says *"did not fit the 64-row envelope"***,
+  which is false on exactly the new drop path and false twice over: three valid
+  suggestions plus four rows with no usable `file` print `TOTAL=3 BLOCKER=0
+  SUGGESTION=3 FILES=3 OVERFLOW=4` — nowhere near 64, nothing displaced by it.
+  Each arm reports *displaced by the cap or dropped as unfilable* on a full
+  envelope and *dropped as unfilable*, with the row count, below one. An arm
+  reasoning about what the envelope CONTAINS needs `TOTAL=` as its witness
+  besides.
+- **The overflow classes are reported differently, and none promises more than it
+  can — the `CLASS=` token included.** `TOTAL == 64 && SUGGESTION == 0 &&
+  OVERFLOW > 0` means the envelope was FILLED entirely by blockers; it keeps the
+  severe `CLASS=blocker` sentence, and an operator must never be shown a milder one
+  over that state. `TOTAL == 64` is the half that is easy to get wrong and must
+  not be: `TOTAL = BLOCKER + SUGGESTION`, so `SUGGESTION == 0` proves every row
+  *in* the envelope is a blocker — and nothing except `TOTAL == MAX_FINDINGS`
+  proves the envelope was FULL, which is the other half of what that sentence
+  asserts. Guard the arm on `SUGGESTION == 0` alone, or on `TOTAL > 0 &&
+  SUGGESTION == 0`, and a run that never overflowed takes it: two blockers in
+  `a.py` plus one suggestion whose `file` is a JSON object print `TOTAL=2
+  BLOCKER=2 SUGGESTION=0 FILES=1 OVERFLOW=1`, where all three of the severe
+  sentence's claims are false — 2 of 64 rows held, the dropped row a suggestion,
+  no blocker dropped at all. Because `CLASS=`
+  is the only parseable part of the line, a scraper records the alarm as real. An
+  envelope that is not full witnesses nothing about the dropped rows, so it falls
+  through to the arms that answer from the **candidate set** rather than from the
+  envelope, and those stay correct at any `TOTAL`. What the mild arm may no longer say
+  is *every blocker was kept*. Files are the unit now, and a blocker-bearing file
+  carries its own cleanup rows into the envelope with it — so cleanup can survive
+  while a blocker is dropped, and `SUGGESTION > 0` no longer witnesses anything
+  about blockers. Run the shipped rule over one file holding 40 cleanup rows plus
+  a blocker and one holding 30 blockers and it prints `TOTAL=64 BLOCKER=24
+  SUGGESTION=40 FILES=2 OVERFLOW=7`: all seven dropped rows are blockers. So the
+  token retired with the sentence. `CLASS=cleanup` is now printed only where it is
+  provable — the run deferred without `--include-blockers`, so no blocker was ever
+  a candidate and `BLOCKER=0` says so — and every other overflow reports
+  `CLASS=unknown`. `BLOCKER=` on the defer line is the only field that answers
+  "did every blocker fit", and that arm points at it rather than guessing; the
+  defer line is printed immediately after it so *the line below* is literally the
+  line below.
 
 **The blocker rows are the new thing here, and they needed a producer, not a
 louder promise.** `_encode_aggregate` used to pin every row to `suggestion`, so
 the claim that surviving blockers were filed had nothing behind it — the same
 no-producer defect Phase 4 shipped with. `agents/findings-to-issues.md` was
 already ready for them: `severity_rank(blocker)=3` sorts a blocker above every
-cleanup row so a `max_new` overflow can never displace one, and Step 8d gives it
-the `@author`-mention shape. Only the writer was missing.
+cleanup row, and since the cap moved to file groups the file holding it ranks at
+`group_tier_rank(BLOCKER)=3` above every cleanup-only file — so a `max_new`
+overflow can never displace it, and a blocker sharing a file with cleanup rows is
+not dragged under the cap by them. Step 8d gives it the `@author`-mention shape.
+Only the writer was missing.
 
 A deferred blocker **halts** the parent run in that agent (RFC 0002). That is the
 correct outcome and not a regression: the loop has already stopped not-green, so
@@ -2188,7 +2509,9 @@ Print the run summary and **stop**:
   clean gate    green | not_green (<reasons>)
   simplify      applied <n> / deferred <n> | skipped (<reason>) | reverted (<reason>)
   issues filed  <n> created, <n> commented, <n> deduped  (<n> blocker, <n> suggestion)
-                  <n> rows did not fit the 64-row envelope (cleanup | BLOCKER-class)
+                  <n> owning files — one issue each, at most max_new=10 of them
+                  <n> rows dropped, CLASS=blocker | cleanup | unknown
+                    (displaced by the cap or dropped as unfilable)
   version       v<X.Y.Z> | skipped (<reason>)
 
   <stack PR URL>
@@ -2206,6 +2529,17 @@ The trace is `converge.jsonl` — one row per decision, append-only, in the run
 directory. `CATEGORY_BACKED` still belongs in the review row: it says how much of
 the blocker/suggestion split rested on a machine-checked signal, and under a loop
 that number governs how much of the whole run's work was correctly aimed.
+
+**The two `issues filed` sub-rows are transcribed from the defer fence, not
+re-derived.** They are its `PREMERGE DEFER_FILES=` and
+`PREMERGE DEFER_OVERFLOW= CLASS=` lines, and the summary must carry the same
+three tokens the fence can print, `unknown` included — that token is the whole
+point of the row. It means *a dropped row may be a blocker and this run cannot
+prove otherwise*, so collapsing it into `blocker` or `cleanup` reports a
+certainty nobody has. Omit the dropped-rows sub-row entirely when `OVERFLOW=0`;
+the fence prints nothing then either. And keep the reason clause honest per
+`#### When the envelope overflows`: rows are displaced by the cap only on a full
+envelope, and below one every dropped row is an unfilable one.
 
 Never offer to merge, never ask whether to merge, never dispatch `/merge`.
 
@@ -2241,12 +2575,13 @@ third of which quietly edits a test.
 **Reading `converge`'s exit status as success or failure.** `STOP_GREEN` exits 1.
 1 means "stop", 0 means "go round again". Branch on `DECISION=`.
 
-**Filing issues inside the loop.** `findings-to-issues` fingerprints on
-`file:line:summary`, and every fix moves lines — so per-attempt filing creates
-duplicates rather than comments, and burns the per-dispatch `MAX_NEW` and
-rate-limit budget doing it. It also re-`os.replace`s the aggregate under an
-in-flight dispatch, which that agent refuses as `input-malformed`. File once, at
-Phase 5.
+**Filing issues inside the loop.** `findings-to-issues` keys the ISSUE on the
+owning file, so a second dispatch comments rather than duplicating — but every
+fix moves lines, so each attempt re-lists the same members as new and turns
+one issue into a per-attempt transcript, while burning the per-dispatch
+`MAX_NEW` and rate-limit budget doing it. It also re-`os.replace`s the
+aggregate under an in-flight dispatch, which that agent refuses as
+`input-malformed`. File once, at Phase 5.
 
 **Letting a fixer edit the test instead of the code.** The named hazard. It is
 guarded in the fixer prompt and by the progress detectors, and both halves are

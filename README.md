@@ -4,7 +4,7 @@
 
 **Personal Claude Code marketplace — opinionated GitHub-workflow slash commands.**
 
-[![Version](https://img.shields.io/badge/version-0.54.0-blue)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.55.0-blue)](./CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8B5CF6)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Repo Agnostic](https://img.shields.io/badge/repo--agnostic-yes-success)](#configuration)
@@ -393,7 +393,9 @@ Design rationale and full topology in [`docs/rfc/0021-premerge-stack-integration
 
 ## `/issue` — investigation-first issue creation
 
-Pipeline: classify → 2-scout fanout (`codebase-scout` + `triage-scout`, parallel in one turn — dedup against closed issues, label/scope validation against `gh label list` and commitlint) → draft → user-confirm → create → print `Next step: /solve N`. Median wall-clock under 30 seconds.
+Pipeline: classify → 2-scout fanout (`codebase-scout` + `triage-scout`, parallel in one turn — dedup against open and closed issues, label/scope validation against `gh label list` and commitlint) → draft → **create** → print `Next step: /solve N`. Median wall-clock under 30 seconds — one turn, no approval prompt unless the duplicate gate below halts.
+
+**Autopilot.** `/issue` files the issue without stopping to ask — the same call `/merge` made when `auto_confirm` became a documented no-op. The draft is the issue body, not a question: on the normal path it never reaches your terminal — what prints is the result block with the issue URL. Exactly one gate survives, and it fails **closed** — so it halts on two verdicts, not one. It stops before `gh issue create` when `triage-scout` returned an **open** duplicate, because a second copy of a live issue is the one outcome that closing it does not cleanly undo; and it stops the same way when the duplicate search *cannot be shown to have completed* (a `gh` rate limit, a failed or unparseable search), because an empty result from a search that never ran means "we could not look", not "we looked and found nothing" — and a check that could not run has not passed. The scout is re-dispatched once before that second verdict is taken, so a transient blip costs you no prompt. Either halt prints the draft alongside what the gate found — or could not look at — and asks whether to file anyway or abandon; commenting on the match instead is offered only when there is a match. Closed duplicates never halt — they are regression evidence and render as `## Possible duplicates`. Scout degradations that still leave that gate decidable (a `BLOCKED` codebase scout, a `gh label list` that failed) are reported in the result block, never promoted to gates. There is no opt-out key and no `--confirm` flag. `/solve` is still never auto-run.
 
 Templates by type — bug (`fix`), feature (`feat`), or chore/refactor — each producing conventional-commit-style titles and a body footed with `**Triage hint:** <trivial|small|medium>` that `/solve` reads later to pick the workflow without reclassifying.
 

@@ -17,6 +17,12 @@ TRIAGE_SCOUT="$REPO_ROOT/plugins/uberdev/agents/triage-scout.md"
 SOLVE_LAUNCHER="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
 SPEC_WRITER="$REPO_ROOT/plugins/uberdev/agents/spec-writer.md"
 SOLVE_SKILL="$REPO_ROOT/plugins/uberdev/skills/solve-pipeline/SKILL.md"
+# #723: /issue autopilot. README_MD carries an assert_no_grep row below, so it
+# MUST join the pre-flight loop — assert_no_grep passes trivially against a
+# missing file, which is exactly how a moved path goes vacuously green. RFC12
+# joins it so a moved RFC reports the real cause, not a bare pattern miss.
+README_MD="$REPO_ROOT/README.md"
+RFC12="$REPO_ROOT/docs/rfc/0012-ultracode-workflow-orchestration.md"
 
 # Pre-flight: refuse to run if the files we're asserting against are missing
 # or unreadable — without this, every assertion fails with a confusing
@@ -24,7 +30,8 @@ SOLVE_SKILL="$REPO_ROOT/plugins/uberdev/skills/solve-pipeline/SKILL.md"
 # below names MUST be in this loop: assert_no_grep passes trivially against a
 # missing or emptied file, so a moved path would go vacuously green.
 for f in "$ISSUE_CMD" "$BRAINSTORM" "$CODEBASE_SCOUT" "$TRIAGE_SCOUT" \
-         "$SOLVE_LAUNCHER" "$SPEC_WRITER" "$SOLVE_SKILL"; do
+         "$SOLVE_LAUNCHER" "$SPEC_WRITER" "$SOLVE_SKILL" \
+         "$README_MD" "$RFC12"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -300,6 +307,102 @@ assert_grep "$SOLVE_LAUNCHER" \
 assert_grep "$SOLVE_SKILL" \
   'lightweight TodoWrite plan' \
   "solve-pipeline small row still describes a workflow"
+
+echo
+echo "== /issue is autopilot: the confirm gate is gone (#723) =="
+# NEGATIVES. Each names one of the five sentences that carried the gate. A
+# repo-wide sweep outside CHANGELOG.md found exactly these five, so the set
+# is closed: a sixth copy cannot hide in a skill.
+assert_no_grep "$ISSUE_CMD" \
+  '^## Phase 5: Confirm$' \
+  "Phase 5 is no longer a bare Confirm section"
+assert_no_grep "$ISSUE_CMD" \
+  'STOP and show the draft to the user' \
+  "the draft-confirm stop instruction is removed"
+assert_no_grep "$ISSUE_CMD" \
+  '\*\*Always confirm\*\*' \
+  "the Always confirm rule is removed"
+# Scoped to the create call, not to the bare phrase: this row's subject is the
+# create gate, but the file also carries the SURVIVING '/solve is never
+# auto-run' rule phrased "always wait for the user". A whole-file negative on
+# 'wait for explicit approval' would red if that surviving sentence were ever
+# reworded — a false red on prose this same change protects.
+assert_no_grep "$ISSUE_CMD" \
+  'wait for explicit approval before `gh issue create`' \
+  "no rule still demands explicit approval before gh issue create"
+assert_no_grep "$ISSUE_CMD" \
+  'confirms with the user' \
+  "the header pipeline summary no longer claims a user-confirm step"
+assert_no_grep "$ISSUE_CMD" \
+  'Show the user a complete draft BEFORE creating' \
+  "Phase 4 no longer frames the draft as a pre-create prompt"
+
+# POSITIVES, half of them on SURVIVING behaviour. A negative grep alone cannot
+# distinguish "gate removed" from "file emptied or renamed"; these rows can.
+assert_grep "$ISSUE_CMD" \
+  '\*\*Autopilot \(always ON\)\.\*\*' \
+  "issue.md declares unconditional autopilot"
+assert_grep "$ISSUE_CMD" \
+  'no config key and no `--confirm` flag' \
+  "autopilot is declared unconditional — no knob, no inverse flag"
+assert_grep "$ISSUE_CMD" \
+  '^## Phase 5: Open-duplicate gate \(the only halt\)$' \
+  "Phase 5 is now the open-duplicate gate"
+# The prose is sentence-initial "Proceed", so the class is required: assert_grep
+# is case-sensitive grep -qE. Do NOT lowercase this to match plan.md's literal.
+assert_grep "$ISSUE_CMD" \
+  '[Pp]roceed \*\*straight to Phase 6\*\*' \
+  "the no-duplicate path goes straight to create, in one turn"
+assert_grep "$ISSUE_CMD" \
+  'Do not run `gh issue create` until the user answers' \
+  "an OPEN duplicate still halts before the mutation"
+assert_grep "$ISSUE_CMD" \
+  '\*\*Closed\*\* duplicates never halt' \
+  "closed duplicates stay regression evidence, not a gate"
+assert_grep "$ISSUE_CMD" \
+  '\*\*Autopilot: never confirm\*\*' \
+  "the Rules list carries the autopilot rule in place of Always confirm"
+
+# Degradations are REPORTED, never gates (AC 3), and the Phase 7 follow-up
+# block survives intact (AC 4).
+assert_grep "$ISSUE_CMD" \
+  'never promoted to gates' \
+  "scout degradations are reported, not turned into gates"
+assert_grep "$ISSUE_CMD" \
+  '^degradation: ' \
+  "the Phase 7 result block carries a degradation line"
+assert_grep "$ISSUE_CMD" \
+  'Next step: /solve \$ISSUE_NUM' \
+  "the Phase 7 follow-up block still prints"
+assert_grep "$ISSUE_CMD" \
+  '\*\*Do not run `/solve` automatically\*\*' \
+  "/solve is still never auto-run"
+
+echo
+echo "== README and RFC 0012 match the autopilot behaviour (#723) =="
+# Scoped to the /issue pipeline arrow (the removed literal was
+# 'draft -> user-confirm -> create'), not to the bare word: README.md documents
+# fifteen commands and already discusses confirm-gate semantics for /merge, so
+# a whole-file negative would red on prose that has nothing to do with /issue.
+# ASCII-only per the plan's D7 — '.*' spans the non-ASCII arrows.
+assert_no_grep "$README_MD" \
+  'draft.*user-confirm.*create' \
+  "README /issue pipeline no longer claims a user-confirm step"
+assert_grep "$README_MD" \
+  'investigation-first issue creation' \
+  "README /issue section still exists (anti-vacuity anchor for the row above)"
+assert_grep "$README_MD" \
+  'one turn, no approval prompt' \
+  "README /issue section describes the autopilot default"
+assert_grep "$README_MD" \
+  'no opt-out key and no `--confirm` flag' \
+  "README records that no knob and no inverse flag landed"
+assert_grep "$RFC12" \
+  'deliberate draft-confirm gate protecting a GitHub mutation' \
+  "RFC 0012 keeps its original light-R1 verdict verbatim (no re-baseline)"
+assert_grep "$RFC12" \
+  '\*\*SUPERSEDED IN PART \(#723\)\.\*\*' \
+  "RFC 0012 records the supersession alongside the retained verdict"
 
 echo
 echo "== Summary =="
