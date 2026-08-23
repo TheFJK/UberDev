@@ -866,3 +866,153 @@ another.
 `## Phase 3b — CONVERGE`, `## Common Mistakes`) and
 `_fingerprint`'s docstring state the same distinction at the code. This amendment
 is what keeps the design authority from outranking them with the retired premise.
+
+### A5 — the growth ratio is computed and stops the loop (2026-08-23)
+
+A5 is the first code change made under A3, and it discharges A3's second
+corollary rather than its constraint set. A3 closed, verbatim:
+
+> **A3 changes no code.** It ratifies the diagnosis and the constraint set; the
+> loop that ships today is A1's, unmodified, and stays that way until a design
+> satisfying C1–C8 is written and amended in.
+
+From this amendment on, the second half of that sentence no longer describes the
+shipped tree: the loop carries one new measurement and one new stop, and C1–C8
+are not satisfied. A3's text is retained as written — it is the record of what
+was decided then — and narrowed here, the way A4 narrows §8 and A1.
+
+The narrowing is precise. C1–C8 are constraints on **replacing the reviewed
+surface**, and every one of them is still open. Phase 1 still re-reviews the
+whole stack every attempt, so §1's finding — that the loop makes its own
+haystack grow, and that the generator's rate is roughly constant per unit
+reviewed — is undiminished. A5 adds a predicate over the sampler A1 already
+runs, computed from artifacts the run already writes. **It detects the pump; it
+does not stop the pumping. It stops the loop.**
+
+That is also what keeps it on the right side of the general law A3 states.
+`GROWTH` is a predicate fixed before the loop starts, with a written threshold
+and a written streak length, and it never reads a critic's silence:
+`blockers == 0` remains a coin that has to land empty, and no stop introduced
+here turns on it.
+
+#### What it computes
+
+A3's corollary 2 named the quantity:
+
+> That ratio — findings landing in text the previous round wrote, over total
+> findings — is a cheap, computable divergence signal, and at 100% it says stop
+> rather than repair again.
+
+`cmd_converge` now computes it as a set intersection, at the point where it
+already holds both attempts' evidence:
+
+```
+GROWTH(N) = |{ b in blockers(N) : b.file in modified(N-1)
+                                  and b.fingerprint not in blockers(N-1) }|
+            / |blockers(N)|
+```
+
+`blockers(N)` is attempt N's `classified-<NN>.json`; `modified(N-1)` is
+`fix-scope-<NN-1>.modified`, the list the fix-commit fence's scope guard already
+writes. Both sit inside the run directory `converge` is already handed, so there
+is no new artifact, no new phase and no new argument. The value is printed as a
+`GROWTH=` field on the existing `PREMERGE_CONVERGE` line and recorded under a
+`growth` key on the existing `converge.jsonl` row; the number compared against
+the threshold is the same two-decimal value the line prints, so the field an
+operator reads and the decision the run took cannot disagree.
+
+The fingerprint exclusion is load-bearing, not an optimisation. The wave plan
+assigns exactly the files this attempt's blockers named, so a **survivor** — a
+blocker the fixer was handed and did not clear — always sits in a modified file.
+Counted, it would drive a loop that is converging with residual findings to 1.00
+and stop it on its own success. Excluded, the numerator counts only fingerprints
+the previous attempt's evidence did not carry, so it can never exceed the `NEW=`
+count already on the same line, which is what makes that line internally
+checkable.
+
+Because the reviewed surface is unchanged, the denominator is the same
+population `BLOCKERS=` already reports. C2's hazard — consumers reading one
+attempt's findings as if they described the whole stack — is a consequence of
+C1's shrinking surface and is not created here.
+
+#### The stop
+
+`STOP_SELF_REFERENTIAL` joins the closed `CONVERGE_DECISIONS` vocabulary as a
+new cascade arm, after `STOP_NO_PROGRESS` and before the budget check that
+yields `STOP_EXHAUSTED`. It fires when `GROWTH` is at or above
+`CONVERGE_GROWTH_CEILING` (`0.50`) on `CONVERGE_GROWTH_RUNS` (`2`) consecutive
+**measured** attempts, the earlier one read off that attempt's own ledger row
+rather than carried in a variable a fence could forget. The pipeline SKILL
+restates both numbers as `PREMERGE_GROWTH_CEILING` and `PREMERGE_GROWTH_RUNS`,
+the way it restates the loop's other constants.
+
+- **0.50 is break-even, and it is chosen rather than calibrated.** The numerator
+  is work the last repair authored; the complement is work the loop inherited.
+  At 0.50 a repair round manufactured exactly as much new work as it took from
+  the inherited pile, and above it the repair is a net generator — every further
+  round enlarges its own haystack. The two runs recorded in #754 were computed
+  by hand, over whole runs, not by the code that ships here: the pumped run at
+  1.00 and the converging one at 0.20. They bound the threshold — any value in
+  (0.20, 1.00] separates them — without determining it.
+- **Two rounds, because A3 §2 (*Blockers are resampled; only suggestions have a
+  ledger*) is still true.** Attempt N's blocker set is a fresh sample, so a
+  defect present since attempt 1 but first rolled at attempt 3 counts as new —
+  and the files most likely to be resampled are exactly the ones the repair just
+  touched. One high round is therefore consistent with a healthy convergence
+  whose repairs happen to be concentrated in a few files, and firing on it would
+  reproduce, for a new detector, the failure C3 names for an old one: "the real
+  failure is that they stop a loop that was working." No run has yet produced a
+  two-round streak from the shipped code — A3's own drafting is the nearest
+  recorded case, and that is a single round at 6/6 — so the streak length is the
+  conservative choice this argument supports, not a number read off data.
+- **It pre-empts `STOP_EXHAUSTED` on purpose.** "The loop was still winning,
+  raise `--converge`" and "the loop was reviewing itself" are opposite operator
+  responses, and the budget stop says the first about a run that did the second.
+
+Nothing it stops is discarded. `STOP_SELF_REFERENTIAL` is a not-green stop like
+every other stop here, so the run reaches Phase 5 with `PREMERGE_SURVIVORS=1`,
+which is what adds `--include-blockers` to the `defer` call and puts every
+surviving blocker into the aggregate that becomes issues. The ratio's claim is
+"not *this loop's* work", never "not work" — corollary 1, record incompleteness
+as scope rather than chasing it as a bug, applied to the loop's own output. It
+also closes no gate: a run ending here is not green, so C5 is untouched.
+
+#### Why this is a signal and not a proof
+
+Three limits, recorded so the next amendment is checked against them instead of
+rediscovering them.
+
+**File granularity over-counts.** The precise question is whether a finding
+landed in text the previous repair *wrote*; what is measured is whether it
+landed in a **file** that repair modified. A genuinely new defect four hundred
+lines from the repair hunk counts as growth. The precise version needs diff-hunk
+mapping against a review pointed at one repair's delta, and C8 records that no
+such dispatch exists — the only reviewer this pipeline has accepts a PR, a
+branch or a path, and a two-SHA range is not in that surface. So the proxy errs
+toward stopping, which is what the two-round requirement exists to absorb.
+Making it precise belongs to the C1–C8 work, not to a follow-up on this one.
+
+**The measurement is blind on any round whose repair committed nothing.** The
+fix-commit fence exits early with `REASON=no-edits` on a clean tree and writes
+no `fix-scope-<NN>.modified` at all, and a repair that only re-ran CI commits
+nothing. Those attempts report `GROWTH=-`, which means *not measured* and is a
+different answer from `0.00`: there was no repair to attribute the round's
+findings to, and printing zero would be reporting a measurement nobody took.
+
+**So the guard is incomplete, not defeatable.** A pump interleaved with no-edit
+rounds never accumulates two consecutive measured rounds and so never trips this
+stop. That is a gap, not a bypass — the run then behaves exactly as it does
+today and ends at `STOP_EXHAUSTED` on the budget. Today's behaviour is the floor
+every degraded path falls back to: an unmeasurable ratio, an unreadable scope
+list, attempt 1, or an attempt with no blockers to divide by all report `-` and
+change no decision. Failing closed here would stop a loop that is working, which
+is the one direction this measurement must not fail in.
+
+#### What this does not change
+
+The A1 ordering (gate before repair), the line-independent multiset fingerprint,
+`STOP_NO_PROGRESS` / `STOP_REGRESSED` and their inputs, `cmd_assert_green`'s
+`blockers_remaining` gate, the fixer prompt's prohibition on weakening tests,
+controller-only commits, and the wave scope guard are all untouched. The
+reviewed surface is still the whole stack, every attempt. C1–C8 remain the open
+constraint set for the design that changes that, and A5 is not it.
