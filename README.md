@@ -393,7 +393,9 @@ Design rationale and full topology in [`docs/rfc/0021-premerge-stack-integration
 
 ## `/issue` — investigation-first issue creation
 
-Pipeline: classify → 2-scout fanout (`codebase-scout` + `triage-scout`, parallel in one turn — dedup against closed issues, label/scope validation against `gh label list` and commitlint) → draft → user-confirm → create → print `Next step: /solve N`. Median wall-clock under 30 seconds.
+Pipeline: classify → 2-scout fanout (`codebase-scout` + `triage-scout`, parallel in one turn — dedup against open and closed issues, label/scope validation against `gh label list` and commitlint) → draft → **create** → print `Next step: /solve N`. Median wall-clock under 30 seconds — one turn, no approval prompt.
+
+**Autopilot.** `/issue` files the issue without stopping to ask — the same call `/merge` made when `auto_confirm` became a documented no-op. The draft is the issue body, not a question: on the normal path it never reaches your terminal — what prints is the result block with the issue URL. Exactly one halt survives: an **open** duplicate found by `triage-scout` stops before `gh issue create` and shows you both the match and the draft, because a second copy of a live issue is the one outcome that closing it does not cleanly undo. Closed duplicates never halt — they are regression evidence and render as `## Possible duplicates`. Scout degradations (a `BLOCKED` codebase scout, a `gh label list` that failed) are reported in the result block, never promoted to gates. There is no opt-out key and no `--confirm` flag. `/solve` is still never auto-run.
 
 Templates by type — bug (`fix`), feature (`feat`), or chore/refactor — each producing conventional-commit-style titles and a body footed with `**Triage hint:** <trivial|small|medium>` that `/solve` reads later to pick the workflow without reclassifying.
 
