@@ -116,6 +116,8 @@ PREMERGE_VERSION_MANIFEST = plugins/uberdev/.claude-plugin/plugin.json
 PREMERGE_CONVERGE_DEFAULT= 3              # REPAIR rounds, --converge dials it
 PREMERGE_REPAIR_CEILING  = 6              # the runaway backstop --converge cannot pass
 PREMERGE_WAIT_CI_CEILING = 8              # WAIT_CI re-probes before the loop calls CI dead
+PREMERGE_GROWTH_CEILING  = 0.50           # self-referential growth that stops the loop
+PREMERGE_GROWTH_RUNS     = 2              # consecutive attempts at/above it before it stops
 PREMERGE_RERUN_FLAKY_CAP = 1              # `gh run rerun` attempts per RUN
 ```
 
@@ -124,6 +126,14 @@ PREMERGE_RERUN_FLAKY_CAP = 1              # `gh run rerun` attempts per RUN
 and restated here for the reader. The library is the enforcer — it refuses an
 out-of-range `--max-repairs` rather than clamping it, so these two numbers being
 prose does not make them advisory.
+
+`PREMERGE_GROWTH_CEILING` and `PREMERGE_GROWTH_RUNS` are declared the same way
+(`CONVERGE_GROWTH_CEILING`, `CONVERGE_GROWTH_RUNS`) and restated here for the
+same reason. `0.50` is the break-even point of the loop's own accounting rather
+than a round number: above it a repair round manufactures more new work than it
+inherited, so every further round enlarges its own haystack. `2` is what makes
+it a warning before it is a stop — one high round is consistent with a
+convergence whose repairs happen to be concentrated in a few files.
 
 `PREMERGE_CI_SETTLE_SECS` is consumed by the **controller**, not by a fence, and
 that is deliberate. It is named in exactly one instruction — the waitable-reasons
@@ -1266,7 +1276,7 @@ exit 0
 The fence prints one line and appends one row to `converge.jsonl`:
 
 ```
-PREMERGE_CONVERGE ATTEMPT=<n> DECISION=<D> BLOCKERS=<n> PREV=<n|-> FIXED=<n> NEW=<n> WAIT=<n> MAXREPAIRS=<n> REASONS=<csv>
+PREMERGE_CONVERGE ATTEMPT=<n> DECISION=<D> BLOCKERS=<n> PREV=<n|-> FIXED=<n> NEW=<n> GROWTH=<0.00-1.00|-> WAIT=<n> MAXREPAIRS=<n> REASONS=<csv>
 ```
 
 **Branch on `DECISION=`, never on the exit status.** `STOP_GREEN` — the outcome
@@ -1283,6 +1293,7 @@ successfully converged stack as a broken one.
 | `CONTINUE` | something is still fixable and the last attempt changed something | repair (3c) → Phase 1 at attempt+1 |
 | `STOP_NO_PROGRESS` | an attempt changed neither the blockers nor the CI reason | **Phase 5, not green** |
 | `STOP_REGRESSED` | our own fixes grew the blocker set | **Phase 5, not green** |
+| `STOP_SELF_REFERENTIAL` | two rounds running, most of the blockers were defects that did not exist before this loop's own repairs wrote them | **Phase 5, not green** |
 | `STOP_EXHAUSTED` | the runaway backstop | **Phase 5, not green** |
 | `STOP_UNREADABLE` | stale evidence, or CI that never settled | **Phase 5, not green** |
 
@@ -1300,6 +1311,81 @@ fingerprint `findings-to-issues` computes. That agent keys a per-finding identit
 on `file:line:summary` because a finding is about a location, and a per-ISSUE
 identity on the owning file alone because an issue is now about a file. Same
 width, three different questions.
+
+**The growth ratio, and why it is a different question.** `FIXED=` and `NEW=`
+compare two fingerprint multisets, and RFC 0021 A3 records what that cannot see.
+A critic asked *"what is wrong with this?"* samples an **unbounded** set, so the
+two multisets are independent draws from a generator, not two readings of a fixed
+population: a blocker the sampler simply did not roll counts `FIXED`, a defect
+that was always there counts `NEW`, and `findings == 0` is a property of the
+sample, never of the artifact. That is why find→fix→re-find has no fixed point
+and runs until something outside it says stop. `GROWTH=` is that something. It
+asks the one question the fingerprints cannot: **of this attempt's blockers, what
+fraction did not exist last attempt AND sits in a file the last repair actually
+modified?** At `1.00` the loop is reviewing what its own repairs wrote, and the
+answer to that is to stop, not to repair again.
+
+- **Denominator** — every blocker in this attempt's `classified-<NN>.json`, the
+  same number printed as `BLOCKERS=`.
+- **Numerator** — those blockers whose `file` is in the previous attempt's
+  `fix-scope-<NN-1>.modified` and whose fingerprint the previous attempt's
+  evidence did not carry. Excluding carried fingerprints is what keeps a
+  *survivor* out of the count: the wave plan assigns exactly the files this
+  attempt's blockers named, so a finding the fixer did not clear is always in a
+  touched file, and counting it would make a converging loop stop on its own
+  success. The numerator is therefore a strict subset of `NEW=`.
+- **Both inputs are already on disk** in the run directory. Nothing new is
+  written, no phase is added, and `converge` takes no new argument.
+
+**Two consecutive rounds, and never one.** `PREMERGE_GROWTH_CEILING` is compared
+with `>=`, but one round at or above it changes no decision: the stop needs
+`PREMERGE_GROWTH_RUNS` consecutive **measured** rounds, read back off the previous
+attempt's own `converge.jsonl` row rather than carried in a variable a fence could
+forget. This is not caution for its own sake, and it is the part most likely to be
+"simplified" away by someone who has not read why it is there. A3 §2 establishes
+that attempt N's blocker set is a *fresh sample*, so a defect present since
+attempt 1 but first rolled at attempt 3 counts as new — and the files most likely
+to be resampled are exactly the ones the repair just touched. One high round is
+therefore what a healthy convergence with concentrated repairs looks like, and
+firing on it would stop a loop that was working, which is the failure A3 C3 names
+outright. A loop that really is pumping pays one extra round for this, every time;
+that is the deliberate price. **Do not reduce the requirement to a single round.**
+
+**Where it sits in the cascade, and what it pre-empts.** The ratio is read after
+`STOP_NO_PROGRESS` — the two fingerprint detectors are sharper diagnoses and keep
+their place — and **before** `STOP_EXHAUSTED`, which it pre-empts on purpose.
+"The loop was still winning, raise `--converge`" and "the loop was reviewing
+itself" are opposite operator responses, and the budget stop says the first about
+a run that did the second.
+
+`GROWTH=-` means *not measured*, not *zero*, and it has **four** causes:
+
+1. **attempt 1** — there is no predecessor to attribute anything to;
+2. **a previous attempt that committed no edits**, so wrote no scope list — the
+   fix-commit fence's `REASON=no-edits` early exit. A repair that only re-ran CI
+   is a real `CONTINUE`, and there is no repair to blame this round's findings on;
+3. **no blockers this attempt** — nothing to divide by;
+4. **a scope list that *is* present but could not be read** — the only one of the
+   four that is a **fault** rather than an undefined ratio. It announces itself,
+   printing `premerge-findings: repair_scope_unreadable:` with the path on
+   **stderr**. So a `-` on the line is the cue to check stderr before concluding
+   the ratio was merely undefined.
+
+None of the four stops the loop, and none of them is `0.00`. Reading `-` as zero
+turns *we did not look* into *we looked and it was fine*.
+
+**Deliberately the coarse proxy.** The precise question is whether a finding
+landed in text the previous repair *wrote*, which needs diff-hunk mapping nothing
+in this pipeline produces (A3 C8: the reviewer accepts a PR, a branch or a path,
+not a two-SHA range). File-level membership counts a new finding anywhere in a
+touched file, so it errs toward stopping — which the two-round requirement is
+there to absorb. Do not build the hunk-mapping version to "fix" this; build it, if
+ever, as the C1–C8 design A3 is waiting for.
+
+**The findings that trip it are not discarded.** `STOP_SELF_REFERENTIAL` is a
+not-green stop like the others, so Phase 5 runs with `PREMERGE_SURVIVORS=1` and
+`defer` is handed `--include-blockers`. Every surviving blocker becomes an issue.
+The ratio's claim is "not *this loop's* work", never "not work".
 
 ### 3c — Repair, by reason
 
@@ -2256,9 +2342,9 @@ Print the run summary and **stop**:
   packed        #A #B #C            (base: <base>, branch: chore/stack-<run-id>)
   excluded      #D (conflict_unresolved)
   review        <level> — <n> findings (<n> category-backed)
-  converge      <n>/<max> attempts — STOP_GREEN | STOP_NO_PROGRESS | …
-                  attempt 1: <n> blockers, ci=red      → fixed <n>, class=code_bug
-                  attempt 2: <n> blockers, ci=green    → fixed <n>
+  converge      <n>/<max> attempts — STOP_GREEN | STOP_NO_PROGRESS | STOP_SELF_REFERENTIAL | …
+                  attempt 1: <n> blockers, ci=red      → fixed <n>, growth=-, class=code_bug
+                  attempt 2: <n> blockers, ci=green    → fixed <n>, growth=0.20
   blockers      <n> found / <n> fixed / <n> surviving
   ci            <state> before simplify / <state> after
   clean gate    green | not_green (<reasons>)
@@ -2279,6 +2365,15 @@ STOP_NO_PROGRESS" and "3/3 attempts, STOP_EXHAUSTED" call for opposite next move
 — the first says the fixers are stuck and a human should look, the second says
 the loop was still winning and `--converge=5` would probably finish it. A summary
 that collapses both to `not_green` withholds the one thing the operator needs.
+
+**Every attempt's row carries its `growth=`**, transcribed from that attempt's
+`converge.jsonl` row, because "it was still converging" and "it was reviewing
+its own output" call for opposite operator responses in exactly the way
+`STOP_NO_PROGRESS` and `STOP_EXHAUSTED` do. A run that ends `STOP_EXHAUSTED`
+with `growth=0.10` on every attempt wants a bigger `--converge`; the same stop
+with `growth=0.90` wants a smaller stack and a lower level. Print `growth=-`
+unchanged where the ledger row carries none — it means the ratio was not
+measured, and rendering it as `0.00` would invent a measurement.
 
 The trace is `converge.jsonl` — one row per decision, append-only, in the run
 directory. `CATEGORY_BACKED` still belongs in the review row: it says how much of
