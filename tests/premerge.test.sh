@@ -73,6 +73,14 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 CMD="$REPO_ROOT/plugins/uberdev/commands/premerge.md"
 SKILL="$REPO_ROOT/plugins/uberdev/skills/premerge-pipeline/SKILL.md"
+# #747 — four reference files now hold what the body used to: the Phase 0/1/2/3
+# contracts, the finding-overflow arms, and Common Mistakes. The BYTES are
+# unchanged; only the file holding them moved. $SKILL_MISTAKES and
+# $SKILL_CONTRACTS name the two that assertions below read; $SKILL stays the
+# body, because every fence extraction still comes out of it.
+SKILL_CONTRACTS="$REPO_ROOT/plugins/uberdev/skills/premerge-pipeline/references/phase-contracts.md"
+SKILL_MISTAKES="$REPO_ROOT/plugins/uberdev/skills/premerge-pipeline/references/common-mistakes.md"
+SKILL_OVERFLOW="$REPO_ROOT/plugins/uberdev/skills/premerge-pipeline/references/finding-overflow.md"
 LIB="$REPO_ROOT/plugins/uberdev/lib/premerge-findings.py"
 PRIMITIVES="$REPO_ROOT/plugins/uberdev/lib/report_primitives.py"
 F2I="$REPO_ROOT/plugins/uberdev/agents/findings-to-issues.md"
@@ -84,7 +92,7 @@ GOAL_STATE="$REPO_ROOT/plugins/uberdev/lib/goal-state.sh"
 
 # Pre-flight: refuse to run if any asserted-against file is missing. A shape test
 # whose subject vanished must fail loudly, never report zero findings.
-for f in "$CMD" "$SKILL" "$LIB" "$PRIMITIVES" "$F2I" "$SYNC" "$VENDOR" "$RFC" "$README" "$GOAL_STATE"; do
+for f in "$CMD" "$SKILL" "$SKILL_CONTRACTS" "$SKILL_MISTAKES" "$SKILL_OVERFLOW" "$LIB" "$PRIMITIVES" "$F2I" "$SYNC" "$VENDOR" "$RFC" "$README" "$GOAL_STATE"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -271,7 +279,7 @@ print('\n'.join(sorted(mod.CLEANUP_CATEGORIES)))
 ") 2>"$P3B_ERR" | tr -d '\r')"
 # The tagged block, split on whitespace. Tagged rather than positional so a
 # reflow of the surrounding prose cannot silently move the anchor.
-P3B_DOC_SET="$(sed -n '/^[[:space:]]*```text premerge-cleanup-categories$/,/^[[:space:]]*```$/p' "$SKILL" \
+P3B_DOC_SET="$(sed -n '/^[[:space:]]*```text premerge-cleanup-categories$/,/^[[:space:]]*```$/p' "$SKILL_CONTRACTS" \
   | sed -e '1d' -e '$d' | tr '[:space:]' '\n' | grep -v '^$' | LC_ALL=C sort -u)"
 P3B_PY_N="$(grep -c . <<<"$P3B_PY_SET")"
 P3B_DOC_N="$(grep -c . <<<"$P3B_DOC_SET")"
@@ -472,7 +480,7 @@ assert_fixed "$SKILL" 'do not route this' "P14: 4c does not crash on a spent rep
 # The CI agents DO run git locally; conflating them with the wave agents makes a
 # CI repair silently no-op through a commit fence that finds a clean tree.
 assert_fixed "$SKILL" '--force-with-lease' "P14: the rebase arm publishes under a lease"
-assert_grep "$SKILL" 'Assuming that rule covers the CI agents too' "P14: the wave-agent git rule is scoped away from the CI agents"
+assert_grep "$SKILL_MISTAKES" 'Assuming that rule covers the CI agents too' "P14: the wave-agent git rule is scoped away from the CI agents"
 
 echo "== P15: the gate builds an argv LIST, not a string =="
 # The fences run through /bin/zsh, which does NOT word-split an unquoted scalar.
@@ -695,11 +703,11 @@ assert_in "$SIMPLIFY_FENCE" 'git -C "$PREMERGE_ROOT" diff --name-only --no-renam
 # which only holds if the file says what the value IS everywhere the gate runs.
 # It used to say so at `### 4c` step 3 alone; a controller inferring 0 at a gate
 # that just pushed gets `no_checks` read as green.
-assert_grep "$SKILL" '^### What `PREMERGE_PUSHED` is at each call site$' \
+assert_grep "$SKILL_CONTRACTS" '^### What `PREMERGE_PUSHED` is at each call site$' \
   "P17/#707: the call-site table exists"
 for pushed_site in 'first entry at attempt 1' 'premerge-fix-commit' \
                    'premerge-ci-publish' 'WAIT_CI'; do
-  assert_grep "$SKILL" "$pushed_site" \
+  assert_grep "$SKILL_CONTRACTS" "$pushed_site" \
     "P17/#707: the table names the '$pushed_site' call site"
 done
 
@@ -900,9 +908,9 @@ assert_count_fixed "$SKILL" 'file:line:summary' 2 \
   "P17/#722: the per-finding identity is stated in exactly two places"
 assert_no_grep "$SKILL" 'duplicates rather than comments' \
   "P17/#722: no copy says per-attempt filing duplicates instead of commenting"
-assert_fixed "$SKILL" 'keys the ISSUE' \
+assert_fixed "$SKILL_MISTAKES" 'keys the ISSUE' \
   "P17/#722: Common Mistakes states the grouped mechanism (anti-vacuity)"
-assert_fixed "$SKILL" 'File once, at Phase 5.' \
+assert_fixed "$SKILL_MISTAKES" 'File once, at Phase 5.' \
   "P17/#722: and keeps the conclusion the corrected mechanism still carries"
 
 # --- #722: DEFER_FILES= must name the bound the operator actually feels -------
@@ -1162,7 +1170,8 @@ fi
 P20_DANGLING=""
 while IFS= read -r P20_REF; do
   [ -n "$P20_REF" ] || continue
-  grep -qxF -e "$P20_REF" "$SKILL" || P20_DANGLING="$P20_DANGLING [$P20_REF]"
+  grep -qxF -e "$P20_REF" "$SKILL" "$SKILL_CONTRACTS" "$SKILL_MISTAKES" "$SKILL_OVERFLOW" \
+    >/dev/null || P20_DANGLING="$P20_DANGLING [$P20_REF]"
 done <<EOF_P20_REFS
 $CONST_REFS
 EOF_P20_REFS

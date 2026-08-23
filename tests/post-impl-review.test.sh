@@ -30,6 +30,14 @@ set -o pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TEST_FILE="$REPO_ROOT/tests/post-impl-review.test.sh"
 POST_IMPL="$REPO_ROOT/plugins/uberdev/skills/post-impl-review/SKILL.md"
+# #747 — the reviewer roster table, the fanout-cap precedence, the
+# evidence-failure taxonomy, the convention citation gate and the whole
+# integration contract moved into this reference file when SKILL.md was cut
+# toward Anthropic's 500-line ceiling. The BYTES are unchanged; only the
+# file holding them moved, so an assertion about that content now names
+# this path. Fence extraction still reads $POST_IMPL — no executable fence
+# moved.
+POST_IMPL_REF="$REPO_ROOT/plugins/uberdev/skills/post-impl-review/references/contracts.md"
 REVIEW_AGG="$REPO_ROOT/plugins/uberdev/lib/review-aggregate.sh"
 PHASE1_ORACLE_RELPATH="tests/fixtures/findings-to-issues/post-impl-review-final.sample.md"
 PHASE1_EMPTY_ORACLE_RELPATH="tests/fixtures/findings-to-issues/post-impl-review-empty.sample.md"
@@ -44,7 +52,7 @@ SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
 # explicit rc=2, never a silently-zero-assertion PASS.
 REVIEW_FLEET_JS="$REPO_ROOT/plugins/uberdev/skills/review-fleet/workflow.js"
 
-for f in "$POST_IMPL" "$SOLVE_CMD" "$SUBAGENT_DRIVEN" "$SOLVE_PIPELINE" "$REVIEW_FLEET_JS"; do
+for f in "$POST_IMPL" "$POST_IMPL_REF" "$SOLVE_CMD" "$SUBAGENT_DRIVEN" "$SOLVE_PIPELINE" "$REVIEW_FLEET_JS"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -104,9 +112,9 @@ fi
 # "| `<name>`" optionally followed by " (qualifier)" before the next pipe —
 # the second `code-reviewer` row uses " (general lens)" so we tolerate any
 # non-pipe trailing chars between the closing backtick and the next "|".
-assert_count "$POST_IMPL" '^### Step 2: ' '^### Step 3: ' '^\| .code-[a-z-]+.[^|]*\||^\| .pr-test-analyzer.[^|]*\||^\| .silent-failure-hunter.[^|]*\||^\| .type-design-analyzer.[^|]*\||^\| .comment-analyzer.[^|]*\||^\| .convention-compliance.[^|]*\|' \
+assert_count "$POST_IMPL_REF" '^## Reviewer roster and the fanout cap' '^## The evidence ledger' '^\| .code-[a-z-]+.[^|]*\||^\| .pr-test-analyzer.[^|]*\||^\| .silent-failure-hunter.[^|]*\||^\| .type-design-analyzer.[^|]*\||^\| .comment-analyzer.[^|]*\||^\| .convention-compliance.[^|]*\|' \
   7 \
-  "Step 2 dispatch table has exactly 7 reviewer rows (one per dispatch slot, including 2 code-reviewer rows)"
+  "reviewer dispatch table has exactly 7 reviewer rows (one per dispatch slot, including 2 code-reviewer rows)"
 assert_grep "$POST_IMPL" 'dispatch-all-before-wait|dispatch.*before waiting' \
   "dispatch-before-wait invariant documented"
 assert_grep "$POST_IMPL" 'configured wave|each wave|within.*wave' \
@@ -252,13 +260,13 @@ ROSTER_FILES="$(sed -n '/^const REVIEW_ROSTER = \[/,/^];/p' "$REVIEW_FLEET_JS" \
 # The table's second column, block-scoped from its header row to the next blank
 # line. `agents/` and the ` (inherit)` adornment are stripped so both sides
 # speak the roster's bare-filename vocabulary.
-TABLE_FILES="$(awk '/^\| Reviewer \| Agent file \| Lens \|/{f=1;next} f&&/^$/{exit} f' "$POST_IMPL" \
+TABLE_FILES="$(awk '/^\| Reviewer \| Agent file \| Lens \|/{f=1;next} f&&/^$/{exit} f' "$POST_IMPL_REF" \
   | grep -v '^|[- |]*|$' | awk -F'|' '{print $3}' \
   | sed 's/`//g; s/ (inherit)//; s#agents/##; s/^ *//; s/ *$//')"
 # The "Pairs with:" prose is explicitly the SIX DISTINCT files, so it is
 # compared de-duplicated. Its block is the last one in the file, so the
 # terminator must be "blank line OR EOF" — which is what a bare `f` action does.
-PAIRS_FILES="$(awk '/^\*\*Pairs with:\*\*/{f=1;next} f&&/^$/{exit} f' "$POST_IMPL" \
+PAIRS_FILES="$(awk '/^\*\*Pairs with:\*\*/{f=1;next} f&&/^$/{exit} f' "$POST_IMPL_REF" \
   | grep -o 'agents/[a-z0-9-]*\.md' | sed 's#agents/##' | sort -u)"
 ROSTER_FILES_UNIQ="$(sort -u <<<"$ROSTER_FILES")"
 ROSTER_COUNT="$(grep -c . <<<"$ROSTER_FILES")"
@@ -460,7 +468,7 @@ assert_no_grep "$POST_IMPL" 'end-of-issue from subagent-driven-dev' \
   "frontmatter description no longer names subagent-driven-dev as a caller"
 assert_grep "$POST_IMPL" 'post-impl-review-final\.md' \
   "Step 4 output paths name the canonical post-impl-review-final.md (no wave- infix)"
-assert_grep "$POST_IMPL" 'Findings artifact contract' \
+assert_grep "$POST_IMPL_REF" 'Findings artifact contract' \
   "Integration section contains a Findings artifact contract subsection"
 assert_grep "$POST_IMPL" 'Pre-push bypass|Options 1.*3.*4.*bypass|Options 1, 3, 4 bypass' \
   "Integration section documents the finish-branch Options 1/3/4 bypass"

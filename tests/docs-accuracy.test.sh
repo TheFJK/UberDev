@@ -3259,6 +3259,11 @@ echo "== T17: the brainstorm launcher is invoked through bash, with the reason r
 # lane (skills/solve-fleet/workflow.js).
 VC_MD="$REPO_ROOT/plugins/uberdev/skills/brainstorm/visual-companion.md"
 ORCH_SKILL="$REPO_ROOT/plugins/uberdev/skills/orchestrator/SKILL.md"
+# #747 — the Phase 2 visual-companion flow, and the cross-file citation it
+# carries, moved into this reference file when the orchestrator body was cut
+# toward Anthropic's 500-line ceiling. The citation still belongs to the
+# orchestrator skill; it is just no longer in the body file.
+ORCH_VC_REF="$REPO_ROOT/plugins/uberdev/skills/orchestrator/references/visual-companion.md"
 if [ ! -r "$VC_MD" ] || [ ! -r "$ORCH_SKILL" ]; then
   echo "  FAIL  T17.0 corpus missing or unreadable — every row below would pass vacuously"
   echo "        visual-companion: $VC_MD"
@@ -3267,7 +3272,7 @@ if [ ! -r "$VC_MD" ] || [ ! -r "$ORCH_SKILL" ]; then
 else
   assert_absent_fixed "$ORCH_SKILL" 'visual-companion.md:' \
     "T17.1 the orchestrator's cross-file citation carries no line-number anchor"
-  assert_grep "$ORCH_SKILL" 'Unload when returning to terminal' \
+  assert_grep "$ORCH_VC_REF" 'Unload when returning to terminal' \
     "T17.2a the orchestrator anchors on the step's heading text instead"
   assert_grep "$VC_MD" 'Unload when returning to terminal' \
     "T17.2b that heading still resolves in the file it cites"
@@ -4554,6 +4559,16 @@ tiers = list(st.TIERS)
 
 roster_md = plugin_dir / "skills" / "post-impl-review" / "SKILL.md"
 roster_text = roster_md.read_text(encoding="utf-8").replace("\r\n", "\n")
+# #747 — the post-impl-review body was cut toward Anthropic's 500-line ceiling
+# and its roster table, fanout-cap precedence and failure boundary moved into
+# reference files the body points at. The SKILL is now those files together, so
+# a quotation credited to the skill is checked against all of them; checking the
+# body alone would report a correctly-cited sentence as a fabrication.
+roster_refs = sorted((roster_md.parent / "references").glob("*.md"))
+roster_all = roster_text + "\n" + "\n".join(
+    r.read_text(encoding="utf-8").replace("\r\n", "\n") for r in roster_refs)
+# The two spellings a shipped source may use to credit that skill.
+ROSTER_CREDITS = ("post-impl-review/SKILL.md", "post-impl-review/references/")
 ok = True
 
 # T20.1 — anti-vacuity for the roster. A renamed marker or a reshaped block
@@ -4715,12 +4730,13 @@ for path in sorted(p for p in owners if p.suffix in (".js", ".sh")):
                   re.sub(r"\n\s*(?://+|#+)\s*", " ",
                          texts[path].replace("\r\n", "\n")))
     for quoted in re.finditer(r"[\"“]([^\"“”]{20,300})[\"”]", flat):
-        if "post-impl-review/SKILL.md" not in flat[quoted.end():quoted.end() + 160]:
+        tail = flat[quoted.end():quoted.end() + 160]
+        if not any(credit in tail for credit in ROSTER_CREDITS):
             continue
         attributed += 1
         needle = re.sub(r"\s+", " ", quoted.group(1)).strip().casefold()
-        if needle not in re.sub(r"\s+", " ", roster_text).casefold():
-            print("T20.6 %s quotes %r and credits post-impl-review/SKILL.md, which does not contain it"
+        if needle not in re.sub(r"\s+", " ", roster_all).casefold():
+            print("T20.6 %s quotes %r and credits the post-impl-review skill, which does not contain it"
                   % (path.relative_to(plugin_dir).as_posix(), quoted.group(1)))
             ok = False
 if attributed < 2:

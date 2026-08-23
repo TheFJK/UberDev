@@ -302,7 +302,7 @@
       "last_reviewed_upstream_commit": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
       "last_reviewed_on": "2026-08-13",
       "stance": "fork",
-      "stance_reason": "Base e7a2d16 \u2014 upstream main's HEAD across the 2026-04-27\u21922026-05-04 vendoring window. Measured at that base on 2026-08-13: the file set is 1:1 (1/1, symmetric difference 0) and the copy diverges by 949 changed lines (GNU diff, '<' plus '>' lines); method and the 12-candidate scan are in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md, where no candidate scores better. A heavily-modified descendant: the local copy owns the pre-push secret-scan gate, the auto-chain into /uberdev:review-pr, and the no-Co-Authored-By PR rule. Upstream's version is not drop-in.",
+      "stance_reason": "Base e7a2d16 \u2014 upstream main's HEAD across the 2026-04-27\u21922026-05-04 vendoring window. Measured at that base on 2026-08-13: the file set is 1:1 (1/1, symmetric difference 0) and the copy diverges by 949 changed lines (GNU diff, '<' plus '>' lines); method and the 12-candidate scan are in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md, where no candidate scores better. A heavily-modified descendant: the local copy owns the pre-push secret-scan gate, the auto-chain into /uberdev:review-pr, and the no-Co-Authored-By PR rule. Upstream's version is not drop-in. Local-only addition (#747): references/options-and-integration.md holds the option matrix, Common Mistakes, Red Flags and Integration sections moved out of SKILL.md to bring the body toward Anthropic's 500-line ceiling. Upstream has no such file, so the 1:1 file-set measurement above is the reading AT ITS DATED BASE and no longer describes the current tree: the local set is now 2 files to upstream's 1. The moved bytes are unchanged, so the divergence is a relocation, not new content. The new file carries no provenance header on purpose \u2014 it was not copied from upstream, and stamping it as vendored would be a false attribution.",
       "measured_diff_lines": 1077,
       "measured_diff_basis": {
         "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
@@ -328,7 +328,11 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "5558bf49c3e6d69001892a9b0eb9e018bb40930ab9521e682e47a0921cf1cec7"
+          "sha256": "4d31ab9a878e290c48f3962f6808c6a0c3a4a13a34f34dacbc9d0ce5982d4a97"
+        },
+        {
+          "path": "references/options-and-integration.md",
+          "sha256": "e958f86af0bc51a546a642d36052cfff28b678c745864a56f3d35968ae197f23"
         }
       ]
     },

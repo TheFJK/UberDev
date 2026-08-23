@@ -11,6 +11,11 @@ set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FINISH_BRANCH="$REPO_ROOT/plugins/uberdev/skills/finish-branch/SKILL.md"
+# #747 — the Quick Reference option matrix, Common Mistakes, Red Flags and the
+# Integration contract moved into this reference file when SKILL.md was cut
+# toward Anthropic's 500-line ceiling. The bytes are unchanged; the QR rows
+# below name the file that now holds the table.
+FINISH_BRANCH_REF="$REPO_ROOT/plugins/uberdev/skills/finish-branch/references/options-and-integration.md"
 SECRET_SCAN_LIB="$REPO_ROOT/plugins/uberdev/lib/secret-scan.sh"
 
 if [ ! -r "$FINISH_BRANCH" ]; then
@@ -266,19 +271,19 @@ assert_grep "$FINISH_BRANCH" \
 
 echo
 echo "== Issue #67: Quick Reference table includes Post-impl review column =="
-assert_grep "$FINISH_BRANCH" \
+assert_grep "$FINISH_BRANCH_REF" \
   '\| Post-impl review \|' \
   "QR1 — Quick Reference table has Post-impl review column header"
-assert_grep "$FINISH_BRANCH" \
+assert_grep "$FINISH_BRANCH_REF" \
   '1\. Merge locally.*\|.*bypassed' \
   "QR2 — Option 1 row marks Post-impl review as bypassed"
-assert_grep "$FINISH_BRANCH" \
+assert_grep "$FINISH_BRANCH_REF" \
   '2\. Create PR.*\|.*runs' \
   "QR3 — Option 2 row marks Post-impl review as runs (via /review-pr Phase 1)"
-assert_grep "$FINISH_BRANCH" \
+assert_grep "$FINISH_BRANCH_REF" \
   '3\. Keep as-is.*\|.*bypassed' \
   "QR4 — Option 3 row marks Post-impl review as bypassed"
-assert_grep "$FINISH_BRANCH" \
+assert_grep "$FINISH_BRANCH_REF" \
   '4\. Discard.*\|.*bypassed' \
   "QR5 — Option 4 row marks Post-impl review as bypassed"
 
