@@ -89,11 +89,17 @@ path. **The moved bytes are unchanged** — this is a relocation, not a rewrite:
 
 | Skill | Before | After | New reference files |
 |---|---:|---:|---|
-| `premerge-pipeline` | 2,666 | 2,274 | `phase-contracts.md`, `finding-overflow.md`, `common-mistakes.md` |
+| `premerge-pipeline` | 2,666 | 2,323 | `phase-contracts.md`, `finding-overflow.md`, `common-mistakes.md` |
 | `orchestrator` | 1,095 | 1,012 | `visual-companion.md`, `tiers-and-recovery.md` |
 | `finish-branch` | 1,024 | 984 | `options-and-integration.md` |
 | `post-impl-review` | 900 | 797 | `contracts.md` |
 | `turbox-fleet` | 669 | **471** | `return-contracts.md`, `rationale.md`, `design-path.md` |
+
+`premerge-pipeline` reads 2,323 rather than the 2,274 the extraction reached: the severity
+rule and its `premerge-cleanup-categories` token block were put back into the body, because
+only `SKILL.md` is loaded when a skill fires and that rule is one the controller must read at
+the moment it writes a `severity`. Behind a reference file it was a rule the controller could
+not see. `tests/skill-size.test.sh` records the re-pin and its reason on the waiver row.
 
 `turbox-fleet` is the one that clears 500 outright. The other four are still
 dominated by executable `uberdev-executable` fences that tests extract and run;
@@ -115,6 +121,31 @@ was written, so:
 The list can therefore only ever get shorter. The gate also executes its own
 classifier against synthetic rows, so a rule that stopped refusing reds on the
 commit that broke it rather than printing a screen of green.
+
+### Fixed — runtime contracts and test guards the split had broken
+
+Caught by the `/premerge` stack gate on #752, before landing.
+
+**The dispatch brief handed leaf agents an unresolvable path.** `turbox-fleet`'s Phase 1c and
+Phase 4b briefs were rewritten from `the structured return in "Return contracts" below` to the bare
+path `references/return-contracts.md`. That text is relayed verbatim into a dispatched agent's
+prompt, and a leaf runs with `cwd` set to an issue worktree and no plugin root — so the path resolved
+to nothing and the agent answered without the required block. By the skill's own rule a missing
+return block is "a blocker, never a prompt to guess", so every single-solver and implementer task
+would have blocked. A new invariant now makes the controller read the reference file and paste the
+block into the brief; a leaf is never handed a path.
+
+**Four test guards had gone vacuous.** Assertions whose subject moved into a reference file were left
+pointing at the body, where a one-line cross-reference still satisfied the grep — so deleting the
+documentation they guard left them green. Repaired and each verified by mutation: `turbox-fleet`
+TX16 (re-scoped to the Phase 3 rung in `design-path.md`), `docs-accuracy` T20.6 (citations now
+resolve to the file they name, searched per-file so a needle cannot span two) and T17.1 (split so
+both files are guarded, with T17.0's readability pre-flight extended), and `post-impl-review`'s
+Integration row plus four siblings the audit found.
+
+**The severity rule was un-guarded in the copy that governs a run.** It was restored to
+`premerge-pipeline/SKILL.md`, the reference copy replaced by a pointer, and `tests/premerge.test.sh`
+P3b re-pointed to compare the copy the controller actually reads against the shipped library.
 
 ### Fixed — two cross-file citations that had drifted
 
