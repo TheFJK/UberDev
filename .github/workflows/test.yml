@@ -201,6 +201,7 @@ jobs:
           run_one bash tests/leaf-worker-contract.test.sh
           run_one bash tests/sdd-routed-lifecycle.test.sh
           run_one bash tests/audit-fixups.test.sh
+          run_one bash tests/agent-description-budget.test.sh
           run_one bash tests/review-pr.test.sh
           run_one bash tests/review-pr-entry.test.sh
           run_one bash tests/review-pr-phase3-ci.test.sh
@@ -752,6 +753,7 @@ jobs:
           run_one bash tests/spec-reviewer-plan-aware.test.sh
           run_one bash tests/leaf-worker-contract.test.sh
           run_one bash tests/audit-fixups.test.sh
+          run_one bash tests/agent-description-budget.test.sh
           run_one bash tests/review-pr.test.sh
           run_one bash tests/prkit-manifest.test.sh
           run_one bash tests/cluster.test.sh

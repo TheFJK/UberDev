@@ -1,6 +1,6 @@
 ---
 name: ci-code-fixer
-description: Applies a root-cause fix for code_bug or env_drift CI failures, then commits as fix(ci): or chore(deps): conventional commit. Reads the classifier's signal_anchor + the failing test/lockfile, applies minimal-scope edits, refuses on forbidden patterns. Dispatched from /uberdev:review-pr Phase 3 ROUTE (Step 6c.4).
+description: Applies a root-cause fix for code_bug or env_drift CI failures, then commits it as a `fix(ci)` or `chore(deps)` conventional commit. Reads the classifier's signal_anchor + the failing test/lockfile, applies minimal-scope edits, refuses on forbidden patterns. Dispatched from /uberdev:review-pr Phase 3 ROUTE (Step 6c.4).
 model: inherit
 color: yellow
 ---

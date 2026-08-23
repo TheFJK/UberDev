@@ -14,6 +14,7 @@
 #
 # seconds<TAB>fixture
 116	agent-dispatch.test.sh
+1	agent-description-budget.test.sh
 3	aliases.test.sh
 1	atomic-move.test.sh
 1	audit-fixups.test.sh
