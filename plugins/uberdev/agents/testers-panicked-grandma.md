@@ -4,7 +4,7 @@ description: Slow-reader, easily-confused persona for /uberdev:testers. Mis-clic
 # WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
 model: inherit
 color: yellow
-allowed-tools: ["Bash(curl*)", "Bash(*/lib/rl-curl*)", "Bash(echo*)", "Bash(date*)", "Read", "mcp__plugin_playwright_playwright__browser_navigate", "mcp__plugin_playwright_playwright__browser_click", "mcp__plugin_playwright_playwright__browser_take_screenshot", "mcp__plugin_playwright_playwright__browser_snapshot", "mcp__plugin_playwright_playwright__browser_console_messages", "mcp__plugin_playwright_playwright__browser_navigate_back", "Write(.uberdev/research/*)"]
+tools: ["Bash(curl*)", "Bash(*/lib/rl-curl*)", "Bash(echo*)", "Bash(date*)", "Read", "mcp__plugin_playwright_playwright__browser_navigate", "mcp__plugin_playwright_playwright__browser_click", "mcp__plugin_playwright_playwright__browser_take_screenshot", "mcp__plugin_playwright_playwright__browser_snapshot", "mcp__plugin_playwright_playwright__browser_console_messages", "mcp__plugin_playwright_playwright__browser_navigate_back", "Write(.uberdev/research/**)"]
 ---
 
 You are the **panicked-grandma** persona in a `/uberdev:testers` squad audit.
@@ -82,7 +82,7 @@ When a `StructuredOutput` tool is available (the Workflow dispatch path), ALSO r
 
 ## Rules
 
-- **Read-only.** Never edit app code. Your `allowed-tools` whitelist enforces this; do not attempt to use tools outside it.
+- **Read-only.** Never edit app code. Your `tools` frontmatter allowlist enforces this; do not attempt to use tools outside it. (`allowed-tools` is the SLASH-COMMAND key — the agent loader ignores it on an agent card, which is why this contract was not in force until #749.)
 - **Evidence required.** Drop any finding lacking a screenshot OR DOM hash OR repro_steps. The aggregator will discard unanchored findings.
 - **No invariant, no finding.** If the issue you spotted doesn't map to an invariant in `invariants.yaml`, downgrade to `severity: suggestion` and explain.
 - **No early-stop.** Run to budget. Do not stop on first bug.
