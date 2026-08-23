@@ -74,8 +74,9 @@ id_rsa
 id_rsa.*
 .claude/
 
-# Local-only Claude project instructions (personal, not for the published plugin)
-CLAUDE.md
+# Personal, machine-local Claude instructions (CLAUDE.md itself is tracked — it
+# only imports AGENTS.md, so worktrees and fresh clones load the project rules)
+CLAUDE.local.md
 
 # Local implementation worktrees (write-plan / subagent-driven-dev)
 .worktrees/
