@@ -576,9 +576,8 @@ printf 'PREMERGE PR_NUMBER=%s RUN_ID=%s BRANCH=%s\n' "$PREMERGE_PR" "$RUN_ID" "$
 Every `git push` here captures its stderr, because a push that exits 2 without a
 word is a dead end mid-loop — but what it may print is bounded, because a
 pre-receive hook chooses the length and content of every `remote:` line.
-`references/phase-contracts.md` carries that rule and the stack PR body contract,
-including the `premerge-cleanup-categories` block and the supersession comment
-the originals receive.
+`references/phase-contracts.md` carries that rule and the stack PR body
+contract, including the supersession comment the originals receive.
 
 ---
 
@@ -671,9 +670,10 @@ Two constraints on applying it:
    exists because the controller that writes `severity` never opens that file,
    and a rule it cannot see is a rule it will break.)
 
-   **This copy is the one the controller reads; it is not the one the test
-   compares.** `tests/premerge.test.sh` P3b checks the copy in
-   `references/phase-contracts.md` against the library — edit all three in step.
+   **This copy is the one the controller reads, and it is the one the test
+   compares.** `tests/premerge.test.sh` P3b diffs this tagged block against the
+   library's evaluated set. Those are the only two copies, and
+   `references/phase-contracts.md` deliberately holds none — edit both in step.
 2. **An unfamiliar category is treated as correctness-class, and reading that
    the other way costs the whole attempt.** The asymmetry itself is deliberate: a
    novel *correctness* slug silently demoted to `suggestion` ships the bug. But

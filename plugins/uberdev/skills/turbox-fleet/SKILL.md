@@ -95,6 +95,12 @@ a PR.
 6. **Dispatch before wait.** When a phase has N independent agents, they go out
    in **ONE message** with N `Task` calls. Never dispatch one, wait, dispatch
    the next — that throws away the whole lane's advantage.
+7. **A leaf cannot read `references/`.** Every agent you dispatch runs with cwd
+   set to an issue worktree and no plugin root, so a `references/…` path in a
+   brief resolves to nothing and the agent answers without the shape you asked
+   for. Those files are yours to read. When a brief needs what one of them
+   defines — a return block, a rung's wire inputs — open it and paste the
+   relevant block into the prompt **verbatim**. Never hand a leaf the path.
 
 ---
 
@@ -180,7 +186,8 @@ message**, each told:
   the routing decision and no requirements;
 - that it is alone in that checkout, so it runs its own git, pushes, and opens
   its own PR against `baseBranch`;
-- to end its reply with the structured return in `references/return-contracts.md`.
+- to end its reply with the **delivery** return block, pasted into its brief
+  verbatim from `references/return-contracts.md` (invariant 7).
 
 These issues are done after this phase. They rejoin the run at Phase 7.
 
@@ -285,7 +292,8 @@ what 4a just proved. Each `uberdev:implementation-worker` gets:
 - **No subagents.** The worker does all of its own task; review arrives from
   this controller after it reports. A reviewer it spawns for itself duplicates
   the gate in Phase 5 — a full extra review seat per task.
-- the structured return in `references/return-contracts.md`.
+- the **implementer/fixer** return block, pasted in verbatim from
+  `references/return-contracts.md` (invariant 7).
 
 Count every implementation-phase agent against TB2 **as you dispatch**, where
 `--count` is the number of agents that dispatch just added for that issue —
