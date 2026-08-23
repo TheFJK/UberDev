@@ -907,7 +907,7 @@
       "measured_diff_basis": {
         "upstream_rev": "4ca561fb8532594e7a5faef945e85096fcec0616",
         "upstream_tree": "anthropics/claude-plugins-official blob 462f2e01b89e6339994c071c765dcb4dd380c869 \u2014 the single-file artifact base_evidence records for code-reviewer.md, re-derivable offline from this repository at base_evidence.vendored_ref",
-        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "uberdev_rev": "b7dbe74a36bbc4ff02bc364f0ae554f1c9800872",
         "measured_on": "2026-08-23",
         "method": "diff of upstream blob 462f2e01b89e6339994c071c765dcb4dd380c869 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines"
       },
@@ -942,7 +942,7 @@
       "measured_diff_basis": {
         "upstream_rev": "ceb9b72b4c4c20ad39efce780edd0aabe80ebce3",
         "upstream_tree": "anthropics/claude-plugins-official blob 05e361b4ef1b688203251989707f8a924a9ed266 \u2014 the single-file artifact base_evidence records for code-simplifier.md, re-derivable offline from this repository at base_evidence.vendored_ref",
-        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "uberdev_rev": "b7dbe74a36bbc4ff02bc364f0ae554f1c9800872",
         "measured_on": "2026-08-23",
         "method": "diff of upstream blob 05e361b4ef1b688203251989707f8a924a9ed266 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines"
       },
@@ -987,7 +987,7 @@
       "measured_diff_basis": {
         "upstream_rev": "4ca561fb8532594e7a5faef945e85096fcec0616",
         "upstream_tree": "anthropics/claude-plugins-official blob e214620a3fa348c550bfca1f8d23ceaec39bfe57 \u2014 the single-file artifact base_evidence records for comment-analyzer.md, re-derivable offline from this repository at base_evidence.vendored_ref",
-        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "uberdev_rev": "b7dbe74a36bbc4ff02bc364f0ae554f1c9800872",
         "measured_on": "2026-08-23",
         "method": "diff of upstream blob e214620a3fa348c550bfca1f8d23ceaec39bfe57 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines"
       },
@@ -1072,7 +1072,7 @@
       "measured_diff_basis": {
         "upstream_rev": "4ca561fb8532594e7a5faef945e85096fcec0616",
         "upstream_tree": "anthropics/claude-plugins-official blob 9b2de05b90e74f828e58a8874ed17f6eb9372db3 \u2014 the single-file artifact base_evidence records for pr-test-analyzer.md, re-derivable offline from this repository at base_evidence.vendored_ref",
-        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "uberdev_rev": "b7dbe74a36bbc4ff02bc364f0ae554f1c9800872",
         "measured_on": "2026-08-23",
         "method": "diff of upstream blob 9b2de05b90e74f828e58a8874ed17f6eb9372db3 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines"
       },
@@ -1137,7 +1137,7 @@
       "measured_diff_basis": {
         "upstream_rev": "4ca561fb8532594e7a5faef945e85096fcec0616",
         "upstream_tree": "anthropics/claude-plugins-official blob b8a8dfa41e18ef6ac801ae64be38b2508aa04f44 \u2014 the single-file artifact base_evidence records for silent-failure-hunter.md, re-derivable offline from this repository at base_evidence.vendored_ref",
-        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "uberdev_rev": "b7dbe74a36bbc4ff02bc364f0ae554f1c9800872",
         "measured_on": "2026-08-23",
         "method": "diff of upstream blob b8a8dfa41e18ef6ac801ae64be38b2508aa04f44 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines"
       },
@@ -1242,7 +1242,7 @@
       "measured_diff_basis": {
         "upstream_rev": "4ca561fb8532594e7a5faef945e85096fcec0616",
         "upstream_tree": "anthropics/claude-plugins-official blob f720f0fcec856560cdddb6b030ac7e64af159438 \u2014 the single-file artifact base_evidence records for type-design-analyzer.md, re-derivable offline from this repository at base_evidence.vendored_ref",
-        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
+        "uberdev_rev": "b7dbe74a36bbc4ff02bc364f0ae554f1c9800872",
         "measured_on": "2026-08-23",
         "method": "diff of upstream blob f720f0fcec856560cdddb6b030ac7e64af159438 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines"
       },
