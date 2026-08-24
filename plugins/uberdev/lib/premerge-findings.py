@@ -1067,11 +1067,27 @@ def _object_rows(values: "list", what: str) -> "list[dict]":
 #
 # A carried row is the loop's own bookkeeping. No reviewer raised it, it names no
 # line, and its `summary` states a scheduling fact ("the fixer for X said it
-# needed this file") rather than a defect. So it is INERT for every question
-# about whether the stack is repaired -- the progress multisets, the clean gate,
-# the growth ratio, the deferred issue set -- and LIVE for exactly one: which
-# files the next fixer wave is allowed to touch. Anything that reads it as
-# evidence is reading the loop's notes to itself as a finding.
+# needed this file") rather than a defect. THE LINE THIS PREDICATE DRAWS IS
+# EVIDENCE VERSUS WORK, and it is not the line between "counts" and "does not
+# count":
+#
+#   * NOT EVIDENCE, so it is inert for every question about whether repairing is
+#     WORKING -- the progress multisets (`_blocker_fingerprints`) and both sides
+#     of `_growth_ratio`. Counted there it manufactures churn: a consequence
+#     naming b, then c, then b reads as `FIXED=1 NEW=1` on every round while
+#     nothing is being repaired, which makes STOP_NO_PROGRESS and STOP_REGRESSED
+#     structurally unreachable. Anything that reads it as evidence is reading the
+#     loop's notes to itself as a finding.
+#
+#   * STILL WORK, so it is live for every question about whether the stack is
+#     FINISHED -- the wave plan, the clean gate (`blockers_remaining=`, the only
+#     term SKILL.md `### 3c` routes to a fixer wave) and, once the loop stops
+#     with the edit still outstanding, the deferred issue set. Excluding it from
+#     those was a silent discard: a run whose only remaining blockers were
+#     carried gated green, dispatched nothing, and filed nothing.
+#
+# Filed, it is filed at CLEANUP tier -- see `_as_deferred_carry_row`. "It is work"
+# does not make it a defect the reviewer proved.
 #
 # `isinstance` here and not at the call sites: `_read_attempt` proves `blockers`
 # is an ARRAY and nothing proves its elements are objects, and a predicate that
@@ -1079,6 +1095,26 @@ def _object_rows(values: "list", what: str) -> "list[dict]":
 # `AttributeError` instead of whatever refusal its own reader already has.
 def _is_carried(finding: object) -> bool:
     return isinstance(finding, dict) and finding.get("blocked_on_carry") is True
+
+
+def _as_deferred_carry_row(finding: "dict") -> "dict":
+    """A carried row as `cmd_defer` files it: same finding, cleanup tier.
+
+    The row is `blocker` in `classified.json` because that is the array
+    `_fix_waves` reads and the gate counts -- it has to be, or no fixer is ever
+    assigned to it. But that severity is `severity_source: controller`
+    bookkeeping rather than a reviewer's judgement, and by the time this verb
+    runs the only thing left to do with the row is file it. See the call site for
+    what blocker tier cost when it reached the filer.
+
+    A SHALLOW COPY, not a mutation: the caller iterates rows read straight off
+    disk and hands them to `_encode_aggregate`, and rewriting a stored row in
+    place would make the same artifact encode differently on a second call.
+    Every value in a finding is a JSON scalar, so nothing here is shared deeply.
+    """
+    row = dict(finding)
+    row["severity"] = "suggestion"
+    return row
 
 
 def _blocker_fingerprints(document: "dict") -> "collections.Counter[str]":
@@ -1215,13 +1251,20 @@ def _wave_certainly_ran(out_dir: str, attempt: int) -> bool:
     which costs it the one run where it is true.
 
     THE ONLY SUFFICIENT CONDITION THIS MODULE CAN CHECK is that the attempt
-    recorded at least one REVIEWER-RAISED blocker. That guarantees
-    `blockers_remaining=` was on the gate's reasons, so the gate cannot have been
-    green, and it guarantees `_fix_waves` produced a non-empty plan -- both
-    halves of "a wave went out". Anything else is unestablished: an attempt with
-    only carried rows may or may not have dispatched depending on a CI verdict
-    written to no artifact this module reads, and an attempt whose evidence is
-    absent or corrupt says nothing at all.
+    recorded at least one blocker -- reviewer-raised OR carried. Either kind
+    guarantees `blockers_remaining=` was on the gate's reasons, so the gate
+    cannot have been green, and either kind is a wave member, so `_fix_waves`
+    produced a non-empty plan: both halves of "a wave went out". An attempt whose
+    evidence is absent or corrupt says nothing at all, and stays silent.
+
+    THE CARRIED HALF USED TO BE EXCLUDED HERE, on the premise that such an
+    attempt "may or may not have dispatched". That premise died with the carried
+    -row exclusion in `cmd_assert_green`: a carried row now gates exactly like a
+    reviewer's, which is the only way it reaches a fixer at all. Leaving the
+    exclusion behind would have kept the warning silent on the run shape where
+    the missing artifact is most diagnostic -- a wave dispatched at nothing but
+    cross-file consequences, which is precisely the wave whose `blocked_on_file`
+    returns nobody would otherwise notice were gone.
 
     UNESTABLISHED MEANS SILENT, and that is the right direction for this
     particular message and no other in this file. Every other refusal here fails
@@ -1236,7 +1279,7 @@ def _wave_certainly_ran(out_dir: str, attempt: int) -> bool:
         return False
     if document is None:
         return False
-    return any(not _is_carried(row) for row in document["blockers"])
+    return bool(document["blockers"])
 
 
 def _read_blocked_on(
@@ -1582,6 +1625,40 @@ def _repair_scope_path(run_dir: str, attempt: int) -> str:
     return os.path.join(run_dir, "fix-scope-%02d.modified" % attempt)
 
 
+def _scope_key(value: object) -> "str | None":
+    """The ONE form both sides of the GROWTH membership test are compared in.
+
+    ONE FUNCTION BECAUSE ONE COMPARISON. `_read_repair_scope` builds the set and
+    `_growth_ratio` looks paths up in it, and the two used different derivations:
+    the set stripped every line, the lookup passed the finding's `file` through
+    `_repo_path`, which trims nothing. A repaired path with surrounding
+    whitespace -- `git diff --name-only` prints a tracked path verbatim -- was
+    therefore stored trimmed and looked up untrimmed, the membership test missed,
+    and the blocker dropped out of the NUMERATOR while staying in the
+    denominator. GROWTH under-reports, a genuinely self-referential round falls
+    below CONVERGE_GROWTH_CEILING and never starts a streak: a fail-OPEN in the
+    one detector whose entire job is to notice the pump. Two derivations of one
+    key cannot be kept in agreement by a comment, so there is one.
+
+    IT REFUSES NOTHING, and that is deliberate rather than lax. Its only caller
+    on the findings side is `_growth_ratio`, which runs inside `cmd_converge` --
+    the one place in this module where failing closed is WRONG (see
+    `_read_repair_scope`'s docstring: a refusal there stops a loop that is
+    working, RFC 0021 A3 C3). `_repo_path` used to be that caller, and it raises
+    `finding_schema_invalid` on an absolute, back-slashed or non-normalised path;
+    `_read_attempt` validates `schema_version`, the two arrays, `pr_number` and
+    `run_id` and never a blocker's `file`, so one hand-edited or resumed-run
+    artifact turned the DECISION step into exit 74 and killed the run. A path
+    this cannot key is simply not in the scope set -- `git diff --name-only`
+    emits neither shape -- so it is excluded from the numerator, which is the
+    same answer the refusal would have produced minus the crash.
+    """
+    if not isinstance(value, str):
+        return None
+    entry = value.strip()
+    return entry or None
+
+
 def _read_repair_scope(run_dir: str, attempt: int) -> "frozenset[str] | None":
     """The repo-relative files that attempt's repair modified, or None.
 
@@ -1634,10 +1711,12 @@ def _read_repair_scope(run_dir: str, attempt: int) -> "frozenset[str] | None":
             file=sys.stderr,
         )
         return None
+    # Through `_scope_key`, which is also what the lookup side runs -- see its
+    # docstring for the drop this closes.
     paths = set()
     for line in raw.decode("utf-8", "replace").splitlines():
-        entry = line.strip()
-        if entry:
+        entry = _scope_key(line)
+        if entry is not None:
             paths.add(entry)
     return frozenset(paths)
 
@@ -1652,8 +1731,12 @@ def _growth_ratio(
     numerator   -- blockers whose `file` is in `scope` AND whose fingerprint
                    the previous attempt's evidence did not carry.
     denominator -- every blocker in this attempt's evidence that a REVIEWER
-                   raised. That is `BLOCKERS=` minus the carried cross-file
-                   consequences -- see the carried-row exclusion below.
+                   raised. That is the number `converge` prints as `BLOCKERS=`
+                   -- the identity SKILL.md `## Phase 3b` asserts -- and it is
+                   the TRIAGE line's `BLOCKER=` minus its `BLOCKED=`, which is
+                   also written down as `counts.blocker_reviewer`. Two blocker
+                   populations, and this is the reviewer-raised one; see the
+                   carried-row exclusion below.
 
     THE CARRIED-ROW EXCLUSION. `_read_blocked_on` turns the previous attempt's
     `blocked_on_file` returns into blocker findings, stamped
@@ -1710,7 +1793,12 @@ def _growth_ratio(
         if _is_carried(finding):
             continue
         measured += 1
-        if _repo_path(finding.get("file")) not in scope:
+        # `_scope_key`, NOT `_repo_path`. Both sides of this test have to be
+        # derived the same way or a padded path silently leaves the numerator,
+        # and `_repo_path` REFUSES rather than answering -- exit 74 out of the
+        # loop's decision step, on a `file` value nothing between here and
+        # `_read_attempt` has validated. Its docstring covers both halves.
+        if _scope_key(finding.get("file")) not in scope:
             continue
         if finding.get("fingerprint") in previous_prints:
             continue
@@ -2142,6 +2230,28 @@ def cmd_plan(args: argparse.Namespace) -> int:
         "counts": {
             "total": len(findings),
             "blocker": len(blockers),
+            # THE OTHER BLOCKER POPULATION, NAMED RATHER THAN INFERRED.
+            #
+            # `blocker` above is every row in the `blockers` array: the
+            # reviewer's findings PLUS the cross-file consequences the previous
+            # attempt's fixers reported. That is the population `_fix_waves`
+            # plans and `assert-green` counts into `blockers_remaining=`, and it
+            # is what `PREMERGE_TRIAGE BLOCKER=` prints -- so `total = blocker +
+            # suggestion` stays true and no field anyone parses changes meaning.
+            #
+            # It is NOT the population the loop's other three blocker numbers
+            # measure. `converge`'s `BLOCKERS=`, the `GROWTH=` denominator
+            # (SKILL.md `## Phase 3b` calls these two the same number, and they
+            # are) and `defer`'s `BLOCKER=` all count REVIEWER-RAISED blockers
+            # only, because a carried row is the loop's own bookkeeping and
+            # counting it as progress manufactures churn -- see
+            # `_blocker_fingerprints`. Two different questions, two different
+            # numbers, and an operator who reads `BLOCKER=1` on one line and
+            # `BLOCKERS=0` on the next deserves better than arithmetic on
+            # `BLOCKED=` to reconcile them. This key is that number, written
+            # down. It equals `blocker - blocked_on_admitted` by construction,
+            # which is what makes the artifact self-checking.
+            "blocker_reviewer": len(blockers) - len(synthesised),
             "suggestion": len(suggestions),
             # How many severities were machine-checked rather than judged. The
             # run summary prints this so an operator can see at a glance whether
@@ -2236,6 +2346,19 @@ def cmd_plan(args: argparse.Namespace) -> int:
     #
     # The first five fields are a pinned prefix (tests/premerge-findings.test.sh
     # matches on it): append, never reorder or insert.
+    #
+    # `BLOCKER=` IS THE ARTIFACT'S BLOCKER ARRAY, CARRIED ROWS INCLUDED, and it
+    # is deliberately not redefined to the reviewer-only count. `TOTAL = BLOCKER
+    # + SUGGESTION` is an invariant of this line, `counts.blocker` describes the
+    # population `classified.json` actually holds, and `assert-green` counts the
+    # same rows into `blockers_remaining=` -- so this line and the gate agree.
+    # `converge`'s `BLOCKERS=`, the `GROWTH=` denominator and `defer`'s
+    # `BLOCKER=` count reviewer-raised blockers ONLY; the difference between the
+    # two populations is exactly `BLOCKED=`, three fields along, and it is also
+    # written out as `counts.blocker_reviewer` for a reader who should not have
+    # to do the subtraction. Redefining `BLOCKER=` in place would have moved the
+    # divergence rather than documented it, under a field the Phase 5 fence and
+    # the run summary both parse.
     print(
         "PREMERGE_TRIAGE TOTAL=%d BLOCKER=%d SUGGESTION=%d WAVES=%d CATEGORY_BACKED=%d"
         " ATTEMPT=%d CARRIED=%d BLOCKED=%d"
@@ -2266,27 +2389,59 @@ def cmd_assert_green(args: argparse.Namespace) -> int:
     if not isinstance(blockers, list):
         fail("input_schema_invalid", "classified.json has no blockers array")
 
-    # CARRIED ROWS DO NOT GATE. A `blocked_on_carry` row is not a defect anyone
-    # reported: it is the loop telling itself which extra file the NEXT fixer
-    # wave may touch, and its summary describes a scheduling fact with no line
-    # number. Counted here it held a stack not-green on the reviewer's own
-    # verdict of clean, spent a full review+repair round dispatching a fixer at
-    # a file with nothing to fix, and -- if the run then stopped -- filed that
-    # file as a BLOCKER-tier issue with a `Blocks:` backref describing no defect.
+    # CARRIED ROWS DO GATE, AND THIS IS THE ONE PLACE THEY MAY.
     #
-    # IT IS ALSO WHAT KEEPS `converge` HONEST. `_blocker_fingerprints` ignores
-    # carried rows, so an attempt whose only remaining blockers are carried has
-    # an EMPTY reviewer multiset; leaving them in this count made that attempt
-    # report `not_green` with no routable reason, which `cmd_converge` reads as
-    # an unchanged multiset and an unchanged reason set -- STOP_NO_PROGRESS,
-    # "the fixers are stuck, a human should look", about a stack the reviewer
-    # just called clean. The gate and the loop have to agree about what a
-    # blocker is, and the reviewer's blockers are the ones that count.
+    # A `blocked_on_carry` row is not a defect anyone reported -- it is the loop
+    # telling itself which extra file the NEXT fixer wave has to touch -- so it
+    # is inert for every question about PROGRESS: `_blocker_fingerprints` skips
+    # it, so it never inflates `BLOCKERS=`, `FIXED=`, `NEW=` or the
+    # STOP_NO_PROGRESS/STOP_REGRESSED multisets, and `_growth_ratio` skips it on
+    # both sides. Nothing below changes any of that. What it IS is an edit the
+    # run has not made yet, and this gate's question is not "did the reviewer
+    # find something" but "is this stack finished". It is not.
     #
-    # Still FAIL-CLOSED on anything unreadable: a non-object row is not carried
-    # (see `_is_carried`), so it counts, exactly as it did before.
+    # EXCLUDING IT HERE LOSES THE WORK OUTRIGHT, which is why the exclusion is
+    # gone. Reproduced end to end against the shipped module: attempt 1 with one
+    # reviewer blocker in tests/premerge.test.sh, a `blocked_on_file` naming
+    # tests/goal.test.sh, attempt 2 with an empty reviewer findings array.
+    # `plan --carry-blocked` printed `BLOCKED=1` and wrote
+    # `fix-waves-02.json = [[tests/goal.test.sh]]`, and this gate answered
+    # `VERDICT=green REASONS=none` -- so `converge` said STOP_GREEN, that wave
+    # was never dispatched, Phase 5 ran with `PREMERGE_SURVIVORS=0`, and the
+    # consequence was discarded without a word. That is exactly the run shape
+    # SKILL.md `## Phase 2` advertises as the widening's payoff ("a `BLOCKED=`
+    # above zero on a run whose reviewer found nothing new is the loop finishing
+    # a cross-file fix"), so the feature was a no-op in precisely its own case.
+    #
+    # `blockers_remaining=` IS THE ONLY ROUTE TO A FIXER WAVE. SKILL.md `### 3c`
+    # dispatches the Phase 2a waves on that term and on no other, and a term it
+    # has never heard of is a STOP_UNREADABLE rather than a wave (see
+    # `GATE_REASONS_ROUTABLE`). So a carried row that does not land in this count
+    # cannot reach a fixer at all, and there is no second token to give it.
+    #
+    # THE COUNT IS NOT WHAT THE STOP CONDITIONS READ. `cmd_converge` strips every
+    # `blockers_remaining=` term out of `other` before routing precisely because
+    # the fingerprint multisets say the same thing more exactly -- so widening
+    # this number back out feeds the wave dispatch and feeds NOTHING that decides
+    # whether the loop has stalled. The two populations stay separate: this
+    # number is "edits the stack still needs", `BLOCKERS=` is "defects the
+    # reviewer raised", and `BLOCKED=` on the triage line is exactly the
+    # difference.
+    #
+    # AND IT STAYS BOUNDED. An attempt whose blockers are ALL carried has an
+    # empty reviewer multiset, so a second such attempt in a row is
+    # `current_prints == previous_prints` with an unchanged `other` --
+    # STOP_NO_PROGRESS, a not-green stop that hands Phase 5
+    # `--include-blockers`, where `cmd_defer` files the outstanding carried rows
+    # rather than dropping them. One round of chasing a cross-file chain, then a
+    # stop that loses nothing. The label is the loop's least precise, and a
+    # carried-set-changed escape from it is exactly the phantom churn
+    # `_BLOCKED_ON_SUMMARY` documents: b, c, b, c forever.
+    #
+    # Still FAIL-CLOSED on anything unreadable: every row counts here, so a
+    # non-object row cannot make this gate answer green.
     reasons = []
-    remaining = sum(1 for row in blockers if not _is_carried(row))
+    remaining = len(blockers)
     if remaining:
         reasons.append("blockers_remaining=%d" % remaining)
 
@@ -2450,22 +2605,40 @@ def cmd_defer(args: argparse.Namespace) -> int:
     )
 
     if args.include_blockers:
-        # CARRIED ROWS ARE NOT DEFERRED. This verb files "a thing the machine
-        # could not fix"; a `blocked_on_carry` row is a thing there was nothing
-        # to fix in. Filed, it opened a BLOCKER-tier issue naming a file with no
-        # described defect and no line number, carrying the `Blocks:
-        # #<stack-pr>` backref `findings-to-issues` gives a real surviving
-        # blocker -- and `severity_rank(blocker)=3` sorts it ABOVE every cleanup
-        # row, so up to MAX_BLOCKED_ON of them displaced real findings from the
-        # filer's `max_new` cap. The row's own value expires with the loop: it
-        # says which file the next wave needed, and there is no next wave.
+        # CARRIED ROWS ARE DEFERRED, AT CLEANUP TIER. This is the loop's LAST
+        # exit for one, and dropping it here is what made the widening lossy.
+        #
+        # A `blocked_on_carry` row reaching this verb is a file some fixer said
+        # it needed and that no wave ever got to: the run stopped not-green with
+        # the edit still outstanding. That is the definition of "a thing the
+        # machine could not fix", so it belongs in the aggregate. Skipping it
+        # discarded it silently -- the gate above is the loop's first mechanism
+        # for keeping it (it routes the row to a fixer wave), and this is the
+        # second, for the runs where the budget ran out before a wave could.
+        #
+        # IT IS FILED AS A SUGGESTION, NEVER A BLOCKER, and that is the half of
+        # the old exclusion worth keeping. No reviewer raised it, it names no
+        # line and its summary states a scheduling fact; at blocker tier it
+        # opened a BLOCKER-tier issue describing no defect, carrying the
+        # `Blocks: #<stack-pr>` backref `findings-to-issues` gives a real
+        # surviving blocker, and `severity_rank(blocker)=3` sorted it ABOVE
+        # every cleanup row, so up to MAX_BLOCKED_ON of them displaced real
+        # findings from the filer's `max_new` cap. Cleanup tier keeps the
+        # follow-up without either claim: it does not outrank a proven defect,
+        # and `PREMERGE_DEFER BLOCKER=` keeps meaning "reviewer-raised blockers
+        # this run could not clear" -- the same population `converge`'s
+        # `BLOCKERS=` and the GROWTH denominator measure, and the one the Phase 5
+        # fence's `CLASS=` arms branch on.
+        #
+        # A COPY, NEVER THE STORED ROW. `document` is re-read per invocation, so
+        # mutating in place would be invisible today -- and it would also make
+        # this verb's answer depend on how many times it had run.
         #
         # `_object_rows` still runs over the whole array, so a stored row that
         # is not an object refuses here exactly as it always did.
         rows.extend(
-            row
+            _as_deferred_carry_row(row) if _is_carried(row) else row
             for row in _object_rows(document["blockers"], "blocker")
-            if not _is_carried(row)
         )
 
     if args.lens_findings is not None:

@@ -169,6 +169,7 @@ jobs:
           shard_routed=0
           shard_ran=0
           shard_ran_names=""
+          shard_seen_names=""
           run_one() {
             run_one_routed=0
             if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
@@ -197,6 +198,18 @@ jobs:
               if [ -n "$run_one_fixture" ]; then
                 shard_routed=$((shard_routed + 1))
                 run_one_routed=1
+                # Every fixture this job OFFERS, plan membership aside. The
+                # coverage tail needs it to tell a plan entry that no
+                # invocation ever handed to this function -- one the plan
+                # producer grepped out of a step name:, another step's run:,
+                # an echo, or a trailing comment -- apart from one that WAS
+                # handed here and then filtered out below. Folded through the
+                # same sentinel-space rule as every other membership test in
+                # this harness, for the same undercounting reason.
+                case " ${shard_seen_names} " in
+                  *" ${run_one_fixture} "*) : ;;
+                  *) shard_seen_names="${shard_seen_names}${shard_seen_names:+ }${run_one_fixture}" ;;
+                esac
                 case " ${UBERDEV_SHARD_PLAN} " in
                   *" ${run_one_fixture} "*) : ;;
                   *) echo "--- SKIP $* (shard ${UBERDEV_SHARD:-?}/${UBERDEV_SHARDS:-?})"; return 0 ;;
@@ -389,9 +402,22 @@ jobs:
           # shard that ran its whole plan.
           #
           # No echo below may name a tests/<name>.test.{sh,py} path: the
-          # fixture extractor greps this block for exactly that shape once
-          # full-line comments are stripped, so an echo carrying one would be
-          # read back as a wiring line and enter every shard plan.
+          # fixture extractor greps the whole JOB BLOCK for exactly that shape
+          # once full-line comments are stripped, so an echo carrying one would
+          # be read back as a wiring line, enter every shard plan, and -- now
+          # that the comparison is an equality -- RED the shard it inflated
+          # rather than merely padding a number nobody compared.
+          #
+          # That convention is no longer hand-checked, and it could not honestly
+          # be checked from in here: the same extractor also reads step name:
+          # lines and other steps' run: lines, which are outside this block
+          # entirely, and re-deriving its regex down here would be a second
+          # uncompared copy of it -- the defect this suite exists to refuse.
+          # So the failing arm below names the shortfall BY CAUSE instead, out
+          # of what the harness was actually handed: a plan entry no invocation
+          # ever offered is reported separately from one that was offered and
+          # then filtered out. A stray mention now arrives as a named fixture
+          # with its reason attached, not as a bare count mismatch.
           if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
             shard_plan_len="$(printf '%s' "$UBERDEV_SHARD_PLAN" | wc -w | tr -d ' ')"
             echo "=== SHARD-COVERAGE shard=${UBERDEV_SHARD:-?}/${UBERDEV_SHARDS:-?} plan=$shard_plan_len routed=$shard_routed ran=$shard_ran"
@@ -411,6 +437,62 @@ jobs:
                   echo "=== SHARD-COVERAGE FAIL: planned $shard_plan_len fixture(s), ran $shard_ran."
                   echo "    A shard that runs fewer fixtures than its plan reports green, because a skip is not a failure."
                   echo "    Dump the plan bytes with: bash tests/ci-shard-diagnose.sh dump <job-key> <shards> <shard>"
+                  # WHICH names went unrun, and by WHICH of the two mechanisms.
+                  # They need opposite repairs -- one is a fixture path spelled
+                  # somewhere in the job block that nothing invokes, the other
+                  # is a plan whose bytes the membership test cannot match --
+                  # and a bare count cannot tell them apart.
+                  #
+                  # Built ONLY inside this arm. The verdict is still the same
+                  # equality over the same two numbers, so nothing below can
+                  # turn a red shard green or a green shard red; it decides
+                  # only what an already-failing job prints. Planned entries
+                  # are never dropped from the count to make it agree.
+                  #
+                  # Whitespace is canonicalised before the split, deliberately
+                  # unlike the membership test (spaces only) and unlike the
+                  # `wc -w` denominator above. A plan whose separators carry a
+                  # stray CR is the case this tail was written for, and a
+                  # splitter that inherited that byte would file every entry
+                  # under the wrong cause -- naming the wrong cause is worse
+                  # than naming none.
+                  shard_unrun_mentioned=""
+                  shard_unrun_skipped=""
+                  shard_plan_rest="$(printf '%s' "$UBERDEV_SHARD_PLAN" | tr -s ' \t\r\n' ' ')"
+                  while [ -n "$shard_plan_rest" ]; do
+                    # Split by parameter expansion, never `for x in $plan`: zsh
+                    # does not word-split an unquoted scalar and would walk the
+                    # whole plan once, as one entry.
+                    shard_plan_entry="${shard_plan_rest%% *}"
+                    case "$shard_plan_rest" in
+                      *' '*) shard_plan_rest="${shard_plan_rest#* }" ;;
+                      *) shard_plan_rest="" ;;
+                    esac
+                    [ -n "$shard_plan_entry" ] || continue
+                    case " ${shard_ran_names} " in
+                      *" ${shard_plan_entry} "*) continue ;;
+                    esac
+                    case " ${shard_seen_names} " in
+                      *" ${shard_plan_entry} "*)
+                        shard_unrun_skipped="${shard_unrun_skipped}${shard_unrun_skipped:+ }${shard_plan_entry}"
+                        ;;
+                      *)
+                        shard_unrun_mentioned="${shard_unrun_mentioned}${shard_unrun_mentioned:+ }${shard_plan_entry}"
+                        ;;
+                    esac
+                  done
+                  if [ -n "$shard_unrun_mentioned" ]; then
+                    echo "    NEVER INVOKED (planned, but no invocation in this job ever handed them to run_one): $shard_unrun_mentioned"
+                    echo "      Those names reached the plan by being MENTIONED in the job block -- a step name:, another step's run:, an echo, or a trailing comment."
+                    echo "      The plan producer greps the whole job block for fixture paths; only argv reaching run_one runs. Wire them, or stop spelling the path where it is not an invocation."
+                  fi
+                  if [ -n "$shard_unrun_skipped" ]; then
+                    echo "    SKIPPED (planned and handed to run_one, then filtered out by the plan-membership test): $shard_unrun_skipped"
+                    echo "      The plan value and the membership test disagree about these names -- that is what the dump above shows."
+                  fi
+                  if [ -z "$shard_unrun_mentioned" ] && [ -z "$shard_unrun_skipped" ]; then
+                    echo "    Every name in the plan ran, yet the counts differ: the plan's word count and its distinct names disagree (a repeated entry, or separators splitting into more words than names)."
+                  fi
                   fail=$((fail + 1))
                   failed="${failed}${failed:+ | }SHARD-COVERAGE($shard_ran/$shard_plan_len)"
                 fi
@@ -499,6 +581,7 @@ jobs:
           shard_routed=0
           shard_ran=0
           shard_ran_names=""
+          shard_seen_names=""
           run_one() {
             run_one_routed=0
             if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
@@ -527,6 +610,18 @@ jobs:
               if [ -n "$run_one_fixture" ]; then
                 shard_routed=$((shard_routed + 1))
                 run_one_routed=1
+                # Every fixture this job OFFERS, plan membership aside. The
+                # coverage tail needs it to tell a plan entry that no
+                # invocation ever handed to this function -- one the plan
+                # producer grepped out of a step name:, another step's run:,
+                # an echo, or a trailing comment -- apart from one that WAS
+                # handed here and then filtered out below. Folded through the
+                # same sentinel-space rule as every other membership test in
+                # this harness, for the same undercounting reason.
+                case " ${shard_seen_names} " in
+                  *" ${run_one_fixture} "*) : ;;
+                  *) shard_seen_names="${shard_seen_names}${shard_seen_names:+ }${run_one_fixture}" ;;
+                esac
                 case " ${UBERDEV_SHARD_PLAN} " in
                   *" ${run_one_fixture} "*) : ;;
                   *) echo "--- SKIP $* (shard ${UBERDEV_SHARD:-?}/${UBERDEV_SHARDS:-?})"; return 0 ;;
@@ -595,9 +690,22 @@ jobs:
           # shard that ran its whole plan.
           #
           # No echo below may name a tests/<name>.test.{sh,py} path: the
-          # fixture extractor greps this block for exactly that shape once
-          # full-line comments are stripped, so an echo carrying one would be
-          # read back as a wiring line and enter every shard plan.
+          # fixture extractor greps the whole JOB BLOCK for exactly that shape
+          # once full-line comments are stripped, so an echo carrying one would
+          # be read back as a wiring line, enter every shard plan, and -- now
+          # that the comparison is an equality -- RED the shard it inflated
+          # rather than merely padding a number nobody compared.
+          #
+          # That convention is no longer hand-checked, and it could not honestly
+          # be checked from in here: the same extractor also reads step name:
+          # lines and other steps' run: lines, which are outside this block
+          # entirely, and re-deriving its regex down here would be a second
+          # uncompared copy of it -- the defect this suite exists to refuse.
+          # So the failing arm below names the shortfall BY CAUSE instead, out
+          # of what the harness was actually handed: a plan entry no invocation
+          # ever offered is reported separately from one that was offered and
+          # then filtered out. A stray mention now arrives as a named fixture
+          # with its reason attached, not as a bare count mismatch.
           if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
             shard_plan_len="$(printf '%s' "$UBERDEV_SHARD_PLAN" | wc -w | tr -d ' ')"
             echo "=== SHARD-COVERAGE shard=${UBERDEV_SHARD:-?}/${UBERDEV_SHARDS:-?} plan=$shard_plan_len routed=$shard_routed ran=$shard_ran"
@@ -617,6 +725,62 @@ jobs:
                   echo "=== SHARD-COVERAGE FAIL: planned $shard_plan_len fixture(s), ran $shard_ran."
                   echo "    A shard that runs fewer fixtures than its plan reports green, because a skip is not a failure."
                   echo "    Dump the plan bytes with: bash tests/ci-shard-diagnose.sh dump <job-key> <shards> <shard>"
+                  # WHICH names went unrun, and by WHICH of the two mechanisms.
+                  # They need opposite repairs -- one is a fixture path spelled
+                  # somewhere in the job block that nothing invokes, the other
+                  # is a plan whose bytes the membership test cannot match --
+                  # and a bare count cannot tell them apart.
+                  #
+                  # Built ONLY inside this arm. The verdict is still the same
+                  # equality over the same two numbers, so nothing below can
+                  # turn a red shard green or a green shard red; it decides
+                  # only what an already-failing job prints. Planned entries
+                  # are never dropped from the count to make it agree.
+                  #
+                  # Whitespace is canonicalised before the split, deliberately
+                  # unlike the membership test (spaces only) and unlike the
+                  # `wc -w` denominator above. A plan whose separators carry a
+                  # stray CR is the case this tail was written for, and a
+                  # splitter that inherited that byte would file every entry
+                  # under the wrong cause -- naming the wrong cause is worse
+                  # than naming none.
+                  shard_unrun_mentioned=""
+                  shard_unrun_skipped=""
+                  shard_plan_rest="$(printf '%s' "$UBERDEV_SHARD_PLAN" | tr -s ' \t\r\n' ' ')"
+                  while [ -n "$shard_plan_rest" ]; do
+                    # Split by parameter expansion, never `for x in $plan`: zsh
+                    # does not word-split an unquoted scalar and would walk the
+                    # whole plan once, as one entry.
+                    shard_plan_entry="${shard_plan_rest%% *}"
+                    case "$shard_plan_rest" in
+                      *' '*) shard_plan_rest="${shard_plan_rest#* }" ;;
+                      *) shard_plan_rest="" ;;
+                    esac
+                    [ -n "$shard_plan_entry" ] || continue
+                    case " ${shard_ran_names} " in
+                      *" ${shard_plan_entry} "*) continue ;;
+                    esac
+                    case " ${shard_seen_names} " in
+                      *" ${shard_plan_entry} "*)
+                        shard_unrun_skipped="${shard_unrun_skipped}${shard_unrun_skipped:+ }${shard_plan_entry}"
+                        ;;
+                      *)
+                        shard_unrun_mentioned="${shard_unrun_mentioned}${shard_unrun_mentioned:+ }${shard_plan_entry}"
+                        ;;
+                    esac
+                  done
+                  if [ -n "$shard_unrun_mentioned" ]; then
+                    echo "    NEVER INVOKED (planned, but no invocation in this job ever handed them to run_one): $shard_unrun_mentioned"
+                    echo "      Those names reached the plan by being MENTIONED in the job block -- a step name:, another step's run:, an echo, or a trailing comment."
+                    echo "      The plan producer greps the whole job block for fixture paths; only argv reaching run_one runs. Wire them, or stop spelling the path where it is not an invocation."
+                  fi
+                  if [ -n "$shard_unrun_skipped" ]; then
+                    echo "    SKIPPED (planned and handed to run_one, then filtered out by the plan-membership test): $shard_unrun_skipped"
+                    echo "      The plan value and the membership test disagree about these names -- that is what the dump above shows."
+                  fi
+                  if [ -z "$shard_unrun_mentioned" ] && [ -z "$shard_unrun_skipped" ]; then
+                    echo "    Every name in the plan ran, yet the counts differ: the plan's word count and its distinct names disagree (a repeated entry, or separators splitting into more words than names)."
+                  fi
                   fail=$((fail + 1))
                   failed="${failed}${failed:+ | }SHARD-COVERAGE($shard_ran/$shard_plan_len)"
                 fi
@@ -923,6 +1087,7 @@ jobs:
           shard_routed=0
           shard_ran=0
           shard_ran_names=""
+          shard_seen_names=""
           run_one() {
             run_one_routed=0
             if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
@@ -951,6 +1116,18 @@ jobs:
               if [ -n "$run_one_fixture" ]; then
                 shard_routed=$((shard_routed + 1))
                 run_one_routed=1
+                # Every fixture this job OFFERS, plan membership aside. The
+                # coverage tail needs it to tell a plan entry that no
+                # invocation ever handed to this function -- one the plan
+                # producer grepped out of a step name:, another step's run:,
+                # an echo, or a trailing comment -- apart from one that WAS
+                # handed here and then filtered out below. Folded through the
+                # same sentinel-space rule as every other membership test in
+                # this harness, for the same undercounting reason.
+                case " ${shard_seen_names} " in
+                  *" ${run_one_fixture} "*) : ;;
+                  *) shard_seen_names="${shard_seen_names}${shard_seen_names:+ }${run_one_fixture}" ;;
+                esac
                 case " ${UBERDEV_SHARD_PLAN} " in
                   *" ${run_one_fixture} "*) : ;;
                   *) echo "--- SKIP $* (shard ${UBERDEV_SHARD:-?}/${UBERDEV_SHARDS:-?})"; return 0 ;;
@@ -1081,9 +1258,22 @@ jobs:
           # shard that ran its whole plan.
           #
           # No echo below may name a tests/<name>.test.{sh,py} path: the
-          # fixture extractor greps this block for exactly that shape once
-          # full-line comments are stripped, so an echo carrying one would be
-          # read back as a wiring line and enter every shard plan.
+          # fixture extractor greps the whole JOB BLOCK for exactly that shape
+          # once full-line comments are stripped, so an echo carrying one would
+          # be read back as a wiring line, enter every shard plan, and -- now
+          # that the comparison is an equality -- RED the shard it inflated
+          # rather than merely padding a number nobody compared.
+          #
+          # That convention is no longer hand-checked, and it could not honestly
+          # be checked from in here: the same extractor also reads step name:
+          # lines and other steps' run: lines, which are outside this block
+          # entirely, and re-deriving its regex down here would be a second
+          # uncompared copy of it -- the defect this suite exists to refuse.
+          # So the failing arm below names the shortfall BY CAUSE instead, out
+          # of what the harness was actually handed: a plan entry no invocation
+          # ever offered is reported separately from one that was offered and
+          # then filtered out. A stray mention now arrives as a named fixture
+          # with its reason attached, not as a bare count mismatch.
           if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
             shard_plan_len="$(printf '%s' "$UBERDEV_SHARD_PLAN" | wc -w | tr -d ' ')"
             echo "=== SHARD-COVERAGE shard=${UBERDEV_SHARD:-?}/${UBERDEV_SHARDS:-?} plan=$shard_plan_len routed=$shard_routed ran=$shard_ran"
@@ -1103,6 +1293,62 @@ jobs:
                   echo "=== SHARD-COVERAGE FAIL: planned $shard_plan_len fixture(s), ran $shard_ran."
                   echo "    A shard that runs fewer fixtures than its plan reports green, because a skip is not a failure."
                   echo "    Dump the plan bytes with: bash tests/ci-shard-diagnose.sh dump <job-key> <shards> <shard>"
+                  # WHICH names went unrun, and by WHICH of the two mechanisms.
+                  # They need opposite repairs -- one is a fixture path spelled
+                  # somewhere in the job block that nothing invokes, the other
+                  # is a plan whose bytes the membership test cannot match --
+                  # and a bare count cannot tell them apart.
+                  #
+                  # Built ONLY inside this arm. The verdict is still the same
+                  # equality over the same two numbers, so nothing below can
+                  # turn a red shard green or a green shard red; it decides
+                  # only what an already-failing job prints. Planned entries
+                  # are never dropped from the count to make it agree.
+                  #
+                  # Whitespace is canonicalised before the split, deliberately
+                  # unlike the membership test (spaces only) and unlike the
+                  # `wc -w` denominator above. A plan whose separators carry a
+                  # stray CR is the case this tail was written for, and a
+                  # splitter that inherited that byte would file every entry
+                  # under the wrong cause -- naming the wrong cause is worse
+                  # than naming none.
+                  shard_unrun_mentioned=""
+                  shard_unrun_skipped=""
+                  shard_plan_rest="$(printf '%s' "$UBERDEV_SHARD_PLAN" | tr -s ' \t\r\n' ' ')"
+                  while [ -n "$shard_plan_rest" ]; do
+                    # Split by parameter expansion, never `for x in $plan`: zsh
+                    # does not word-split an unquoted scalar and would walk the
+                    # whole plan once, as one entry.
+                    shard_plan_entry="${shard_plan_rest%% *}"
+                    case "$shard_plan_rest" in
+                      *' '*) shard_plan_rest="${shard_plan_rest#* }" ;;
+                      *) shard_plan_rest="" ;;
+                    esac
+                    [ -n "$shard_plan_entry" ] || continue
+                    case " ${shard_ran_names} " in
+                      *" ${shard_plan_entry} "*) continue ;;
+                    esac
+                    case " ${shard_seen_names} " in
+                      *" ${shard_plan_entry} "*)
+                        shard_unrun_skipped="${shard_unrun_skipped}${shard_unrun_skipped:+ }${shard_plan_entry}"
+                        ;;
+                      *)
+                        shard_unrun_mentioned="${shard_unrun_mentioned}${shard_unrun_mentioned:+ }${shard_plan_entry}"
+                        ;;
+                    esac
+                  done
+                  if [ -n "$shard_unrun_mentioned" ]; then
+                    echo "    NEVER INVOKED (planned, but no invocation in this job ever handed them to run_one): $shard_unrun_mentioned"
+                    echo "      Those names reached the plan by being MENTIONED in the job block -- a step name:, another step's run:, an echo, or a trailing comment."
+                    echo "      The plan producer greps the whole job block for fixture paths; only argv reaching run_one runs. Wire them, or stop spelling the path where it is not an invocation."
+                  fi
+                  if [ -n "$shard_unrun_skipped" ]; then
+                    echo "    SKIPPED (planned and handed to run_one, then filtered out by the plan-membership test): $shard_unrun_skipped"
+                    echo "      The plan value and the membership test disagree about these names -- that is what the dump above shows."
+                  fi
+                  if [ -z "$shard_unrun_mentioned" ] && [ -z "$shard_unrun_skipped" ]; then
+                    echo "    Every name in the plan ran, yet the counts differ: the plan's word count and its distinct names disagree (a repeated entry, or separators splitting into more words than names)."
+                  fi
                   fail=$((fail + 1))
                   failed="${failed}${failed:+ | }SHARD-COVERAGE($shard_ran/$shard_plan_len)"
                 fi
