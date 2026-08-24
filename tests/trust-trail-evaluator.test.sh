@@ -198,8 +198,20 @@ fi
 # TT7 — Step 1.5 ordering invariant: the Phase 2.5 gate runs BEFORE Step 2
 # (structural primitives). Locate Step 1.5 and Step 2 by line number and
 # assert ordering.
+#
+# The `L_2` anchor MUST stay off the prose. `grep` reports matches in FILE order,
+# not alternation order, so a `|Step 2` alternative resolves `head -1` to the
+# FIRST line mentioning Step 2 anywhere — and Step 1.5's own body says "fall
+# through to Step 2 (structural primitives)" in three of its arms. This row was
+# therefore comparing 1.5's heading against 1.5's own body: measured, `L_2` bound
+# to line 79, the `not_applicable` arm INSIDE the 1.5 block, not to line 112 where
+# Step 2 actually begins. Deleting the real `2. Probe ancestry` heading outright
+# left the row GREEN. Anchoring on the column-0 list marker is what gives it
+# teeth: the arms are indented, so only the heading can match, and a card that
+# lost Step 2 now reds with an empty `L_2` instead of passing over its absence.
+# Do not re-add a prose alternative here for symmetry with `L_1_5`.
 L_1_5=$(grep -n '^1\.5\.\|^1\.5 \|Step 1\.5' "$AGENT_MD" | head -1 | cut -d: -f1)
-L_2=$(grep -n '^2\. Probe ancestry\|^2\.[[:space:]]\|Step 2' "$AGENT_MD" | head -1 | cut -d: -f1)
+L_2=$(grep -n '^2\. Probe ancestry\|^2\.[[:space:]]' "$AGENT_MD" | head -1 | cut -d: -f1)
 if [[ -n "$L_1_5" && -n "$L_2" && "$L_1_5" -lt "$L_2" ]]; then
   echo "  PASS  TT7 — Step 1.5 (Phase 2.5 gate) precedes Step 2 (structural primitives); L_1_5=$L_1_5 < L_2=$L_2"
   PASS=$((PASS + 1))
