@@ -1,6 +1,6 @@
 # Premerge — phase contracts and their reasoning
 
-Reference for `skills/premerge-pipeline/SKILL.md`. Three contracts the phases depend on but do not need in context to run: how Phase 0 differs from `/review-pr` Phase 0, what a failed push may print and what the stack PR carries, and what `PREMERGE_PUSHED` is at each gate call site. The severity rule is the one contract that must NOT live here — `## The severity rule` below says where it is and why.
+Reference for `skills/premerge-pipeline/SKILL.md`. Four contracts the phases depend on but do not need in context to run: how Phase 0 differs from `/review-pr` Phase 0, what a failed push may print and what the stack PR carries, what `PREMERGE_PUSHED` is at each gate call site, and what the Phase 5-trail fences require at theirs. The severity rule is the one contract that must NOT live here — `## The severity rule` below says where it is and why.
 
 ### What `/premerge` does differently from `/review-pr` Phase 0
 
@@ -23,7 +23,7 @@ combined HEAD.
 Every `git push` in this file captures its stderr, because a push that exits 2
 without a word is a dead end mid-loop. But *what* it captures is not this repo's
 text: everything a server sends back arrives as `remote:` lines, and a
-pre-receive hook chooses their length and their content. So the five handlers do
+pre-receive hook chooses their length and their content. So the six handlers do
 not print the capture — they print a **bounded, single-line, token-free** view of
 it, rebuilt in place by one line. That line is deliberately not reproduced here —
 the fences are its only copy, so this section cannot come to describe a bound the
@@ -180,3 +180,46 @@ that was never going to change.
 `PREMERGE_WAIT_CI_CEILING` bounds the waiting. A check that never settles is not
 a reason to loop forever, and after that many re-probes the loop calls the
 evidence unreadable and stops — which is a *not-green* stop, never a pass.
+
+### What the Phase 5-trail fences require at their call sites
+
+Both fences take their inputs with `:?` and no default, so the value at every
+call site is part of the contract rather than a convention.
+
+| Fence | Variable | Value at the call site |
+|---|---|---|
+| `premerge-trail-gate` | `PREMERGE_ATTEMPT` | the attempt the loop stopped on — the same number the CONVERGE phase last wrote a ledger row for |
+| `premerge-trail-gate` | `PREMERGE_STOP` | the `DECISION=` token from that ledger row, verbatim. Never re-derived, and never inferred from an exit status: `STOP_GREEN` exits **1** by design |
+| `premerge-trail-emit` | `PREMERGE_TRAIL` | the `TRAIL=` token the gate fence printed — `emit` or `skipped`. Anything but `emit` publishes nothing |
+| `premerge-trail-emit` | `PREMERGE_TRAIL_ATTEMPT` | the zero-padded `ATTEMPT=` token from the same line, which becomes the `attempt=NN` half of the trailer's gate token |
+
+The gate fence runs after the post-simplify VERIFY step has re-gated the simplify
+commit and before the bump, so the HEAD it binds to is the last gated tree. A
+controller that runs it earlier binds a trail to a tree the simplify phase is
+about to change; one that runs it after the bump binds it to a release commit no
+gate read.
+
+**Four refusals, one shape.** `stop_not_green`, `gate_unreadable`, `not_green`
+and `head_moved` are the whole set the gate fence can print, each on the same
+`PREMERGE TRAIL=skipped REASON=…` line, and `### 5b — PARK`'s trust-trail row
+transcribes whichever one it was. They are separate tokens because they call for
+different next moves: the first says the stack still has work in it, the last
+says something touched the branch after the gate read it, and a run that
+collapsed them into a blank row would withhold the one thing an operator can act
+on. All four exit **0** — declining to emit is an ordinary outcome the run
+continues past, not a failure of the fence.
+
+**What the trail claims, and what it must never be read as claiming.** It says
+`/premerge`'s clean gate was green on this exact head: blockers cleared, CI green
+or absent, the stack not conflicting, and the evidence stamped with the branch's
+own HEAD. It says nothing about the seven-lens review fanout, the
+finding-verification pass or the CI-health phase — under `/premerge` none of them
+ran, and the instrument field in the trailer is the thing that keeps the claim
+honest rather than a convention someone has to remember. `/merge` resolves the
+instrument from the label *and* from the trailer, refuses when the two disagree,
+and records a green premerge trail under its own trust anchor, so an audit
+consumer can tell the two tiers apart without reading either producer.
+
+**And a trail is still not permission to merge.** It changes which PRs `/merge`
+is *able* to resolve a trust path for; it changes nothing about who decides that
+a specific PR should land. `/premerge` parks the stack PR and dispatches nothing.

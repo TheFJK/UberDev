@@ -191,6 +191,7 @@
     "agents/silent-failure-hunter.md",
     "agents/trust-trail-evaluator.md",
     "agents/type-design-analyzer.md",
+    "commands/merge.md",
     "commands/review-pr.md",
     "commands/simplify.md",
     "lib/agent-dispatch.sh",

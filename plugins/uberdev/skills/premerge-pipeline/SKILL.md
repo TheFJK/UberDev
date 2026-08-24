@@ -120,6 +120,8 @@ PREMERGE_GROWTH_CEILING  = 0.50           # self-referential growth that stops t
 PREMERGE_GROWTH_RUNS     = 2              # consecutive attempts at/above it before it stops
 PREMERGE_RERUN_FLAKY_CAP = 1              # `gh run rerun` attempts per RUN
 PREMERGE_MAX_BLOCKED_ON  = 8              # blocked_on_file paths one attempt may add — see `### 2a — The fixer-wave mechanism`
+PREMERGE_TRUST_LABEL      = premerge-approved  # the trail label /merge maps to instrument `premerge`
+PREMERGE_TRUST_INSTRUMENT = premerge           # the value carried inside the trust trailer
 ```
 
 `PREMERGE_MAX_BLOCKED_ON` is **declared in `lib/premerge-findings.py`**
@@ -175,6 +177,16 @@ row in `tests/premerge.test.sh` asserts they do:
 1. `lib/premerge-findings.py` — `AGGREGATE_SOURCE`
 2. `lib/report_primitives.py` — `ACCEPTED_SOURCES`
 3. `agents/findings-to-issues.md` — the closed source set in Step 1
+
+`PREMERGE_TRUST_LABEL` and `PREMERGE_TRUST_INSTRUMENT` are the two halves of one
+claim: *this stack passed `/premerge`'s clean gate, and `/premerge` is the
+instrument that says so.* `/merge` resolves the instrument from the label AND from
+the trailer and refuses when they disagree, so neither half is decorative. Both are
+declared on the consumer side as well — `skills/merge-pipeline/SKILL.md`'s Constants
+table carries them as `PREMERGE_APPROVED_LABEL` and as a member of
+`TRUST_INSTRUMENT_ENUM` — and a row in `tests/premerge.test.sh` compares the two
+files rather than trusting them to stay equal. `/premerge` never claims another
+command's instrument; see `### 5-trail — the premerge trust trail`.
 
 ## Inputs
 
@@ -575,7 +587,7 @@ fi
 PREMERGE_PUSH_ERR="$(git -C "$PREMERGE_WORKTREE" push -u origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
   # Bounded and defused BEFORE anything reads it — see `### What a failed push
   # is allowed to say` below for why, and for why this one line is spelled
-  # identically at all five push sites. 200 chars, one line, no live token.
+  # identically at all six push sites. 200 chars, one line, no live token.
   PREMERGE_PUSH_ERR="$(printf '%s' "${PREMERGE_PUSH_ERR//PREMERGE/PRE-MERGE}" | tr -s '\n\r\t' ' ' | cut -c1-200)"
   printf '%s\n' "push_refused" >"$PREMERGE_RUN_DIR/failure-reason.txt"
   printf 'error: pushing %s to origin failed: %s\n' "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2
@@ -2304,6 +2316,164 @@ are also dropped for having no usable `file`. The full arm-by-arm contract, the
 worked examples behind each one, and the reason `CLASS=` may only claim what the
 run can prove are in `references/finding-overflow.md`.
 
+### 5-trail — the premerge trust trail
+
+Emitted **only** when the convergence loop stopped `STOP_GREEN` *and* this
+attempt's `gate-NN.json` carries `verdict=green` bound to the branch's current
+HEAD. A run that stopped any other way emits nothing at all and parks exactly as
+it did before — no anchor commit, no label, no push.
+
+**It runs BEFORE `### 5a`, and the order is load-bearing.** 5a lands a
+`chore(release): vX.Y.Z` commit on top of the branch, and `/merge`'s trust-head
+resolution tolerates exactly one such commit above the anchor — but only once
+`skills/merge-pipeline/lib/release-anchor.sh` has proved it inert with respect to
+reviewed code: exactly one parent, an exact `chore(release): vX.Y.Z` subject, a
+changed-path set that is a subset of the six version surfaces, and a canonical
+manifest version that strictly advances. Emitting the anchor first therefore gets
+the release commit *proved* rather than merely tolerated. Emitting it after the
+bump would also resolve, and would leave that proof unmade.
+
+**What the trail claims and what it does not** — `references/phase-contracts.md`,
+`### What the Phase 5-trail fences require at their call sites`, which also states
+the value every input takes at every call site. The short version: it says
+`/premerge`'s clean gate was green on this exact head, and nothing about the
+seven-lens fanout, the finding-verification pass or the CI-health phase, none of
+which ran here. The instrument field is what keeps that claim honest, and `/merge`
+records it under its own trust anchor so an audit consumer can tell the two tiers
+apart. **`/premerge` still never merges.** A trail changes which PRs are
+*eligible*; it is not permission, and it dispatches nothing.
+
+The decision and the publication are two fences on purpose: the first reads
+evidence and prints a verdict with no git write and no network, so
+`tests/premerge-phase5.test.sh` can execute it against a throwaway repo and prove
+the not-green case emits nothing. The second is the one that touches the remote.
+
+```bash uberdev-executable origin=premerge-trail-gate
+set -u
+RUN_ID="${RUN_ID:?RUN_ID must be prefixed onto this fence by the orchestrator}"
+PREMERGE_ATTEMPT="${PREMERGE_ATTEMPT:?PREMERGE_ATTEMPT must be prefixed onto this fence by the orchestrator}"
+# The loop's own stop decision, verbatim from the converge ledger row. Required
+# with no default for the same reason PREMERGE_PUSHED is: defaulting it would
+# make the UNSAFE answer the one you get by forgetting.
+PREMERGE_STOP="${PREMERGE_STOP:?PREMERGE_STOP must be prefixed onto this fence by the orchestrator}"
+PREMERGE_ROOT="$(git rev-parse --show-toplevel)" || exit 2
+PREMERGE_RUN_DIR="$PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
+PREMERGE_ATTEMPT_PAD="$(printf '%02d' "$PREMERGE_ATTEMPT")"
+PREMERGE_GATE_FILE="$PREMERGE_RUN_DIR/gate-$PREMERGE_ATTEMPT_PAD.json"
+# Every refusal below prints the SAME typed line with a different REASON, so a
+# run that emitted nothing always says which of the four reasons it was. A
+# silent skip is indistinguishable from a fence that never ran.
+if [ "$PREMERGE_STOP" != "STOP_GREEN" ]; then
+  printf 'PREMERGE TRAIL=skipped REASON=stop_not_green STOP=%s\n' "$PREMERGE_STOP" >&2
+  exit 0
+fi
+if [ ! -s "$PREMERGE_GATE_FILE" ]; then
+  printf 'PREMERGE TRAIL=skipped REASON=gate_unreadable ATTEMPT=%s\n' "$PREMERGE_ATTEMPT_PAD" >&2
+  exit 0
+fi
+PREMERGE_TRAIL_VERDICT="$(jq -r '.verdict' <"$PREMERGE_GATE_FILE" 2>/dev/null)" || PREMERGE_TRAIL_VERDICT=""
+PREMERGE_TRAIL_RC="$(jq -r '.rc' <"$PREMERGE_GATE_FILE" 2>/dev/null)" || PREMERGE_TRAIL_RC=""
+PREMERGE_TRAIL_GATE_SHA="$(jq -r '.head_sha' <"$PREMERGE_GATE_FILE" 2>/dev/null)" || PREMERGE_TRAIL_GATE_SHA=""
+# `verdict` AND `rc`, because the gate fence writes them from two different
+# variables and `assert-green` documents its own exit codes (0 green, 1 not
+# green, 74 refused). A file whose two halves disagree is evidence about nothing,
+# and a trail is the last place that can still notice.
+if [ "$PREMERGE_TRAIL_VERDICT" != "green" ] || [ "$PREMERGE_TRAIL_RC" != "0" ]; then
+  printf 'PREMERGE TRAIL=skipped REASON=not_green VERDICT=%s RC=%s\n' \
+    "${PREMERGE_TRAIL_VERDICT:-unreadable}" "${PREMERGE_TRAIL_RC:-unreadable}" >&2
+  exit 0
+fi
+# The SHA binding. The gate describes ONE commit; anything that moved HEAD after
+# it -- a late fixup, a manual commit, a rebase -- means the evidence is about a
+# tree that is no longer the one a trail would authorise.
+PREMERGE_TRAIL_HEAD="$(git rev-parse HEAD)" || exit 2
+if [ "$PREMERGE_TRAIL_GATE_SHA" != "$PREMERGE_TRAIL_HEAD" ]; then
+  printf 'PREMERGE TRAIL=skipped REASON=head_moved GATE_SHA=%s HEAD=%s\n' \
+    "${PREMERGE_TRAIL_GATE_SHA:-unreadable}" "$PREMERGE_TRAIL_HEAD" >&2
+  exit 0
+fi
+printf 'PREMERGE TRAIL=emit ATTEMPT=%s HEAD=%s\n' "$PREMERGE_ATTEMPT_PAD" "$PREMERGE_TRAIL_HEAD" >&2
+exit 0
+```
+
+Publish only on `TRAIL=emit`. The orchestrator carries the decision across the
+fence boundary because a fence is a fresh shell.
+
+```bash uberdev-executable origin=premerge-trail-emit
+set -u
+RUN_ID="${RUN_ID:?RUN_ID must be prefixed onto this fence by the orchestrator}"
+# `emit` or `skipped`, transcribed from the gate fence's TRAIL= token. Required,
+# never defaulted: a forgotten value must not publish a trail nobody proved.
+PREMERGE_TRAIL="${PREMERGE_TRAIL:?PREMERGE_TRAIL must be prefixed onto this fence by the orchestrator}"
+PREMERGE_TRAIL_ATTEMPT="${PREMERGE_TRAIL_ATTEMPT:?PREMERGE_TRAIL_ATTEMPT must be prefixed onto this fence by the orchestrator}"
+[ "$PREMERGE_TRAIL" = "emit" ] || exit 0
+PREMERGE_ROOT="$(git rev-parse --show-toplevel)" || exit 2
+PREMERGE_RUN_DIR="$PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
+PREMERGE_PR="$(jq -r '.combined_pr' <"$PREMERGE_RUN_DIR/manifest.json")" || exit 2
+PREMERGE_BRANCH="$(cat "$PREMERGE_RUN_DIR/combine-branch.txt")" || exit 2
+PREMERGE_BASE="$(cat "$PREMERGE_RUN_DIR/combine-base.txt")" || exit 2
+# Refuse to anchor from anywhere but the stack branch. A fence is a fresh shell
+# and cannot assume the checkout did not move under it.
+PREMERGE_HEAD_BRANCH="$(git symbolic-ref -q --short HEAD)" || PREMERGE_HEAD_BRANCH=""
+[ "$PREMERGE_HEAD_BRANCH" = "$PREMERGE_BRANCH" ] || {
+  printf 'error: expected to be on %s but HEAD is %s; refusing to emit a trust trail\n' \
+    "$PREMERGE_BRANCH" "${PREMERGE_HEAD_BRANCH:-(detached)}" >&2
+  exit 2
+}
+# BOTH endpoints of the delta this trail describes. A head endpoint with no base
+# endpoint names a delta with one end, and that survives a base retarget
+# untouched -- the reasoning #440 put the base half in the commit body for.
+PREMERGE_TRAIL_PARENT="$(git rev-parse HEAD)" || exit 2
+PREMERGE_TRAIL_BASE_OID="$(git rev-parse "origin/$PREMERGE_BASE")" || exit 2
+PREMERGE_ANCHOR_MESSAGE="$(printf 'chore(premerge): trust trail anchor for #%s\n\nReviewed-by: uberdev/premerge@%s gate=green attempt=%s\nReviewed-base: uberdev/premerge@%s ref=%s' \
+  "$PREMERGE_PR" "$PREMERGE_TRAIL_PARENT" "$PREMERGE_TRAIL_ATTEMPT" \
+  "$PREMERGE_TRAIL_BASE_OID" "$PREMERGE_BASE")" || exit 2
+# `--cleanup=verbatim` because the trailers are the payload: the default mode
+# strips any line beginning `#`, and the whole message is read back out of the
+# immutable commit body by a consumer that cannot ask for a resend.
+git commit --allow-empty --cleanup=verbatim -m "$PREMERGE_ANCHOR_MESSAGE" >/dev/null || {
+  printf 'error: the trust-trail anchor commit failed; no trail was emitted\n' >&2
+  exit 2
+}
+# `--allow-empty` ASKS for an empty commit; it does not PROVE one. A pre-commit
+# hook or a concurrent writer can stage bytes, and an anchor carrying a diff is
+# exactly what /merge's evaluator reads as a cumulative delta nobody reviewed.
+# `HEAD~1` rather than `HEAD^`: `^` is a glob metacharacter under zsh with
+# EXTENDED_GLOB, and these fences run through /bin/zsh.
+PREMERGE_TRAIL_ANCHOR="$(git rev-parse HEAD)" || exit 2
+[ "$(git rev-parse HEAD~1)" = "$PREMERGE_TRAIL_PARENT" ] || {
+  printf 'error: the anchor commit parent is not the gated head; refusing to publish\n' >&2
+  exit 2
+}
+git diff --quiet "$PREMERGE_TRAIL_PARENT" "$PREMERGE_TRAIL_ANCHOR" || {
+  printf 'error: the anchor commit is not empty; refusing to publish a trail over changed bytes\n' >&2
+  exit 2
+}
+PREMERGE_PUSH_ERR="$(git push origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
+  # Bounded and defused first — references/phase-contracts.md, `### What a failed push is allowed to say`.
+  PREMERGE_PUSH_ERR="$(printf '%s' "${PREMERGE_PUSH_ERR//PREMERGE/PRE-MERGE}" | tr -s '\n\r\t' ' ' | cut -c1-200)"
+  printf 'error: pushing the trust-trail anchor to %s failed: %s\n' \
+    "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2
+  exit 2
+}
+# `gh pr edit --add-label` cannot auto-create a repo label and exits non-zero when
+# it is missing, so a fresh repo would fail on the label rather than on the trail.
+# `--force` is idempotent and never errors on "already exists". The description
+# stays under GitHub's 100-character ceiling, which 422s on update as well.
+gh label create --force premerge-approved --color 1D76DB \
+  --description 'Premerge trust trail: /premerge clean gate green. Set by /premerge, read by /merge.' >/dev/null || {
+  printf 'error: failed to provision the premerge-approved trust label; check gh auth and repo write permission\n' >&2
+  exit 2
+}
+gh pr edit "$PREMERGE_PR" --add-label premerge-approved >/dev/null || {
+  printf 'error: adding the premerge-approved label to #%s failed; the anchor is pushed but the trail is half-emitted\n' "$PREMERGE_PR" >&2
+  exit 2
+}
+printf 'PREMERGE TRAIL=emitted ANCHOR=%s PR=%s LABEL=premerge-approved\n' \
+  "$PREMERGE_TRAIL_ANCHOR" "$PREMERGE_PR" >&2
+exit 0
+```
+
 ### 5a — One bump for the whole stack
 
 Skipped when `--no-bump`, and skipped with a reported reason when the **repo being
@@ -2416,6 +2586,7 @@ Print the run summary and **stop**:
   blockers      <n> found / <n> fixed / <n> surviving
   ci            <state> before simplify / <state> after
   clean gate    green | not_green (<reasons>)
+  trust trail   premerge-approved @ <anchor-sha> | none (<reason>)
   simplify      applied <n> / deferred <n> | skipped (<reason>) | reverted (<reason>)
   issues filed  <n> created, <n> commented, <n> deduped  (<n> blocker, <n> suggestion)
                   <n> owning files — one issue each, at most max_new=10 of them
@@ -2433,6 +2604,13 @@ STOP_NO_PROGRESS" and "3/3 attempts, STOP_EXHAUSTED" call for opposite next move
 — the first says the fixers are stuck and a human should look, the second says
 the loop was still winning and `--converge=5` would probably finish it. A summary
 that collapses both to `not_green` withholds the one thing the operator needs.
+
+**The trust-trail row prints its reason when there is none.** `none
+(stop_not_green)` and `none (head_moved)` call for different next moves — the
+first says the stack still has work in it, the second says something touched the
+branch after the gate read it — and a row that collapses both to a blank withholds
+the one thing the operator needs to act. The four reasons are exactly the ones
+`### 5-trail — the premerge trust trail`'s decision fence can print.
 
 **Every attempt's row carries its `growth=`**, transcribed from that attempt's
 `converge.jsonl` row, because "it was still converging" and "it was reviewing
