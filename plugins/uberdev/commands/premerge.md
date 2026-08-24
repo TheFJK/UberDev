@@ -67,9 +67,46 @@ across attempts rather than `file:line`, because a fix moves lines and a
 location-keyed identity would report every survivor as brand new — the loop would
 see infinite progress and never stop.
 
-`--converge` is the runaway backstop behind those two, not the stop condition, and
-that distinction is the answer to the hazard RFC 0021 originally refused a loop
-over: *"the third automatic attempt is where a fixer starts 'fixing' the test."*
+A third measurement catches what those two cannot. Both compare fingerprint sets
+drawn from independent full-stack reviews, so neither can tell a defect the
+fixers just wrote from one that was always there. `STOP_SELF_REFERENTIAL` fires
+when, for two attempts running, at least half of the blockers a round returned
+did not exist the round before **and** sit in files the previous repair
+modified — the loop reviewing its own output. It reports `GROWTH=` on every
+attempt so you can see the difference between a run that was still converging
+and one that had started generating its own work. The findings that trip it are
+filed as issues like every other survivor, not dropped.
+
+Why that measurement has to exist at all: a reviewer asked *what is wrong with
+this?* samples from an **unbounded** set, so a round that comes back with no
+blockers is a property of the sample, never of the stack. Find → fix → re-find
+has no fixed point, and a loop that terminates when the critic goes quiet is
+terminating on nothing. `GROWTH=` stands in for the fixed point the loop does not
+have: the fraction of a round's blockers that landed in text the **previous
+round's own repair wrote**. At `1.00` the loop is reviewing its own output, and
+the correct response to that is to **stop**, not to repair again.
+
+`STOP_SELF_REFERENTIAL` pre-empts the budget stop deliberately, because *"it was
+still winning, raise `--converge`"* and *"the loop was reviewing itself"* are
+**opposite** operator responses — and an operator shown the budget stop for a run
+that did the second will raise the budget on a loop that can never converge. For
+the same reason the stop takes **two consecutive measured rounds** at or above
+that half-mark, never one. Each review is a fresh sample, and the files most
+likely to be resampled next round are exactly the ones the last repair touched,
+so a single high round is equally consistent with a healthy convergence whose
+repairs happen to be concentrated in a few files. Removing the two-round
+requirement makes the detector stop loops that were working — the failure it
+exists to avoid.
+
+`GROWTH=` is a signal, not a proof. Attribution is at file granularity, so a
+genuinely new defect elsewhere in a repaired file over-counts as growth; and a
+round whose repair committed nothing leaves no scope list to attribute against,
+so it prints `GROWTH=-` — *not measured*, which is a different answer from
+`0.00`.
+
+`--converge` is the runaway backstop behind those three, not the stop condition,
+and that distinction is the answer to the hazard RFC 0021 originally refused a
+loop over: *"the third automatic attempt is where a fixer starts 'fixing' the test."*
 The attempt that achieves nothing is now caught **when it happens** rather than
 assumed to be the third one, and the fixer agents are told outright that a test
 they read as the wrong half is a finding to report and skip, never an obstacle to
@@ -107,8 +144,9 @@ trusting a run's split.
   excluded **by number with a typed reason** and that reason is rendered into
   the stack PR body.
 - **It will not loop forever.** The loop ends on the attempt that stopped making
-  progress or made things worse; `--converge`'s ceiling of six is only the
-  backstop behind that, and waiting on CI has a bound of its own.
+  progress, made things worse, or began reviewing what its own repairs wrote;
+  `--converge`'s ceiling of six is only the backstop behind those three, and
+  waiting on CI has a bound of its own.
 - **It will not weaken a test to clear a finding.** Making the evidence stop
   complaining is not fixing the bug. A fixer that honestly reads the test as the
   wrong half says so and skips, and the run records that as an answer.

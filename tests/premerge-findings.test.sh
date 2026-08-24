@@ -2124,6 +2124,287 @@ else
 fi
 
 # --------------------------------------------------------------------------
+echo "== B32: the growth ratio, and the stop it drives (#754) =="
+# DRIVEN, not grepped. A detector whose only test is "the identifier appears in
+# the source" is a detector that can be made unreachable without any row going
+# red -- the exact class this file's own header is about. Every case below runs
+# the shipped verb against a synthetic run directory and reads the DECISION, the
+# GROWTH field and the exit status off the real output line.
+
+# scope DIR ATTEMPT PATH... -> writes DIR/fix-scope-<NN>.modified
+# The same shape the fix-commit fence writes: one repo-relative path per line,
+# already sorted and unique.
+scope() {
+  local dir="$1" attempt="$2" pad
+  shift 2
+  pad="$(printf '%02d' "$attempt")"
+  printf '%s\n' "$@" >"$dir/fix-scope-$pad.modified"
+}
+
+# decide_g DIR ATTEMPT MAX VERDICT REASONS -> prints "<DECISION>|<GROWTH>|<rc>"
+#
+# All three on ONE line for the reason `decide` already documents: a command
+# substitution runs in a subshell, so an rc stashed inside never reaches the
+# caller -- and rc is half of what is under test here, since a stop exits 1.
+#
+# stderr is kept in DIR/g.err rather than discarded, because one of the four
+# routes to an unmeasured ratio -- an OSError on a scope file that IS present --
+# is indistinguishable from the three benign ones by its `-` alone. Its
+# announcement is the only thing that separates "we could not look" from "there
+# was nothing to look at".
+decide_g() {
+  local dir="$1" attempt="$2" maxa="$3" verdict="$4" reasons="$5"
+  local line rc
+  line="$(python3 -I -B "$LIB" converge --run-dir "$dir" --attempt "$attempt" \
+    --max-repairs "$maxa" --verdict "$verdict" --reasons "$reasons" 2>"$dir/g.err")"
+  rc=$?
+  printf '%s|%s|%s' \
+    "$(printf '%s' "$line" | sed -n 's/.*DECISION=\([A-Z_]*\).*/\1/p')" \
+    "$(printf '%s' "$line" | sed -n 's/.*GROWTH=\([0-9.-]*\).*/\1/p')" \
+    "$rc"
+}
+
+expect_g() {  # expect_g "<got>" "<want>" "<what>"
+  if [ "$1" = "$2" ]; then
+    ok "B32: $3 -> $2"
+  else
+    bad "B32: $3 -> got '$1', wanted '$2'"
+  fi
+}
+
+# 0.00 -- every blocker this round is new, and NONE of them is in a file the
+# last repair touched. This is a loop finding real work elsewhere in the stack.
+D="$(new_case)"
+write_input "$D" '[{"file":"lib/a.sh","line":1,"summary":"alpha","failure_scenario":"crash","severity":"blocker"},
+                   {"file":"lib/b.sh","line":2,"summary":"beta","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D" 1 "$SHA_A" || bad "B32: setup attempt 1 failed"
+decide_g "$D" 1 6 not_green 'blockers_remaining=2' >/dev/null
+scope "$D" 1 'lib/a.sh'
+write_input "$D" '[{"file":"lib/z.sh","line":1,"summary":"zulu","failure_scenario":"crash","severity":"blocker"},
+                   {"file":"lib/y.sh","line":2,"summary":"yankee","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D" 2 "$SHA_B" || bad "B32: setup attempt 2 failed"
+expect_g "$(decide_g "$D" 2 6 not_green 'blockers_remaining=2')" 'CONTINUE|0.00|0' \
+  "two new blockers, neither in a repaired file"
+
+scope "$D" 2 'lib/z.sh' 'lib/y.sh'
+write_input "$D" '[{"file":"lib/w.sh","line":1,"summary":"whiskey","failure_scenario":"crash","severity":"blocker"},
+                   {"file":"lib/v.sh","line":2,"summary":"victor","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D" 3 "$SHA_C" || bad "B32: setup attempt 3 failed"
+expect_g "$(decide_g "$D" 3 6 not_green 'blockers_remaining=2')" 'CONTINUE|0.00|0' \
+  "a second round at 0.00 still continues"
+
+# EXACTLY at the ceiling, twice. The comparison is `>=` and the number compared
+# is the same rounded value the line prints, so the boundary has one defined
+# answer and this is it. The first round at 0.50 must NOT stop -- that is the
+# warn half, and a detector that fired on one round would stop a convergence
+# whose repairs happened to be concentrated.
+#
+# THE PAIR IS ITSELF THE MUTATION for CONVERGE_GROWTH_RUNS. One ratio, one
+# scope, two decisions: nothing but the consecutive-round requirement can
+# produce CONTINUE from 0.50 and then STOP_SELF_REFERENTIAL from 0.50. Collapse
+# the constant to one round and the first row reds; delete the stop and the
+# second does.
+D_THRESH="$(new_case)"
+write_input "$D_THRESH" '[{"file":"lib/a.sh","line":1,"summary":"alpha","failure_scenario":"crash","severity":"blocker"},
+                          {"file":"lib/b.sh","line":2,"summary":"beta","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D_THRESH" 1 "$SHA_A" || bad "B32: threshold setup 1 failed"
+decide_g "$D_THRESH" 1 6 not_green 'blockers_remaining=2' >/dev/null
+scope "$D_THRESH" 1 'lib/a.sh'
+write_input "$D_THRESH" '[{"file":"lib/a.sh","line":7,"summary":"delta","failure_scenario":"crash","severity":"blocker"},
+                          {"file":"lib/b.sh","line":2,"summary":"beta","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D_THRESH" 2 "$SHA_B" || bad "B32: threshold setup 2 failed"
+expect_g "$(decide_g "$D_THRESH" 2 6 not_green 'blockers_remaining=2')" 'CONTINUE|0.50|0' \
+  "the FIRST round at the threshold warns and continues"
+
+scope "$D_THRESH" 2 'lib/a.sh'
+write_input "$D_THRESH" '[{"file":"lib/a.sh","line":9,"summary":"epsilon","failure_scenario":"crash","severity":"blocker"},
+                          {"file":"lib/b.sh","line":2,"summary":"beta","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D_THRESH" 3 "$SHA_C" || bad "B32: threshold setup 3 failed"
+expect_g "$(decide_g "$D_THRESH" 3 6 not_green 'blockers_remaining=2')" 'STOP_SELF_REFERENTIAL|0.50|1' \
+  "the SECOND consecutive round at the threshold stops, with budget to spare"
+
+# 1.00 -- every blocker this round is new and in the file the repair just wrote.
+# This is the shape the recorded pumped run had on its final attempt.
+b32_pump() {  # b32_pump DIR SCOPE2 -> replays three attempts, prints attempt 3's result
+  local dir="$1" scope2="$2"
+  write_input "$dir" '[{"file":"lib/a.sh","line":1,"summary":"alpha","failure_scenario":"crash","severity":"blocker"}]'
+  plan_at "$dir" 1 "$SHA_A" || bad "B32: pump setup 1 failed"
+  decide_g "$dir" 1 6 not_green 'blockers_remaining=1' >/dev/null
+  scope "$dir" 1 'lib/a.sh'
+  write_input "$dir" '[{"file":"lib/a.sh","line":7,"summary":"delta","failure_scenario":"crash","severity":"blocker"}]'
+  plan_at "$dir" 2 "$SHA_B" || bad "B32: pump setup 2 failed"
+  decide_g "$dir" 2 6 not_green 'blockers_remaining=1' >/dev/null
+  scope "$dir" 2 "$scope2"
+  write_input "$dir" '[{"file":"lib/a.sh","line":9,"summary":"epsilon","failure_scenario":"crash","severity":"blocker"}]'
+  plan_at "$dir" 3 "$SHA_C" || bad "B32: pump setup 3 failed"
+  decide_g "$dir" 3 6 not_green 'blockers_remaining=1'
+}
+
+D="$(new_case)"
+expect_g "$(b32_pump "$D" 'lib/a.sh')" 'STOP_SELF_REFERENTIAL|1.00|1' \
+  "two rounds of blockers only in the file the repair rewrote"
+
+# THE MUTATION, THROUGH THE SAME PREDICATE. Identical replay, identical
+# assertion path, one byte range changed: the second repair's scope names a
+# file no attempt-3 blocker sits in. If the decision does not move, the rows
+# above were passing for some reason other than the measurement.
+D="$(new_case)"
+expect_g "$(b32_pump "$D" 'lib/untouched.sh')" 'CONTINUE|0.00|0' \
+  "MUTATION: repoint the repair scope and the same run continues"
+
+# The false positive the fingerprint exclusion exists to remove. The wave plan
+# assigns exactly the files this round's blockers named, so a finding the fixer
+# did not clear is ALWAYS in a modified file. Counted, the survivor below would
+# make this round measure 0.50 -- and 1.00 on a round with no new work elsewhere
+# -- and stop a converging loop on its own success. Drop the fingerprint
+# exclusion from `_growth_ratio` and this row reds on the GROWTH field.
+D="$(new_case)"
+write_input "$D" '[{"file":"lib/a.sh","line":1,"summary":"alpha","failure_scenario":"crash","severity":"blocker"},
+                   {"file":"lib/a.sh","line":4,"summary":"bravo","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D" 1 "$SHA_A" || bad "B32: survivor setup 1 failed"
+decide_g "$D" 1 6 not_green 'blockers_remaining=2' >/dev/null
+scope "$D" 1 'lib/a.sh'
+write_input "$D" '[{"file":"lib/a.sh","line":1,"summary":"alpha","failure_scenario":"crash","severity":"blocker"},
+                   {"file":"lib/c.sh","line":3,"summary":"charlie","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D" 2 "$SHA_B" || bad "B32: survivor setup 2 failed"
+expect_g "$(decide_g "$D" 2 6 not_green 'blockers_remaining=2')" 'CONTINUE|0.00|0' \
+  "a survivor in the repaired file plus a new blocker elsewhere is 0.00"
+
+# ---- the FOUR routes to `-`, each driven, none of them a stop ---------------
+#
+# `-` is not `0.00`: it says the ratio was not measured. Four distinct
+# conditions produce it, and a block that only exercised one of them would pass
+# just as happily over the other three being dead code.
+
+# (1) attempt 1: there is no predecessor to attribute anything to.
+# (2) a predecessor that committed nothing, so the commit fence wrote no scope
+#     list (`REASON=no-edits`) or the repair only re-ran CI.
+D_DASH="$(new_case)"
+write_input "$D_DASH" '[{"file":"lib/a.sh","line":1,"summary":"alpha","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D_DASH" 1 "$SHA_A" || bad "B32: unmeasured setup 1 failed"
+expect_g "$(decide_g "$D_DASH" 1 6 not_green 'blockers_remaining=1')" 'CONTINUE|-|0' \
+  "attempt 1 has no predecessor and reports no ratio"
+write_input "$D_DASH" '[{"file":"lib/q.sh","line":1,"summary":"quebec","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D_DASH" 2 "$SHA_B" || bad "B32: unmeasured setup 2 failed"
+expect_g "$(decide_g "$D_DASH" 2 6 not_green 'blockers_remaining=1')" 'CONTINUE|-|0' \
+  "an attempt whose predecessor wrote no scope list reports no ratio"
+
+# And the field is on the line even when it has no value: a line whose field set
+# varies is a line no `case` pattern can match.
+B32_LINE="$(python3 -I -B "$LIB" converge --run-dir "$D_DASH" --attempt 2 --max-repairs 6 \
+  --verdict not_green --reasons 'blockers_remaining=1' 2>/dev/null)"
+case "$B32_LINE" in
+  *"NEW=1 GROWTH=- WAIT="*) ok "B32: GROWTH sits between NEW and WAIT on every line" ;;
+  *) bad "B32: the GROWTH field is missing or misplaced: $B32_LINE" ;;
+esac
+
+# (3) an attempt with NO blockers to divide by. The scope list is present and
+#     the predecessor's evidence is on disk, so the only thing standing between
+#     this row and a ZeroDivisionError traceback is the empty-denominator guard
+#     -- which is why this row asserts rc=0 as well as `-`.
+D="$(new_case)"
+write_input "$D" '[{"file":"lib/a.sh","line":1,"summary":"alpha","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D" 1 "$SHA_A" || bad "B32: zero-blocker setup 1 failed"
+decide_g "$D" 1 6 not_green 'blockers_remaining=1' >/dev/null
+scope "$D" 1 'lib/a.sh'
+write_input "$D" '[]'
+plan_at "$D" 2 "$SHA_B" || bad "B32: zero-blocker setup 2 failed"
+expect_g "$(decide_g "$D" 2 6 not_green 'ci=red')" 'CONTINUE|-|0' \
+  "an attempt with no blockers reports no ratio and does not divide by zero"
+
+# (4) an OSError on a scope file that IS present. This one is a FAULT, not an
+#     absence, and it is the only `-` an operator has to act on -- so it
+#     announces itself on stderr with a token while degrading exactly like the
+#     other three. A directory at the scope path is the portable way to make
+#     `os.path.exists` true and `open()` raise, with no dependence on the test
+#     running as an unprivileged user.
+D_ERR="$(new_case)"
+write_input "$D_ERR" '[{"file":"lib/a.sh","line":1,"summary":"alpha","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D_ERR" 1 "$SHA_A" || bad "B32: unreadable setup 1 failed"
+decide_g "$D_ERR" 1 6 not_green 'blockers_remaining=1' >/dev/null
+mkdir "$D_ERR/fix-scope-01.modified"
+write_input "$D_ERR" '[{"file":"lib/a.sh","line":7,"summary":"delta","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D_ERR" 2 "$SHA_B" || bad "B32: unreadable setup 2 failed"
+expect_g "$(decide_g "$D_ERR" 2 6 not_green 'blockers_remaining=1')" 'CONTINUE|-|0' \
+  "an unreadable scope file degrades to no ratio and stops nothing"
+if grep -q 'premerge-findings: repair_scope_unreadable:' "$D_ERR/g.err"; then
+  ok "B32: the unreadable scope file announces itself on stderr"
+else
+  bad "B32: an unreadable scope file was absorbed silently: $(cat "$D_ERR/g.err")"
+fi
+
+# THE MUTATION FOR THAT ROW, THROUGH THE SAME PREDICATE. Same run directory,
+# same attempt, same assertion path: replace the directory with the scope list
+# it was standing in for, and both halves must move -- the ratio becomes a
+# number and the announcement must stop. Without this, the two rows above pass
+# just as happily over a `_read_repair_scope` that never reads anything.
+rmdir "$D_ERR/fix-scope-01.modified"
+scope "$D_ERR" 1 'lib/a.sh'
+expect_g "$(decide_g "$D_ERR" 2 6 not_green 'blockers_remaining=1')" 'CONTINUE|1.00|0' \
+  "MUTATION: a readable scope list at the same path is measured"
+if grep -q 'repair_scope_unreadable' "$D_ERR/g.err"; then
+  bad "B32: a readable scope file still announced an unreadable one"
+else
+  ok "B32: MUTATION: the stderr announcement is gone once the file is readable"
+fi
+
+# ---- the ledger row, and the SKILL's restatement ---------------------------
+#
+# Acceptance 4 reads the ratio out of `converge.jsonl`, per attempt, so the
+# summary can render it. Asserted on the ledger the run actually wrote.
+#
+# MEMBERSHIP BEFORE VALUE. `r.get("growth")` alone cannot tell "key present,
+# value null" from "the module never wrote a growth key at all" -- both are
+# `None` -- so a row keyed on it is the one row that PASSES against a module
+# with no growth key whatsoever. `"growth" in r` is the half that reds.
+b32_growths() {  # b32_growths LEDGER -> "<attempt>:<key present>=<value>,..."
+  python3 -I -B -c '
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8").read().splitlines() if l.strip()]
+print(",".join("%s:%s=%r" % (r.get("attempt"), "growth" in r, r.get("growth")) for r in rows))
+' "$1"
+}
+
+B32_GROWTHS="$(b32_growths "$D_DASH/converge.jsonl")"
+case "$B32_GROWTHS" in
+  *"2:True=None"*) ok "B32: every ledger row carries a growth key, null when unmeasured" ;;
+  *) bad "B32: the ledger row has no growth key (got '$B32_GROWTHS')" ;;
+esac
+
+# And the measured half: an assertion that only ever sees null is satisfied by a
+# module that writes the key and never populates it.
+B32_GROWTHS="$(b32_growths "$D_THRESH/converge.jsonl")"
+case "$B32_GROWTHS" in
+  *"2:True=0.5"*"3:True=0.5"*) ok "B32: a measured ledger row carries the ratio itself" ;;
+  *) bad "B32: the ledger did not record the measured ratio (got '$B32_GROWTHS')" ;;
+esac
+
+# B15b's technique, applied to the new constants: import one side, read the
+# shipped bytes of the other. A restated number a human keeps in step is a
+# number that has already drifted.
+B32_DRIFT="$(python3 -I -B -c '
+import importlib.util, re, sys
+spec = importlib.util.spec_from_file_location("pmf", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+text = open(sys.argv[2], encoding="utf-8").read()
+bad = []
+for name, value in (("PREMERGE_GROWTH_CEILING", module.CONVERGE_GROWTH_CEILING),
+                    ("PREMERGE_GROWTH_RUNS", module.CONVERGE_GROWTH_RUNS)):
+    found = re.search(r"^%s\s*=\s*([0-9.]+)" % name, text, re.M)
+    if found is None:
+        bad.append("%s:absent" % name)
+    elif float(found.group(1)) != float(value):
+        bad.append("%s:skill=%s lib=%s" % (name, found.group(1), value))
+print(";".join(bad) or "agree")
+' "$LIB" "$REPO_ROOT/plugins/uberdev/skills/premerge-pipeline/SKILL.md")"
+if [ "$B32_DRIFT" = "agree" ]; then
+  ok "B32: the SKILL's restated growth constants match the library's enforced ones"
+else
+  bad "B32: growth constant drift ($B32_DRIFT)"
+fi
+
+# --------------------------------------------------------------------------
 rm -rf "$WORK"
 
 echo ""

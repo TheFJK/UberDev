@@ -59,6 +59,12 @@
 #          runtime and no test noticed (#724)
 #   P20  — every backticked heading reference in the Constants block resolves to
 #          a heading that exists in this file (#724)
+#   P21  — the growth ratio's surfaces: the library declares the ceiling and the
+#          decision, the SKILL documents both and prints GROWTH=, and the command
+#          file names the stop for the operator. The BEHAVIOUR — that the ratio
+#          is computed, that one round warns and two stop, and that repointing
+#          the repair scope moves the decision — is driven in B32 of
+#          tests/premerge-findings.test.sh, which executes the module
 #   P16  — repo-agnosticism: Phase 5's bump probes the TARGET repo (not the
 #          plugin install), passes that root through to bump-version.sh, and
 #          skips with a typed reason elsewhere; Phase 0 publishes the private
@@ -1193,6 +1199,58 @@ fi
 # re-file a constant whose consumer is the controller by design.
 assert_fixed "$SKILL" '`PREMERGE_CI_SETTLE_SECS` is consumed by the **controller**' \
   "P20: the settle constant's consumer is stated, not left to be re-discovered"
+
+echo "== P21: the growth ratio's surfaces (#754) =="
+# Grep-only, on purpose, and NOT the proof that the detector works: a literal in
+# the source is satisfied by a comment mentioning it. What these rows catch is a
+# surface DELETED or renamed — a library constant with no restatement, a
+# decision the SKILL stopped documenting, an operator file that never learned
+# the loop grew a third stop. B32 in tests/premerge-findings.test.sh is the half
+# that executes.
+assert_fixed "$LIB" 'CONVERGE_GROWTH_CEILING = 0.50' "P21: the library declares the break-even ceiling"
+assert_fixed "$LIB" 'CONVERGE_GROWTH_RUNS = 2' "P21: the library declares the consecutive-round requirement"
+assert_fixed "$LIB" '"STOP_SELF_REFERENTIAL",' "P21: the decision is a member of the closed vocabulary"
+assert_fixed "$LIB" 'fix-scope-%02d.modified' "P21: the ratio reads the scope list the commit fence already writes"
+assert_grep  "$SKILL" '^PREMERGE_GROWTH_CEILING' "P21: the SKILL restates the ceiling in the Constants block"
+assert_grep  "$SKILL" '^PREMERGE_GROWTH_RUNS' "P21: the SKILL restates the consecutive-round requirement"
+assert_fixed "$SKILL" '| `STOP_SELF_REFERENTIAL` |' "P21: the decision table routes the new stop"
+assert_fixed "$SKILL" 'GROWTH=<0.00-1.00|->' "P21: the documented output line carries the ratio"
+assert_fixed "$SKILL" 'growth=0.20' "P21: the run summary's converge row carries the ratio per attempt"
+assert_fixed "$CMD" 'STOP_SELF_REFERENTIAL' "P21: the command file names the stop for the operator"
+assert_fixed "$SKILL_MISTAKES" 'GROWTH=-' "P21: Common Mistakes warns against reading unmeasured as zero"
+assert_fixed "$RFC" '### A5 — the growth ratio is computed and stops the loop' "P21: RFC 0021 records the amendment"
+# The measurement takes NO new argument: both its inputs are in the run
+# directory the fence already passes. This row reds if someone "fixes" the
+# measurement by widening the verb's surface and threading a value through a
+# fence.
+#
+# LINE-BASED, and deliberately NOT `converge.*--growth` on one line: grep judges
+# one line at a time, and this fence writes every argument on its own
+# backslash-continued line — `--run-dir`, `--attempt`, `--max-repairs`,
+# `--verdict`, `--reasons`, `--wait-passes` all sit BELOW the word `converge`.
+# A same-line pattern is therefore blind to the only shape a seventh argument
+# would ever be written in. Measured, not reasoned: with
+# `--growth "$PREMERGE_GROWTH" \` spliced into the converge invocation exactly
+# the way its six siblings are written, the same-line pattern still reported
+# PASS on this suite. It would have shipped permanently green.
+#
+# The widened claim — no fence passes a growth argument AT ALL — is true today
+# and errs in the safe direction: it also catches the value being threaded into
+# the `plan` or `defer` call instead, which is the same mistake wearing a
+# different verb.
+#
+# `^[^#]*` is P15's idiom, for P15's reason: a fence COMMENT that mentions the
+# flag while explaining why nothing passes it must not red this row. The
+# `[^-[:alnum:]]` before the flag keeps `----growth` and `x--growth` out, and
+# the trailing class keeps `--growth-ceiling` out.
+#
+# Anti-vacuity is already established ABOVE, in this same run, and is not
+# restated here: P11c FAILS the extraction outright below 100 lines, and P11c's
+# own `assert_fixed "$FENCES" 'premerge-findings.py" converge'` is what proves
+# the converge invocation is in the slice at all. A second copy of either
+# predicate is the drift this suite exists to prevent.
+assert_no_grep "$FENCES" '^[^#]*[^-[:alnum:]]--growth([^[:alnum:]_-]|$)' \
+  "P21: no fence passes a growth argument — the inputs are in the run dir"
 
 echo ""
 echo "== Summary =="

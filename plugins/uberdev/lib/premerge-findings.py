@@ -168,6 +168,7 @@ CONVERGE_DECISIONS = (
     "STOP_GREEN",       # the gate passed -- the loop's whole purpose
     "STOP_NO_PROGRESS",  # an attempt changed neither the blockers nor the CI reason
     "STOP_REGRESSED",   # our own fixes grew the blocker set
+    "STOP_SELF_REFERENTIAL",  # the loop is now reviewing what its own repairs wrote
     "STOP_EXHAUSTED",   # the runaway backstop
     "STOP_UNREADABLE",  # evidence we could not read -- never reported as green
 )
@@ -184,6 +185,33 @@ CONVERGE_CONTINUE = frozenset({"CONTINUE", "WAIT_CI"})
 # a flag documented as reproducing it.
 CONVERGE_REPAIR_CEILING = 6
 CONVERGE_WAIT_CI_CEILING = 8
+
+# The self-referential-growth stop.
+#
+# GROWTH is the fraction of an attempt's blockers that are BOTH new since the
+# previous attempt AND sitting in a file the previous attempt's repair actually
+# modified: work this loop made for itself. RFC 0021 A3 states the law
+# ("never terminate a loop on a generative critic's silence") and its second
+# corollary names this exact quantity as the cheap, computable divergence
+# signal. This is that corollary made mechanical.
+#
+# WHY 0.50, AND WHY IT IS NOT A ROUND NUMBER. The numerator is work the last
+# repair authored; the complement is everything the loop inherited. At 0.50 a
+# repair round manufactured exactly as much new work as it inherited, and above
+# it the repair is a net generator -- every further round enlarges its own
+# haystack. The two recorded runs bound the choice without determining it: the
+# pumped run measured 1.00 and the converging one 0.20.
+#
+# WHY TWO CONSECUTIVE ROUNDS AND NOT ONE. A3 section 2: attempt N's blocker set
+# is a FRESH SAMPLE, so a defect present since attempt 1 but first rolled at
+# attempt 3 counts as new -- and the files most likely to be resampled are
+# exactly the ones the repair just touched. One high round is therefore
+# consistent with a healthy convergence whose repairs are concentrated, and
+# stopping on it is C3's failure: not a detector gone quiet, a detector that
+# stops a loop that was working. Two in a row is what A3's own drafting
+# measured (8/8, then 6/6) before it stopped.
+CONVERGE_GROWTH_CEILING = 0.50
+CONVERGE_GROWTH_RUNS = 2
 
 # `plan` and `defer` legally run ONE ATTEMPT PAST the loop's last attempt.
 #
@@ -1117,6 +1145,100 @@ def _union_suggestions(base: "list[dict]", carried: "list[dict]") -> "list[dict]
     return out
 
 
+def _repair_scope_path(run_dir: str, attempt: int) -> str:
+    return os.path.join(run_dir, "fix-scope-%02d.modified" % attempt)
+
+
+def _read_repair_scope(run_dir: str, attempt: int) -> "frozenset[str] | None":
+    """The repo-relative files that attempt's repair modified, or None.
+
+    None means NOT MEASURED, and it is a different answer from the empty set.
+    The commit fence writes this list only on an attempt that actually
+    committed edits -- it exits early with `REASON=no-edits` otherwise, and a
+    repair that only re-ran CI commits nothing at all. There is then no repair
+    to attribute this attempt's findings to, and printing 0.00 for it would be
+    a measurement nobody took.
+
+    NOT FAIL-CLOSED, AND THIS IS THE ONE PLACE IN THIS MODULE WHERE THAT IS
+    RIGHT. Every other refusal here stops a loop that might otherwise ship
+    something unverified. This one would stop a loop that is WORKING, which is
+    the failure RFC 0021 A3 C3 names outright. An unmeasurable ratio is
+    reported as `-`, is visible on the line and in the summary, and changes no
+    decision. An OSError on a file that IS present degrades the same way but
+    announces itself with a token, the way `_carry_prior_suggestions` already
+    announces a skipped attempt.
+    """
+    target = _repair_scope_path(run_dir, attempt)
+    if not os.path.exists(target):
+        return None
+    try:
+        with open(target, "rb") as handle:
+            raw = handle.read()
+    except OSError as exc:
+        print(
+            "premerge-findings: repair_scope_unreadable: "
+            f"{target} ({exc}); this attempt's GROWTH is not measured",
+            file=sys.stderr,
+        )
+        return None
+    paths = set()
+    for line in raw.decode("utf-8", "replace").splitlines():
+        entry = line.strip()
+        if entry:
+            paths.add(entry)
+    return frozenset(paths)
+
+
+def _growth_ratio(
+    document: "dict",
+    previous_prints: "collections.Counter[str] | None",
+    scope: "frozenset[str] | None",
+) -> "float | None":
+    """What fraction of this attempt's blockers the previous repair authored.
+
+    numerator   -- blockers whose `file` is in `scope` AND whose fingerprint
+                   the previous attempt's evidence did not carry.
+    denominator -- every blocker in this attempt's evidence, i.e. the number
+                   already printed as BLOCKERS=.
+
+    THE FINGERPRINT EXCLUSION IS NOT AN OPTIMISATION. The wave plan assigns
+    exactly the files this attempt's blockers named, so a SURVIVOR -- a blocker
+    the fixer was assigned and did not clear -- is by construction sitting in a
+    file the repair touched. Counted, it would make a converging loop with
+    residual findings measure 1.00 and stop on its own success. Excluded, the
+    numerator is a strict subset of the `NEW=` count already on the output
+    line, which is also what makes that line internally checkable.
+
+    DELIBERATELY THE COARSE PROXY. The precise question is "did this finding
+    land in text the previous repair WROTE", which needs diff-hunk mapping
+    nothing produces today (RFC 0021 A3 C8: the reviewer cannot be pointed at a
+    two-SHA range). File membership over-counts -- a new finding elsewhere in a
+    touched file counts -- so it errs toward stopping, which is precisely why
+    CONVERGE_GROWTH_RUNS requires two consecutive rounds rather than one.
+
+    None when the ratio is undefined: no previous attempt, no measured repair
+    scope, or no blockers to divide by.
+    """
+    if scope is None or previous_prints is None:
+        return None
+    blockers = document["blockers"]
+    if not blockers:
+        return None
+    grown = 0
+    for finding in blockers:
+        if not isinstance(finding, dict):
+            fail("finding_schema_invalid", "a blocker is not an object")
+        if _repo_path(finding.get("file")) not in scope:
+            continue
+        if finding.get("fingerprint") in previous_prints:
+            continue
+        grown += 1
+    # ROUNDED BEFORE THE COMPARISON, not after. The threshold test below uses
+    # the same two-decimal value the line prints, so an operator reading
+    # `GROWTH=0.50` and the decision the run took can never disagree.
+    return round(grown / len(blockers), 2)
+
+
 def _converge_ledger(run_dir: str) -> str:
     return os.path.join(run_dir, "converge.jsonl")
 
@@ -1985,6 +2107,14 @@ def cmd_converge(args: argparse.Namespace) -> int:
     current_prints = _blocker_fingerprints(current)
     previous_prints = _blocker_fingerprints(previous) if previous is not None else None
 
+    # The self-referential-growth measurement, from artifacts the run already
+    # wrote: this attempt's `classified-NN.json` (already loaded above) and the
+    # previous attempt's `fix-scope-NN.modified` (already written by the commit
+    # fence, already inside --run-dir). No new argument, no new fence, no new
+    # phase.
+    repair_scope = _read_repair_scope(run_dir, attempt - 1) if attempt > 1 else None
+    growth = _growth_ratio(current, previous_prints, repair_scope)
+
     current_total = sum(current_prints.values())
     if previous_prints is None:
         previous_total = None
@@ -2025,6 +2155,21 @@ def cmd_converge(args: argparse.Namespace) -> int:
         frozenset(last_row.get("reasons_other") or []) if isinstance(last_row, dict) else None
     )
 
+    # WARN, THEN STOP. One round at or above the ceiling is consistent with a
+    # convergence whose repairs are concentrated in a few files; it is printed
+    # and recorded and changes nothing. The stop needs CONVERGE_GROWTH_RUNS
+    # consecutive MEASURED rounds, read off the previous attempt's own ledger
+    # row rather than carried in a variable a fence could forget -- the same
+    # reasoning `_count_wait_rows` is built on.
+    previous_growth = last_row.get("growth") if isinstance(last_row, dict) else None
+    growth_streak = (
+        growth is not None
+        and growth >= CONVERGE_GROWTH_CEILING
+        and isinstance(previous_growth, (int, float))
+        and not isinstance(previous_growth, bool)
+        and previous_growth >= CONVERGE_GROWTH_CEILING
+    )
+
     # Every gate term this loop has no route for: `stale_evidence`, which is
     # unrepairable by definition, plus anything a fence invented that
     # GATE_REASONS_ROUTABLE has never heard of -- `gate_unreadable` above all,
@@ -2062,6 +2207,18 @@ def cmd_converge(args: argparse.Namespace) -> int:
         and other == previous_other
     ):
         decision = "STOP_NO_PROGRESS"
+    elif growth_streak:
+        # Two rounds running, most of what the reviewer returned did not exist
+        # before the loop's own repairs wrote it. Stopping ABOVE the budget
+        # check on purpose: "the loop was still winning, raise --converge" and
+        # "the loop was reviewing itself" are opposite operator responses, and
+        # STOP_EXHAUSTED says the first about a run that did the second.
+        #
+        # These findings are not discarded. This is a not-green stop, so the
+        # controller runs Phase 5 with PREMERGE_SURVIVORS=1 and `defer` gets
+        # --include-blockers: every surviving blocker becomes an issue. The
+        # claim is "not THIS loop's work", never "not work".
+        decision = "STOP_SELF_REFERENTIAL"
     elif attempt > max_repairs:
         # Strictly greater: attempt N is the review that verifies repair N-1, so
         # the budget is spent only once we are past it. `>=` here is the
@@ -2080,6 +2237,7 @@ def cmd_converge(args: argparse.Namespace) -> int:
             "blockers": current_total,
             "decision": decision,
             "fixed": fixed,
+            "growth": growth,
             "head_sha": current.get("head_sha"),
             "max_repairs": max_repairs,
             "new": appeared,
@@ -2093,7 +2251,7 @@ def cmd_converge(args: argparse.Namespace) -> int:
 
     print(
         "PREMERGE_CONVERGE ATTEMPT=%d DECISION=%s BLOCKERS=%d PREV=%s FIXED=%d NEW=%d"
-        " WAIT=%d MAXREPAIRS=%d REASONS=%s"
+        " GROWTH=%s WAIT=%d MAXREPAIRS=%d REASONS=%s"
         % (
             attempt,
             decision,
@@ -2101,6 +2259,7 @@ def cmd_converge(args: argparse.Namespace) -> int:
             "-" if previous_total is None else str(previous_total),
             fixed,
             appeared,
+            "-" if growth is None else "%.2f" % growth,
             wait_passes,
             max_repairs,
             ",".join(reasons) if reasons else "none",
