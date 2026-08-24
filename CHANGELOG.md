@@ -4,6 +4,69 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.56.0] — 2026-08-24
+
+Packs #762, #763, #764, #765 and #766 as one stack, plus three rounds of
+`/premerge` repair on the combined result and one pre-existing `main` red.
+MINOR: #765 and #766 add behaviour (`STOP_SELF_REFERENTIAL`, the
+`blocked_on_file` widening); the rest is fixes. Closes #755, #754, #753, #749
+and the frontmatter break behind #762.
+
+### Added — the growth ratio, and a third evidence-first stop (#765)
+
+`/premerge`'s loop could clear every blocker a review raised and still be
+handed a fresh set next round, because a critic asked "what is wrong with
+this?" samples from an unbounded set. `converge` now measures what fraction of
+an attempt's blockers landed in files the *previous* repair modified, prints it
+as `GROWTH=`, and stops as `STOP_SELF_REFERENTIAL` when two consecutive
+eligible rounds sit at or above `CONVERGE_GROWTH_CEILING` — the loop reviewing
+its own output rather than the artifact.
+
+A round only counts toward the streak if it did **not** reduce the
+reviewer-raised blocker count; without that term the ratio rises toward 1.00
+precisely as a run converges, and a healthy 5→2→2 run stopped falsely with most
+of its budget unspent.
+
+### Added — `blocked_on_file`, so a cross-file consequence is not lost (#766)
+
+Fixer waves are one agent per file. A fix whose honest scope spans two files
+had no route: the agent could only refuse, and the finding survived to the next
+round. Fixers now return `blocked_on_file`, and those paths enter the **next
+attempt's wave plan** — never the allowed set directly, which would make a path
+committable while no agent owned it.
+
+Carried rows gate (so they reach a fixer) but are excluded from the
+fingerprints and the growth denominator (so they cannot manufacture progress),
+and any row still outstanding when the loop stops is filed rather than dropped.
+
+### Fixed — guards that were silently vacuous
+
+- The `tools:` frontmatter migration (#749) turned eight `testers-*` allowlists
+  into real ceilings, but `StructuredOutput` was on none of them while
+  `testers-pipeline` dispatches all eight with a schema. The structured return
+  channel was gated shut; every card now grants it.
+- SHARD-COVERAGE (#753) compared `run_one` *invocations* against a
+  *de-duplicated* plan, so a job invoking one fixture twice failed a correct
+  shard. It now counts distinct fixtures, and names every planned-but-unrun
+  fixture split by cause instead of printing a bare count mismatch.
+- The unpinned-`sort`/`comm` detector required whitespace after the command
+  name, so `sort)` and end-of-line invocations were invisible — the guard was
+  green on exactly the bypass it existed to catch.
+- The `tools:` contract check recognised only flow-style YAML, so a
+  block-sequence declaration read as *no declaration at all*.
+- All three `/premerge` scope guards compared C-quoted paths against raw UTF-8,
+  reporting correctly-edited non-ASCII files as strays; and
+  `review-consolidate.sh` had five masked producers where a failed `git` read
+  as an empty result — one of which silently re-admitted an excluded PR into
+  the combine.
+
+### Fixed — vendor provenance
+
+Six `measured_diff_basis.uberdev_rev` records pinned a SHA on an unmerged
+branch, so `V46` failed on clean `main`. Re-pinned to the commit that actually
+carries those bytes; the six blobs are byte-identical at both revs, so the
+measurement re-derives unchanged.
+
 ## [0.55.1] — 2026-08-23
 
 Packs #750 and #751 as one stack. Both are context-cost work on the eager
@@ -4231,55 +4294,822 @@ UberDev now installs into the [OpenAI Codex CLI](https://developers.openai.com/c
 
 ## [0.37.1] — 2026-06-12
 
-- _Release notes pending — replace this stub before committing (inserted by bump-version.sh)._
+Packs #762, #763, #764, #765 and #766 as one stack, plus three rounds of
+`/premerge` repair on the combined result and one pre-existing `main` red.
+MINOR: #765 and #766 add behaviour (`STOP_SELF_REFERENTIAL`, the
+`blocked_on_file` widening); the rest is fixes. Closes #755, #754, #753, #749
+and the frontmatter break behind #762.
+
+### Added — the growth ratio, and a third evidence-first stop (#765)
+
+`/premerge`'s loop could clear every blocker a review raised and still be
+handed a fresh set next round, because a critic asked "what is wrong with
+this?" samples from an unbounded set. `converge` now measures what fraction of
+an attempt's blockers landed in files the *previous* repair modified, prints it
+as `GROWTH=`, and stops as `STOP_SELF_REFERENTIAL` when two consecutive
+eligible rounds sit at or above `CONVERGE_GROWTH_CEILING` — the loop reviewing
+its own output rather than the artifact.
+
+A round only counts toward the streak if it did **not** reduce the
+reviewer-raised blocker count; without that term the ratio rises toward 1.00
+precisely as a run converges, and a healthy 5→2→2 run stopped falsely with most
+of its budget unspent.
+
+### Added — `blocked_on_file`, so a cross-file consequence is not lost (#766)
+
+Fixer waves are one agent per file. A fix whose honest scope spans two files
+had no route: the agent could only refuse, and the finding survived to the next
+round. Fixers now return `blocked_on_file`, and those paths enter the **next
+attempt's wave plan** — never the allowed set directly, which would make a path
+committable while no agent owned it.
+
+Carried rows gate (so they reach a fixer) but are excluded from the
+fingerprints and the growth denominator (so they cannot manufacture progress),
+and any row still outstanding when the loop stops is filed rather than dropped.
+
+### Fixed — guards that were silently vacuous
+
+- The `tools:` frontmatter migration (#749) turned eight `testers-*` allowlists
+  into real ceilings, but `StructuredOutput` was on none of them while
+  `testers-pipeline` dispatches all eight with a schema. The structured return
+  channel was gated shut; every card now grants it.
+- SHARD-COVERAGE (#753) compared `run_one` *invocations* against a
+  *de-duplicated* plan, so a job invoking one fixture twice failed a correct
+  shard. It now counts distinct fixtures, and names every planned-but-unrun
+  fixture split by cause instead of printing a bare count mismatch.
+- The unpinned-`sort`/`comm` detector required whitespace after the command
+  name, so `sort)` and end-of-line invocations were invisible — the guard was
+  green on exactly the bypass it existed to catch.
+- The `tools:` contract check recognised only flow-style YAML, so a
+  block-sequence declaration read as *no declaration at all*.
+- All three `/premerge` scope guards compared C-quoted paths against raw UTF-8,
+  reporting correctly-edited non-ASCII files as strays; and
+  `review-consolidate.sh` had five masked producers where a failed `git` read
+  as an empty result — one of which silently re-admitted an excluded PR into
+  the combine.
+
+### Fixed — vendor provenance
+
+Six `measured_diff_basis.uberdev_rev` records pinned a SHA on an unmerged
+branch, so `V46` failed on clean `main`. Re-pinned to the commit that actually
+carries those bytes; the six blobs are byte-identical at both revs, so the
+measurement re-derives unchanged.
 
 ## [0.37.0] — 2026-06-12
 
-- _Release notes pending — replace this stub before committing (inserted by bump-version.sh)._
+Packs #762, #763, #764, #765 and #766 as one stack, plus three rounds of
+`/premerge` repair on the combined result and one pre-existing `main` red.
+MINOR: #765 and #766 add behaviour (`STOP_SELF_REFERENTIAL`, the
+`blocked_on_file` widening); the rest is fixes. Closes #755, #754, #753, #749
+and the frontmatter break behind #762.
+
+### Added — the growth ratio, and a third evidence-first stop (#765)
+
+`/premerge`'s loop could clear every blocker a review raised and still be
+handed a fresh set next round, because a critic asked "what is wrong with
+this?" samples from an unbounded set. `converge` now measures what fraction of
+an attempt's blockers landed in files the *previous* repair modified, prints it
+as `GROWTH=`, and stops as `STOP_SELF_REFERENTIAL` when two consecutive
+eligible rounds sit at or above `CONVERGE_GROWTH_CEILING` — the loop reviewing
+its own output rather than the artifact.
+
+A round only counts toward the streak if it did **not** reduce the
+reviewer-raised blocker count; without that term the ratio rises toward 1.00
+precisely as a run converges, and a healthy 5→2→2 run stopped falsely with most
+of its budget unspent.
+
+### Added — `blocked_on_file`, so a cross-file consequence is not lost (#766)
+
+Fixer waves are one agent per file. A fix whose honest scope spans two files
+had no route: the agent could only refuse, and the finding survived to the next
+round. Fixers now return `blocked_on_file`, and those paths enter the **next
+attempt's wave plan** — never the allowed set directly, which would make a path
+committable while no agent owned it.
+
+Carried rows gate (so they reach a fixer) but are excluded from the
+fingerprints and the growth denominator (so they cannot manufacture progress),
+and any row still outstanding when the loop stops is filed rather than dropped.
+
+### Fixed — guards that were silently vacuous
+
+- The `tools:` frontmatter migration (#749) turned eight `testers-*` allowlists
+  into real ceilings, but `StructuredOutput` was on none of them while
+  `testers-pipeline` dispatches all eight with a schema. The structured return
+  channel was gated shut; every card now grants it.
+- SHARD-COVERAGE (#753) compared `run_one` *invocations* against a
+  *de-duplicated* plan, so a job invoking one fixture twice failed a correct
+  shard. It now counts distinct fixtures, and names every planned-but-unrun
+  fixture split by cause instead of printing a bare count mismatch.
+- The unpinned-`sort`/`comm` detector required whitespace after the command
+  name, so `sort)` and end-of-line invocations were invisible — the guard was
+  green on exactly the bypass it existed to catch.
+- The `tools:` contract check recognised only flow-style YAML, so a
+  block-sequence declaration read as *no declaration at all*.
+- All three `/premerge` scope guards compared C-quoted paths against raw UTF-8,
+  reporting correctly-edited non-ASCII files as strays; and
+  `review-consolidate.sh` had five masked producers where a failed `git` read
+  as an empty result — one of which silently re-admitted an excluded PR into
+  the combine.
+
+### Fixed — vendor provenance
+
+Six `measured_diff_basis.uberdev_rev` records pinned a SHA on an unmerged
+branch, so `V46` failed on clean `main`. Re-pinned to the commit that actually
+carries those bytes; the six blobs are byte-identical at both revs, so the
+measurement re-derives unchanged.
 
 ## [0.36.12] — 2026-06-12
 
-- _Release notes pending — replace this stub before committing (inserted by bump-version.sh)._
+Packs #762, #763, #764, #765 and #766 as one stack, plus three rounds of
+`/premerge` repair on the combined result and one pre-existing `main` red.
+MINOR: #765 and #766 add behaviour (`STOP_SELF_REFERENTIAL`, the
+`blocked_on_file` widening); the rest is fixes. Closes #755, #754, #753, #749
+and the frontmatter break behind #762.
+
+### Added — the growth ratio, and a third evidence-first stop (#765)
+
+`/premerge`'s loop could clear every blocker a review raised and still be
+handed a fresh set next round, because a critic asked "what is wrong with
+this?" samples from an unbounded set. `converge` now measures what fraction of
+an attempt's blockers landed in files the *previous* repair modified, prints it
+as `GROWTH=`, and stops as `STOP_SELF_REFERENTIAL` when two consecutive
+eligible rounds sit at or above `CONVERGE_GROWTH_CEILING` — the loop reviewing
+its own output rather than the artifact.
+
+A round only counts toward the streak if it did **not** reduce the
+reviewer-raised blocker count; without that term the ratio rises toward 1.00
+precisely as a run converges, and a healthy 5→2→2 run stopped falsely with most
+of its budget unspent.
+
+### Added — `blocked_on_file`, so a cross-file consequence is not lost (#766)
+
+Fixer waves are one agent per file. A fix whose honest scope spans two files
+had no route: the agent could only refuse, and the finding survived to the next
+round. Fixers now return `blocked_on_file`, and those paths enter the **next
+attempt's wave plan** — never the allowed set directly, which would make a path
+committable while no agent owned it.
+
+Carried rows gate (so they reach a fixer) but are excluded from the
+fingerprints and the growth denominator (so they cannot manufacture progress),
+and any row still outstanding when the loop stops is filed rather than dropped.
+
+### Fixed — guards that were silently vacuous
+
+- The `tools:` frontmatter migration (#749) turned eight `testers-*` allowlists
+  into real ceilings, but `StructuredOutput` was on none of them while
+  `testers-pipeline` dispatches all eight with a schema. The structured return
+  channel was gated shut; every card now grants it.
+- SHARD-COVERAGE (#753) compared `run_one` *invocations* against a
+  *de-duplicated* plan, so a job invoking one fixture twice failed a correct
+  shard. It now counts distinct fixtures, and names every planned-but-unrun
+  fixture split by cause instead of printing a bare count mismatch.
+- The unpinned-`sort`/`comm` detector required whitespace after the command
+  name, so `sort)` and end-of-line invocations were invisible — the guard was
+  green on exactly the bypass it existed to catch.
+- The `tools:` contract check recognised only flow-style YAML, so a
+  block-sequence declaration read as *no declaration at all*.
+- All three `/premerge` scope guards compared C-quoted paths against raw UTF-8,
+  reporting correctly-edited non-ASCII files as strays; and
+  `review-consolidate.sh` had five masked producers where a failed `git` read
+  as an empty result — one of which silently re-admitted an excluded PR into
+  the combine.
+
+### Fixed — vendor provenance
+
+Six `measured_diff_basis.uberdev_rev` records pinned a SHA on an unmerged
+branch, so `V46` failed on clean `main`. Re-pinned to the commit that actually
+carries those bytes; the six blobs are byte-identical at both revs, so the
+measurement re-derives unchanged.
 
 ## [0.36.11] — 2026-06-12
 
-- _Release notes pending — replace this stub before committing (inserted by bump-version.sh)._
+Packs #762, #763, #764, #765 and #766 as one stack, plus three rounds of
+`/premerge` repair on the combined result and one pre-existing `main` red.
+MINOR: #765 and #766 add behaviour (`STOP_SELF_REFERENTIAL`, the
+`blocked_on_file` widening); the rest is fixes. Closes #755, #754, #753, #749
+and the frontmatter break behind #762.
+
+### Added — the growth ratio, and a third evidence-first stop (#765)
+
+`/premerge`'s loop could clear every blocker a review raised and still be
+handed a fresh set next round, because a critic asked "what is wrong with
+this?" samples from an unbounded set. `converge` now measures what fraction of
+an attempt's blockers landed in files the *previous* repair modified, prints it
+as `GROWTH=`, and stops as `STOP_SELF_REFERENTIAL` when two consecutive
+eligible rounds sit at or above `CONVERGE_GROWTH_CEILING` — the loop reviewing
+its own output rather than the artifact.
+
+A round only counts toward the streak if it did **not** reduce the
+reviewer-raised blocker count; without that term the ratio rises toward 1.00
+precisely as a run converges, and a healthy 5→2→2 run stopped falsely with most
+of its budget unspent.
+
+### Added — `blocked_on_file`, so a cross-file consequence is not lost (#766)
+
+Fixer waves are one agent per file. A fix whose honest scope spans two files
+had no route: the agent could only refuse, and the finding survived to the next
+round. Fixers now return `blocked_on_file`, and those paths enter the **next
+attempt's wave plan** — never the allowed set directly, which would make a path
+committable while no agent owned it.
+
+Carried rows gate (so they reach a fixer) but are excluded from the
+fingerprints and the growth denominator (so they cannot manufacture progress),
+and any row still outstanding when the loop stops is filed rather than dropped.
+
+### Fixed — guards that were silently vacuous
+
+- The `tools:` frontmatter migration (#749) turned eight `testers-*` allowlists
+  into real ceilings, but `StructuredOutput` was on none of them while
+  `testers-pipeline` dispatches all eight with a schema. The structured return
+  channel was gated shut; every card now grants it.
+- SHARD-COVERAGE (#753) compared `run_one` *invocations* against a
+  *de-duplicated* plan, so a job invoking one fixture twice failed a correct
+  shard. It now counts distinct fixtures, and names every planned-but-unrun
+  fixture split by cause instead of printing a bare count mismatch.
+- The unpinned-`sort`/`comm` detector required whitespace after the command
+  name, so `sort)` and end-of-line invocations were invisible — the guard was
+  green on exactly the bypass it existed to catch.
+- The `tools:` contract check recognised only flow-style YAML, so a
+  block-sequence declaration read as *no declaration at all*.
+- All three `/premerge` scope guards compared C-quoted paths against raw UTF-8,
+  reporting correctly-edited non-ASCII files as strays; and
+  `review-consolidate.sh` had five masked producers where a failed `git` read
+  as an empty result — one of which silently re-admitted an excluded PR into
+  the combine.
+
+### Fixed — vendor provenance
+
+Six `measured_diff_basis.uberdev_rev` records pinned a SHA on an unmerged
+branch, so `V46` failed on clean `main`. Re-pinned to the commit that actually
+carries those bytes; the six blobs are byte-identical at both revs, so the
+measurement re-derives unchanged.
 
 ## [0.36.10] — 2026-06-12
 
-- _Release notes pending — replace this stub before committing (inserted by bump-version.sh)._
+Packs #762, #763, #764, #765 and #766 as one stack, plus three rounds of
+`/premerge` repair on the combined result and one pre-existing `main` red.
+MINOR: #765 and #766 add behaviour (`STOP_SELF_REFERENTIAL`, the
+`blocked_on_file` widening); the rest is fixes. Closes #755, #754, #753, #749
+and the frontmatter break behind #762.
+
+### Added — the growth ratio, and a third evidence-first stop (#765)
+
+`/premerge`'s loop could clear every blocker a review raised and still be
+handed a fresh set next round, because a critic asked "what is wrong with
+this?" samples from an unbounded set. `converge` now measures what fraction of
+an attempt's blockers landed in files the *previous* repair modified, prints it
+as `GROWTH=`, and stops as `STOP_SELF_REFERENTIAL` when two consecutive
+eligible rounds sit at or above `CONVERGE_GROWTH_CEILING` — the loop reviewing
+its own output rather than the artifact.
+
+A round only counts toward the streak if it did **not** reduce the
+reviewer-raised blocker count; without that term the ratio rises toward 1.00
+precisely as a run converges, and a healthy 5→2→2 run stopped falsely with most
+of its budget unspent.
+
+### Added — `blocked_on_file`, so a cross-file consequence is not lost (#766)
+
+Fixer waves are one agent per file. A fix whose honest scope spans two files
+had no route: the agent could only refuse, and the finding survived to the next
+round. Fixers now return `blocked_on_file`, and those paths enter the **next
+attempt's wave plan** — never the allowed set directly, which would make a path
+committable while no agent owned it.
+
+Carried rows gate (so they reach a fixer) but are excluded from the
+fingerprints and the growth denominator (so they cannot manufacture progress),
+and any row still outstanding when the loop stops is filed rather than dropped.
+
+### Fixed — guards that were silently vacuous
+
+- The `tools:` frontmatter migration (#749) turned eight `testers-*` allowlists
+  into real ceilings, but `StructuredOutput` was on none of them while
+  `testers-pipeline` dispatches all eight with a schema. The structured return
+  channel was gated shut; every card now grants it.
+- SHARD-COVERAGE (#753) compared `run_one` *invocations* against a
+  *de-duplicated* plan, so a job invoking one fixture twice failed a correct
+  shard. It now counts distinct fixtures, and names every planned-but-unrun
+  fixture split by cause instead of printing a bare count mismatch.
+- The unpinned-`sort`/`comm` detector required whitespace after the command
+  name, so `sort)` and end-of-line invocations were invisible — the guard was
+  green on exactly the bypass it existed to catch.
+- The `tools:` contract check recognised only flow-style YAML, so a
+  block-sequence declaration read as *no declaration at all*.
+- All three `/premerge` scope guards compared C-quoted paths against raw UTF-8,
+  reporting correctly-edited non-ASCII files as strays; and
+  `review-consolidate.sh` had five masked producers where a failed `git` read
+  as an empty result — one of which silently re-admitted an excluded PR into
+  the combine.
+
+### Fixed — vendor provenance
+
+Six `measured_diff_basis.uberdev_rev` records pinned a SHA on an unmerged
+branch, so `V46` failed on clean `main`. Re-pinned to the commit that actually
+carries those bytes; the six blobs are byte-identical at both revs, so the
+measurement re-derives unchanged.
 
 ## [0.36.9] — 2026-06-12
 
-- _Release notes pending — replace this stub before committing (inserted by bump-version.sh)._
+Packs #762, #763, #764, #765 and #766 as one stack, plus three rounds of
+`/premerge` repair on the combined result and one pre-existing `main` red.
+MINOR: #765 and #766 add behaviour (`STOP_SELF_REFERENTIAL`, the
+`blocked_on_file` widening); the rest is fixes. Closes #755, #754, #753, #749
+and the frontmatter break behind #762.
+
+### Added — the growth ratio, and a third evidence-first stop (#765)
+
+`/premerge`'s loop could clear every blocker a review raised and still be
+handed a fresh set next round, because a critic asked "what is wrong with
+this?" samples from an unbounded set. `converge` now measures what fraction of
+an attempt's blockers landed in files the *previous* repair modified, prints it
+as `GROWTH=`, and stops as `STOP_SELF_REFERENTIAL` when two consecutive
+eligible rounds sit at or above `CONVERGE_GROWTH_CEILING` — the loop reviewing
+its own output rather than the artifact.
+
+A round only counts toward the streak if it did **not** reduce the
+reviewer-raised blocker count; without that term the ratio rises toward 1.00
+precisely as a run converges, and a healthy 5→2→2 run stopped falsely with most
+of its budget unspent.
+
+### Added — `blocked_on_file`, so a cross-file consequence is not lost (#766)
+
+Fixer waves are one agent per file. A fix whose honest scope spans two files
+had no route: the agent could only refuse, and the finding survived to the next
+round. Fixers now return `blocked_on_file`, and those paths enter the **next
+attempt's wave plan** — never the allowed set directly, which would make a path
+committable while no agent owned it.
+
+Carried rows gate (so they reach a fixer) but are excluded from the
+fingerprints and the growth denominator (so they cannot manufacture progress),
+and any row still outstanding when the loop stops is filed rather than dropped.
+
+### Fixed — guards that were silently vacuous
+
+- The `tools:` frontmatter migration (#749) turned eight `testers-*` allowlists
+  into real ceilings, but `StructuredOutput` was on none of them while
+  `testers-pipeline` dispatches all eight with a schema. The structured return
+  channel was gated shut; every card now grants it.
+- SHARD-COVERAGE (#753) compared `run_one` *invocations* against a
+  *de-duplicated* plan, so a job invoking one fixture twice failed a correct
+  shard. It now counts distinct fixtures, and names every planned-but-unrun
+  fixture split by cause instead of printing a bare count mismatch.
+- The unpinned-`sort`/`comm` detector required whitespace after the command
+  name, so `sort)` and end-of-line invocations were invisible — the guard was
+  green on exactly the bypass it existed to catch.
+- The `tools:` contract check recognised only flow-style YAML, so a
+  block-sequence declaration read as *no declaration at all*.
+- All three `/premerge` scope guards compared C-quoted paths against raw UTF-8,
+  reporting correctly-edited non-ASCII files as strays; and
+  `review-consolidate.sh` had five masked producers where a failed `git` read
+  as an empty result — one of which silently re-admitted an excluded PR into
+  the combine.
+
+### Fixed — vendor provenance
+
+Six `measured_diff_basis.uberdev_rev` records pinned a SHA on an unmerged
+branch, so `V46` failed on clean `main`. Re-pinned to the commit that actually
+carries those bytes; the six blobs are byte-identical at both revs, so the
+measurement re-derives unchanged.
 
 ## [0.36.8] — 2026-06-12
 
-- _Release notes pending — replace this stub before committing (inserted by bump-version.sh)._
+Packs #762, #763, #764, #765 and #766 as one stack, plus three rounds of
+`/premerge` repair on the combined result and one pre-existing `main` red.
+MINOR: #765 and #766 add behaviour (`STOP_SELF_REFERENTIAL`, the
+`blocked_on_file` widening); the rest is fixes. Closes #755, #754, #753, #749
+and the frontmatter break behind #762.
+
+### Added — the growth ratio, and a third evidence-first stop (#765)
+
+`/premerge`'s loop could clear every blocker a review raised and still be
+handed a fresh set next round, because a critic asked "what is wrong with
+this?" samples from an unbounded set. `converge` now measures what fraction of
+an attempt's blockers landed in files the *previous* repair modified, prints it
+as `GROWTH=`, and stops as `STOP_SELF_REFERENTIAL` when two consecutive
+eligible rounds sit at or above `CONVERGE_GROWTH_CEILING` — the loop reviewing
+its own output rather than the artifact.
+
+A round only counts toward the streak if it did **not** reduce the
+reviewer-raised blocker count; without that term the ratio rises toward 1.00
+precisely as a run converges, and a healthy 5→2→2 run stopped falsely with most
+of its budget unspent.
+
+### Added — `blocked_on_file`, so a cross-file consequence is not lost (#766)
+
+Fixer waves are one agent per file. A fix whose honest scope spans two files
+had no route: the agent could only refuse, and the finding survived to the next
+round. Fixers now return `blocked_on_file`, and those paths enter the **next
+attempt's wave plan** — never the allowed set directly, which would make a path
+committable while no agent owned it.
+
+Carried rows gate (so they reach a fixer) but are excluded from the
+fingerprints and the growth denominator (so they cannot manufacture progress),
+and any row still outstanding when the loop stops is filed rather than dropped.
+
+### Fixed — guards that were silently vacuous
+
+- The `tools:` frontmatter migration (#749) turned eight `testers-*` allowlists
+  into real ceilings, but `StructuredOutput` was on none of them while
+  `testers-pipeline` dispatches all eight with a schema. The structured return
+  channel was gated shut; every card now grants it.
+- SHARD-COVERAGE (#753) compared `run_one` *invocations* against a
+  *de-duplicated* plan, so a job invoking one fixture twice failed a correct
+  shard. It now counts distinct fixtures, and names every planned-but-unrun
+  fixture split by cause instead of printing a bare count mismatch.
+- The unpinned-`sort`/`comm` detector required whitespace after the command
+  name, so `sort)` and end-of-line invocations were invisible — the guard was
+  green on exactly the bypass it existed to catch.
+- The `tools:` contract check recognised only flow-style YAML, so a
+  block-sequence declaration read as *no declaration at all*.
+- All three `/premerge` scope guards compared C-quoted paths against raw UTF-8,
+  reporting correctly-edited non-ASCII files as strays; and
+  `review-consolidate.sh` had five masked producers where a failed `git` read
+  as an empty result — one of which silently re-admitted an excluded PR into
+  the combine.
+
+### Fixed — vendor provenance
+
+Six `measured_diff_basis.uberdev_rev` records pinned a SHA on an unmerged
+branch, so `V46` failed on clean `main`. Re-pinned to the commit that actually
+carries those bytes; the six blobs are byte-identical at both revs, so the
+measurement re-derives unchanged.
 
 ## [0.36.7] — 2026-06-12
 
-- _Release notes pending — replace this stub before committing (inserted by bump-version.sh)._
+Packs #762, #763, #764, #765 and #766 as one stack, plus three rounds of
+`/premerge` repair on the combined result and one pre-existing `main` red.
+MINOR: #765 and #766 add behaviour (`STOP_SELF_REFERENTIAL`, the
+`blocked_on_file` widening); the rest is fixes. Closes #755, #754, #753, #749
+and the frontmatter break behind #762.
+
+### Added — the growth ratio, and a third evidence-first stop (#765)
+
+`/premerge`'s loop could clear every blocker a review raised and still be
+handed a fresh set next round, because a critic asked "what is wrong with
+this?" samples from an unbounded set. `converge` now measures what fraction of
+an attempt's blockers landed in files the *previous* repair modified, prints it
+as `GROWTH=`, and stops as `STOP_SELF_REFERENTIAL` when two consecutive
+eligible rounds sit at or above `CONVERGE_GROWTH_CEILING` — the loop reviewing
+its own output rather than the artifact.
+
+A round only counts toward the streak if it did **not** reduce the
+reviewer-raised blocker count; without that term the ratio rises toward 1.00
+precisely as a run converges, and a healthy 5→2→2 run stopped falsely with most
+of its budget unspent.
+
+### Added — `blocked_on_file`, so a cross-file consequence is not lost (#766)
+
+Fixer waves are one agent per file. A fix whose honest scope spans two files
+had no route: the agent could only refuse, and the finding survived to the next
+round. Fixers now return `blocked_on_file`, and those paths enter the **next
+attempt's wave plan** — never the allowed set directly, which would make a path
+committable while no agent owned it.
+
+Carried rows gate (so they reach a fixer) but are excluded from the
+fingerprints and the growth denominator (so they cannot manufacture progress),
+and any row still outstanding when the loop stops is filed rather than dropped.
+
+### Fixed — guards that were silently vacuous
+
+- The `tools:` frontmatter migration (#749) turned eight `testers-*` allowlists
+  into real ceilings, but `StructuredOutput` was on none of them while
+  `testers-pipeline` dispatches all eight with a schema. The structured return
+  channel was gated shut; every card now grants it.
+- SHARD-COVERAGE (#753) compared `run_one` *invocations* against a
+  *de-duplicated* plan, so a job invoking one fixture twice failed a correct
+  shard. It now counts distinct fixtures, and names every planned-but-unrun
+  fixture split by cause instead of printing a bare count mismatch.
+- The unpinned-`sort`/`comm` detector required whitespace after the command
+  name, so `sort)` and end-of-line invocations were invisible — the guard was
+  green on exactly the bypass it existed to catch.
+- The `tools:` contract check recognised only flow-style YAML, so a
+  block-sequence declaration read as *no declaration at all*.
+- All three `/premerge` scope guards compared C-quoted paths against raw UTF-8,
+  reporting correctly-edited non-ASCII files as strays; and
+  `review-consolidate.sh` had five masked producers where a failed `git` read
+  as an empty result — one of which silently re-admitted an excluded PR into
+  the combine.
+
+### Fixed — vendor provenance
+
+Six `measured_diff_basis.uberdev_rev` records pinned a SHA on an unmerged
+branch, so `V46` failed on clean `main`. Re-pinned to the commit that actually
+carries those bytes; the six blobs are byte-identical at both revs, so the
+measurement re-derives unchanged.
 
 ## [0.36.6] — 2026-06-12
 
-- _Release notes pending — replace this stub before committing (inserted by bump-version.sh)._
+Packs #762, #763, #764, #765 and #766 as one stack, plus three rounds of
+`/premerge` repair on the combined result and one pre-existing `main` red.
+MINOR: #765 and #766 add behaviour (`STOP_SELF_REFERENTIAL`, the
+`blocked_on_file` widening); the rest is fixes. Closes #755, #754, #753, #749
+and the frontmatter break behind #762.
+
+### Added — the growth ratio, and a third evidence-first stop (#765)
+
+`/premerge`'s loop could clear every blocker a review raised and still be
+handed a fresh set next round, because a critic asked "what is wrong with
+this?" samples from an unbounded set. `converge` now measures what fraction of
+an attempt's blockers landed in files the *previous* repair modified, prints it
+as `GROWTH=`, and stops as `STOP_SELF_REFERENTIAL` when two consecutive
+eligible rounds sit at or above `CONVERGE_GROWTH_CEILING` — the loop reviewing
+its own output rather than the artifact.
+
+A round only counts toward the streak if it did **not** reduce the
+reviewer-raised blocker count; without that term the ratio rises toward 1.00
+precisely as a run converges, and a healthy 5→2→2 run stopped falsely with most
+of its budget unspent.
+
+### Added — `blocked_on_file`, so a cross-file consequence is not lost (#766)
+
+Fixer waves are one agent per file. A fix whose honest scope spans two files
+had no route: the agent could only refuse, and the finding survived to the next
+round. Fixers now return `blocked_on_file`, and those paths enter the **next
+attempt's wave plan** — never the allowed set directly, which would make a path
+committable while no agent owned it.
+
+Carried rows gate (so they reach a fixer) but are excluded from the
+fingerprints and the growth denominator (so they cannot manufacture progress),
+and any row still outstanding when the loop stops is filed rather than dropped.
+
+### Fixed — guards that were silently vacuous
+
+- The `tools:` frontmatter migration (#749) turned eight `testers-*` allowlists
+  into real ceilings, but `StructuredOutput` was on none of them while
+  `testers-pipeline` dispatches all eight with a schema. The structured return
+  channel was gated shut; every card now grants it.
+- SHARD-COVERAGE (#753) compared `run_one` *invocations* against a
+  *de-duplicated* plan, so a job invoking one fixture twice failed a correct
+  shard. It now counts distinct fixtures, and names every planned-but-unrun
+  fixture split by cause instead of printing a bare count mismatch.
+- The unpinned-`sort`/`comm` detector required whitespace after the command
+  name, so `sort)` and end-of-line invocations were invisible — the guard was
+  green on exactly the bypass it existed to catch.
+- The `tools:` contract check recognised only flow-style YAML, so a
+  block-sequence declaration read as *no declaration at all*.
+- All three `/premerge` scope guards compared C-quoted paths against raw UTF-8,
+  reporting correctly-edited non-ASCII files as strays; and
+  `review-consolidate.sh` had five masked producers where a failed `git` read
+  as an empty result — one of which silently re-admitted an excluded PR into
+  the combine.
+
+### Fixed — vendor provenance
+
+Six `measured_diff_basis.uberdev_rev` records pinned a SHA on an unmerged
+branch, so `V46` failed on clean `main`. Re-pinned to the commit that actually
+carries those bytes; the six blobs are byte-identical at both revs, so the
+measurement re-derives unchanged.
 
 ## [0.36.5] — 2026-06-12
 
-- _Release notes pending — replace this stub before committing (inserted by bump-version.sh)._
+Packs #762, #763, #764, #765 and #766 as one stack, plus three rounds of
+`/premerge` repair on the combined result and one pre-existing `main` red.
+MINOR: #765 and #766 add behaviour (`STOP_SELF_REFERENTIAL`, the
+`blocked_on_file` widening); the rest is fixes. Closes #755, #754, #753, #749
+and the frontmatter break behind #762.
+
+### Added — the growth ratio, and a third evidence-first stop (#765)
+
+`/premerge`'s loop could clear every blocker a review raised and still be
+handed a fresh set next round, because a critic asked "what is wrong with
+this?" samples from an unbounded set. `converge` now measures what fraction of
+an attempt's blockers landed in files the *previous* repair modified, prints it
+as `GROWTH=`, and stops as `STOP_SELF_REFERENTIAL` when two consecutive
+eligible rounds sit at or above `CONVERGE_GROWTH_CEILING` — the loop reviewing
+its own output rather than the artifact.
+
+A round only counts toward the streak if it did **not** reduce the
+reviewer-raised blocker count; without that term the ratio rises toward 1.00
+precisely as a run converges, and a healthy 5→2→2 run stopped falsely with most
+of its budget unspent.
+
+### Added — `blocked_on_file`, so a cross-file consequence is not lost (#766)
+
+Fixer waves are one agent per file. A fix whose honest scope spans two files
+had no route: the agent could only refuse, and the finding survived to the next
+round. Fixers now return `blocked_on_file`, and those paths enter the **next
+attempt's wave plan** — never the allowed set directly, which would make a path
+committable while no agent owned it.
+
+Carried rows gate (so they reach a fixer) but are excluded from the
+fingerprints and the growth denominator (so they cannot manufacture progress),
+and any row still outstanding when the loop stops is filed rather than dropped.
+
+### Fixed — guards that were silently vacuous
+
+- The `tools:` frontmatter migration (#749) turned eight `testers-*` allowlists
+  into real ceilings, but `StructuredOutput` was on none of them while
+  `testers-pipeline` dispatches all eight with a schema. The structured return
+  channel was gated shut; every card now grants it.
+- SHARD-COVERAGE (#753) compared `run_one` *invocations* against a
+  *de-duplicated* plan, so a job invoking one fixture twice failed a correct
+  shard. It now counts distinct fixtures, and names every planned-but-unrun
+  fixture split by cause instead of printing a bare count mismatch.
+- The unpinned-`sort`/`comm` detector required whitespace after the command
+  name, so `sort)` and end-of-line invocations were invisible — the guard was
+  green on exactly the bypass it existed to catch.
+- The `tools:` contract check recognised only flow-style YAML, so a
+  block-sequence declaration read as *no declaration at all*.
+- All three `/premerge` scope guards compared C-quoted paths against raw UTF-8,
+  reporting correctly-edited non-ASCII files as strays; and
+  `review-consolidate.sh` had five masked producers where a failed `git` read
+  as an empty result — one of which silently re-admitted an excluded PR into
+  the combine.
+
+### Fixed — vendor provenance
+
+Six `measured_diff_basis.uberdev_rev` records pinned a SHA on an unmerged
+branch, so `V46` failed on clean `main`. Re-pinned to the commit that actually
+carries those bytes; the six blobs are byte-identical at both revs, so the
+measurement re-derives unchanged.
 
 ## [0.36.4] — 2026-06-12
 
-- _Release notes pending — replace this stub before committing (inserted by bump-version.sh)._
+Packs #762, #763, #764, #765 and #766 as one stack, plus three rounds of
+`/premerge` repair on the combined result and one pre-existing `main` red.
+MINOR: #765 and #766 add behaviour (`STOP_SELF_REFERENTIAL`, the
+`blocked_on_file` widening); the rest is fixes. Closes #755, #754, #753, #749
+and the frontmatter break behind #762.
+
+### Added — the growth ratio, and a third evidence-first stop (#765)
+
+`/premerge`'s loop could clear every blocker a review raised and still be
+handed a fresh set next round, because a critic asked "what is wrong with
+this?" samples from an unbounded set. `converge` now measures what fraction of
+an attempt's blockers landed in files the *previous* repair modified, prints it
+as `GROWTH=`, and stops as `STOP_SELF_REFERENTIAL` when two consecutive
+eligible rounds sit at or above `CONVERGE_GROWTH_CEILING` — the loop reviewing
+its own output rather than the artifact.
+
+A round only counts toward the streak if it did **not** reduce the
+reviewer-raised blocker count; without that term the ratio rises toward 1.00
+precisely as a run converges, and a healthy 5→2→2 run stopped falsely with most
+of its budget unspent.
+
+### Added — `blocked_on_file`, so a cross-file consequence is not lost (#766)
+
+Fixer waves are one agent per file. A fix whose honest scope spans two files
+had no route: the agent could only refuse, and the finding survived to the next
+round. Fixers now return `blocked_on_file`, and those paths enter the **next
+attempt's wave plan** — never the allowed set directly, which would make a path
+committable while no agent owned it.
+
+Carried rows gate (so they reach a fixer) but are excluded from the
+fingerprints and the growth denominator (so they cannot manufacture progress),
+and any row still outstanding when the loop stops is filed rather than dropped.
+
+### Fixed — guards that were silently vacuous
+
+- The `tools:` frontmatter migration (#749) turned eight `testers-*` allowlists
+  into real ceilings, but `StructuredOutput` was on none of them while
+  `testers-pipeline` dispatches all eight with a schema. The structured return
+  channel was gated shut; every card now grants it.
+- SHARD-COVERAGE (#753) compared `run_one` *invocations* against a
+  *de-duplicated* plan, so a job invoking one fixture twice failed a correct
+  shard. It now counts distinct fixtures, and names every planned-but-unrun
+  fixture split by cause instead of printing a bare count mismatch.
+- The unpinned-`sort`/`comm` detector required whitespace after the command
+  name, so `sort)` and end-of-line invocations were invisible — the guard was
+  green on exactly the bypass it existed to catch.
+- The `tools:` contract check recognised only flow-style YAML, so a
+  block-sequence declaration read as *no declaration at all*.
+- All three `/premerge` scope guards compared C-quoted paths against raw UTF-8,
+  reporting correctly-edited non-ASCII files as strays; and
+  `review-consolidate.sh` had five masked producers where a failed `git` read
+  as an empty result — one of which silently re-admitted an excluded PR into
+  the combine.
+
+### Fixed — vendor provenance
+
+Six `measured_diff_basis.uberdev_rev` records pinned a SHA on an unmerged
+branch, so `V46` failed on clean `main`. Re-pinned to the commit that actually
+carries those bytes; the six blobs are byte-identical at both revs, so the
+measurement re-derives unchanged.
 
 ## [0.36.3] — 2026-06-12
 
-- _Release notes pending — replace this stub before committing (inserted by bump-version.sh)._
+Packs #762, #763, #764, #765 and #766 as one stack, plus three rounds of
+`/premerge` repair on the combined result and one pre-existing `main` red.
+MINOR: #765 and #766 add behaviour (`STOP_SELF_REFERENTIAL`, the
+`blocked_on_file` widening); the rest is fixes. Closes #755, #754, #753, #749
+and the frontmatter break behind #762.
+
+### Added — the growth ratio, and a third evidence-first stop (#765)
+
+`/premerge`'s loop could clear every blocker a review raised and still be
+handed a fresh set next round, because a critic asked "what is wrong with
+this?" samples from an unbounded set. `converge` now measures what fraction of
+an attempt's blockers landed in files the *previous* repair modified, prints it
+as `GROWTH=`, and stops as `STOP_SELF_REFERENTIAL` when two consecutive
+eligible rounds sit at or above `CONVERGE_GROWTH_CEILING` — the loop reviewing
+its own output rather than the artifact.
+
+A round only counts toward the streak if it did **not** reduce the
+reviewer-raised blocker count; without that term the ratio rises toward 1.00
+precisely as a run converges, and a healthy 5→2→2 run stopped falsely with most
+of its budget unspent.
+
+### Added — `blocked_on_file`, so a cross-file consequence is not lost (#766)
+
+Fixer waves are one agent per file. A fix whose honest scope spans two files
+had no route: the agent could only refuse, and the finding survived to the next
+round. Fixers now return `blocked_on_file`, and those paths enter the **next
+attempt's wave plan** — never the allowed set directly, which would make a path
+committable while no agent owned it.
+
+Carried rows gate (so they reach a fixer) but are excluded from the
+fingerprints and the growth denominator (so they cannot manufacture progress),
+and any row still outstanding when the loop stops is filed rather than dropped.
+
+### Fixed — guards that were silently vacuous
+
+- The `tools:` frontmatter migration (#749) turned eight `testers-*` allowlists
+  into real ceilings, but `StructuredOutput` was on none of them while
+  `testers-pipeline` dispatches all eight with a schema. The structured return
+  channel was gated shut; every card now grants it.
+- SHARD-COVERAGE (#753) compared `run_one` *invocations* against a
+  *de-duplicated* plan, so a job invoking one fixture twice failed a correct
+  shard. It now counts distinct fixtures, and names every planned-but-unrun
+  fixture split by cause instead of printing a bare count mismatch.
+- The unpinned-`sort`/`comm` detector required whitespace after the command
+  name, so `sort)` and end-of-line invocations were invisible — the guard was
+  green on exactly the bypass it existed to catch.
+- The `tools:` contract check recognised only flow-style YAML, so a
+  block-sequence declaration read as *no declaration at all*.
+- All three `/premerge` scope guards compared C-quoted paths against raw UTF-8,
+  reporting correctly-edited non-ASCII files as strays; and
+  `review-consolidate.sh` had five masked producers where a failed `git` read
+  as an empty result — one of which silently re-admitted an excluded PR into
+  the combine.
+
+### Fixed — vendor provenance
+
+Six `measured_diff_basis.uberdev_rev` records pinned a SHA on an unmerged
+branch, so `V46` failed on clean `main`. Re-pinned to the commit that actually
+carries those bytes; the six blobs are byte-identical at both revs, so the
+measurement re-derives unchanged.
 
 ## [0.36.2] — 2026-06-12
 
-- _Release notes pending — replace this stub before committing (inserted by bump-version.sh)._
+Packs #762, #763, #764, #765 and #766 as one stack, plus three rounds of
+`/premerge` repair on the combined result and one pre-existing `main` red.
+MINOR: #765 and #766 add behaviour (`STOP_SELF_REFERENTIAL`, the
+`blocked_on_file` widening); the rest is fixes. Closes #755, #754, #753, #749
+and the frontmatter break behind #762.
+
+### Added — the growth ratio, and a third evidence-first stop (#765)
+
+`/premerge`'s loop could clear every blocker a review raised and still be
+handed a fresh set next round, because a critic asked "what is wrong with
+this?" samples from an unbounded set. `converge` now measures what fraction of
+an attempt's blockers landed in files the *previous* repair modified, prints it
+as `GROWTH=`, and stops as `STOP_SELF_REFERENTIAL` when two consecutive
+eligible rounds sit at or above `CONVERGE_GROWTH_CEILING` — the loop reviewing
+its own output rather than the artifact.
+
+A round only counts toward the streak if it did **not** reduce the
+reviewer-raised blocker count; without that term the ratio rises toward 1.00
+precisely as a run converges, and a healthy 5→2→2 run stopped falsely with most
+of its budget unspent.
+
+### Added — `blocked_on_file`, so a cross-file consequence is not lost (#766)
+
+Fixer waves are one agent per file. A fix whose honest scope spans two files
+had no route: the agent could only refuse, and the finding survived to the next
+round. Fixers now return `blocked_on_file`, and those paths enter the **next
+attempt's wave plan** — never the allowed set directly, which would make a path
+committable while no agent owned it.
+
+Carried rows gate (so they reach a fixer) but are excluded from the
+fingerprints and the growth denominator (so they cannot manufacture progress),
+and any row still outstanding when the loop stops is filed rather than dropped.
+
+### Fixed — guards that were silently vacuous
+
+- The `tools:` frontmatter migration (#749) turned eight `testers-*` allowlists
+  into real ceilings, but `StructuredOutput` was on none of them while
+  `testers-pipeline` dispatches all eight with a schema. The structured return
+  channel was gated shut; every card now grants it.
+- SHARD-COVERAGE (#753) compared `run_one` *invocations* against a
+  *de-duplicated* plan, so a job invoking one fixture twice failed a correct
+  shard. It now counts distinct fixtures, and names every planned-but-unrun
+  fixture split by cause instead of printing a bare count mismatch.
+- The unpinned-`sort`/`comm` detector required whitespace after the command
+  name, so `sort)` and end-of-line invocations were invisible — the guard was
+  green on exactly the bypass it existed to catch.
+- The `tools:` contract check recognised only flow-style YAML, so a
+  block-sequence declaration read as *no declaration at all*.
+- All three `/premerge` scope guards compared C-quoted paths against raw UTF-8,
+  reporting correctly-edited non-ASCII files as strays; and
+  `review-consolidate.sh` had five masked producers where a failed `git` read
+  as an empty result — one of which silently re-admitted an excluded PR into
+  the combine.
+
+### Fixed — vendor provenance
+
+Six `measured_diff_basis.uberdev_rev` records pinned a SHA on an unmerged
+branch, so `V46` failed on clean `main`. Re-pinned to the commit that actually
+carries those bytes; the six blobs are byte-identical at both revs, so the
+measurement re-derives unchanged.
 
 ## [0.36.1] — 2026-05-31
 
