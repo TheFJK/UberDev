@@ -54,12 +54,10 @@ TURBO_OPT=0
 # `dispatch_backend` answers "how is one per-issue solver child launched?", and
 # standard mode launches no per-issue solver at all (RFC 0020 §2).
 STANDARD_MODE=0
-# --fix narrows standard mode to the lean single-issue lane (RFC 0022): no
-# design rungs, one implementer, one code-reviewer, at most one fix round, and
-# the controller delivers. It is a NARROWING of --standard rather than a third
-# transport, so it requires --standard rather than implying it: the operator
-# who wrote only `--fix` has a lane in mind the launcher cannot confirm, and
-# guessing which is how a batch lands somewhere nobody expected.
+# --fix narrows standard mode to the lean single-issue lane. It REQUIRES
+# --standard rather than implying it: an operator who wrote only --fix has a
+# lane in mind the launcher cannot confirm, and guessing is how a run lands
+# somewhere nobody expected. Rationale: RFC 0022 section 2.
 FIX_MODE=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -122,13 +120,9 @@ export UBERDEV_DISPATCH_ROUTING_MODE UBERDEV_DISPATCH_ROUTE UBERDEV_DISPATCH_MOD
 export UBERDEV_DISPATCH_REASONING_EFFORT UBERDEV_DISPATCH_SERVICE_TIER
 
 # --- FX1: the /fix arity refusal (RFC 0022 §3.1) ---------------------------
-# Refused HERE, off the already-parsed CLI JSON, because this is the last
-# point before gh runs — and therefore before Step 4.5 can write a claim. A
-# lean lane that discovered its second issue after claiming both would leave
-# two issues labelled `uberdev:active` with nothing running, and the operator
-# would have to release them by hand. The whole simplification of the lane —
-# one worktree, one diff, one review, one PR — is arity 1, so a second issue
-# is not a batch to split but a request for a different command.
+# Refused HERE, off the parsed CLI JSON: it is the last point before gh runs,
+# and therefore before Step 4.5 can write a claim. A second issue discovered
+# after claiming both would strand two `uberdev:active` labels.
 if [ "$FIX_MODE" = "1" ]; then
   if ! _UBERDEV_FIX_ISSUE_COUNT="$(python3 -I -c 'import json,sys; print(len(json.loads(sys.argv[1])["issues"]))' "$SOLVE_CLI_JSON" 2>&1)"; then
     echo "error: solve-launcher: could not count the issues on the /fix lane: $_UBERDEV_FIX_ISSUE_COUNT" >&2
@@ -140,29 +134,13 @@ if [ "$FIX_MODE" = "1" ]; then
     echo "no claims written; no agents dispatched" >&2
     exit 1
   fi
-  # FX2's ceiling, resolved and validated HERE rather than beside the plan it
-  # ends up in — for the same reason FX1 sits here. A malformed knob discovered
-  # after Step 4.5 would abort a run that had already written a claim, and the
-  # operator would be releasing a label by hand over a typo in an env var.
-  #
-  # This lane has its own ceiling and its own default. It is deliberately NOT
-  # the turbox per-task ladder that `bash lib/turbox-fleet.sh loop-cap` owns:
-  # that one bounds a fix loop inside a WAVE, so adopting its number here would
-  # import a budget written for a different loop. The value is not restated in
-  # this file, in either direction (RFC 0022 section 3.6).
-  # Default: one round.
+  # FX2's ceiling, resolved beside FX1 so a malformed knob cannot abort a run
+  # that has already written a claim. Its own default of one round, NOT the
+  # turbox per-task cap — that value stays with its owner (RFC 0022 sec 3.6).
   UBERDEV_FIX_ROUNDS_RESOLVED="${UBERDEV_FIX_FIX_ROUNDS:-1}"
-  # Two gates, and neither is redundant. The glob rejects the empty string and
-  # anything with a non-digit — that is ALL it does; it accepts `0`, `00` and
-  # `000` alike. The numeric test below is what enforces "positive", and it has
-  # to run second because `-lt` on a non-numeric string is a shell error rather
-  # than a false. Deleting either one reopens the hole: a string-glob `|0` arm
-  # would still pass `00`, whose int value is the very number being refused.
-  #
-  # The canonical form is also what gets emitted. The resolved value is
-  # interpolated into a JSON literal in the audit row below, and JSON forbids a
-  # leading zero in a number, so a leading-zero value would write an
-  # unparseable audit row rather than merely a wrong cap.
+  # Two gates, both load-bearing. The glob rejects empty and non-digit ONLY —
+  # it accepts `0`, `00`, `000` — so the numeric test is what enforces
+  # "positive", and it runs second because `-lt` on a non-digit is an error.
   case "$UBERDEV_FIX_ROUNDS_RESOLVED" in
     ''|*[!0-9]*)
       echo "error: UBERDEV_FIX_FIX_ROUNDS must be a positive integer (got '$UBERDEV_FIX_ROUNDS_RESOLVED')" >&2
@@ -175,8 +153,8 @@ if [ "$FIX_MODE" = "1" ]; then
     echo "no claims written; no agents dispatched" >&2
     exit 2
   fi
-  # Strip leading zeros so every downstream consumer sees the same canonical
-  # integer the plan carries.
+  # Canonical, not merely valid: the value is interpolated into a JSON literal
+  # in the audit row, and JSON forbids a leading zero in a number.
   UBERDEV_FIX_ROUNDS_RESOLVED="$(( UBERDEV_FIX_ROUNDS_RESOLVED + 0 ))"
 fi
 
@@ -1480,16 +1458,9 @@ print(sum(1 for r in d["issues"]
   SOLVE_FLEET_ISSUES="$(printf '%s,' "${ISSUE_NUMS[@]}")"; SOLVE_FLEET_ISSUES="${SOLVE_FLEET_ISSUES%,}"
 
   # --- Step 5f — the /fix lean-lane plan (RFC 0022 §4) ----------------------
-  # A THIRD marker pair, for the reason the turbox block below states about the
-  # second: each marker names exactly one executor. WORKFLOW_ARGS_BEGIN/END
-  # means "call Workflow() with this"; TURBOX_PLAN_BEGIN/END selects a lane
-  # with design rungs this one does not have. Relaying a fix plan into either
-  # would run the wrong pipeline rather than produce an error message.
-  #
-  # The envelope is deliberately NARROWER than the turbox plan: no
-  # riskIssueCount (no security lens on this lane), no concurrency (arity 1),
-  # no implementBudget or maxAgents (no wave loop to bound). A field the skill
-  # never reads is a field that drifts unnoticed.
+  # A THIRD marker pair on purpose: each marker names exactly one executor, so
+  # relaying a fix plan into Workflow() or into the turbox lane would run the
+  # wrong pipeline rather than error. Narrower envelope: RFC 0022 section 4.
   if [[ "$FIX_MODE" == "1" ]]; then
     # UBERDEV_FIX_ROUNDS_RESOLVED (FX2's ceiling) was resolved and validated
     # back at the FX1 arity refusal, before gh ran and therefore before any
