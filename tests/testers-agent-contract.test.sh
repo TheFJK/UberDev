@@ -79,7 +79,10 @@ pass "C4: all 8 agent files exist with canonical frontmatter"
 # the pre-#749 row completely clean.
 #
 # WHAT IS ASSERTED -- only what the runtime actually implements:
-#   1. `tools:` is PRESENT        -- absent, the agent loader grants ALL tools
+#   1. `tools:` is PRESENT        -- absent, the agent loader grants ALL tools.
+#      Presence is recognised in EITHER YAML spelling of a list, flow or block
+#      sequence; see the extractor below for why that is a correctness fix and
+#      not a relaxation.
 #   2. `allowed-tools:` is ABSENT -- the inert key must not come back, and a
 #      half-migrated card carrying both is the likeliest way it would
 #   3. no `Edit` token            -- THE ceiling. A `tools:` entry filters tool
@@ -110,15 +113,74 @@ pass "C4: all 8 agent files exist with canonical frontmatter"
 # synthetic mutants in C5b -- one function, two call sites. A transcribed second
 # copy of the predicate would be a replica test: permanently green no matter
 # what the live one does, which is strictly worse than no test at all.
-c5_verdict() { # $1=full card text  $2=label ; rc 0 clean, rc 1 violation (reason on stderr)
-  local c5_rc=0
-  C5_TEXT="$1" C5_LABEL="$2" python3 - <<'PY' || c5_rc=$?
+#
+# The same rule binds the READER underneath both predicates. C5 (the ceiling)
+# and C5c (the convention) each have to answer "what does this card declare
+# under `tools:`?", and each used to carry its OWN copy of the answer -- the
+# byte-identical `^tools:[ \t]*(.+)$` in two heredocs. That is the two-uncompared
+# -copies shape #749 was made of, and it drifts in exactly one direction: a fix
+# lands on the half someone happened to be reading. The extractor below is that
+# answer, defined ONCE and spliced into both programs, so a change to how a
+# declaration is FOUND reaches both halves or neither.
+#
+# It recognises both YAML spellings of a list, because `tools:` is parsed as
+# YAML and a list has two legal renderings:
+#     flow    tools: ["Read", "Write(.uberdev/research/**)"]
+#     block   tools:
+#               - Read
+#               - Write(.uberdev/research/**)
+# The old same-line-only `(.+)$` saw the flow form only. A block-sequence card --
+# correctly restricted, and accepted by the `yaml.safe_load` frontmatter reader
+# in tests/agent-description-budget.test.sh -- came back as `declared is None`
+# and was failed for "no 'tools:' declaration", i.e. the row went RED on a card
+# that honours it. Widening WHAT COUNTS AS A DECLARATION is not a relaxation of
+# what is asserted: once one is found, every token in it is checked exactly as
+# before, in either spelling. C5b/C5c prove that on synthetic block-form cards.
+C5_TOOLS_PY="$(cat <<'PY'
 import os, re, sys
 
-text, label = os.environ["C5_TEXT"], os.environ["C5_LABEL"]
 # Distinct from 1 so a CRASHED predicate cannot masquerade as "rejected" and
-# quietly turn every C5b reject row green. See the c5_rc case below.
+# quietly turn every C5b/C5c reject row green. See the c5_rc cases below.
 VIOLATION = 9
+
+_FRONTMATTER = re.compile(r'(?s)\A---\n(.*?)\n---(?:\n|\Z)')
+# `tools:` plus, when the same-line value is empty, the `- item` lines that
+# follow it. ONLY block-sequence item lines are absorbed: an indented
+# continuation of some other key's folded scalar is not a tool declaration, and
+# swallowing one would let prose words be read as granted tool names. The item
+# indent is `[ \t]*` because YAML also permits a sequence at the parent key's
+# own column.
+_TOOLS = re.compile(r'(?m)^tools:[ \t]*(.*(?:\n[ \t]*-[ \t]+\S.*)*)$')
+_TOKEN = re.compile(r'[A-Za-z_]+(?:\([^)]*\))?')
+
+
+def frontmatter(text):
+    """The --- block's body, or None when the card has no frontmatter."""
+    m = _FRONTMATTER.match(text)
+    return m.group(1) if m else None
+
+
+def declared_tools(block):
+    """The raw `tools:` value in EITHER spelling, or None when undeclared.
+
+    An empty value (`tools:` with nothing after it and no item lines) is YAML
+    null -- the loader grants everything, exactly as if the key were absent --
+    so it is reported as no declaration rather than as an empty allowlist.
+    """
+    m = _TOOLS.search(block)
+    if m is None or not m.group(1).strip():
+        return None
+    return m.group(1)
+
+
+def tool_tokens(value):
+    """Tool NAMES (each with its parenthesised scope, if any) inside a value."""
+    return _TOKEN.findall(value)
+PY
+)"
+
+C5_VERDICT_PY="$(cat <<'PY'
+text, label = os.environ["C5_TEXT"], os.environ["C5_LABEL"]
 
 
 def bad(reason):
@@ -126,17 +188,16 @@ def bad(reason):
     sys.exit(VIOLATION)
 
 
-head = re.match(r'(?s)\A---\n(.*?)\n---(?:\n|\Z)', text)
-if head is None:
+block = frontmatter(text)
+if block is None:
     bad("no --- frontmatter block")
-block = head.group(1)
 if re.search(r'(?m)^allowed-tools:', block):
     bad("declares 'allowed-tools:' -- that is the SLASH-COMMAND key; an agent "
         "card is read for 'tools:', so this declaration is inert (#749)")
-declared = re.search(r'(?m)^tools:[ \t]*(.+)$', block)
+declared = declared_tools(block)
 if declared is None:
     bad("no 'tools:' declaration -- the agent loader then grants ALL tools (#749)")
-tokens = re.findall(r'[A-Za-z_]+(?:\([^)]*\))?', declared.group(1))
+tokens = tool_tokens(declared)
 if any(t == 'Edit' or t.startswith('Edit(') for t in tokens):
     bad("forbidden 'Edit' in tools: -- tool-NAME filtering is the one ceiling an "
         "agent card can actually impose, and this contract spends it on Edit")
@@ -145,6 +206,12 @@ if not any(t == 'Write' or t.startswith('Write(') for t in tokens):
         "file, so the contract requires a write, not no write (#749)")
 sys.exit(0)
 PY
+)"
+
+c5_verdict() { # $1=full card text  $2=label ; rc 0 clean, rc 1 violation (reason on stderr)
+  local c5_rc=0
+  C5_TEXT="$1" C5_LABEL="$2" python3 -c "$C5_TOOLS_PY
+$C5_VERDICT_PY" || c5_rc=$?
   case "$c5_rc" in
     0) return 0 ;;
     9) return 1 ;;
@@ -176,7 +243,17 @@ c5_mutant() { # $1=name  $2=frontmatter line(s) under test -> a whole card text
 #   edit-grant      the ceiling breach itself
 #   scoped-edit     the same breach wearing parentheses
 #   no-write-grant  the over-correction that breaks the evidence channel
-C5_REJECT_NAMES=( no-tools-key legacy-key both-keys edit-grant scoped-edit no-write-grant )
+#   block-seq-edit  the ceiling breach written as a YAML block sequence. The
+#                   anti-vacuity for the WIDENING itself is `good-block-seq`
+#                   below, not this row: a narrow reader calls a block-form
+#                   declaration ABSENT and rejects the card, so only an accept
+#                   row can tell "recognised" apart from "never seen". This row
+#                   restates the ceiling in the second spelling, and it is the
+#                   only row that catches a reader which finds a block-form
+#                   WRITE grant but misses a block-form `Edit` -- a token rule
+#                   tuned to the quoted flow items does exactly that, and
+#                   good-block-seq stays green right through it.
+C5_REJECT_NAMES=( no-tools-key legacy-key both-keys edit-grant scoped-edit no-write-grant block-seq-edit )
 C5_REJECT_BODIES=(
   '# this card declares no tool key at all'
   'allowed-tools: ["Read", "Write(.uberdev/research/**)"]'
@@ -185,6 +262,10 @@ allowed-tools: ["Read", "Write(.uberdev/research/**)"]'
   'tools: ["Read", "Edit", "Write(.uberdev/research/**)"]'
   'tools: ["Read", "Edit(.uberdev/research/**)", "Write"]'
   'tools: ["Read", "Grep"]'
+  'tools:
+  - Read
+  - Edit
+  - Write(.uberdev/research/**)'
 )
 # And each accept row states something C5 must NOT do:
 #   good-live-shape   the shape the eight live cards carry
@@ -192,12 +273,27 @@ allowed-tools: ["Read", "Write(.uberdev/research/**)"]'
 #   good-single-star  DECLARED BOUNDARY: C5 asserts no path-admission property,
 #                     so a scope that would not cover the runtime path is still
 #                     clean at THIS row. C5c is where that spelling is pinned.
-C5_ACCEPT_NAMES=( good-live-shape good-bare-write good-single-star )
+#   good-block-seq    the block-sequence spelling of the live shape. This row
+#                     is the one that FAILS if the extractor narrows back to a
+#                     same-line value: a correctly-restricted card would be
+#                     reported as declaring no tools at all and rejected.
+C5_ACCEPT_NAMES=( good-live-shape good-bare-write good-single-star good-block-seq )
 C5_ACCEPT_BODIES=(
   'tools: ["Read", "Write(.uberdev/research/**)"]'
   'tools: ["Read", "Write"]'
   'tools: ["Read", "Write(.uberdev/research/*)"]'
+  'tools:
+  - Read
+  - Write(.uberdev/research/**)'
 )
+# A names/bodies length mismatch would SKIP the surplus rows in silence, which
+# is how an anti-vacuity row stops being one. Both arrays are indexed by the
+# names array below, so a short bodies array trips `set -u` -- only a long one
+# needs catching, and asserting equality catches both.
+[ "${#C5_REJECT_NAMES[@]}" -eq "${#C5_REJECT_BODIES[@]}" ] \
+  || fail "C5b: reject names/bodies arrays disagree (${#C5_REJECT_NAMES[@]} vs ${#C5_REJECT_BODIES[@]}) -- rows would be silently skipped"
+[ "${#C5_ACCEPT_NAMES[@]}" -eq "${#C5_ACCEPT_BODIES[@]}" ] \
+  || fail "C5b: accept names/bodies arrays disagree (${#C5_ACCEPT_NAMES[@]} vs ${#C5_ACCEPT_BODIES[@]}) -- rows would be silently skipped"
 for c5_i in "${!C5_REJECT_NAMES[@]}"; do
   c5_name="${C5_REJECT_NAMES[$c5_i]}"
   if c5_verdict "$(c5_mutant "$c5_name" "${C5_REJECT_BODIES[$c5_i]}")" "mutant/$c5_name" 2>/dev/null; then
@@ -209,7 +305,7 @@ for c5_i in "${!C5_ACCEPT_NAMES[@]}"; do
   c5_verdict "$(c5_mutant "$c5_name" "${C5_ACCEPT_BODIES[$c5_i]}")" "mutant/$c5_name" \
     || fail "C5b: the C5 predicate REJECTED known-good card '$c5_name' -- a predicate that rejects everything is vacuous in the other direction"
 done
-pass "C5b: the C5 predicate rejects all 6 mutants and accepts all 3 known-good cards"
+pass "C5b: the C5 predicate rejects all ${#C5_REJECT_NAMES[@]} mutants and accepts all ${#C5_ACCEPT_NAMES[@]} known-good cards"
 
 # C5c (#749) CONVENTION, NOT A CEILING -- read the C5 header first. The text
 # inside a `tools:` entry's parentheses binds NOTHING at runtime, so this row
@@ -224,21 +320,20 @@ pass "C5b: the C5 predicate rejects all 6 mutants and accepts all 3 known-good c
 # is what stops it coming back. A bare `Write` declares no scope and is exempt
 # by construction, never by waiver.
 C5_WRITE_SCOPE_CONVENTION='Write(.uberdev/research/**)'
-c5_spelling() { # $1=full card text  $2=label ; rc 0 on-convention, rc 1 off
-  local c5_rc=0
-  C5_TEXT="$1" C5_LABEL="$2" C5_CONV="$C5_WRITE_SCOPE_CONVENTION" python3 - <<'PY' || c5_rc=$?
-import os, re, sys
-
+# The SAME C5_TOOLS_PY extractor C5 runs is spliced in here -- see its header.
+# This half used to carry its own byte-identical copy of the frontmatter and
+# `tools:` regexes, so "which spellings count as a declaration" was answered
+# twice and could be widened once.
+C5_SPELLING_PY="$(cat <<'PY'
 text, label = os.environ["C5_TEXT"], os.environ["C5_LABEL"]
 canonical = os.environ["C5_CONV"]
-VIOLATION = 9
 
-head = re.match(r'(?s)\A---\n(.*?)\n---(?:\n|\Z)', text)
-declared = re.search(r'(?m)^tools:[ \t]*(.+)$', head.group(1)) if head else None
+block = frontmatter(text)
+declared = declared_tools(block) if block is not None else None
 if declared is None:
     print(f"FAIL  C5c {label}: no 'tools:' declaration to inspect", file=sys.stderr)
     sys.exit(VIOLATION)
-scoped = re.findall(r'(?<![A-Za-z_])Write\([^)]*\)', declared.group(1))
+scoped = re.findall(r'(?<![A-Za-z_])Write\([^)]*\)', declared)
 off = [t for t in scoped if t != canonical]
 if off:
     print(f"FAIL  C5c {label}: scoped write grant {off!r} is not the run-dir "
@@ -248,6 +343,11 @@ if off:
     sys.exit(VIOLATION)
 sys.exit(0)
 PY
+)"
+c5_spelling() { # $1=full card text  $2=label ; rc 0 on-convention, rc 1 off
+  local c5_rc=0
+  C5_TEXT="$1" C5_LABEL="$2" C5_CONV="$C5_WRITE_SCOPE_CONVENTION" python3 -c "$C5_TOOLS_PY
+$C5_SPELLING_PY" || c5_rc=$?
   case "$c5_rc" in
     0) return 0 ;;
     9) return 1 ;;
@@ -266,6 +366,21 @@ c5_spelling "$(c5_mutant conv-bare-write 'tools: ["Read", "Write"]')" "mutant/co
   || fail "C5c: the convention predicate REJECTED a bare Write grant, which declares no scope and is exempt by construction"
 if c5_spelling "$(c5_mutant conv-single-star 'tools: ["Read", "Write(.uberdev/research/*)"]')" "mutant/conv-single-star" 2>/dev/null; then
   fail "C5c: the convention predicate ACCEPTED the pre-#749 single-segment scope -- it cannot fail"
+fi
+# ANTI-VACUITY FOR THE WIDENING, on this half too. The accept row is the
+# discriminating one: a narrowed extractor reports a block-sequence card as
+# having no declaration to inspect, which is a REJECT, so only requiring an
+# accept here can tell "recognised and on-convention" apart from "not seen at
+# all". The reject row then shows the scope inside a block sequence is really
+# compared, not merely skipped past.
+c5_spelling "$(c5_mutant conv-block-canonical "tools:
+  - Read
+  - $C5_WRITE_SCOPE_CONVENTION")" "mutant/conv-block-canonical" \
+  || fail "C5c: the convention predicate REJECTED a block-sequence card carrying the canonical spelling -- the extractor no longer sees a block-form 'tools:' declaration"
+if c5_spelling "$(c5_mutant conv-block-single-star 'tools:
+  - Read
+  - Write(.uberdev/research/*)')" "mutant/conv-block-single-star" 2>/dev/null; then
+  fail "C5c: the convention predicate ACCEPTED an off-convention scope written as a block sequence -- block-form scopes are recognised but not compared"
 fi
 pass "C5c: all 8 scoped write grants carry the run-dir convention (documentation of intent, not a runtime ceiling)"
 

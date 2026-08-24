@@ -310,11 +310,39 @@ class Refusal(SystemExit):
         self.detail = detail
 
 
-def fail(token: str, detail: str = "") -> "NoReturn":  # type: ignore[valid-type]
+def _refusal_line(token: str, detail: str) -> str:
+    """The module's one hard-refusal format.
+
+    ONE function, two readers -- `main` announces the refusals that actually end
+    the process, and nothing else may re-type this shape. A second copy would
+    drift from the token every calling fence branches on.
+    """
     message = f"premerge-findings: {token}"
     if detail:
         message = f"{message}: {detail}"
-    print(message, file=sys.stderr)
+    return message
+
+
+def fail(token: str, detail: str = "") -> "NoReturn":  # type: ignore[valid-type]
+    """Raise the module's hard refusal. IT DOES NOT PRINT -- `main` does.
+
+    THE PRINT MOVED TO THE ONE PLACE THAT KNOWS THE REFUSAL WAS NOT ABSORBED.
+    Several callers here TOLERATE a refusal by design: `_read_blocked_on` drops
+    a malformed row and counts it, `_carry_prior_suggestions` skips a corrupt
+    attempt, `cmd_defer` falls back to the newest readable one. Printing inside
+    `fail` put this module's own hard-refusal format on stderr for every one of
+    those -- so an artifact with three bad rows emitted three lines that read
+    exactly like a fence abort and then exited 0, on fences contracted `0|74`.
+    An operator cannot tell "we refused" from "we absorbed this and carried on"
+    when both say the same thing in the same words.
+
+    So the announcement happens where the outcome is known: `main` catches
+    `Refusal` and prints `_refusal_line` on the way to exit 74. Every tolerating
+    caller already announces its own absorption with its own token
+    (`attempt_unreadable_skipped`, `blocked_on_unreadable_skipped`,
+    `blocked_on_rows_dropped`, `attempt_fallback`), and `Refusal` carries the
+    token so those messages can name what they swallowed.
+    """
     raise Refusal(token, detail)
 
 
@@ -1034,8 +1062,27 @@ def _object_rows(values: "list", what: str) -> "list[dict]":
     return out
 
 
+# The key `_read_blocked_on` stamps on a synthesised cross-file consequence, and
+# the ONE predicate every consumer asks about one.
+#
+# A carried row is the loop's own bookkeeping. No reviewer raised it, it names no
+# line, and its `summary` states a scheduling fact ("the fixer for X said it
+# needed this file") rather than a defect. So it is INERT for every question
+# about whether the stack is repaired -- the progress multisets, the clean gate,
+# the growth ratio, the deferred issue set -- and LIVE for exactly one: which
+# files the next fixer wave is allowed to touch. Anything that reads it as
+# evidence is reading the loop's notes to itself as a finding.
+#
+# `isinstance` here and not at the call sites: `_read_attempt` proves `blockers`
+# is an ARRAY and nothing proves its elements are objects, and a predicate that
+# raised on a non-object would turn a malformed stored row into an
+# `AttributeError` instead of whatever refusal its own reader already has.
+def _is_carried(finding: object) -> bool:
+    return isinstance(finding, dict) and finding.get("blocked_on_carry") is True
+
+
 def _blocker_fingerprints(document: "dict") -> "collections.Counter[str]":
-    """The attempt's blockers as a MULTISET of fingerprints.
+    """The attempt's REVIEWER-RAISED blockers as a MULTISET of fingerprints.
 
     A multiset and not a set, because the fingerprint is deliberately
     line-independent: two genuinely distinct blockers at different lines of one
@@ -1045,9 +1092,38 @@ def _blocker_fingerprints(document: "dict") -> "collections.Counter[str]":
     STOP_NO_PROGRESS on an attempt that removed a real blocker -- stopping early,
     with budget unspent, on exactly the success it was built to keep going for.
     Counting them keeps that visible.
+
+    CARRIED ROWS ARE NOT IN IT, AND THAT IS THE SAME DEFECT `_BLOCKED_ON_SUMMARY`
+    ONLY HALF-CLOSED. That comment removed the attempt number from the
+    synthesised summary because one consequence persisting across two attempts
+    was arriving under two fingerprints and reading as `fixed=1 new=1` every
+    round -- manufactured progress. But the fingerprint is `hash(file, summary)`
+    and the FILE varies too: a fixer that reports lib/b.sh on one attempt and
+    lib/c.sh on the next produces exactly the same phantom churn, from the same
+    stalled state. Measured: one reviewer blocker that never changed, with
+    blocked-on rows naming b, c, b, printed `FIXED=1 NEW=1 CONTINUE` on every
+    round while nothing was being repaired. STOP_NO_PROGRESS needs an UNCHANGED
+    multiset and STOP_REGRESSED needs `fixed == 0`, so both were structurally
+    unreachable for as long as any row was carried -- and the loop ran to its
+    counter backstop on a stack it was not repairing. The attempt-2 stall was
+    additionally mislabelled STOP_REGRESSED, because the first carried row is an
+    `appeared` with no `fixed` beside it.
+
+    `_growth_ratio` already excludes these rows from both of its sides for the
+    same reason, so this is the two mechanisms agreeing on one population rather
+    than a new rule: the loop's progress claim is about what the REVIEWER
+    reported, and a carried row is neither the reviewer's finding nor the
+    previous repair's work. It also restores the identity the SKILL asserts
+    between the growth denominator and the `BLOCKERS=` field.
+
+    A carried row is still dispatched to a fixer and still bounds the allowed
+    file set -- nothing here touches `_fix_waves`. What stops is the loop
+    treating its own scheduling notes as evidence of progress.
     """
     prints: "collections.Counter[str]" = collections.Counter()
     for finding in document["blockers"]:
+        if _is_carried(finding):
+            continue
         value = finding.get("fingerprint") if isinstance(finding, dict) else None
         if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{16}", value):
             # Pre-loop artifacts carry no fingerprint. Refusing is the only
@@ -1124,6 +1200,45 @@ _BLOCKED_ON_SUMMARY = (
 )
 
 
+def _wave_certainly_ran(out_dir: str, attempt: int) -> bool:
+    """Did that attempt CERTAINLY dispatch a fixer wave?
+
+    The premise of `blocked_on_artifact_absent`, made checkable. That message
+    asserts a contract violation -- "SKILL.md requires this artifact" -- and it
+    was emitted whenever the file was missing, including on the run shape
+    `/premerge` is designed to reach. The order inside one attempt is review ->
+    plan -> gate -> fixers ONLY IF NOT GREEN, so the last attempt of every
+    successful run gates green and dispatches no wave; Phase 4c then re-plans at
+    `PREMERGE_ATTEMPT + 1` with `--carry-blocked` (the shared triage fence passes
+    it unconditionally) and the absent artifact was reported as a breach. A
+    warning that fires on the happy path teaches the operator to skip the token,
+    which costs it the one run where it is true.
+
+    THE ONLY SUFFICIENT CONDITION THIS MODULE CAN CHECK is that the attempt
+    recorded at least one REVIEWER-RAISED blocker. That guarantees
+    `blockers_remaining=` was on the gate's reasons, so the gate cannot have been
+    green, and it guarantees `_fix_waves` produced a non-empty plan -- both
+    halves of "a wave went out". Anything else is unestablished: an attempt with
+    only carried rows may or may not have dispatched depending on a CI verdict
+    written to no artifact this module reads, and an attempt whose evidence is
+    absent or corrupt says nothing at all.
+
+    UNESTABLISHED MEANS SILENT, and that is the right direction for this
+    particular message and no other in this file. Every other refusal here fails
+    CLOSED because being wrong ships something unverified; this one changes no
+    decision at all -- the caller returns `([], 0)` either way -- so its entire
+    value is that an operator believes it. A missed warning costs a diagnosis; a
+    false one costs the token.
+    """
+    try:
+        document = _read_attempt(out_dir, attempt, required=False)
+    except Refusal:
+        return False
+    if document is None:
+        return False
+    return any(not _is_carried(row) for row in document["blockers"])
+
+
 def _read_blocked_on(
     out_dir: str, attempt: int, repo_root: str, findings: "list[dict]"
 ) -> "tuple[list[dict], int]":
@@ -1170,13 +1285,17 @@ def _read_blocked_on(
     direction this function already stands for: displaced rows are dropped and
     counted, never fatal.
 
-    EVERY DROP IS ANNOUNCED, and so is an absent artifact. `counts.blocked_on_*`
-    lives in `classified.json`, which no fence reads and no run summary renders,
-    so a fully-refused artifact and an empty one were the same observable state
-    on the operator's line -- `BLOCKED=0` either way. Every sibling refusal in
-    this module announces itself with a stable token
-    (`attempt_unreadable_skipped`, `blocked_on_unreadable_skipped`,
-    `repair_scope_unreadable`, `attempt_fallback`); these two now do too.
+    EVERY DROP IS ANNOUNCED, and so is an absent artifact THAT A WAVE SHOULD
+    HAVE WRITTEN. `counts.blocked_on_*` lives in `classified.json`, which no
+    fence reads and no run summary renders, so a fully-refused artifact and an
+    empty one were the same observable state on the operator's line --
+    `BLOCKED=0` either way. Every sibling refusal in this module announces itself
+    with a stable token (`attempt_unreadable_skipped`,
+    `blocked_on_unreadable_skipped`, `repair_scope_unreadable`,
+    `attempt_fallback`); these two now do too. The absence message is gated on
+    `_wave_certainly_ran`, because it asserts a contract violation and the
+    commonest way to reach an absent artifact is an attempt that gated green and
+    therefore legitimately dispatched nobody.
 
     Returns (synthesised blocker findings, dropped).
     """
@@ -1196,12 +1315,13 @@ def _read_blocked_on(
         # Only reachable when the widening was actually REQUESTED: `cmd_plan`
         # calls this function only under `--carry-blocked`, and an absent
         # artifact on a run that never asked for one is legitimate.
-        print(
-            "premerge-findings: blocked_on_artifact_absent: "
-            "%s is missing; SKILL.md requires it even when the wave reported "
-            "nothing, so nothing is widened from attempt %d" % (path, prior),
-            file=sys.stderr,
-        )
+        if _wave_certainly_ran(out_dir, prior):
+            print(
+                "premerge-findings: blocked_on_artifact_absent: "
+                "%s is missing; SKILL.md requires it even when the wave reported "
+                "nothing, so nothing is widened from attempt %d" % (path, prior),
+                file=sys.stderr,
+            )
         return [], 0
     try:
         document = _load(path)
@@ -1466,11 +1586,31 @@ def _read_repair_scope(run_dir: str, attempt: int) -> "frozenset[str] | None":
     """The repo-relative files that attempt's repair modified, or None.
 
     None means NOT MEASURED, and it is a different answer from the empty set.
-    The commit fence writes this list only on an attempt that actually
-    committed edits -- it exits early with `REASON=no-edits` otherwise, and a
-    repair that only re-ran CI commits nothing at all. There is then no repair
-    to attribute this attempt's findings to, and printing 0.00 for it would be
-    a measurement nobody took.
+    The fix-commit fence publishes `fix-scope-<NN>.modified` only on an attempt
+    that actually committed and pushed edits -- it exits early with
+    `REASON=no-edits` otherwise. There is then no repair to attribute this
+    attempt's findings to, and printing 0.00 for it would be a measurement
+    nobody took.
+
+    A COMMITTED-NOTHING REPAIR IS NOT THE ONLY UNMEASURED CASE, AND SAYING SO
+    WAS FALSE. SKILL.md `## Phase 3`'s CI-repair fence has an `arm=commit` path
+    that dispatches `ci-code-fixer`, validates its diff against
+    `ci-scope-<NN>.allowed`, and PUSHES -- a real repair, with real code edits.
+    It publishes `ci-scope-<NN>.*` and nothing else: no `fix-scope-<NN>.modified`
+    exists on that path, so the next attempt reads None here and prints
+    `GROWTH=-`. A loop whose repairs run through the CI arm therefore cannot
+    accumulate two consecutive eligible rounds, and STOP_SELF_REFERENTIAL is
+    unreachable for it. This is not hypothetical: the `/premerge` run that
+    surfaced it took exactly that path at attempt 1.
+
+    Reading `ci-scope-<NN>.changed` here would NOT close it honestly. That file
+    is written BEFORE the scope comparison and before the push, and the whole
+    point of the `.pending` -> `.modified` rename at the end of the fix-commit
+    fence is that only a PUSHED repair may claim a scope. Attributing this
+    attempt's findings to edits that may never have left the machine trades one
+    wrong measurement for another. The half that closes it is a durable publish
+    in the CI fence itself -- SKILL.md, not this file -- and until that lands the
+    honest report is `-`, which stops nothing.
 
     NOT FAIL-CLOSED, AND THIS IS THE ONE PLACE IN THIS MODULE WHERE THAT IS
     RIGHT. Every other refusal here stops a loop that might otherwise ship
@@ -1544,6 +1684,19 @@ def _growth_ratio(
     touched file counts -- so it errs toward stopping, which is precisely why
     CONVERGE_GROWTH_RUNS requires two consecutive rounds rather than one.
 
+    IT MEASURES COMPOSITION, NOT DIRECTION -- WHICH IS WHY IT IS NOT ON ITS OWN
+    A STOP. The denominator is this attempt's RESIDUAL, so it shrinks as the
+    loop succeeds while the numerator is dominated by whatever the reviewer
+    newly sampled -- and the reviewer resamples the repaired file by
+    construction. A run that cleared 4 of 5 blockers and came back with one
+    survivor plus one new finding in the file it just fixed measures 0.50 on a
+    round that halved the stack, and 5 -> 2 -> 2 measured 0.50 twice and stopped
+    with three of five repair rounds unspent. That is C3's failure with the
+    ratio's own name on it. `_growth_round_counts` is where the direction of
+    travel is put back: the ratio stays exactly what it says it is, and a round
+    that REDUCED the reviewer-raised blocker count is not eligible to be half of
+    a divergence streak.
+
     None when the ratio is undefined: no previous attempt, no measured repair
     scope, or no reviewer-raised blocker to divide by.
     """
@@ -1554,7 +1707,7 @@ def _growth_ratio(
     for finding in document["blockers"]:
         if not isinstance(finding, dict):
             fail("finding_schema_invalid", "a blocker is not an object")
-        if finding.get("blocked_on_carry") is True:
+        if _is_carried(finding):
             continue
         measured += 1
         if _repo_path(finding.get("file")) not in scope:
@@ -1568,6 +1721,60 @@ def _growth_ratio(
     # the same two-decimal value the line prints, so an operator reading
     # `GROWTH=0.50` and the decision the run took can never disagree.
     return round(grown / measured, 2)
+
+
+def _growth_round_counts(
+    growth: object, blockers: object, previous_blockers: object
+) -> bool:
+    """Is this ONE round eligible to be half of a STOP_SELF_REFERENTIAL streak?
+
+    Two conditions, and the second is the one #765 shipped without.
+
+    AT OR ABOVE THE CEILING. `>=`, against the same rounded value the line
+    prints, so an operator reading `GROWTH=0.50` and the decision the run took
+    can never disagree.
+
+    AND THE ROUND DID NOT REDUCE THE REVIEWER-RAISED BLOCKER COUNT. `GROWTH=`
+    answers "what is the residual MADE OF", never "which way is this going", and
+    those two questions come apart in one specific direction: the denominator is
+    the residual, so it shrinks as the loop succeeds, while the numerator counts
+    findings the reviewer newly sampled in the file the repair just touched --
+    which is the file it was always most likely to resample. The ratio therefore
+    RISES toward 1.00 precisely as a run converges. Reproduced against the
+    shipped module with `--max-repairs 5`: 5 blockers, then 4 cleared leaving one
+    survivor and one new (0.50), then one more cleared leaving one survivor and
+    one new (0.50) -- STOP_SELF_REFERENTIAL and exit 1 on a loop that went
+    5 -> 2 -> 2, with three of five repair rounds unspent. CONVERGE_GROWTH_RUNS
+    does not mitigate it, because at n=2 a single new finding in a repaired file
+    IS 0.50, twice running.
+
+    A round that removed more of the reviewer's blockers than it was left
+    holding is a round in which repairing demonstrably worked, whatever the
+    residual is made of, and RFC 0021 A3 C3 is explicit that stopping such a
+    loop is the worse error. So it is not eligible; the ratio is still measured,
+    still printed and still recorded, and a genuine pump -- which by definition
+    is not reducing the count -- reaches the ceiling on consecutive eligible
+    rounds exactly as before.
+
+    THE INPUTS ARE THE LEDGER'S OWN COLUMNS, so the previous round is judged by
+    the same predicate as this one with no new key and no fence to thread it
+    through: `converge.jsonl` already records `growth`, `blockers` and
+    `previous_blockers` per attempt. Every value is type-checked because a
+    hand-edited or truncated ledger is JSON, not a contract -- `blockers >= None`
+    is a TypeError, and `bool` is an `int` in Python, so both are rejected
+    explicitly. Anything unreadable is NOT eligible, which is the fail-safe
+    direction here: the failure this guard exists to prevent is stopping a loop
+    that was working.
+    """
+    if not isinstance(growth, (int, float)) or isinstance(growth, bool):
+        return False
+    if growth < CONVERGE_GROWTH_CEILING:
+        return False
+    if not isinstance(blockers, int) or isinstance(blockers, bool):
+        return False
+    if not isinstance(previous_blockers, int) or isinstance(previous_blockers, bool):
+        return False
+    return blockers >= previous_blockers
 
 
 def _converge_ledger(run_dir: str) -> str:
@@ -2059,9 +2266,29 @@ def cmd_assert_green(args: argparse.Namespace) -> int:
     if not isinstance(blockers, list):
         fail("input_schema_invalid", "classified.json has no blockers array")
 
+    # CARRIED ROWS DO NOT GATE. A `blocked_on_carry` row is not a defect anyone
+    # reported: it is the loop telling itself which extra file the NEXT fixer
+    # wave may touch, and its summary describes a scheduling fact with no line
+    # number. Counted here it held a stack not-green on the reviewer's own
+    # verdict of clean, spent a full review+repair round dispatching a fixer at
+    # a file with nothing to fix, and -- if the run then stopped -- filed that
+    # file as a BLOCKER-tier issue with a `Blocks:` backref describing no defect.
+    #
+    # IT IS ALSO WHAT KEEPS `converge` HONEST. `_blocker_fingerprints` ignores
+    # carried rows, so an attempt whose only remaining blockers are carried has
+    # an EMPTY reviewer multiset; leaving them in this count made that attempt
+    # report `not_green` with no routable reason, which `cmd_converge` reads as
+    # an unchanged multiset and an unchanged reason set -- STOP_NO_PROGRESS,
+    # "the fixers are stuck, a human should look", about a stack the reviewer
+    # just called clean. The gate and the loop have to agree about what a
+    # blocker is, and the reviewer's blockers are the ones that count.
+    #
+    # Still FAIL-CLOSED on anything unreadable: a non-object row is not carried
+    # (see `_is_carried`), so it counts, exactly as it did before.
     reasons = []
-    if blockers:
-        reasons.append("blockers_remaining=%d" % len(blockers))
+    remaining = sum(1 for row in blockers if not _is_carried(row))
+    if remaining:
+        reasons.append("blockers_remaining=%d" % remaining)
 
     # ---- is this evidence about the code that is on the branch RIGHT NOW? ----
     # A refused re-plan (a >64-finding review, a finding the reviewer emitted
@@ -2173,7 +2400,16 @@ def cmd_defer(args: argparse.Namespace) -> int:
     for candidate in range(attempt, 0, -1):
         try:
             document = _read_attempt(run_dir, candidate, required=False)
-        except Refusal:
+        except Refusal as refusal:
+            # NAMED, not merely stepped over. `fail` no longer prints, so an
+            # unannounced absorption here would lose the only statement of WHY
+            # an attempt was unusable -- and `attempt_fallback` below reports
+            # the outcome, never the cause.
+            print(
+                "premerge-findings: attempt_unreadable_skipped: "
+                f"attempt {candidate} ({refusal.token}); it is not deferred from",
+                file=sys.stderr,
+            )
             document = None
         if document is not None:
             defer_attempt = candidate
@@ -2214,7 +2450,23 @@ def cmd_defer(args: argparse.Namespace) -> int:
     )
 
     if args.include_blockers:
-        rows.extend(_object_rows(document["blockers"], "blocker"))
+        # CARRIED ROWS ARE NOT DEFERRED. This verb files "a thing the machine
+        # could not fix"; a `blocked_on_carry` row is a thing there was nothing
+        # to fix in. Filed, it opened a BLOCKER-tier issue naming a file with no
+        # described defect and no line number, carrying the `Blocks:
+        # #<stack-pr>` backref `findings-to-issues` gives a real surviving
+        # blocker -- and `severity_rank(blocker)=3` sorts it ABOVE every cleanup
+        # row, so up to MAX_BLOCKED_ON of them displaced real findings from the
+        # filer's `max_new` cap. The row's own value expires with the loop: it
+        # says which file the next wave needed, and there is no next wave.
+        #
+        # `_object_rows` still runs over the whole array, so a stored row that
+        # is not an object refuses here exactly as it always did.
+        rows.extend(
+            row
+            for row in _object_rows(document["blockers"], "blocker")
+            if not _is_carried(row)
+        )
 
     if args.lens_findings is not None:
         rows.extend(_normalise_lens_findings(_load(args.lens_findings)))
@@ -2536,16 +2788,20 @@ def cmd_converge(args: argparse.Namespace) -> int:
     # WARN, THEN STOP. One round at or above the ceiling is consistent with a
     # convergence whose repairs are concentrated in a few files; it is printed
     # and recorded and changes nothing. The stop needs CONVERGE_GROWTH_RUNS
-    # consecutive MEASURED rounds, read off the previous attempt's own ledger
+    # consecutive ELIGIBLE rounds, read off the previous attempt's own ledger
     # row rather than carried in a variable a fence could forget -- the same
     # reasoning `_count_wait_rows` is built on.
-    previous_growth = last_row.get("growth") if isinstance(last_row, dict) else None
-    growth_streak = (
-        growth is not None
-        and growth >= CONVERGE_GROWTH_CEILING
-        and isinstance(previous_growth, (int, float))
-        and not isinstance(previous_growth, bool)
-        and previous_growth >= CONVERGE_GROWTH_CEILING
+    #
+    # ELIGIBLE, not merely measured: `_growth_round_counts` holds both halves of
+    # the test, and it is called with THIS round's numbers and then with the
+    # previous round's own ledger columns, so the two rounds are judged by one
+    # predicate rather than by two hand-kept copies of it.
+    growth_streak = _growth_round_counts(
+        growth, current_total, previous_total
+    ) and _growth_round_counts(
+        last_row.get("growth") if isinstance(last_row, dict) else None,
+        last_row.get("blockers") if isinstance(last_row, dict) else None,
+        last_row.get("previous_blockers") if isinstance(last_row, dict) else None,
     )
 
     # Every gate term this loop has no route for: `stale_evidence`, which is
@@ -2690,7 +2946,16 @@ def main(argv: "list[str]") -> int:
     loop.set_defaults(handler=cmd_converge)
 
     args = parser.parse_args(argv)
-    return args.handler(args)
+    # THE ONE PLACE A REFUSAL IS ANNOUNCED -- see `fail`. A `Refusal` that gets
+    # this far is one no caller absorbed, so it really is the process refusing
+    # and the `0|74` contract every fence branches on is what it means. Exit 74
+    # is `Refusal`'s own code, restated here rather than read off the exception
+    # so `main` keeps returning an int on every path.
+    try:
+        return args.handler(args)
+    except Refusal as refusal:
+        print(_refusal_line(refusal.token, refusal.detail), file=sys.stderr)
+        return 74
 
 
 if __name__ == "__main__":

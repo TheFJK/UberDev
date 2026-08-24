@@ -168,6 +168,7 @@ jobs:
           failed=""
           shard_routed=0
           shard_ran=0
+          shard_ran_names=""
           run_one() {
             run_one_routed=0
             if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
@@ -203,7 +204,23 @@ jobs:
               fi
             fi
             if [ "$run_one_routed" -eq 1 ]; then
-              shard_ran=$((shard_ran + 1))
+              # DISTINCT fixtures, never invocations. The plan is de-duplicated
+              # by its producer -- first occurrence wins -- so a fixture named by
+              # two run_one lines in one job contributes ONE plan entry. Tallying
+              # invocations here would report ran=N+1 against a plan of N and red
+              # a shard that had run everything it was planned; the gate below is
+              # an equality, so both sides must be counting the same thing.
+              #
+              # Folded through the SAME sentinel-space rule the plan gate uses,
+              # for the same reason: a bare substring test would let one basename
+              # that contains another swallow its neighbour and undercount.
+              case " ${shard_ran_names} " in
+                *" ${run_one_fixture} "*) : ;;
+                *)
+                  shard_ran_names="${shard_ran_names}${shard_ran_names:+ }${run_one_fixture}"
+                  shard_ran=$((shard_ran + 1))
+                  ;;
+              esac
             fi
             echo "--- RUN  $*"
             if "$@"; then
@@ -364,6 +381,13 @@ jobs:
           # disagrees with the corruption instead of inheriting it. Re-deriving
           # the length the way the gate derives it would make this vacuous.
           #
+          # The numerator counts DISTINCT fixtures for the same reason the
+          # denominator is de-duplicated: run_one folds repeat invocations of
+          # one fixture into a single tally, so a job that names a fixture on
+          # two lines still measures as one against the one plan entry it
+          # produced. Counting invocations would make this guard fire on a
+          # shard that ran its whole plan.
+          #
           # No echo below may name a tests/<name>.test.{sh,py} path: the
           # fixture extractor greps this block for exactly that shape once
           # full-line comments are stripped, so an echo carrying one would be
@@ -474,6 +498,7 @@ jobs:
           failed=""
           shard_routed=0
           shard_ran=0
+          shard_ran_names=""
           run_one() {
             run_one_routed=0
             if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
@@ -509,7 +534,23 @@ jobs:
               fi
             fi
             if [ "$run_one_routed" -eq 1 ]; then
-              shard_ran=$((shard_ran + 1))
+              # DISTINCT fixtures, never invocations. The plan is de-duplicated
+              # by its producer -- first occurrence wins -- so a fixture named by
+              # two run_one lines in one job contributes ONE plan entry. Tallying
+              # invocations here would report ran=N+1 against a plan of N and red
+              # a shard that had run everything it was planned; the gate below is
+              # an equality, so both sides must be counting the same thing.
+              #
+              # Folded through the SAME sentinel-space rule the plan gate uses,
+              # for the same reason: a bare substring test would let one basename
+              # that contains another swallow its neighbour and undercount.
+              case " ${shard_ran_names} " in
+                *" ${run_one_fixture} "*) : ;;
+                *)
+                  shard_ran_names="${shard_ran_names}${shard_ran_names:+ }${run_one_fixture}"
+                  shard_ran=$((shard_ran + 1))
+                  ;;
+              esac
             fi
             echo "--- RUN  $*"
             if "$@"; then
@@ -545,6 +586,13 @@ jobs:
           # nothing while `wc -w` still reports its true length, so the guard
           # disagrees with the corruption instead of inheriting it. Re-deriving
           # the length the way the gate derives it would make this vacuous.
+          #
+          # The numerator counts DISTINCT fixtures for the same reason the
+          # denominator is de-duplicated: run_one folds repeat invocations of
+          # one fixture into a single tally, so a job that names a fixture on
+          # two lines still measures as one against the one plan entry it
+          # produced. Counting invocations would make this guard fire on a
+          # shard that ran its whole plan.
           #
           # No echo below may name a tests/<name>.test.{sh,py} path: the
           # fixture extractor greps this block for exactly that shape once
@@ -874,6 +922,7 @@ jobs:
           failed=""
           shard_routed=0
           shard_ran=0
+          shard_ran_names=""
           run_one() {
             run_one_routed=0
             if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
@@ -909,7 +958,23 @@ jobs:
               fi
             fi
             if [ "$run_one_routed" -eq 1 ]; then
-              shard_ran=$((shard_ran + 1))
+              # DISTINCT fixtures, never invocations. The plan is de-duplicated
+              # by its producer -- first occurrence wins -- so a fixture named by
+              # two run_one lines in one job contributes ONE plan entry. Tallying
+              # invocations here would report ran=N+1 against a plan of N and red
+              # a shard that had run everything it was planned; the gate below is
+              # an equality, so both sides must be counting the same thing.
+              #
+              # Folded through the SAME sentinel-space rule the plan gate uses,
+              # for the same reason: a bare substring test would let one basename
+              # that contains another swallow its neighbour and undercount.
+              case " ${shard_ran_names} " in
+                *" ${run_one_fixture} "*) : ;;
+                *)
+                  shard_ran_names="${shard_ran_names}${shard_ran_names:+ }${run_one_fixture}"
+                  shard_ran=$((shard_ran + 1))
+                  ;;
+              esac
             fi
             echo "--- RUN  $*"
             if "$@"; then
@@ -1007,6 +1072,13 @@ jobs:
           # nothing while `wc -w` still reports its true length, so the guard
           # disagrees with the corruption instead of inheriting it. Re-deriving
           # the length the way the gate derives it would make this vacuous.
+          #
+          # The numerator counts DISTINCT fixtures for the same reason the
+          # denominator is de-duplicated: run_one folds repeat invocations of
+          # one fixture into a single tally, so a job that names a fixture on
+          # two lines still measures as one against the one plan entry it
+          # produced. Counting invocations would make this guard fire on a
+          # shard that ran its whole plan.
           #
           # No echo below may name a tests/<name>.test.{sh,py} path: the
           # fixture extractor greps this block for exactly that shape once

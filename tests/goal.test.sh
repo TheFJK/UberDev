@@ -4841,10 +4841,24 @@ g56_unpinned() {  # g56_unpinned FILE OPENER -> offending lines, empty when clea
   # `sed -E` rather than a BRE `\(sort\|comm\)`: `\|` is a GNU extension that
   # BSD sed matches as a LITERAL pipe, so the BRE form silently neutralises
   # nothing on macOS and reds the live row there. Measured, not assumed.
+  #
+  # THE TRAILING CLASS IS EVERY COMMAND TERMINATOR, NOT JUST WHITESPACE. A
+  # `[[:space:]]`-only tail can only see an invocation that carries an argument,
+  # and `sort` needs none -- it reads stdin. So `... | sort)` closing a command
+  # substitution, `... | sort` at end of line, `sort|uniq`, `sort;`, `sort&` and
+  # `sort>f` were every one of them a LIVE unpinned sort that this grep scored
+  # as zero hits, and G56.live printed PASS over the lot. The two mutants below
+  # cannot catch that: both spell every occurrence with a following flag, which
+  # is precisely the whitespace case the old tail already covered.
+  # G56.mutation-bare is the row that pins the widened tail.
+  #
+  # `=`, `"`, `'` and `}` stay OUT of the class deliberately -- those are how an
+  # ASSIGNMENT or a variable READ ends, so admitting them would red `sort=/bin/x`,
+  # `"$sort"` and `${sort}`, none of which invokes anything.
   g56_body "$1" "$2" \
     | grep -vE '^[[:space:]]*#' \
     | sed -E 's/LC_ALL=C[[:space:]]+(sort|comm)/PINNED_\1/g' \
-    | grep -nE '(^|[^=[:alnum:]_./-])(sort|comm)[[:space:]]' || :
+    | grep -nE '(^|[^=[:alnum:]_./-])(sort|comm)([[:space:])|;&<>`]|$)' || :
 }
 G56_OPENER='_uberdev_goal_rebase_collision_chain() {'
 G56_LINES="$(g56_body "$GOAL_LIB" "$G56_OPENER" | grep -c . || :)"
@@ -4895,6 +4909,39 @@ if [ -n "$G56_HALF_HITS" ]; then
   echo "  PASS  G56.mutation-half: a half-pinned line still reds — the predicate is per-token, not per-line"; PASS=$((PASS + 1))
 else
   echo "  FAIL  G56.mutation-half: a pinned comm hides an unpinned sort on the same line — G56.live is vacuous"; FAIL=$((FAIL + 1))
+fi
+# THE BARE-TERMINATOR MUTANT — the hole the two rows above CANNOT see. Both of
+# them spell every occurrence with a following flag (`sort -u`, `comm -12`), so
+# a `[[:space:]]`-only tail was enough to red them and the rest of the offender
+# class went untested. `sort` takes no operand, so these three spellings are the
+# ones a rewrite of the shipped `merged_sorted=` / `intersection=` lines actually
+# produces: the word ends at `)`, at end-of-line, or at `|`. Every one of them is
+# a live unpinned sort. Against the pre-widening `[[:space:]]` tail this body
+# scores ZERO hits -- which is what makes the widening a fix and not a cosmetic.
+#
+# No `comm` row here, and that is not an omission: `comm` requires TWO operands,
+# so a terminator always follows an operand, never the command name itself. The
+# tail is shared by the `(sort|comm)` alternation and the two mutants above
+# already prove `comm` reaches this grep.
+G56_MUTANT_BARE="$(mktemp)"
+cat >"$G56_MUTANT_BARE" <<'EOF_G56_BARE'
+_uberdev_goal_rebase_collision_chain() {
+  local merged_sorted pr_sorted intersection
+  merged_sorted="$(printf '%s\n' "$merged_diff" | sort)"
+  pr_sorted="$(printf '%s\n' "$pr_diff" | sort|uniq)"
+  intersection="$(LC_ALL=C comm -12 <(printf '%s\n' "$merged_sorted") <(printf '%s\n' "$pr_sorted"))"
+  printf '%s\n' "$intersection" | sort
+}
+EOF_G56_BARE
+G56_BARE_HITS="$(g56_unpinned "$G56_MUTANT_BARE" "$G56_OPENER")"
+G56_BARE_COUNT="$(printf '%s\n' "$G56_BARE_HITS" | grep -c . || :)"
+rm -f "$G56_MUTANT_BARE"
+# ALL THREE, never merely one: a tail widened for `)` alone would satisfy a
+# non-empty check while leaving the end-of-line and `|` bypasses wide open.
+if [ "${G56_BARE_COUNT:-0}" -eq 3 ]; then
+  echo "  PASS  G56.mutation-bare: all 3 bare-terminator sorts red — ')', end-of-line and '|' are in the offender class"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  G56.mutation-bare: expected 3 bare-terminator hits, got ${G56_BARE_COUNT:-0} — the offender tail is still whitespace-only: $G56_BARE_HITS"; FAIL=$((FAIL + 1))
 fi
 
 echo "== Summary =="

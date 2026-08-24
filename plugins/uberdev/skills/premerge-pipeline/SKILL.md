@@ -970,35 +970,39 @@ PREMERGE_MODIFIED_LIST="$PREMERGE_RUN_DIR/fix-scope-$PREMERGE_ATTEMPT_PAD.pendin
 PREMERGE_SCOPE_RAW="$PREMERGE_RUN_DIR/fix-scope-$PREMERGE_ATTEMPT_PAD.raw"
 # NEITHER list may be produced by a pipeline. `<producer> | sort -u >LIST ||
 # exit 2` binds the `||` to the PIPELINE's status, which is `sort`'s -- and
-# `sort` succeeds on empty input. A `git diff` that failed (index.lock
-# contention from a concurrent agent, a corrupt index, a `$PREMERGE_ROOT` that
-# moved under the fence) therefore produced an EMPTY modified list, an empty
-# `comm -23`, an empty `PREMERGE_STRAY`, and this fence fell through to `git add
-# -u` and swept every tracked modification in the tree into the stack commit.
-# That is the exact fail-OPEN the scope guard exists to prevent, inside the
-# guard itself, on the half `## Common Mistakes` calls "the enforcement". Worse,
-# the two halves failed in OPPOSITE directions under the identical shape: an
-# empty ASSIGNED makes every file stray (loud, closed), an empty MODIFIED makes
-# none (silent, open). So both are written the same way -- a producer whose own
-# status is checked, then a `sort` whose own status is checked. `LC_ALL=C` ON
-# EVERY MEMBER OF THE sort/comm TRIO, INCLUDING `comm` ITSELF.
-# This guard compares PATHS AS BYTES, and locale collation has no business in
-# it. `sort` orders by the ambient collation and `comm`'s merge walk assumes the
-# order its own collation would produce; when the two disagree the walk
-# desynchronises and reports a file present in BOTH lists as a stray -- which
-# aborts an attempt whose fixers behaved correctly. Demonstrated: the same two
+# `sort` succeeds on empty input. A failed `git diff` (index.lock contention
+# from a concurrent agent, a corrupt index, a `$PREMERGE_ROOT` that moved under
+# the fence) therefore produced an EMPTY modified list, an empty `comm -23`, an
+# empty `PREMERGE_STRAY`, and this fence fell through to `git add -u`, sweeping
+# every tracked modification in the tree into the stack commit -- the exact
+# fail-OPEN the scope guard exists to prevent, inside the guard itself, on the
+# half `## Common Mistakes` calls "the enforcement". Worse, the two halves
+# failed in OPPOSITE directions under the identical shape: an empty ASSIGNED
+# makes every file stray (loud, closed), an empty MODIFIED makes none (silent,
+# open). So both are written the same way: a producer whose status is checked,
+# then a `sort` whose status is checked. `LC_ALL=C` ON EVERY MEMBER OF THE
+# sort/comm TRIO, INCLUDING `comm` ITSELF. This guard compares PATHS AS BYTES,
+# and locale collation has no business in it: `sort` orders by the ambient
+# collation, `comm`'s merge walk assumes its own, and when they disagree the
+# walk desynchronises and reports a file present in BOTH lists as a stray --
+# aborting an attempt whose fixers behaved correctly. Demonstrated: the same two
 # paths sorted under en_US.UTF-8 and under C, compared with `comm -23`, print
-# `lib/Zebra.sh` as a stray. The two sorts happen to share a shell today, so
-# they agree with each other by accident; pinning makes the guard's correctness
-# a property of the code rather than of an inherited environment variable that
-# differs across the three CI runners.
+# `lib/Zebra.sh` as a stray. The two sorts share a shell today, agreeing by
+# accident; pinning makes the guard's correctness a property of the code rather
+# than of an inherited environment variable that differs across the three CI
+# runners.
 jq -r '.waves[][].file' <"$PREMERGE_WAVES_FILE" >"$PREMERGE_SCOPE_RAW" || exit 2
 LC_ALL=C sort -u <"$PREMERGE_SCOPE_RAW" >"$PREMERGE_ASSIGNED_LIST" || exit 2
 # `--no-renames`, because rename detection reports only the NEW path and a scope
 # guard reading `--name-only` alone is bypassable by a rename -- a defect this
 # repo has already shipped once. Against `HEAD`, since nothing is staged yet,
 # and `-C "$PREMERGE_ROOT"` so the paths are repo-relative like the plan's are.
-git -C "$PREMERGE_ROOT" diff --name-only --no-renames HEAD >"$PREMERGE_SCOPE_RAW" || exit 2
+# `core.quotePath=false` for the same byte-equality reason: the default C-quotes
+# a non-ASCII path (`"caf\303\251.md"`) out of equality with the plan's raw
+# UTF-8 -- a false stray here, and a GROWTH miss that outlives it in
+# `fix-scope-<NN>.modified`. Via `GIT_CONFIG_*`, not `git -c`, so #693's
+# exact-shape lock still matches.
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.quotePath GIT_CONFIG_VALUE_0=false git -C "$PREMERGE_ROOT" diff --name-only --no-renames HEAD >"$PREMERGE_SCOPE_RAW" || exit 2
 LC_ALL=C sort -u <"$PREMERGE_SCOPE_RAW" >"$PREMERGE_MODIFIED_LIST" || exit 2
 PREMERGE_STRAY="$(LC_ALL=C comm -23 "$PREMERGE_MODIFIED_LIST" "$PREMERGE_ASSIGNED_LIST")" || exit 2
 if [ -n "$PREMERGE_STRAY" ]; then
@@ -1688,10 +1692,9 @@ if [ -n "$PREMERGE_DIRTY" ]; then
 fi
 
 # ---- check 3: the scope comparison ----------------------------------------
-# Same shape as the Phase 2a scope guard, including the producer-then-sort split:
-# `producer | sort -u >LIST || exit 2` binds the `||` to `sort`'s status and
-# `sort` succeeds on empty input, so a failed producer reads as "changed
-# nothing" and every later check passes over an empty set.
+# Same shape as Phase 2a, producer-then-sort split included: `producer | sort -u
+# >LIST || exit 2` binds `||` to `sort`, which succeeds on empty input -- a
+# failed producer reads as "changed nothing" and later checks pass an empty set.
 PREMERGE_CI_RAW="$PREMERGE_RUN_DIR/ci-scope-$PREMERGE_ATTEMPT_PAD.raw"
 case "$PREMERGE_CI_ARM" in
   commit)
@@ -1706,13 +1709,11 @@ case "$PREMERGE_CI_ARM" in
     fi
     PREMERGE_CI_ALLOWED="$PREMERGE_RUN_DIR/ci-scope-$PREMERGE_ATTEMPT_PAD.sorted"
     PREMERGE_CI_CHANGED="$PREMERGE_RUN_DIR/ci-scope-$PREMERGE_ATTEMPT_PAD.changed"
-    # `LC_ALL=C` on the sort/comm trio for the same reason the fix-commit guard
-    # pins it: this compares paths as bytes, and a sort/comm collation
-    # disagreement reports a file present in both lists as a stray.
+    # `LC_ALL=C` on the sort/comm trio, for the reason the fix-commit guard
+    # gives: this compares paths as bytes, and collation drift invents strays.
     LC_ALL=C sort -u <"$PREMERGE_CI_SCOPE" >"$PREMERGE_CI_ALLOWED" || exit 2
-    # `--no-renames`, because rename detection reports only the NEW path and a
-    # scope guard reading `--name-only` alone is bypassable by a rename.
-    git -C "$PREMERGE_ROOT" diff --name-only --no-renames "$PREMERGE_CI_BEFORE" HEAD >"$PREMERGE_CI_RAW" || exit 2
+    # `--no-renames` and `core.quotePath=false`: exactly as the Phase 2a guard sets them, for its reasons.
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.quotePath GIT_CONFIG_VALUE_0=false git -C "$PREMERGE_ROOT" diff --name-only --no-renames "$PREMERGE_CI_BEFORE" HEAD >"$PREMERGE_CI_RAW" || exit 2
     LC_ALL=C sort -u <"$PREMERGE_CI_RAW" >"$PREMERGE_CI_CHANGED" || exit 2
     if [ ! -s "$PREMERGE_CI_CHANGED" ]; then
       printf 'PREMERGE CI PUBLISH=none REASON=no-edits ARM=commit ATTEMPT=%s\n' "$PREMERGE_ATTEMPT" >&2
@@ -1965,9 +1966,8 @@ PREMERGE_SIMPLIFY_ALLOWED="$PREMERGE_RUN_DIR/simplify-scope-$PREMERGE_ATTEMPT_PA
 PREMERGE_SIMPLIFY_RAW="$PREMERGE_RUN_DIR/simplify-scope-$PREMERGE_ATTEMPT_PAD.raw"
 PREMERGE_SIMPLIFY_MODIFIED="$PREMERGE_RUN_DIR/simplify-scope-$PREMERGE_ATTEMPT_PAD.modified"
 LC_ALL=C sort -u <"$PREMERGE_SIMPLIFY_SCOPE" >"$PREMERGE_SIMPLIFY_ALLOWED" || exit 2
-# `--no-renames`: rename detection reports only the NEW path, and a scope guard
-# reading `--name-only` alone is bypassable by a rename.
-git -C "$PREMERGE_ROOT" diff --name-only --no-renames HEAD >"$PREMERGE_SIMPLIFY_RAW" || exit 2
+# `--no-renames` and `core.quotePath=false`: exactly as the Phase 2a guard sets them, for its reasons.
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.quotePath GIT_CONFIG_VALUE_0=false git -C "$PREMERGE_ROOT" diff --name-only --no-renames HEAD >"$PREMERGE_SIMPLIFY_RAW" || exit 2
 LC_ALL=C sort -u <"$PREMERGE_SIMPLIFY_RAW" >"$PREMERGE_SIMPLIFY_MODIFIED" || exit 2
 PREMERGE_SIMPLIFY_STRAY="$(LC_ALL=C comm -23 "$PREMERGE_SIMPLIFY_MODIFIED" "$PREMERGE_SIMPLIFY_ALLOWED")" || exit 2
 if [ -n "$PREMERGE_SIMPLIFY_STRAY" ]; then
