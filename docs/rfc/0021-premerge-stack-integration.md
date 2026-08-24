@@ -647,10 +647,12 @@ findings, and the second round's six were all in text the first round's fixes ha
 just written — the amendment reproducing, on itself, the defect it documents. Two
 of those were structural rather than cosmetic: the design named `refuted` as a
 gate-closing state while defining a producer only for `fixed`, and it prescribed
-reviewing a two-SHA range through a dispatch surface that accepts only a PR, a
-branch or a path. A design with a state nothing can produce and a keystone
+reviewing a two-SHA range through a dispatch surface believed to accept only a
+PR, a branch or a path. A design with a state nothing can produce and a keystone
 nothing can invoke is a sketch, and a sketch attracts "you did not specify X"
-without bound.
+without bound. (The second of those two was itself wrong about the reviewer —
+see C8's 2026-08-24 amendment. The *shape* of the criticism held: the keystone
+was asserted, not executed. Executing it is what found the range regex.)
 
 So what A3 ratifies is the diagnosis above — every pointer in it executed and
 confirmed — plus the constraint set below. Each constraint is a way the obvious
@@ -721,11 +723,51 @@ carried as a retained backstop.
 
 **C8 — the incremental review needs a dispatch that exists.** The only reviewer
 the pipeline has is the built-in `code-review` skill (`SKILL.md:584`), whose
-accepted targets are a PR number, a branch, or a path; the no-target default is
-`git diff @{upstream}...HEAD` plus the working tree. A two-SHA range is not in
-that surface. C1 needs a path set derived from the repair diff, a locally-arranged
-checkout the default picks up, or an extension to the target surface — named
-explicitly, because "review the delta" is not yet an invocation.
+Phase 0 enumerates a PR number, a branch, or a path; the no-target default is
+`git diff @{upstream}...HEAD` plus the working tree.
+
+> **Amended 2026-08-24 (#795).** This constraint originally read *"a two-SHA range
+> is not in that surface"*. That is **false**, and it was asserted from the prompt's
+> enumeration rather than executed against the invocation path. Read out of the
+> shipped binary (`2.1.241`), in three parts, because only the first two support the
+> retraction and the third bounds it:
+>
+> 1. **The parser passes anything through.** `hLs` splits the post-level remainder
+>    on whitespace and `qau` joins every token back into ONE free-text target
+>    string. No shape is rejected.
+> 2. **The CLI carries an explicit range path.** `o30` accepts either no target — in
+>    which case it uses `@{upstream}...HEAD` — or a target of at most 256 chars
+>    matching `^[@\w][@\w./~^-]*\.\.\.?[@\w][@\w./~^-]*$`, on which it runs
+>    `git diff --no-ext-diff --no-textconv --numstat --end-of-options <target> --`,
+>    and it `return`s on every other shape. A range is the *only* target form that
+>    code parses at all; a PR number, a branch and a path all fall straight through
+>    it. "Not in that surface" is exactly backwards.
+> 3. **On the cell /premerge actually runs, that path is dead.** `o30` is reached
+>    only from `n30`, which returns immediately unless the cell sets
+>    `finderBudgetHint`. `O_e` — the constructor every non-Sonnet cell is built
+>    from — sets it **false**, and `claude-opus-5` xhigh resolves to
+>    `O_e("o48-xhigh-v1")`. `PREMERGE_DEFAULT_LEVEL` is `xhigh`. So on the default
+>    cell nothing in the CLI parses the target; it reaches the model as prose, under
+>    a Phase 0 that says *"review that target instead. Treat this diff as the review
+>    scope."*
+>
+> Net: a range is a legitimate, recognised target shape, and on the default cell it
+> is **interpreted rather than enforced**. `### 4c — VERIFY` therefore does **not**
+> pass one. An ignored target does not degrade to a wider review — it degrades to
+> the no-target default, which on an already-pushed branch is an empty range, a
+> clean tree and zero findings: a vacuous green from the one phase that exists to
+> catch a bad polish. 4c instead leaves the polish commit unpushed until after the
+> review, so that default resolves to exactly the polish and no target is needed.
+>
+> What survives of C8 is the narrower point C1 actually needs: a range scopes the
+> **review**, but the findings that come back carry `file` and `line` and no hunk
+> provenance, so per-finding attribution to *"text the previous repair wrote"* is
+> still not purchasable this way.
+
+C1 still needs a path set derived from the repair diff, a locally-arranged
+checkout the default picks up, or per-finding provenance — named explicitly,
+because "review the delta *and know which findings are about it*" is still not
+yet an invocation.
 
 **On the narrow verifier.** The instinct behind C4 — that checking must be
 cheaper than discovering, and structurally unable to emit new findings — is sound
@@ -986,9 +1028,10 @@ rediscovering them.
 landed in text the previous repair *wrote*; what is measured is whether it
 landed in a **file** that repair modified. A genuinely new defect four hundred
 lines from the repair hunk counts as growth. The precise version needs diff-hunk
-mapping against a review pointed at one repair's delta, and C8 records that no
-such dispatch exists — the only reviewer this pipeline has accepts a PR, a
-branch or a path, and a two-SHA range is not in that surface. So the proxy errs
+mapping against a review pointed at one repair's delta. Pointing a review at that
+delta is available — C8's amendment records the range target form, which `### 4c`
+deliberately does not use — but findings carry `file`, `line` and no provenance, so
+the mapping still has nothing to key on. So the proxy errs
 toward stopping, which is what the two-round requirement exists to absorb.
 Making it precise belongs to the C1–C8 work, not to a follow-up on this one.
 

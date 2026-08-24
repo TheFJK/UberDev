@@ -180,3 +180,62 @@ that was never going to change.
 `PREMERGE_WAIT_CI_CEILING` bounds the waiting. A check that never settles is not
 a reason to loop forever, and after that many re-probes the loop calls the
 evidence unreadable and stops — which is a *not-green* stop, never a pass.
+
+
+---
+
+### Phase 4c
+
+Extracted from `SKILL.md` `### 4c — VERIFY` (#795): the instructions and the table
+stay in the body, the reasoning lives here.
+
+**Why the phase exists at all.** Phase 4 is the last thing to touch the branch, and
+every gate in the run was computed *before* it. So a refactor that reddened the
+suite, or changed behaviour while claiming not to, or introduced a fresh blocker,
+would ship inside a stack whose summary says `clean gate green` — and Phase 5's
+`chore(release)` commit would then attest to code nothing ever verified.
+
+**Why the verdict is read from `gate-<NN>.json` and not through `converge`.** Two
+reasons, and the second is the load-bearing one. The repair budget may already be
+spent, and `converge` refuses an attempt past it (`bad_attempt`, exit 74), which
+would turn a successful verify into a crash. And `converge` would answer the wrong
+question anyway: the predecessor attempt gated **green**, so its blocker set is
+empty, so a blocker the polish introduced is `appeared > 0` with `fixed == 0` —
+`STOP_REGRESSED` on the first call, on every run, which parks the exact commit this
+phase exists to remove.
+
+**Why the arms are exhaustive.** The verdict is `green` or `not_green`, and a
+not-green reason set either sits entirely inside the waitable set or it does not.
+
+**The wait arm is not politeness; without it the verify is a coin flip that
+always lands the same way.** Step 4 gates with `PREMERGE_PUSHED=1` shortly after
+step 2 pushed the simplify commit — only the step 3 triage dispatch sits between
+them — and by `### The CI settle window` `gh pr checks` reports nothing at all for
+the first 10–30 seconds after a push. So the first probe answers
+`not_green REASONS=ci=no_checks_after_push` on essentially every run, and
+reverting on that throws away a correct, behaviour-preserving polish because the
+build had not started yet — the same "a self-check that always fails is worse
+than none" hazard step 3 warns about.
+Everywhere else in the pipeline those reasons are explicitly waitable; 4c does
+not get to be the one gate reader that treats them as a verdict.
+
+**And there is no "repair it" arm, deliberately.** Simplify is optional polish,
+so its failure mode is `undo`, not `debug`: routing a broken polish back into the
+loop spends the repair budget — when any is left — on a refactor nobody asked
+for, and on the failure it would most often be handed, a blocker the polish
+itself introduced, `converge` stops with `STOP_REGRESSED` before one fixer is
+dispatched. So the run would park the broken polish either way, which is what
+both `SKILL.md`'s `## The order within one attempt` ("un-does itself if it did
+harm") and the command's own guarantee ("reverted, not debugged") forbid.
+
+The revert rule is the point. **A stack that was green before the polish and
+broken after it does not need a human to debug the polish at 3am — it needs the
+polish gone.** `git revert --no-edit <simplify-sha>` restores the last state that
+actually passed a gate, and the un-applied findings are already on their way to
+issues, so nothing is lost except a refactor that was not safe to ship. Report
+the verify reason alongside `simplify=reverted`: the revert removes the polish,
+not the reason, and a `mergeable=CONFLICTING` that appeared while Phase 4 ran is
+still true of the stack afterwards.
+
+Never revert past the fix commits. They are the loop's product and they are what
+made the stack green in the first place.

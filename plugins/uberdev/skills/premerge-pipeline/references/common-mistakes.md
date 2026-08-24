@@ -90,9 +90,12 @@ twice and no stop is the count condition doing its job, not the detector failing
 over-counts: a new finding anywhere in a touched file counts as growth. It is a
 signal, not a proof, and that is deliberate — it is also why the stop needs two
 consecutive eligible rounds rather than one. The precise version needs diff-hunk
-mapping against a review pointed at one repair's delta, and RFC 0021 A3 C8 records
-that no such dispatch exists yet — building it here would replace a working coarse
-signal with a keystone nothing can invoke.
+mapping against a review pointed at one repair's delta. Pointing a review at that
+delta is available in principle — a two-SHA range is a recognised target shape
+(RFC 0021 A3 C8, as amended 2026-08-24) — but **`### 4c` deliberately does not use
+one**; see *"Handing 4c a target argument"* below for why. And a range would not
+help here regardless: the findings it returns carry no hunk provenance, so the
+mapping has nothing to key on.
 
 **Reading "the round is not measured" as "the round repaired nothing".** The one
 inference that is worth more than the ratio's precision, because it is the case
@@ -214,3 +217,30 @@ only correct writer.
 **Skipping the accounted-for gate in 0c.** It is the substitute for the assertion
 `/premerge` deliberately does not run. Removing it leaves the pack with no
 completeness proof at all.
+
+**Handing 4c a target argument.** `### 4c — VERIFY` dispatches
+`Skill("code-review", "<level>")` with **no target**, and the omission is the
+mechanism, not an oversight. It is tempting to "fix" it by naming the polish
+explicitly — the stack PR (what it used to do, #795) or the `<sha>..<sha>` range.
+Both are wrong, and the range is wrong in the more dangerous direction.
+
+A range *is* a shape the CLI recognises: `o30` accepts either no target or one
+matching `^[@\w][@\w./~^-]*\.\.\.?[@\w][@\w./~^-]*$` and returns on everything else.
+But `o30` runs only when the review cell sets `finderBudgetHint`, and `O_e` sets
+that **false** for `o48-xhigh-v1` — the cell `claude-opus-5` xhigh resolves to, and
+`xhigh` is `PREMERGE_DEFAULT_LEVEL`. On /premerge's own default cell nothing parses
+the target; it reaches the model as prose (RFC 0021 A3 C8, as amended).
+
+**An ignored target does not degrade to a wider review. It degrades to an empty
+one.** It falls back to the no-target default, `git diff @{upstream}...HEAD` — and
+if 4b had pushed, `@{upstream}` would equal `HEAD`, so the range is empty, the tree
+is clean, `git diff HEAD` is empty too, and the review returns zero findings. The
+gate reads `verdict=green`, Phase 5 stamps `chore(release)`, and the summary says
+the stack is green *after* simplify. That is a **vacuous green from the one phase
+whose entire job is to catch a bad polish** — strictly worse than the full-stack
+review it replaced, which at least looked at something.
+
+Leaving 4b's commit unpushed is what makes the default correct instead of empty:
+`@{upstream}` is still the pre-simplify SHA, so the reviewer's *first* command
+returns exactly the polish. Do not add a target, and do not move the push back into
+`### 4b`. `tests/premerge.test.sh` P23 locks both halves.
