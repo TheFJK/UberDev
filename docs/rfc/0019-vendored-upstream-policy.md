@@ -73,8 +73,8 @@ UberDev standalone gets the attribution record with it.
 ```
 
 Every directory under `plugins/uberdev/skills/` and every file under
-`plugins/uberdev/agents/` is a component. There are **78** of them: 20
-third-party and 58 carrying `"origin": "uberdev"`. The originals are two-field
+`plugins/uberdev/agents/` is a component. There are **79** of them: 20
+third-party and 59 carrying `"origin": "uberdev"`. The originals are two-field
 stubs; their only job is to make coverage two-way, so that a *new* undeclared
 vendored file cannot hide among them.
 

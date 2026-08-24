@@ -4,6 +4,72 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.57.0] — 2026-08-24
+
+### Added — `/fix`, the lean single-issue lane (RFC 0022)
+
+`/fix <issue#>` solves exactly one issue with **one** implementer, **one**
+`code-reviewer` over the whole diff, at most one fix round, and a PR this
+session pushes and parks. Two sequential agent rungs on the happy path, three
+when the review comes back red — against `/turbox`'s eight or more.
+
+It is a **narrowing of standard mode**, not a new transport: `commands/fix.md`
+passes `--auto-mode=1 --turbo --standard --fix` to the same launcher, and
+`skills/fix-fleet/SKILL.md` reuses `lib/turbox-fleet.sh` for `worktree-add`,
+`stage-commit`, `round-permitted` and `audit` rather than forking them.
+
+**What it drops** is design: no risk-gated security lens, no design-planner, no
+plan-reviewer, no wave decomposition, no per-task `spec-compliance-reviewer`.
+**What it keeps** is diligence: the full launcher preflight and claim protocol,
+worktree isolation, the explicit-path staging refusal, an independent reviewer
+validated through the canonical `uberdev_child_validate_phase1_review_result`
+boundary, the project's full test suite, and the park-the-PR rule.
+
+The lane's own failure mode is answered structurally rather than hoped away:
+the implementer's return vocabulary carries **`TOO_BIG`**, a first-class answer
+meaning *this issue wants a decomposition — run `/turbox`*. It ends the run with
+the worktree and the claim intact, and the controller is told never to argue an
+agent out of it.
+
+Four circuit breakers (FX1–FX4) bound the arity, the fix ladder, the retest
+ladder and unparseable returns. The one worth knowing at the CLI: a second
+issue number is refused **before `gh` runs**, so a rejected invocation never
+leaves an `uberdev:active` label behind. A red suite, standing blockers, or a
+review result that never validated each open the PR as a **draft**. RFC 0022
+section 3.6 has the table. Committed work never strands in a worktree, and the lane
+never re-runs a suite hoping for a different answer.
+
+### Changed
+
+- `lib/turbox-fleet.sh` — `audit` gained an optional `--basename` (default
+  `turbox-audit.jsonl`; `/fix` passes `fix-audit.jsonl`). A name, not a path —
+  a `/` or `..` is refused.
+- `lib/solve-launcher.sh` — the `--fix` launcher option (requires
+  `--standard`), the FX1 arity refusal and the FX2 knob validation ahead of the
+  first `gh` call, and Step 5f's `FIX_PLAN_BEGIN`/`FIX_PLAN_END` envelope — a
+  third marker pair, because each marker names exactly one executor.
+- `CLAUDE.md` — the bump-lane table gained a fourth row. `/turbox` and `/fix`
+  open one PR per issue rather than a stack, so there is no once-per-stack
+  commit to carry the bump; it rides whatever lands the PR. Reviewing such a PR
+  as an unbumped user-facing change is a false positive.
+- The short-form alias set is now **sixteen**. `/fix` was added across all six
+  alias surfaces — `lib/aliases-sync.sh` (the SSOT row **and** the notice
+  string), `commands/install-aliases.md`, `commands/uninstall-aliases.md`,
+  `README.md`, `skills/using-uberdev/references/configuration.md`, and
+  `tests/aliases.test.sh`. The five-surface recipe repeated across RFCs 0005,
+  0007, 0008, 0009 and 0010 omits `configuration.md`, which `docs-accuracy` T6b
+  provably enforces; the correction is now recorded in `tests/aliases.test.sh`'s
+  header.
+
+### Fixed
+
+- Pre-existing alias drift, surfaced by making the count correct: `/turbox` was
+  missing from the README alias table and the `UBERDEV_NO_AUTO_ALIAS` row while
+  the prose claimed fifteen forwarders, and `/turbox` and `/premerge` were
+  missing from `tests/aliases.test.sh`'s A1 and A6 enumeration loops — so
+  neither command's forwarder nor its `allowed-tools` byte-equality was ever
+  checked.
+
 ## [0.56.1] — 2026-08-24
 
 ### Changed — the project rule file is `CLAUDE.md`, not `AGENTS.md`

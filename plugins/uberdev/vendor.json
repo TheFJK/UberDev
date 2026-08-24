@@ -637,6 +637,11 @@
       "origin": "uberdev"
     },
     {
+      "id": "skills/fix-fleet",
+      "path": "skills/fix-fleet",
+      "origin": "uberdev"
+    },
+    {
       "id": "skills/uberscan-pipeline",
       "path": "skills/uberscan-pipeline",
       "origin": "uberdev"
@@ -721,7 +726,7 @@
         },
         {
           "path": "references/configuration.md",
-          "sha256": "a8bc7ce955d7145bc972a0e6fc3e3b038f7d9e44349e3eed3e170adf51e73762"
+          "sha256": "a5abd83be9db9ab3cf46c4836ebc64eb5df79f1266503e2a539b49d426619c31"
         },
         {
           "path": "references/copilot-tools.md",

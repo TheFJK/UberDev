@@ -63,6 +63,21 @@
         ]
       },
       {
+        "substrate": "session-task-fanout-fix-fleet",
+        "source": "plugins/uberdev/skills/fix-fleet/SKILL.md",
+        "reason": "RFC 0022 added /fix as a THIRD lane off the same launcher, narrowing the /turbox lane above rather than adding a transport: `--fix` requires `--standard`, so the resolved backend is still pinned to `workflow`, and Step 5f emits a fix plan instead of a turbox plan. The calling SESSION is the orchestrator and dispatches every agent through the Task tool. It never sources lib/child-dispatch.sh, so it mints no instance id, creates no handoff, and produces no run-tree edge or receipt - the same gap the turbox entry records, for the same reason. Declared separately rather than folded into that entry because the two lanes dispatch different kinds at different counts, and one entry covering both would let either drift without reddening C9.",
+        "reserved_edge_prefix": "fix_fleet.",
+        "dispatch_sites": 5,
+        "agent_kinds": [
+          "code_reviewer",
+          "general_purpose"
+        ],
+        "agent_kind_rule": "The same derivation the turbox entry above states, applied to this source: a kind is `uberdev:<stem>` where plugins/uberdev/agents/<stem>.md exists, plus the host built-in `general-purpose`, with `-` mapped to `_`. dispatch_sites counts MENTIONS rather than distinct kinds - `general-purpose` is named at the Phase 2 implementer and the Phase 4 fixer, and `uberdev:code-reviewer` at the Phase 3 rung plus the lane-comparison table and the return-contracts section. Phase 5 delivery names no agent because the controller performs it, so it contributes no site. This is why Phase 2's sentence ruling OUT the implementation-worker names that agent by its card path instead of by `uberdev:<stem>`: written the other way it would register as a sixth dispatch site for an agent this lane never dispatches. Derived from the source by C9 in tests/solve-run-tree-scope.test.sh, never by hand.",
+        "tracking_issues": [
+          649
+        ]
+      },
+      {
         "substrate": "workflow-native-review-fleet",
         "source": "plugins/uberdev/skills/review-fleet/workflow.js",
         "reason": "A Workflow script has no filesystem (RFC 0012 §2.2 constraint 6, enforced by tests/workflow-scripts.test.sh T1, which forbids fs./process.), so it cannot read this manifest and no edge here can constrain it. What makes THIS lane's gap real: skills/review-fleet/workflow.js is the DEFAULT engine for BOTH /uberdev:review-pr and /uberdev:simplify — lib/dispatch.sh:610 resolves the `review-pr|simplify` case arm straight to it — and since #383 all four Phase-3 CI stages route through it as well, so nothing in the review arc reaches the routed-child adapter this manifest governs. Two of the six sites dispatch children that MUTATE the caller's checkout with no worktree isolation (uberdev:code-fixer at :1882, which commits on the PR branch, and uberdev:ci-rebase-handler at :2092, whose rebase precedes the single leased force-push), and neither mints an instance id, creates a handoff, or produces a run-tree receipt. The reserved prefix is the LANE id and not an edge id the lane emits: its own edge ids are `review_pr.*` and `simplify.*`, both already claimed by governed routed-child edges here, and C6 rejects those two prefixes as prkit-projected namespace collisions. Declaring the lane does not close that gap; it makes the gap machine-visible and pins its six sites and twelve kinds so a silent widening reds (#654).",

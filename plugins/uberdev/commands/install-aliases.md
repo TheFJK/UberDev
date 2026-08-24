@@ -1,5 +1,5 @@
 ---
-description: "Install short-form aliases (/issue, /solve, /turbo, /turbox, /simplify, /review-pr, /merge, /premerge, /dev, /testers, /ubergoal, /uberscan, /ubersimplify, /uberthink, /ubercluster) as one-way forwarders to /uberdev:<command>"
+description: "Install short-form aliases (/issue, /solve, /turbo, /turbox, /fix, /simplify, /review-pr, /merge, /premerge, /dev, /testers, /ubergoal, /uberscan, /ubersimplify, /uberthink, /ubercluster) as one-way forwarders to /uberdev:<command>"
 argument-hint: "[--force] [--dry-run]"
 allowed-tools: ["Bash", "Read"]
 ---
@@ -14,7 +14,7 @@ field for top-level aliases, so the only mechanism is shipping forwarder
 files into the user's standalone `~/.claude/commands/` directory (where
 filename = command name, no plugin prefix). See issue #16.
 
-This command installs 15 aliases — one per row in the ALIASES table below.
+This command installs 16 aliases — one per row in the ALIASES table below.
 Each is **one-way** — it points at the canonical `/uberdev:<command>`
 rather than duplicating its body. Existing `/uberdev:<command>`
 invocations are unaffected; this is purely additive ergonomics.
@@ -27,6 +27,7 @@ invocations are unaffected; this is purely additive ergonomics.
 | `/solve`     | `/uberdev:solve` |
 | `/turbo`     | `/uberdev:turbo` |
 | `/turbox`    | `/uberdev:turbox` |
+| `/fix`       | `/uberdev:fix` |
 | `/simplify`  | `/uberdev:simplify` |
 | `/review-pr` | `/uberdev:review-pr` |
 | `/merge`     | `/uberdev:merge` |
@@ -96,7 +97,7 @@ SKIPPED=0
 
 # Canonical-name reference list (kept in sync with the ALIASES SSOT in
 # lib/aliases-sync.sh — verified by tests/aliases.test.sh A1/A6):
-#   for canonical in issue solve turbo turbox simplify review-pr merge premerge dev testers goal uberscan ubersimplify uberthink cluster; do …
+#   for canonical in issue solve turbo turbox fix simplify review-pr merge premerge dev testers goal uberscan ubersimplify uberthink cluster; do …
 
 while IFS='|' read -r SHORT CANON TOOLS; do
   [ -n "$SHORT" ] || continue

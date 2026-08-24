@@ -366,6 +366,7 @@ jobs:
           run_one bash tests/solve-fleet-workflow.test.sh
           run_one bash tests/turbox-fleet.test.sh
           run_one bash tests/turbox-fleet-runtime.test.sh
+          run_one bash tests/fix-lane.test.sh
           run_one bash tests/review-pr-workflow.test.sh
           run_one bash tests/goal-workflow.test.sh
           run_one bash tests/uberthink-workflow.test.sh
@@ -1029,6 +1030,19 @@ jobs:
 #                                         uberscan-report. Its SHAPE twin,
 #                                         turbox-fleet.test.sh, is pure
 #                                         grep-and-assert and runs on BOTH jobs)
+#   - fix-lane.test.sh                    (RFC 0022: its FX-E rows EXECUTE the
+#                                         launcher and lib/turbox-fleet.sh, handing
+#                                         python3 absolute mktemp -d paths on argv
+#                                         — the same Git Bash path-translation
+#                                         class as turbox-fleet-runtime.test.sh.
+#                                         Executing those guards is the point: FX1
+#                                         and the FX2 knob check sit ahead of the
+#                                         first gh call so a refused run writes no
+#                                         claim, and only an executed row can prove
+#                                         that. The FX-S rows are pure grep, but
+#                                         they live in the same file rather than a
+#                                         shape twin, so the whole fixture is
+#                                         declared here)
 #   - sdd-wave-contract.test.sh           (#650: hands python3 mktemp -d paths
 #                                         on argv, copies scratch trees under
 #                                         mktemp -d, and sources an extracted

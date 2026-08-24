@@ -54,19 +54,29 @@ TURBO_OPT=0
 # `dispatch_backend` answers "how is one per-issue solver child launched?", and
 # standard mode launches no per-issue solver at all (RFC 0020 §2).
 STANDARD_MODE=0
+# --fix narrows standard mode to the lean single-issue lane. It REQUIRES
+# --standard rather than implying it: an operator who wrote only --fix has a
+# lane in mind the launcher cannot confirm, and guessing is how a run lands
+# somewhere nobody expected. Rationale: RFC 0022 section 2.
+FIX_MODE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --auto-mode=*) AUTO_MODE="${1#--auto-mode=}" ;;
     --turbo)       TURBO_OPT=1 ;;
     --standard)    STANDARD_MODE=1 ;;
+    --fix)         FIX_MODE=1 ;;
     --)            shift; break ;;
     *)
-      echo "error: solve-launcher: unknown launcher option '$1' (only --auto-mode=0|1, --turbo, --standard, -- are accepted before the user arguments)" >&2
+      echo "error: solve-launcher: unknown launcher option '$1' (only --auto-mode=0|1, --turbo, --standard, --fix, -- are accepted before the user arguments)" >&2
       exit 64
       ;;
   esac
   shift
 done
+if [ "$FIX_MODE" = "1" ] && [ "$STANDARD_MODE" != "1" ]; then
+  echo "error: solve-launcher: --fix requires --standard (RFC 0022): the lean lane is a narrowing of standard mode, not a transport of its own" >&2
+  exit 64
+fi
 case "$AUTO_MODE" in
   0|1) ;;
   *) echo "error: solve-launcher: --auto-mode must be 0 or 1 (got '$AUTO_MODE')" >&2; exit 64 ;;
@@ -108,6 +118,38 @@ UBERDEV_DISPATCH_REASONING_EFFORT="$(_uberdev_cli_get effort)"
 UBERDEV_DISPATCH_SERVICE_TIER="$(_uberdev_cli_get service_tier)"
 export UBERDEV_DISPATCH_ROUTING_MODE UBERDEV_DISPATCH_ROUTE UBERDEV_DISPATCH_MODEL
 export UBERDEV_DISPATCH_REASONING_EFFORT UBERDEV_DISPATCH_SERVICE_TIER
+
+# --- FX1: the /fix arity refusal (RFC 0022 §3.1) ---------------------------
+# Refused HERE, off the parsed CLI JSON: it is the last point before gh runs,
+# and therefore before Step 4.5 can write a claim. A second issue discovered
+# after claiming both would strand two `uberdev:active` labels.
+if [ "$FIX_MODE" = "1" ]; then
+  if ! _UBERDEV_FIX_ISSUE_COUNT="$(python3 -I -c 'import json,sys; print(len(json.loads(sys.argv[1])["issues"]))' "$SOLVE_CLI_JSON" 2>&1)"; then
+    echo "error: solve-launcher: could not count the issues on the /fix lane: $_UBERDEV_FIX_ISSUE_COUNT" >&2
+    echo "no claims written; no agents dispatched" >&2
+    exit 1
+  fi
+  if [ "$_UBERDEV_FIX_ISSUE_COUNT" != "1" ]; then
+    echo "error: /fix takes exactly one issue (got $_UBERDEV_FIX_ISSUE_COUNT). The lean lane is one worktree, one diff, one review, one PR — use /turbox for a batch of up to 3, or run /fix once per issue." >&2
+    echo "no claims written; no agents dispatched" >&2
+    exit 1
+  fi
+  # FX2's ceiling, resolved beside FX1 so a malformed knob cannot abort a run
+  # that has already written a claim. Its own default of one round, NOT the
+  # turbox per-task cap — that value stays with its owner (RFC 0022 sec 3.6).
+  UBERDEV_FIX_FIX_ROUNDS_RAW="${UBERDEV_FIX_FIX_ROUNDS:-1}"
+  # Strip leading zeros BEFORE validating, never with `$(( ))`: arithmetic
+  # reads `010` as octal 8 and dies outright on `08`. Stripping first also
+  # collapses `0`/`00` to the empty string, so ONE glob gate covers every case.
+  UBERDEV_FIX_ROUNDS_RESOLVED="${UBERDEV_FIX_FIX_ROUNDS_RAW#"${UBERDEV_FIX_FIX_ROUNDS_RAW%%[!0]*}"}"
+  case "$UBERDEV_FIX_ROUNDS_RESOLVED" in
+    ''|*[!0-9]*)
+      echo "error: UBERDEV_FIX_FIX_ROUNDS must be a positive integer (got '$UBERDEV_FIX_FIX_ROUNDS_RAW')" >&2
+      echo "no claims written; no agents dispatched" >&2
+      exit 2
+      ;;
+  esac
+fi
 
 # Env ownership (#97/#241) — see header. AUTO_MODE gates turbo-vs-interactive
 # behaviour in Steps 4/5a; UBERDEV_TURBO is the chain-wide unattended-mode
@@ -1261,13 +1303,24 @@ if [[ "${UBERDEV_RESOLVED_BACKEND:-}" == "workflow" ]]; then
     # on a target install must refuse cleanly at preflight, not fail later at
     # the layer that tries to use it.
     TURBOX_FLEET_LIB="$SOLVE_FLEET_PLUGIN_ROOT/lib/turbox-fleet.sh"
-    TURBOX_FLEET_SKILL="$SOLVE_FLEET_PLUGIN_ROOT/skills/turbox-fleet/SKILL.md"
+    # The lean lane shares turbox-fleet.sh deliberately (worktree-add,
+    # stage-commit, round-permitted, audit have ONE definition), so the lib is
+    # required on both, and only the SKILL differs.
+    if [[ "$FIX_MODE" == "1" ]]; then
+      TURBOX_FLEET_SKILL="$SOLVE_FLEET_PLUGIN_ROOT/skills/fix-fleet/SKILL.md"
+      _UBERDEV_STANDARD_RFC="RFC 0022"
+      _UBERDEV_STANDARD_FALLBACK="run /turbox instead of /fix"
+    else
+      TURBOX_FLEET_SKILL="$SOLVE_FLEET_PLUGIN_ROOT/skills/turbox-fleet/SKILL.md"
+      _UBERDEV_STANDARD_RFC="RFC 0020"
+      _UBERDEV_STANDARD_FALLBACK="run /turbo instead of /turbox"
+    fi
     if [ ! -f "$TURBOX_FLEET_LIB" ]; then
-      echo "error: $TURBOX_FLEET_LIB missing (RFC 0020); reinstall the plugin, or run /turbo instead of /turbox" >&2
+      echo "error: $TURBOX_FLEET_LIB missing ($_UBERDEV_STANDARD_RFC); reinstall the plugin, or $_UBERDEV_STANDARD_FALLBACK" >&2
       exit 2
     fi
     if [ ! -f "$TURBOX_FLEET_SKILL" ]; then
-      echo "error: $TURBOX_FLEET_SKILL missing (RFC 0020); reinstall the plugin, or run /turbo instead of /turbox" >&2
+      echo "error: $TURBOX_FLEET_SKILL missing ($_UBERDEV_STANDARD_RFC); reinstall the plugin, or $_UBERDEV_STANDARD_FALLBACK" >&2
       exit 2
     fi
   else
@@ -1396,6 +1449,54 @@ print(sum(1 for r in d["issues"]
     || { echo "error: failed to derive the solve-fleet risk-issue count from $SOLVE_FLEET_MANIFEST" >&2; exit 2; }
 
   SOLVE_FLEET_ISSUES="$(printf '%s,' "${ISSUE_NUMS[@]}")"; SOLVE_FLEET_ISSUES="${SOLVE_FLEET_ISSUES%,}"
+
+  # --- Step 5f — the /fix lean-lane plan (RFC 0022 §4) ----------------------
+  # A THIRD marker pair on purpose: each marker names exactly one executor, so
+  # relaying a fix plan into Workflow() or into the turbox lane would run the
+  # wrong pipeline rather than error. Narrower envelope: RFC 0022 section 4.
+  if [[ "$FIX_MODE" == "1" ]]; then
+    _uberdev_audit_emit fix_lean_lane_prepared \
+      "{\"issues\":${#ISSUE_NUMS[@]},\"manifest\":\"$SOLVE_FLEET_MANIFEST\",\"fix_rounds\":$UBERDEV_FIX_ROUNDS_RESOLVED}"
+
+    FIX_PLAN_JSON="$(python3 -I -B -c '
+import json,sys
+(manifest, issues, issue_count, run_dir, repo_root, plugin_root, repo_slug,
+ base_branch, fix_rounds) = sys.argv[1:10]
+print(json.dumps({
+    "v": 1,
+    "lane": "fix-lean",
+    "manifestPathAbs": manifest,
+    "issues": issues,
+    "issueCount": int(issue_count),
+    "runDirAbs": run_dir,
+    "worktreeRootAbs": run_dir.rstrip("/") + "/worktrees",
+    "repoRootAbs": repo_root,
+    "pluginRootAbs": plugin_root,
+    "repoSlug": repo_slug,
+    "baseBranch": base_branch,
+    "branchPrefix": "worktree-fix-issue-",
+    "fixRounds": int(fix_rounds),
+    "autoMode": True,
+}, sort_keys=True, separators=(",", ":")))
+' "$SOLVE_FLEET_MANIFEST" "$SOLVE_FLEET_ISSUES" "${#ISSUE_NUMS[@]}" \
+  "$UBERDEV_TMPDIR" "$REPO_ROOT_ABS" "${UBERDEV_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}" \
+  "$REPO_SLUG" "$SOLVE_FLEET_BASE_BRANCH" "$UBERDEV_FIX_ROUNDS_RESOLVED")" \
+      || { echo "error: failed to compose the fix plan envelope" >&2; exit 2; }
+
+    echo "FIX_PLAN_BEGIN"
+    printf '%s\n' "$FIX_PLAN_JSON"
+    echo "FIX_PLAN_END"
+
+    echo "repo: $REPO_SLUG" >&2
+    echo "prepared issue #${ISSUE_NUMS[0]} for the lean single-issue lane (/fix, RFC 0022)" >&2
+    echo "This session is the lane's orchestrator: follow skills/fix-fleet/SKILL.md with the JSON between FIX_PLAN_BEGIN/FIX_PLAN_END." >&2
+    echo "No design rungs: one implementer, one code-reviewer, up to $UBERDEV_FIX_ROUNDS_RESOLVED fix round(s), then a parked PR." >&2
+    echo "There is no Workflow run and no /workflows tree — progress is this transcript plus $UBERDEV_TMPDIR." >&2
+    if [[ "${AUTO_PERMISSIONS:-0}" == "1" || "${SKIP_PERMISSIONS:-0}" == "1" ]]; then
+      echo "note: --fix — the resolved bypass tier is NOT scoped to the lane's agents; they run in THIS session and inherit its permission tier (same property as backend=workflow, RFC 0015 §6 R-1b)." >&2
+    fi
+    exit 0
+  fi
 
   # --- Step 5s — the /turbox standard-mode plan (RFC 0020 §4.2) -------------
   # A DIFFERENT marker pair on purpose. WORKFLOW_ARGS_BEGIN/END means "call
