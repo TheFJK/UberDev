@@ -186,11 +186,11 @@ ck "issueCount is 1"                    "[ \"\$(fx_plan_field issueCount)\" = '1
 ck "branchPrefix is worktree-fix-issue-" "[ \"\$(fx_plan_field branchPrefix)\" = 'worktree-fix-issue-' ]"
 ck "fixRounds honours the env knob"     "[ \"\$(fx_plan_field fixRounds)\" = '1' ]"
 for fx_absent in riskIssueCount concurrency implementBudget maxAgents; do
-  ck "OMITS $fx_absent"                 "! printf '%s' \"\$(fx_plan_keys)\" | grep -qw '$fx_absent'"
+  ck "OMITS $fx_absent"                 "! grep -qw '$fx_absent' <<<\"\$(fx_plan_keys)\""
 done
 # The key COUNT is what catches a field added to the composer and to nothing
 # else. Update this number and RFC 0022 section 2 together, or not at all.
-ck "carries exactly 14 keys"            "[ \$(fx_plan_keys | wc -w | tr -d ' ') -eq 14 ]"
+ck "carries exactly 14 keys"            "[ \$(wc -w <<<\"\$(fx_plan_keys)\" | tr -d ' ') -eq 14 ]"
 ck "RFC 0022 states the same 14"        "grep -q '| Plan envelope | 18 keys | \*\*14\*\*' '$RFC'"
 
 echo
