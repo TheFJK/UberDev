@@ -668,7 +668,7 @@ jobs:
 #                                         portable shape gates live in
 #                                         premerge.test.sh, which DOES run on
 #                                         both jobs)
-#   - agent-description-budget.test.sh   (the A0-A4 probe does `import yaml`
+#   - agent-description-budget.test.sh   (the A0-A5 probe does `import yaml`
 #                                         and PyYAML is not importable on
 #                                         windows-latest — the same dependency
 #                                         that already declares

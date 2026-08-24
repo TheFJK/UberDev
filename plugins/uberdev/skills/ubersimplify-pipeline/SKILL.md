@@ -1,6 +1,6 @@
 ---
 name: ubersimplify-pipeline
-description: Use when /uberdev:ubersimplify is invoked. Whole-codebase 3-lens simplification — packs the repo into a fixed fleet of byte-balanced areas (default 8, shared lib/chunk.py), audits each area with ONE multi-lens code-simplifier (Reuse/Quality/Efficiency), applies preserve-behavior fixes via code-fixer as one refactor: commit per area on a shared branch, opens ONE PR, and files leftover blocker findings as GitHub issues. --audit-only is read-only. The orchestration runs in the shared scan-fleet Workflow (skills/scan-fleet/workflow.js, mode=simplify); this skill is the thin preflight + args seam.
+description: "Use when /uberdev:ubersimplify is invoked. Whole-codebase 3-lens simplification — packs the repo into a fixed fleet of byte-balanced areas (default 8, shared lib/chunk.py), audits each area with ONE multi-lens code-simplifier (Reuse/Quality/Efficiency), applies preserve-behavior fixes via code-fixer as one refactor: commit per area on a shared branch, opens ONE PR, and files leftover blocker findings as GitHub issues. --audit-only is read-only. The orchestration runs in the shared scan-fleet Workflow (skills/scan-fleet/workflow.js, mode=simplify); this skill is the thin preflight + args seam."
 model: inherit
 ---
 
