@@ -2323,15 +2323,14 @@ attempt's `gate-NN.json` carries `verdict=green` bound to the branch's current
 HEAD. A run that stopped any other way emits nothing at all and parks exactly as
 it did before — no anchor commit, no label, no push.
 
-**It runs BEFORE `### 5a`, and the order is load-bearing.** 5a lands a
-`chore(release): vX.Y.Z` commit on top of the branch, and `/merge`'s trust-head
-resolution tolerates exactly one such commit above the anchor — but only once
-`skills/merge-pipeline/lib/release-anchor.sh` has proved it inert with respect to
-reviewed code: exactly one parent, an exact `chore(release): vX.Y.Z` subject, a
-changed-path set that is a subset of the six version surfaces, and a canonical
-manifest version that strictly advances. Emitting the anchor first therefore gets
-the release commit *proved* rather than merely tolerated. Emitting it after the
-bump would also resolve, and would leave that proof unmade.
+**It runs BEFORE `### 5a`, and that does not resolve.** 5a stacks a release commit
+above the anchor, which `/merge` reads through only if
+`skills/merge-pipeline/lib/release-anchor.sh` proves it inert — it does not: 5a
+replaces the CHANGELOG stub with real notes, and this repo's v0.56.0 and v0.30.4
+both return `RELEASE_ANCHOR=none` (`diff_too_large`, `changelog_shape`).
+`TRUST_HEAD` stays on the trailer-less release commit, so PATH_2 (b) fails
+`trust_trail_trailer_missing`; emitting AFTER the bump only trades that for this
+fence's own `head_moved`. The repair is in that script or 5a, not here.
 
 **What the trail claims and what it does not** — `references/phase-contracts.md`,
 `### What the Phase 5-trail fences require at their call sites`, which also states
@@ -2407,6 +2406,7 @@ RUN_ID="${RUN_ID:?RUN_ID must be prefixed onto this fence by the orchestrator}"
 PREMERGE_TRAIL="${PREMERGE_TRAIL:?PREMERGE_TRAIL must be prefixed onto this fence by the orchestrator}"
 PREMERGE_TRAIL_ATTEMPT="${PREMERGE_TRAIL_ATTEMPT:?PREMERGE_TRAIL_ATTEMPT must be prefixed onto this fence by the orchestrator}"
 [ "$PREMERGE_TRAIL" = "emit" ] || exit 0
+case "$PREMERGE_TRAIL_ATTEMPT" in [0-9][0-9]) ;; *) printf 'error: PREMERGE_TRAIL_ATTEMPT=%s is not the two-digit form; /merge matches the trailer suffix against ^gate=green attempt=[0-9]{2}$, so publishing would emit a trail nothing can resolve\n' "$PREMERGE_TRAIL_ATTEMPT" >&2; exit 2 ;; esac
 PREMERGE_ROOT="$(git rev-parse --show-toplevel)" || exit 2
 PREMERGE_RUN_DIR="$PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
 PREMERGE_PR="$(jq -r '.combined_pr' <"$PREMERGE_RUN_DIR/manifest.json")" || exit 2

@@ -60,14 +60,14 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `REVIEW_PR_PENDING_LABEL` | `review-pr:pending` | `finish-branch/SKILL.md` (add — C1), `commands/review-pr.md` (remove — C2), `merge-pipeline/SKILL.md` Step 1.4.5 probe (C3) |
 | `REVIEW_PR_TRAILER_PREFIX` | `Reviewed-by: uberdev/review-pr@` | Phase 1.4 (PATH_2 trailer extraction); regex form `^Reviewed-by: uberdev/review-pr@([a-f0-9]{40})$` |
 | `REVIEW_PR_BASE_TRAILER_PREFIX` | `Reviewed-base: uberdev/review-pr@` | Phase 1.4 PATH_2 sub-condition (b.5) base-identity extraction; regex form `^Reviewed-base: uberdev/review-pr@([a-f0-9]{40}) ref=(.+)$` (#440) |
-| `TRUST_INSTRUMENT_ENUM` | `review-pr`, `premerge` — the producing command, carried as DATA inside the trailer rather than baked into the regex. Every trust artifact names exactly one member, and the label and the trailer must name the SAME one. | Phase 1.4 PATH_2 sub-conditions (a), (b), (b.5), (c), (d); `trust-trail-evaluator` dispatch input `trust_instrument` |
+| `TRUST_INSTRUMENT_ENUM` | `review-pr`, `premerge` — the producing command, carried as DATA inside the trailer rather than baked into the regex. The trailer names exactly one member, and it must be one the PR's own labels also name (sub-condition (a) resolves a SET, because the documented compose path leaves two trust labels on one PR). | Phase 1.4 PATH_2 sub-conditions (a), (b), (b.5), (c), (d); `trust-trail-evaluator` dispatch input `trust_instrument` |
 | `TRUST_TRAILER_REGEX` | `^Reviewed-by: uberdev/(review-pr\|premerge)@([a-f0-9]{40})( .*)?$` — the generalised form. `REVIEW_PR_TRAILER_PREFIX` is the `review-pr` instrument's instantiation of it; `PREMERGE_TRAILER_PREFIX` is `premerge`'s. The suffix group is REQUIRED, not defensive: `review-pr` uses it for ` severity=critical-deferred count=N` and `premerge` uses it for ` gate=green attempt=NN`. | Phase 1.4 PATH_2 (b) and (b.5) trailer extraction |
 | `TRUST_BASE_TRAILER_REGEX` | `^Reviewed-base: uberdev/(review-pr\|premerge)@([a-f0-9]{40}) ref=(.+)$` — the base half, generalised the same way (#440 is unchanged in substance; only the instrument segment became data). | Phase 1.4 PATH_2 (b.5) base-identity extraction |
 | `PREMERGE_TRAILER_PREFIX` | `Reviewed-by: uberdev/premerge@` | Phase 1.4 (PATH_2 trailer extraction for the `premerge` instrument) |
 | `PREMERGE_BASE_TRAILER_PREFIX` | `Reviewed-base: uberdev/premerge@` | Phase 1.4 PATH_2 sub-condition (b.5) base-identity extraction for the `premerge` instrument |
 | `PREMERGE_APPROVED_LABEL` | `premerge-approved` | Phase 1.4 (PATH_2 label presence check, `premerge` instrument); emitted by `premerge-pipeline/SKILL.md` Phase 5-trail |
-| `TRUST_LABEL_ENUM` | `uberdev-approved` → instrument `review-pr`; `uberdev-approved-with-concerns` → instrument `review-pr`; `premerge-approved` → instrument `premerge`. Membership in this table is what sub-condition (a) tests, and the matched member is what RESOLVES the instrument — a bare-literal equality against one member is how a genuinely-reviewed deferred-critical stack was refused before its acknowledgement flag could be consulted. | Phase 1.4 PATH_2 sub-condition (a) |
-| `PREMERGE_GATE_TOKEN_REGEX` | `^gate=green attempt=[0-9]{2}$` — the trailer suffix the `premerge` instrument MUST carry. The token lives in the commit body because `.uberdev/` is gitignored, so a verdict that existed only in `gate-NN.json` would be unreadable on every clone but the producer's. | Phase 1.4 PATH_2 (b) for instrument `premerge` |
+| `TRUST_LABEL_ENUM` | `uberdev-approved` → instrument `review-pr`; `uberdev-approved-with-concerns` → instrument `review-pr`; `premerge-approved` → instrument `premerge`. Membership in this table is what sub-condition (a) tests, and EVERY matched member contributes its instrument to the resolved set — a bare-literal equality against one member is how a genuinely-reviewed deferred-critical stack was refused before its acknowledgement flag could be consulted. | Phase 1.4 PATH_2 sub-condition (a) |
+| `PREMERGE_GATE_TOKEN_REGEX` | `^gate=green attempt=[0-9]{2}$` — the trailer suffix the `premerge` instrument MUST carry. The token lives in the commit body because `.uberdev/` is gitignored, so a verdict that existed only in `gate-NN.json` would be unreadable on every clone but the producer's. | Phase 1.4 PATH_2 `merge-base-identity-fence-v1` (b.5), for instrument `premerge` |
 | `BASE_IDENTITY_HELPER` | `skills/merge-pipeline/lib/base-identity.sh` (sole implementation of the landed-delta-equivalence predicate; never inline a merge-base comparison — see (b.5) for why the naive form false-STALEs every squash-merged stack — and never compare two `git diff` TEXTS, which false-STALEs whenever the base touches a file the PR also touches) | Phase 1.4 PATH_2 sub-condition (b.5) base-move resolution (#440) |
 | `BASE_DELTA_EQUIVALENCE_ENUM` | `match`, `mismatch`, `unavailable` (helper stdout), plus `not_evaluated` (caller-only: the base did not move — same ref NAME **and** same OID — so no probe ran; the name alone never licenses this token). `unavailable` is "cannot tell" and the agent maps it to STALE, never PASS. | Phase 1.4 PATH_2 (b.5); `trust-trail-evaluator` dispatch input `base_delta_equivalence` |
 | `RELEASE_ANCHOR_HELPER` | `skills/merge-pipeline/lib/release-anchor.sh` (sole implementation of the inert-release-commit predicate; never inline a subject match) | Phase 1.4 PATH_2 sub-condition (a.5) trust-head resolution (#364) |
@@ -503,17 +503,28 @@ On hit: emit `gate_pass` with `data.trust_anchor="reviewDecision_approved"` (∈
 
 ALL of the following must hold:
 
-a. **Resolve the instrument from the label.** At least one member of `TRUST_LABEL_ENUM` is present on the PR — else gate_fail with `data.reason="trust_trail_label_missing"`. The matched member resolves `LABEL_INSTRUMENT` ∈ `TRUST_INSTRUMENT_ENUM`; it is not merely a presence bit. Match on whole label names, never on substrings — `uberdev-approved-with-concerns` contains `uberdev-approved` and a substring test would mis-resolve it:
+a. **Resolve the instrument SET from the labels.** At least one member of `TRUST_LABEL_ENUM` is present on the PR — else gate_fail with `data.reason="trust_trail_label_missing"`. Every matched member contributes its instrument to `LABEL_INSTRUMENTS` ⊆ `TRUST_INSTRUMENT_ENUM`; a label is not merely a presence bit, and the resolution is a SET rather than a first-arm-wins race. Match on whole label names, never on substrings — `uberdev-approved-with-concerns` contains `uberdev-approved` and a substring test would mis-resolve it:
 
    ```bash
-   LABEL_INSTRUMENT=
-   PR_LABEL_LIST=" $(jq -r '[.labels[].name] | join(" ")' <<<"$PR_JSON") "
+   # A SET, never a first-match winner. `/premerge` parks the stack PR with
+   # `premerge-approved`, and `commands/review-pr.md` removes only its own two
+   # labels -- never that one -- so the documented compose order (`/premerge`,
+   # then `/review-pr <stack-pr>` for the higher tier; README and RFC 0021 A7)
+   # leaves BOTH labels on the PR. A `case` that stopped at the first matching
+   # arm resolved whichever instrument the author happened to list first, which
+   # then disagreed with the newest anchor's trailer at (b.5) and turned the
+   # documented compose path into a hard `trust_trail_trailer_missing` refusal.
+   LABEL_INSTRUMENTS=
+   PR_LABEL_LIST=" $(jq -r '[.labels[]?.name] | join(" ")' <<<"$PR_JSON") "
    case "$PR_LABEL_LIST" in
-     *" premerge-approved "*)              LABEL_INSTRUMENT=premerge ;;
-     *" uberdev-approved "*)               LABEL_INSTRUMENT=review-pr ;;
-     *" uberdev-approved-with-concerns "*) LABEL_INSTRUMENT=review-pr ;;
+     *" uberdev-approved "* | *" uberdev-approved-with-concerns "*) LABEL_INSTRUMENTS="review-pr" ;;
+   esac
+   case "$PR_LABEL_LIST" in
+     *" premerge-approved "*) LABEL_INSTRUMENTS="${LABEL_INSTRUMENTS:+$LABEL_INSTRUMENTS }premerge" ;;
    esac
    ```
+
+   **The set widens WHICH instrument may be resolved, never WHETHER one must be.** An empty `LABEL_INSTRUMENTS` is the `trust_trail_label_missing` gate_fail above, and a non-empty one is not yet a pass: (b.5) requires the trailer's own instrument to be a MEMBER of this set, so a PR wearing only `premerge-approved` still refuses a `review-pr` trailer and one wearing only `uberdev-approved` still refuses a `premerge` trailer. What the set buys is exactly that a dual-labelled PR is resolved by the trailer it actually carries instead of by arm order.
 
    The with-concerns row is not new tolerance: `commands/review-pr.md` removes the GREEN label from a deferred-critical PR and adds the with-concerns one instead, so a bare equality against the GREEN literal refused every such trail at (a) — before `--accept-critical-deferred` could be consulted at (c). The strictness that decides a deferred-critical trail is the evaluator's Phase 2.5 gate, and it is untouched.
 
@@ -653,14 +664,76 @@ b.5. **Resolve the BASE half of the trail before (c) dispatches (#440).** The `R
        *) BASE_DELTA_EQUIVALENCE=unavailable ;;
      esac
    fi
+   # ---- the trailer's own contract, decided HERE -------------------------
+   # The two checks below used to be prose sitting AFTER this fence, expanding
+   # the label half (bound in (a)'s own block, as `$LABEL_INSTRUMENT` then),
+   # `$TRUST_INSTRUMENT` and `$TRAILER_SUFFIX` (both bound in here) from a
+   # shell that binds none of the three.
+   # Every fence is a fresh shell, so all three arrived EMPTY -- and the two
+   # failures point OPPOSITE ways, which is why neither was visible: the
+   # agreement check compared empty to empty and passed VACUOUSLY, silently
+   # opening the gate it exists to close, while the gate-token check tested an
+   # empty suffix against its regex and refused EVERY premerge trail, silently
+   # killing the tier. So both checks live where the values are bound, and the
+   # label half is RE-DERIVED from $PR_JSON for exactly the reason the trailer
+   # SHA is re-extracted above. Keep this snippet byte-identical to (a)'s; it
+   # is the same predicate, and the only input it adds is PR_JSON, which this
+   # fence may already assume.
+   LABEL_INSTRUMENTS=
+   PR_LABEL_LIST=" $(jq -r '[.labels[]?.name] | join(" ")' <<<"$PR_JSON") "
+   case "$PR_LABEL_LIST" in
+     *" uberdev-approved "* | *" uberdev-approved-with-concerns "*) LABEL_INSTRUMENTS="review-pr" ;;
+   esac
+   case "$PR_LABEL_LIST" in
+     *" premerge-approved "*) LABEL_INSTRUMENTS="${LABEL_INSTRUMENTS:+$LABEL_INSTRUMENTS }premerge" ;;
+   esac
+   # DEFAULT-DENY, and it has to stay written this way round: start refused and
+   # let only a positive membership match clear it. Written the other way -- start
+   # clear, refuse on mismatch -- an empty $TRUST_INSTRUMENT (no trailer at all)
+   # matches the space-padded set as the empty string and passes vacuously, which
+   # is the very defect this block replaces.
+   TRAILER_CONTRACT_REFUSAL=trust_trail_trailer_missing
+   PREMERGE_GATE_ATTEMPT=
+   case "$TRUST_INSTRUMENT" in
+     review-pr | premerge)
+       case " $LABEL_INSTRUMENTS " in
+         *" $TRUST_INSTRUMENT "*) TRAILER_CONTRACT_REFUSAL= ;;
+       esac
+       ;;
+   esac
+   # PREMERGE_GATE_TOKEN_REGEX as a `case` glob, never `[[ =~ ]]`: these fences
+   # run through the zsh Bash tool, where BASH_REMATCH is unset. `[0-9][0-9]` is
+   # exactly the `{2}` the regex means, and a `case` pattern is whole-string
+   # anchored, so `^` and `$` come for free.
+   if [ -z "$TRAILER_CONTRACT_REFUSAL" ] && [ "$TRUST_INSTRUMENT" = premerge ]; then
+     TRAILER_CONTRACT_REFUSAL=trust_trail_trailer_missing
+     case "$TRAILER_SUFFIX" in
+       "gate=green attempt="[0-9][0-9])
+         TRAILER_CONTRACT_REFUSAL=
+         PREMERGE_GATE_ATTEMPT="${TRAILER_SUFFIX##*=}"
+         ;;
+     esac
+   fi
+   # The caller consumes these BY VALUE. (c)'s dispatch inputs, the two refusals
+   # and (d)'s corroborator lookup are all in later fences or in prose, and no
+   # later shell inherits this one -- so the fence PRINTS what it resolved rather
+   # than leaving the next reader to dereference a name that is already gone.
+   printf 'TRUST_INSTRUMENT=%s\nTRAILER_SHA=%s\nTRAILER_SUFFIX=%s\n' \
+     "$TRUST_INSTRUMENT" "$TRAILER_SHA" "$TRAILER_SUFFIX"
+   printf 'LABEL_INSTRUMENTS=%s\nTRAILER_CONTRACT_REFUSAL=%s\nPREMERGE_GATE_ATTEMPT=%s\n' \
+     "$LABEL_INSTRUMENTS" "$TRAILER_CONTRACT_REFUSAL" "$PREMERGE_GATE_ATTEMPT"
+   printf 'REVIEWED_BASE_SHA=%s\nREVIEWED_BASE_REF=%s\nCURRENT_BASE_REF=%s\nCURRENT_BASE_OID=%s\n' \
+     "$REVIEWED_BASE_SHA" "$REVIEWED_BASE_REF" "$CURRENT_BASE_REF" "$CURRENT_BASE_OID"
+   printf 'BASE_DELTA_EQUIVALENCE=%s\nBASE_IDENTITY_REFUSAL=%s\n' \
+     "$BASE_DELTA_EQUIVALENCE" "$BASE_IDENTITY_REFUSAL"
    # END merge-base-identity-fence-v1
    ```
 
-   **The label's instrument and the trailer's instrument must agree.** `LABEL_INSTRUMENT` was resolved in (a) from a label; `TRUST_INSTRUMENT` was resolved here from an immutable commit body. When they differ, emit `gate_fail` with `data.reason="trust_trail_trailer_missing"` — the trailer for the instrument the label claims is, literally, missing — skip this PR, and continue the queue. A trail that wears one command's label and another command's trailer is not a trail either command emitted.
+   **The label's instrument and the trailer's instrument must agree.** The fence decides this itself, in the shell that binds both halves: it re-derives `LABEL_INSTRUMENTS` from `$PR_JSON` and parses `TRUST_INSTRUMENT` out of an immutable commit body, then requires the second to be a MEMBER of the first, default-deny. When it is not, the fence sets and prints `TRAILER_CONTRACT_REFUSAL=trust_trail_trailer_missing`; on that value emit `gate_fail` with `data.reason="trust_trail_trailer_missing"` — the trailer for the instrument the label claims is, literally, missing — skip this PR, and continue the queue. A trail that wears one command's label and another command's trailer is not a trail either command emitted. **Membership, not arm order, is what decides a dual-labelled PR**: `/premerge` then `/review-pr <stack-pr>` is the documented compose order and leaves both trust labels on the PR, so a first-match resolution refused the very path the README and RFC 0021 A7 prescribe. And the comparison may never be written as prose over names some earlier fence bound — expanded in a shell that binds neither, it compares empty to empty and passes, admitting exactly the mismatched pair it exists to refuse.
 
-   **For instrument `premerge`, the trailer must carry a green gate token.** `$TRAILER_SUFFIX` must match `PREMERGE_GATE_TOKEN_REGEX` (`^gate=green attempt=[0-9]{2}$`) — else `gate_fail` with `data.reason="trust_trail_trailer_missing"`. This is the payload that keeps the premerge tier from resting on two bare literals, and it lives in the commit body rather than in `gate-NN.json` because `.uberdev/` is gitignored and a clone that never ran the producer has no such file. The attempt number is captured for (d)'s corroborator lookup. For instrument `review-pr` the suffix is optional and its only defined value remains the deferred-critical ` severity=critical-deferred count=N` form.
+   **For instrument `premerge`, the trailer must carry a green gate token.** `$TRAILER_SUFFIX` must match `PREMERGE_GATE_TOKEN_REGEX` (`^gate=green attempt=[0-9]{2}$`) — else `gate_fail` with `data.reason="trust_trail_trailer_missing"`. The fence runs this test where `TRAILER_SUFFIX` is bound, as a whole-string `case` glob rather than a `[[ =~ ]]` the zsh Bash tool would evaluate with `BASH_REMATCH` unset, folds the verdict into the same `TRAILER_CONTRACT_REFUSAL`, and captures the attempt number in `PREMERGE_GATE_ATTEMPT` for (d)'s corroborator lookup. Testing this regex against a `$TRAILER_SUFFIX` bound in some other shell is not a stricter reading of the check — it is a check that fails for EVERY premerge trail, which kills the tier as silently as the vacuous pass above opens it. This is the payload that keeps the premerge tier from resting on two bare literals, and it lives in the commit body rather than in `gate-NN.json` because `.uberdev/` is gitignored and a clone that never ran the producer has no such file. For instrument `review-pr` the suffix is optional and its only defined value remains the deferred-critical ` severity=critical-deferred count=N` form.
 
-   **When `$BASE_IDENTITY_REFUSAL` is non-empty this fence REFUSES**: emit `gate_fail` with `data.reason="$BASE_IDENTITY_REFUSAL"` (`trust_trail_trailer_missing`, already in `GATE_FAIL_REASON_ENUM`), skip this PR, and continue the queue. This fence re-derives the trailer SHA from the commit body rather than trusting a name bound in another shell, so its answer is always about evidence it read itself.
+   **When either `$BASE_IDENTITY_REFUSAL` or `$TRAILER_CONTRACT_REFUSAL` is non-empty this fence REFUSES**: emit `gate_fail` with `data.reason` set to that value (`trust_trail_trailer_missing`, already in `GATE_FAIL_REASON_ENUM` — this fence adds no new member), skip this PR before (c) dispatches, and continue the queue. Read both off the fence's own printed output; every value (c) and (d) consume — the trailer SHA, the instrument, the suffix, the label set, the captured attempt, both base endpoints and the equivalence token — is printed there for exactly this reason. This fence re-derives the trailer SHA, the trailer's instrument and the label set rather than trusting names bound in another shell, so its answer is always about evidence it read itself.
 
    **Sub-condition (b)'s stated regex is narrower than what the producer emits.** (b) above quotes `^Reviewed-by: uberdev/review-pr@([a-f0-9]{40})$`, but `review-pr.md` appends `TRAILER_SUFFIX` — ` severity=critical-deferred count=N` — on every YELLOW trail (RFC 0002 §3.4). The `$`-anchored form therefore matches no deferred-critical PR at all. (b.5) uses the suffix-tolerant `( .*)?$` and strips the suffix with `%% *`, so it recovers the SHA the producer actually wrote. Aligning (b)'s quoted regex is tracked separately; do NOT "simplify" (b.5) back to the `$`-anchored form to match it.
 
@@ -847,11 +920,22 @@ c. The extracted `<trailer-sha>` is delegated to the `trust-trail-evaluator` age
 
       Any verdict from (c) other than `PASS` short-circuits sub-condition (d): the caller emits `gate_fail` immediately and does NOT evaluate (d). (d) is only checked when (c) returned `PASS`.
 
-d. **Instrument `premerge`.** The corroborator is a `gate-<NN>.json` written by a `/premerge` run under `.uberdev/premerge/*/`, never a `review-pr-verdict.json`; Step (c.0) never ran for this instrument, so there is no cached receipt to reuse and nothing in the `review-pr` paragraphs below applies. **Select the candidate by SHA, never by attempt number alone.** The `*` in that glob is a run id, and every earlier `/premerge` run in this checkout left its own `gate-<NN>.json` at the same attempt number — so choosing by the trailer's `attempt=NN` alone selects an unrelated run's file, whose `head_sha` names a different commit, and refuses a perfectly good trail as stale. Enumerate every `gate-<NN>.json` the glob matches for the attempt the trailer named, keep only the ones that parse AND whose `head_sha` equals `$TRAILER_SHA`, and classify on what survives. Three arms, and only the middle one is a refusal:
+d. **Instrument `premerge`.** The corroborator is a `gate-<NN>.json` written by a `/premerge` run, never a `review-pr-verdict.json`; Step (c.0) never ran for this instrument, so there is no cached receipt to reuse and nothing in the `review-pr` paragraphs below applies.
+
+   **Search the same four layouts the `review-pr` arm does — the repo root alone is not one of them.** `/premerge` writes its run dir at `<checkout>/.uberdev/premerge/<RUN_ID>/`, where `<checkout>` is `${WORKTREE_ROOT:-$(git rev-parse --show-toplevel)}` — the checkout it ran in, which for a worktree session is the worktree and not the main clone. A root-only `.uberdev/premerge/*/gate-<NN>.json` therefore matches nothing whenever `/premerge` ran in a worktree and `/merge` runs from the main checkout, sending every such run down the Absent arm and making the head_sha selection below dead code. Enumerate, relative to the cwd:
+
+   - `.uberdev/premerge/*/gate-<NN>.json` — canonical root
+   - `.claude/worktrees/*/.uberdev/premerge/*/gate-<NN>.json` — `/solve`, `/turbo`, and any session entered via a worktree
+   - `.worktrees/*/.uberdev/premerge/*/gate-<NN>.json` — `using-git-worktrees`, hidden
+   - `worktrees/*/.uberdev/premerge/*/gate-<NN>.json` — `using-git-worktrees`, visible
+
+   These are the four roots `discover_review_verdict_json` already covers for the `review-pr` arm, and the `~/.config/uberdev/worktrees/<project>/<branch>/…` global fallback stays out of scope here for the same reason it does there. Enumerate them with ONE `find -H` over the roots that exist — never a `compgen -G` OR-chain, which is the bashism that silently misfires under the zsh Bash tool (#294).
+
+   **Select the candidate by SHA, never by attempt number alone.** `<NN>` is `$PREMERGE_GATE_ATTEMPT`, the attempt the (b.5) fence captured out of the trailer suffix and printed. The `*` before it is a run id, and every earlier `/premerge` run in the same checkout left its own `gate-<NN>.json` at that same attempt number — so choosing by `attempt=NN` alone selects an unrelated run's file, whose `head_sha` names a different commit, and refuses a perfectly good trail as stale. Widening the search widens the candidate POOL and never the acceptance: keep only the ones that parse AND whose `head_sha` equals `$TRAILER_SHA`, and classify on what survives. Three arms, and only the middle one is a refusal:
 
    - **Bound and green** — at least one candidate survived, the survivors agree, and their verdict is `green`. Surviving already means the file binds to `$TRAILER_SHA`, so this is evidence about the very commit the trailer names. Proceed to `gate_pass` with `data.trust_anchor="uberdev_premerge_trail"`.
    - **Bound and disagreeing** — the survivors agree and their verdict is not `green`. Emit `gate_fail` with `data.reason="trust_trail_stale_sha"`. Local evidence that demonstrably describes THIS commit and contradicts the trailer is a genuine staleness signal, not a shrug.
-   - **Absent, unreadable or ambiguous** — nothing survived: the glob matched no file, no match parsed, no match bound to `$TRAILER_SHA`, or two that did bind disagree with each other so no single one is authoritative. `.uberdev/` is gitignored, so an empty result is the ordinary state on any clone that did not run `/premerge`, and an ambiguous one is not evidence of anything. Emit one `error` audit event with `data.reason="trust_trail_json_absent"` `data.pr=<N>`, append the one-line run-summary advisory, and emit `gate_pass`. **This arm deliberately downgrades #716's originally-proposed `gate-NN.json` refusal to a corroborator-only check**: hardening it into a refusal would make the premerge tier unresolvable on every clone but the producer's, and the substitute payload is the `gate=green attempt=NN` token in the immutable commit body that (b) already required — so the tier never rests on a bare label plus a bare trailer. The JSON adds corroboration and never gates harder than (c), exactly as the `review-pr` arm does not.
+   - **Absent, unreadable or ambiguous** — nothing survived: no layout matched a file, no match parsed, no match bound to `$TRAILER_SHA`, or two that did bind disagree with each other so no single one is authoritative. `.uberdev/` is gitignored, so an empty result is the ordinary state on any clone that did not run `/premerge`, and an ambiguous one is not evidence of anything. Emit one `error` audit event with `data.reason="trust_trail_json_absent"` `data.pr=<N>`, append the one-line run-summary advisory, and emit `gate_pass`. **This arm deliberately downgrades #716's originally-proposed `gate-NN.json` refusal to a corroborator-only check**: hardening it into a refusal would make the premerge tier unresolvable on every clone but the producer's, and the substitute payload is the `gate=green attempt=NN` token in the immutable commit body that (b) already required — so the tier never rests on a bare label plus a bare trailer. The JSON adds corroboration and never gates harder than (c), exactly as the `review-pr` arm does not.
 
    **Instrument `review-pr` — everything below is unchanged.** The artifact **whose top-level `.pr` integer field equals the current PR number `<N>`** is **corroborating-only** — the JSON is local-only debug telemetry per D1 and `.uberdev/` is gitignored, so its absence on a fresh clone is by design (the trailer + (c) agent verdict are the load-bearing trust artifacts). This sub-condition MUST reuse only the closed controller state produced in Step (c.0): `DISCOVERY_STATE`, `PHASE2_5_AUDIT_STATE`, and cached `AUDIT_ARTIFACT_SHA`. It must not reopen the selected source pathname, reopen the snapshot carrier, rediscover, re-rank, or parse artifact JSON again. The canonical helper's search surface remains `.uberdev/runs/*/review-pr-verdict.json`, `.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json`, `.worktrees/*/.uberdev/runs/*/review-pr-verdict.json`, and `worktrees/*/.uberdev/runs/*/review-pr-verdict.json`. It validates `RUN_ID_REGEX` before identity reads, accepts only integer `.pr`, and ranks by the timestamp prefix only. Expected-PR artifacts tied at the selected timestamp are accepted only when their securely captured bytes are identical. Valid artifacts for other PRs are ignored. Older unknown identity is harmless; newer/equal unknown identity is indeterminate. The check here is presence + cached shape; strict `"sha" == headRefOid` is RETIRED post-#78 — sub-condition (c) already does tamper detection via the trust-trail-evaluator's cumulative-diff heuristic, and (d) gating harder than (c) contradicted the fast-forward-fixup tolerance documented immediately below at "Honest fast-forward fixup commits..." (see issue #78). Two evaluation paths:
    - **JSON present (typed discovery FOUND=0).** Step (c.0) already validated the expected PR, top-level lowercase 40-hex SHA, Phase 2.5 fields, snapshot digest, and snapshot identity from one byte capture, then cleaned the private carrier. Use cached `AUDIT_ARTIFACT_SHA`; do not execute `jq`, the legacy path-taking parser, or any file read in this sub-condition. A missing/non-40-hex cached value is an impossible closed-receipt invariant break and emits `gate_fail` with `data.reason="trust_trail_json_sha_mismatch"` (the reason name is preserved post-#78 for audit-log compatibility but its scope is narrowed to **shape-malformed only**). On shape OK: proceed to `gate_pass`. **No equality check against `headRefOid`** — the JSON's role is corroborator-only; (c) owns tamper detection.
