@@ -1438,6 +1438,102 @@ else
   echo "  FAIL  P22c: the append detector cannot see an append — P22b is vacuous"; FAIL=$((FAIL + 1))
 fi
 
+echo "== P23: the 4c verify review is scoped to the polish, not the stack (#795) =="
+# 4c asks "did the polish do harm", never "what else is wrong with the stack".
+# Pointed at the stack PR it re-samples an unbounded finding set, and any blocker
+# it happens to roll -- including one present all along that the green gate simply
+# did not sample -- reads as "a blocker the polish introduced" and REVERTS a
+# correct, behaviour-preserving refactor.
+#
+# The scope comes from the CHECKOUT, not from a target argument: 4b commits and
+# does NOT push, so the reviewer's no-target default `git diff @{upstream}...HEAD`
+# resolves to exactly the polish. Passing a range instead would be interpreted
+# rather than enforced on the default cell, and an IGNORED target falls back to
+# that same default -- which on an already-pushed branch is EMPTY. That is the
+# trap these rows exist to keep shut: the failure is a vacuous green, not a wider
+# review.
+SIMPLIFY_PUSH_FENCE="$(fence_body "$SKILL" premerge-simplify-push)"
+if [ -n "$SIMPLIFY_PUSH_FENCE" ]; then
+  echo "  PASS  P23: the simplify-push fence extracts non-empty"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  P23: the simplify-push fence extracted empty - the origin tag moved"; FAIL=$((FAIL + 1))
+fi
+assert_grep "$SKILL" '^```bash uberdev-executable origin=premerge-simplify-push$' \
+  "P23: the simplify-push fence carries exactly its documented origin tag"
+# THE LOAD-BEARING ROW. The commit fence must not push: the unpushed window IS
+# 4c's review scope. A push here re-creates the empty-default vacuous green.
+# assert_not_in / assert_in, NOT assert_no_grep / assert_grep: a fence body is a
+# STRING, and handing it to a helper that greps a FILE makes the row vacuous --
+# grep cannot open it, reports no match, and a "must not contain" row passes for
+# the wrong reason. The anti-vacuity mutant below is what caught that here.
+assert_not_in "$SIMPLIFY_FENCE" 'push origin' \
+  "P23: the simplify-COMMIT fence does not push - the unpushed window is the scope"
+assert_in "$SIMPLIFY_PUSH_FENCE" 'push origin "$PREMERGE_BRANCH"' \
+  "P23: the simplify-PUSH fence is the one that pushes"
+# THE PROSE HALF. The fence-body row above cannot see 4b's SURROUNDING TEXT, and a
+# leftover "Push." sentence next to a fence that must not push is a contradiction a
+# controller resolves by pushing -- which closes the unpushed window and hands 4c an
+# empty review. Scoped to the 4b section, extracted by heading, not the whole file.
+P23_4B="$(awk '/^### 4b — Apply the behaviour-preserving findings$/{f=1;next} /^### 4b-defer/{f=0} f' "$SKILL")"
+if [ -z "$P23_4B" ]; then
+  echo "  FAIL  P23: could not extract the 4b section - its heading moved"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  P23: the 4b section extracts non-empty"; PASS=$((PASS + 1))
+fi
+assert_not_in "$P23_4B" '(^|[^-])[Pp]ush\.' \
+  "P23: 4b's prose does not tell the controller to push"
+assert_in "$P23_4B" 'Do not push' \
+  "P23: 4b's prose says the opposite, in words"
+# THE FLAG. The push is the ONLY push of the simplify commit, so it must not sit
+# behind --no-post-simplify-review: that flag is documented as costing the
+# verification, never the polish. Without this row the polish is committed locally
+# and never reaches the stack PR on `/premerge --no-post-simplify-review`.
+assert_fixed "$SKILL" 'Step 2 — the push —' \
+  "P23: 4c distinguishes the flag-gated steps from the push"
+assert_fixed "$SKILL" 'runs regardless' \
+  "P23: and says the push runs regardless of --no-post-simplify-review"
+# 4b's non-zero exits leave the lens edits UNCOMMITTED in a dirty tree, where the
+# reviewer's empty-range fallback would sweep them into the review.
+assert_fixed "$SKILL" 'a non-zero exit' \
+  "P23: 4c has an arm for 4b refusing, not just for 4b finding nothing to do"
+# 4c passes a level and no target. Both halves matter: the old bare-PR call is
+# gone, and nothing reintroduced a target of any shape.
+P23_BARE_PR_RE='code-review", "<level> <PREMERGE_PR>"'
+assert_no_grep "$SKILL" "$P23_BARE_PR_RE" \
+  "P23: 4c no longer dispatches the verify review at the bare stack PR"
+assert_fixed "$SKILL" 'Skill("code-review", "<level>")' \
+  "P23: 4c dispatches with a level and no target argument"
+assert_fixed "$SKILL" 'No target' \
+  "P23: and says so in words, so the next editor does not helpfully add one"
+# The no-edits arm: 4b can exit before making a commit, and 4c must skip rather
+# than verify a commit that was never made.
+assert_fixed "$SKILL" 'COMMIT=none REASON=no-edits`** — skip 4c entirely' \
+  "P23: 4c has an explicit skip arm for 4b's no-edits early exit"
+# The pointer 4c hands the next editor must resolve. A "do not do X, see Y for why"
+# whose Y does not exist is how X gets re-added by someone acting in good faith.
+assert_fixed "$SKILL_MISTAKES" 'Handing 4c a target argument' \
+  "P23: the mistake entry 4c points at actually exists"
+assert_fixed "$SKILL_MISTAKES" 'It degrades to an empty' \
+  "P23: and it records the empty-review failure direction, not a wider-review one"
+# The retraction of the false range claim stays retracted.
+assert_no_grep "$SKILL" 'not a two-SHA range' \
+  "P23: the false 'ranges are not a target form' claim is gone"
+# ANTI-VACUITY, one per assert_no_grep above, each re-reading the SAME pattern
+# rather than re-typing it. Herestrings, not pipes (EPIPE guard).
+P23_PUSH_RE='push origin'
+P23_PUSH_MUTANT='PREMERGE_PUSH_ERR="$(git push origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {'
+if grep -qE -e "$P23_PUSH_RE" <<<"$P23_PUSH_MUTANT"; then
+  echo "  PASS  P23: the push detector sees a push when there is one"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  P23: the push detector cannot see a push - the row above is vacuous"; FAIL=$((FAIL + 1))
+fi
+P23_MUTANT='1. `Skill("code-review", "<level> <PREMERGE_PR>")` again, scoped to the refactor.'
+if grep -qE -e "$P23_BARE_PR_RE" <<<"$P23_MUTANT"; then
+  echo "  PASS  P23: the bare-PR detector sees the old call when it is present"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  P23: the bare-PR detector cannot see the old call - the row above is vacuous"; FAIL=$((FAIL + 1))
+fi
+
 echo ""
 echo "== Summary =="
 echo "  passed: $PASS"

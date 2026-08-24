@@ -1448,8 +1448,10 @@ None of the five stops the loop, and none of them is `0.00`. Reading `-` as zero
 *we did not look* into *we looked and it was fine*.
 
 **Deliberately the coarse proxy.** The precise question — did this finding land in text
-the previous repair *wrote* — needs diff-hunk mapping nothing here produces (A3 C8: the
-reviewer takes a PR, a branch or a path, not a two-SHA range). File membership counts a
+the previous repair *wrote* — needs per-finding hunk provenance, and the reviewer returns
+`file` and `line` and nothing that says which hunk a line came from. (A3 C8's second
+reason — *"a two-SHA range is not in that surface"* — is **retracted**; see its amendment,
+and note that a range would have bought scope, never provenance.) File membership counts a
 new finding anywhere in a touched file, so it errs toward stopping, which the two-round
 requirement absorbs. Do not build the hunk-mapping version to "fix" this; build it, if
 ever, as the C1–C8 design A3 is waiting for.
@@ -1921,7 +1923,7 @@ $PREMERGE_RUN_DIR/simplify-scope-<NN>.allowed
 ```
 
 Then commit with the fence below, which is the Phase 2a guard with that file as
-its assigned list. Push.
+its assigned list. **Do not push** — `### 4c` step 2 does, after the review.
 
 ```bash uberdev-executable origin=premerge-simplify-commit
 set -u
@@ -1978,13 +1980,9 @@ fi
 
 git add -u || exit 2
 git commit -m "refactor(premerge): apply simplify lenses to the stack" >/dev/null || exit 2
-PREMERGE_PUSH_ERR="$(git push origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
-  # Bounded and defused first — references/phase-contracts.md, `### What a failed push is allowed to say`.
-  PREMERGE_PUSH_ERR="$(printf '%s' "${PREMERGE_PUSH_ERR//PREMERGE/PRE-MERGE}" | tr -s '\n\r\t' ' ' | cut -c1-200)"
-  printf 'error: pushing the simplify commit to %s failed: %s\n' \
-    "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2
-  exit 2
-}
+# COMMITS AND DOES NOT PUSH: while `origin/<branch>` is still one commit behind,
+# the reviewer's no-target default IS the polish, which is `### 4c`'s whole scope
+# mechanism. `### 4c` step 2 pushes.
 printf 'PREMERGE SIMPLIFY COMMIT=%s ATTEMPT=%s\n' "$(git rev-parse HEAD)" "$PREMERGE_ATTEMPT" >&2
 ```
 
@@ -2018,20 +2016,58 @@ is written about.)*
 
 ### 4c — VERIFY
 
-**Runs unless `--no-post-simplify-review`.** This is the phase the shipped
-pipeline was missing entirely.
+**Steps 1, 3 and 4 run unless `--no-post-simplify-review`. Step 2 — the push —
+runs regardless**: it is the only push of the simplify commit, and both
+`commands/premerge.md` and RFC 0021 promise that flag costs the *verification*,
+never the polish itself.
 
-Phase 4 is the last thing to touch the branch, and every gate in the run was
-computed *before* it. So a refactor that reddened the suite, or changed behaviour
-while claiming not to, or introduced a fresh blocker, would ship inside a stack
-whose summary says `clean gate green` — and Phase 5's `chore(release)` commit
-would then attest to code nothing ever verified.
+Branch on what `### 4b` reported, and there is no fourth arm:
 
-**Run a full attempt cycle at `PREMERGE_ATTEMPT + 1`.** Not just the gate — the
-whole Phase 1 → Phase 2 → Phase 3 sequence, exactly as the loop runs it:
+- **`COMMIT=none REASON=no-edits`** — skip 4c entirely and go to Phase 5, leaving
+  `PREMERGE_ATTEMPT` where it is. Nothing was applied, so there is nothing to
+  push, verify or revert.
+- **a non-zero exit** — 4b refused (wrong branch, untracked files, absent allowed
+  set, stray files), and each of those leaves the lens edits uncommitted in a
+  dirty tree. **Stop the run; do not verify.** The reviewer's empty-range
+  fallback would otherwise pull those scope-rejected edits into the review.
+- **`COMMIT=<sha>`** — run a full attempt cycle at `PREMERGE_ATTEMPT + 1`: not just
+  the gate, the whole Phase 1 → Phase 2 → Phase 3 sequence, as the loop runs it.
 
-1. `Skill("code-review", "<level> <PREMERGE_PR>")` again, scoped to the refactor.
-2. The **Phase 2 triage fence** at the new attempt index. This is the step that
+1. `Skill("code-review", "<level>")` — **a level and NOTHING ELSE. No target
+   argument at all, and never the stack PR number.** 4c asks *"did the polish do
+   harm"*; pointed at the stack PR it asks *"what is wrong with this stack"* and a
+   critic answers that from an unbounded set, so a blocker it rolls in a file the
+   polish never touched reverts a correct refactor (#795). The scope comes from the
+   **checkout**: the reviewer's no-target default is `git diff @{upstream}...HEAD`,
+   `### 4b` left the polish unpushed and Phase 0c set upstream tracking, so that
+   default resolves to exactly the polish commit. **Do not "improve" this by passing
+   the range explicitly** — `references/common-mistakes.md`, *"Handing 4c a target
+   argument"*, records why an ignored target degrades to an EMPTY review.
+
+2. **Push the polish** — after step 1's review, on the runs where step 1 ran:
+
+```bash uberdev-executable origin=premerge-simplify-push
+set -u
+PREMERGE_BRANCH="${PREMERGE_BRANCH:?PREMERGE_BRANCH must be prefixed onto this fence by the orchestrator}"
+# A fence is a fresh shell and cannot assume the checkout did not move under it.
+PREMERGE_HEAD_BRANCH="$(git symbolic-ref -q --short HEAD)" || PREMERGE_HEAD_BRANCH=""
+[ "$PREMERGE_HEAD_BRANCH" = "$PREMERGE_BRANCH" ] || {
+  printf 'error: expected to be on %s but HEAD is %s; refusing to push the simplify pass\n' \
+    "$PREMERGE_BRANCH" "${PREMERGE_HEAD_BRANCH:-(detached)}" >&2
+  exit 2
+}
+PREMERGE_PUSH_ERR="$(git push origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
+  # Bounded and defused first — references/phase-contracts.md, `### What a failed push is allowed to say`.
+  PREMERGE_PUSH_ERR="$(printf '%s' "${PREMERGE_PUSH_ERR//PREMERGE/PRE-MERGE}" | tr -s '\n\r\t' ' ' | cut -c1-200)"
+  printf 'error: pushing the simplify commit to %s failed: %s\n' \
+    "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2
+  exit 2
+}
+printf 'PREMERGE SIMPLIFY PUSHED=%s\n' "$(git rev-parse HEAD)" >&2
+```
+
+
+3. The **Phase 2 triage fence** at the new attempt index. This is the step that
    is easy to skip and fatal to skip: `plan` is what stamps `head_sha`, and the
    simplify commit has already moved `HEAD`. Re-gating without re-stamping
    compares the pre-simplify evidence against the post-simplify SHA, which is
@@ -2039,7 +2075,7 @@ whole Phase 1 → Phase 2 → Phase 3 sequence, exactly as the loop runs it:
    single run and revert every correct, behaviour-preserving polish pass. A
    self-check that always fails is worse than none: it trains its reader to
    ignore it.
-3. The **Phase 3 gate fence** at the new attempt index with `PREMERGE_PUSHED=1`.
+4. The **Phase 3 gate fence** at the new attempt index with `PREMERGE_PUSHED=1`.
    Report the post-simplify CI state as a row of its own in the summary, not as
    an update to the pre-simplify one — two different SHAs were measured and the
    operator should see both.
@@ -2049,13 +2085,7 @@ attempt index 4c planned, so its `defer` and its summary describe the tree that
 was actually verified rather than the one before the polish.
 
 **Read the gate verdict from `gate-<NN>.json` directly — do not route this
-through `converge`.** Two reasons, and the second is the load-bearing one. The
-repair budget may already be spent, and `converge` refuses an attempt past it
-(`bad_attempt`, exit 74), which would turn a successful verify into a crash. And
-`converge` would answer the wrong question anyway: the predecessor attempt gated
-**green**, so its blocker set is empty, so a blocker the polish introduced is
-`appeared > 0` with `fixed == 0` — `STOP_REGRESSED` on the first call, on every
-run, which parks the exact commit this phase exists to remove. The branch is:
+through `converge`.** The branch is:
 
 | Verify outcome | Action |
 |---|---|
@@ -2063,44 +2093,14 @@ run, which parks the exact commit this phase exists to remove. The branch is:
 | `not_green`, and **every** reason is waitable — `ci=pending`, `ci=no_checks_after_push`, `ci=unknown`, `mergeable=unknown` | wait `PREMERGE_CI_SETTLE_SECS`, re-run **this same** Phase 3 gate fence (same attempt index, `PREMERGE_PUSHED=1`), and take this table again. At most `PREMERGE_WAIT_CI_CEILING` re-probes; reaching the ceiling is `not_green` for `ci_unsettled` — the state `converge` would call `STOP_UNREADABLE` — i.e. the row below |
 | `not_green` for **any** other reason — a blocker the polish introduced, `ci=red`, `mergeable=CONFLICTING`, `stale_evidence` | **revert the simplify commit**, push, and report `simplify=reverted (<reason>)` |
 
-The arms are disjoint and exhaustive by construction: the verdict is `green` or
-`not_green`, and a not-green reason set either sits entirely inside the waitable
-set or it does not. Count the re-probes in the controller — 4c does not call
-`converge`, so it writes no `converge.jsonl` row for `_count_wait_rows` to find,
-and an uncounted wait is an unbounded loop under a command that promises it will
-not loop forever.
+The arms are disjoint and exhaustive. **Count the re-probes in the controller**: 4c
+writes no `converge.jsonl` row for `_count_wait_rows`, so a wait is else unbounded.
 
-**The wait arm is not politeness; without it the verify is a coin flip that
-always lands the same way.** Step 3 gates with `PREMERGE_PUSHED=1` immediately
-after pushing the simplify commit, and by `### The CI settle window` above
-`gh pr checks` reports nothing at all for the first 10–30 seconds after a push.
-So the first probe answers `not_green REASONS=ci=no_checks_after_push` on
-essentially every run, and reverting on that throws away a correct,
-behaviour-preserving polish because the build had not started yet — the same
-"a self-check that always fails is worse than none" hazard step 2 warns about.
-Everywhere else in the pipeline those reasons are explicitly waitable; 4c does
-not get to be the one gate reader that treats them as a verdict.
+**Never revert past the fix commits** — they are the loop's product and what made the
+stack green. Report the verify reason alongside `simplify=reverted`: the revert
+removes the polish, not the reason.
 
-**And there is no "repair it" arm, deliberately.** Simplify is optional polish,
-so its failure mode is `undo`, not `debug`: routing a broken polish back into the
-loop spends the repair budget — when any is left — on a refactor nobody asked
-for, and on the failure it would most often be handed, a blocker the polish
-itself introduced, `converge` stops with `STOP_REGRESSED` before one fixer is
-dispatched. So the run would park the broken polish either way, which is what
-both this file's `## The order within one attempt` ("un-does itself if it did
-harm") and the command's own guarantee ("reverted, not debugged") forbid.
-
-The revert rule is the point. **A stack that was green before the polish and
-broken after it does not need a human to debug the polish at 3am — it needs the
-polish gone.** `git revert --no-edit <simplify-sha>` restores the last state that
-actually passed a gate, and the un-applied findings are already on their way to
-issues, so nothing is lost except a refactor that was not safe to ship. Report
-the verify reason alongside `simplify=reverted`: the revert removes the polish,
-not the reason, and a `mergeable=CONFLICTING` that appeared while Phase 4 ran is
-still true of the stack afterwards.
-
-Never revert past the fix commits. They are the loop's product and they are what
-made the stack green in the first place.
+`references/phase-contracts.md` `### Phase 4c` carries the reasoning for all three.
 
 ---
 
