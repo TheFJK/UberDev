@@ -4,6 +4,36 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.56.1] — 2026-08-24
+
+### Changed — the project rule file is `CLAUDE.md`, not `AGENTS.md`
+
+`AGENTS.md` was the Codex convention, reaching Claude Code only because a
+one-line `CLAUDE.md` imported it (#748). This repo does not use Codex, so the
+indirection bought nothing and cost a level of misdirection: the rules an agent
+actually obeys lived in a file named for a tool that never reads this repo.
+
+The content is unchanged — the same bump-version-everywhere mandate, the same
+three-lane table, the same six surfaces — it now lives directly in `CLAUDE.md`.
+Nine citations that named the old path were retargeted: `bump-version.sh`,
+`review-consolidate.sh`, the premerge SKILL (×2), RFC 0021, `docs/testing.md`,
+`_lib_assert_structural.sh`, `post-impl-review/references/contracts.md`, and
+`.gitignore`'s comment about the import that no longer exists.
+
+`tests/docs-accuracy.test.sh`'s T12 block — which FATALs on the rule document
+being unreadable and pins fourteen assertions to its version section — was
+retargeted with it.
+
+### Unchanged — reading a target repo's `AGENTS.md`
+
+The 62 remaining references are the plugin honouring **whatever** convention
+file the repo it is installed into happens to carry. `convention-compliance`
+reviews against the target repo's own written rules; `research-constraints`
+reads `<working_dir>/AGENTS.md`; `review-fleet-args.sh` collects
+`-name AGENTS.md -o -name CLAUDE.md -o -name .editorconfig`. Dropping those
+would remove a feature from every downstream user, which is a different change
+from this repo not needing the file itself.
+
 ## [0.56.0] — 2026-08-24
 
 Packs #762, #763, #764, #765 and #766 as one stack, plus three rounds of

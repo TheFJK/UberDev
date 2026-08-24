@@ -72,13 +72,13 @@ PLUGIN_DIR="$REPO_ROOT/plugins/uberdev"
 HOOKS_JSON="$REPO_ROOT/plugins/uberdev/hooks/hooks.json"
 HOOKS_CURSOR_JSON="$REPO_ROOT/plugins/uberdev/hooks/hooks-cursor.json"
 PRE_COMPACT="$REPO_ROOT/plugins/uberdev/hooks/pre-compact"
-# #472 version-bump-contract surfaces. AGENTS.md is the rule document the
+# #472 version-bump-contract surfaces. CLAUDE.md is the rule document the
 # convention lens quotes verbatim AND the only one a worktree solver can read
 # (the project CLAUDE.md twin is gitignored — .gitignore). The other three are
 # the machinery that decides which commit actually carries the bump, so T12
 # below locks the doc and the machinery against EACH OTHER rather than pinning
 # either alone.
-AGENTS_MD="$REPO_ROOT/AGENTS.md"
+CLAUDE_MD="$REPO_ROOT/CLAUDE.md"
 SOLVE_FLEET_JS="$PLUGIN_DIR/skills/solve-fleet/workflow.js"
 # #507 design-chain surfaces. The fleet script is the machinery; its SKILL.md
 # and RFC 0015 both restate the chain AND the CB1 projection as prose, so T14
@@ -128,7 +128,7 @@ for f in "$TESTING_MD" "$CONTRIBUTING_MD" "$DISPATCH_RFC" "$ALIAS_RFC" \
          "$SESSION_START" "$ALIASES_SYNC" "$TEST_YML" \
          "$USING_SKILL" "$CONFIG_REF" "$HOOKS_JSON" "$HOOKS_CURSOR_JSON" \
          "$PRE_COMPACT" "$WORKFLOW_RFC" "$GOAL_RFC" "$VENDOR_RFC" \
-         "$PRECISION_RFC" "$PRECISION_MINER" "$AGENTS_MD" "$SOLVE_FLEET_JS" \
+         "$PRECISION_RFC" "$PRECISION_MINER" "$CLAUDE_MD" "$SOLVE_FLEET_JS" \
          "$SOLVE_FLEET_SKILL" "$DISPATCH15_RFC" "$MERGE_PIPELINE_SKILL" \
          "$GOAL_WATCH_SH" "$BUMP_VERSION_SH" "$STRUCTURAL_LIB" \
          "$ADAPTIVE_RFC" "$RUN_MANIFEST_PY" "$DOCS_ACCURACY_SELF" \
@@ -139,8 +139,8 @@ done
 
 # Shared structural-assertion helpers (assert_in_section + assert_count for T12
 # — the version rule is sliced to its own section so a stray prose match
-# elsewhere in AGENTS.md cannot false-positive it; see the T12 block for what
-# that scoping does and does NOT buy while AGENTS.md carries a single level-2
+# elsewhere in CLAUDE.md cannot false-positive it; see the T12 block for what
+# that scoping does and does NOT buy while CLAUDE.md carries a single level-2
 # section). Fail-loud guard per #209: a missing or unreadable helper aborts
 # rc=2, never vacuous-green.
 source "$REPO_ROOT/tests/_lib_assert_structural.sh" || { echo "FATAL: _lib_assert_structural.sh missing/unreadable" >&2; exit 2; }
@@ -1927,14 +1927,14 @@ assert_grep "$REPO_ROOT/README.md" 'finding-confidence-rubric-v1' \
 
 echo
 echo "== T12: the version-bump contract — rule doc and machinery, locked in both directions (#472) =="
-# THE DRIFT THIS LOCKS. AGENTS.md's version section said, unqualified, that
+# THE DRIFT THIS LOCKS. CLAUDE.md's version section said, unqualified, that
 # every user-facing merge must bump the version "in the same PR". The shipped
 # machinery says the opposite for one whole lane: skills/solve-fleet/workflow.js
 # FORBIDS every fleet solver from bumping, because N solvers cut off one base
 # all resolve the SAME next version and that duplicate edit auto-merges without
 # a conflict, silently losing a release. So the rule document convicted the
 # fleet PRs that the tooling had just told to stay unbumped — and the review
-# convention lens, which cites AGENTS.md verbatim, filed that contradiction as a
+# convention lens, which cites CLAUDE.md verbatim, filed that contradiction as a
 # blocker on a compliant PR (#472). Fixing the prose alone would re-rot: this
 # section pins the rule and the machinery to each other, so a future edit to
 # either half that leaves the other behind is a red test, not a stale sentence.
@@ -1954,53 +1954,53 @@ echo "== T12: the version-bump contract — rule doc and machinery, locked in bo
 # with B. Opening one line lower lets the end anchor be a plain `^## `, which
 # closes on EVERY sibling section.
 #
-# STATED PLAINLY, because the scoping is weaker than it looks: AGENTS.md carries
+# STATED PLAINLY, because the scoping is weaker than it looks: CLAUDE.md carries
 # exactly ONE level-2 heading today, so this range still runs to end-of-file and
 # the anchoring buys nothing until a sibling section is added — it is insurance,
 # not a property of the file as it stands. The start anchor is the invariant
 # sentence T12.2a/T12.2b already pin; reword it and all eleven in-section
 # assertions go red together, loudly, rather than passing over an empty slice.
-AGENTS_SECTION_START='^\*\*Every user-facing change'
-AGENTS_SECTION_END='^## '
+CLAUDE_SECTION_START='^\*\*Every user-facing change'
+CLAUDE_SECTION_END='^## '
 
-# --- the rule half: what AGENTS.md must say -------------------------------
-assert_grep "$AGENTS_MD" '^## Bump version EVERYWHERE before merge \(MANDATORY\)$' \
-  "T12.1 AGENTS.md still carries the version-bump section heading"
-assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
+# --- the rule half: what CLAUDE.md must say -------------------------------
+assert_grep "$CLAUDE_MD" '^## Bump version EVERYWHERE before merge \(MANDATORY\)$' \
+  "T12.1 CLAUDE.md still carries the version-bump section heading"
+assert_in_section "$CLAUDE_MD" "$CLAUDE_SECTION_START" "$CLAUDE_SECTION_END" \
   'landing commit' \
   "T12.2a the invariant is scoped to the LANDING commit, not to every PR"
-assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
+assert_in_section "$CLAUDE_MD" "$CLAUDE_SECTION_START" "$CLAUDE_SECTION_END" \
   '(project )?version advanced|advance the (project )?version' \
   "T12.2b the invariant is that the version ADVANCED on main"
-assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
+assert_in_section "$CLAUDE_MD" "$CLAUDE_SECTION_START" "$CLAUDE_SECTION_END" \
   '`/goal`' \
   "T12.3a the /goal lane is named"
-assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
+assert_in_section "$CLAUDE_MD" "$CLAUDE_SECTION_START" "$CLAUDE_SECTION_END" \
   '`/solve`.*`/turbo`.*fleet' \
   "T12.3b the /solve + /turbo fleet lane is named"
-assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
+assert_in_section "$CLAUDE_MD" "$CLAUDE_SECTION_START" "$CLAUDE_SECTION_END" \
   '[Hh]and-authored' \
   "T12.3c the hand-authored lane is named"
-assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
+assert_in_section "$CLAUDE_MD" "$CLAUDE_SECTION_START" "$CLAUDE_SECTION_END" \
   'fleet PR whose diff carries no version surface is compliant' \
   "T12.4 the fleet carve-out is explicit — an unbumped fleet PR is COMPLIANT"
-assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
+assert_in_section "$CLAUDE_MD" "$CLAUDE_SECTION_START" "$CLAUDE_SECTION_END" \
   'skills/solve-fleet/workflow\.js' \
   "T12.4b the carve-out names the file that forbids the solver from bumping"
-assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
+assert_in_section "$CLAUDE_MD" "$CLAUDE_SECTION_START" "$CLAUDE_SECTION_END" \
   'plugins/uberdev/lib/bump-version\.sh' \
   "T12.5 the bump mechanism is named by path"
 # Anchored to the numbered-list-item FORM, not a bare path substring: both test
 # paths also appear in the local-verification bullet further down the section,
 # so a substring match kept passing after the two surface entries themselves
 # were deleted — a label ("listed as a surface") wider than its predicate.
-assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
+assert_in_section "$CLAUDE_MD" "$CLAUDE_SECTION_START" "$CLAUDE_SECTION_END" \
   '^[0-9]+\. \*\*`tests/goal\.test\.sh`\*\*' \
   "T12.5b the CI release-ratchet lock tests/goal.test.sh is still a numbered surface-list entry"
-assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
+assert_in_section "$CLAUDE_MD" "$CLAUDE_SECTION_START" "$CLAUDE_SECTION_END" \
   '^[0-9]+\. \*\*`tests/solve-claim\.test\.sh`\*\*' \
   "T12.5c the CI release-ratchet lock tests/solve-claim.test.sh is still a numbered surface-list entry"
-assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
+assert_in_section "$CLAUDE_MD" "$CLAUDE_SECTION_START" "$CLAUDE_SECTION_END" \
   'No exception' \
   "T12.5d the no-exception clause survives the rewrite"
 
@@ -2041,15 +2041,15 @@ assert_grep "$GOAL_WATCH_SH" '_uberdev_goal_ensure_version_bump' \
   "T12.7 the /goal watch lane still calls the version-bump guarantor"
 
 # --- negatives: the retired claims must not come back ---------------------
-assert_absent_fixed "$AGENTS_MD" 'MUST bump the version in every location below' \
+assert_absent_fixed "$CLAUDE_MD" 'MUST bump the version in every location below' \
   "T12.9 the unqualified every-PR mandate (the sentence #472 was filed against) is gone"
-assert_absent_fixed "$AGENTS_MD" 'single-escaped' \
+assert_absent_fixed "$CLAUDE_MD" 'single-escaped' \
   "T12.10a the stale single-escaped regex-form description is gone (post-#231 the locks are one assert_version_bump arg)"
-assert_absent_fixed "$AGENTS_MD" 'double-escaped' \
+assert_absent_fixed "$CLAUDE_MD" 'double-escaped' \
   "T12.10b the stale double-escaped regex-form description is gone"
-assert_absent_fixed "$AGENTS_MD" 'Update all seven locations above' \
+assert_absent_fixed "$CLAUDE_MD" 'Update all seven locations above' \
   "T12.10c the 'seven locations in one commit' claim is gone (only six are files)"
-assert_absent_fixed "$AGENTS_MD" "Codex's auto-update" \
+assert_absent_fixed "$CLAUDE_MD" "Codex's auto-update" \
   "T12.10d the retired Codex auto-update rationale is gone (#381)"
 
 # Shipped-plugin pointers must not send a reader to the gitignored CLAUDE.md
@@ -2098,8 +2098,8 @@ else
   fi
 fi
 
-assert_grep "$BUMP_VERSION_SH" 'AGENTS\.md' \
-  "T12.12 bump-version.sh's checklist comment names AGENTS.md as the documented ritual"
+assert_grep "$BUMP_VERSION_SH" 'CLAUDE\.md' \
+  "T12.12 bump-version.sh's checklist comment names CLAUDE.md as the documented ritual"
 assert_absent_fixed "$STRUCTURAL_LIB" 'Codex plugin.json' \
   "T12.13 assert_version_bump's doc comment no longer claims a retired Codex manifest surface"
 assert_absent_fixed "$STRUCTURAL_LIB" 'all five manifest surfaces' \
