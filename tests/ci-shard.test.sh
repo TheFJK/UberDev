@@ -179,8 +179,17 @@ echo "== S8: the WORKFLOW'S OWN run_one routes by the plan =="
 #
 # The harness is carved out of the LIVE workflow, never transcribed: a copy here
 # would keep agreeing with itself while CI drifted away from it.
-s8_harness() { # s8_harness <job-key> -> the run: block with invocations stripped
-  awk -v JOB="$1" '
+#
+# SPLICED, NOT APPENDED. The extracted block ends with the job's failure tail,
+# which exits non-zero when anything raised `fail`. Appending the synthetic
+# invocations AFTER that tail means a tail that can fail runs BEFORE them and
+# the script exits having invoked nothing. tests/ci-wiring.test.sh W12.3
+# already carves its fixtures in at a marker for the same reason; this is that
+# shape, so the rows below keep measuring the harness rather than the position
+# they happened to be pasted at.
+S8_MARK='@@S8-INVOCATIONS@@'
+s8_harness() { # s8_harness <job-key> -> the run: block, invocations replaced by ONE marker
+  awk -v JOB="$1" -v MARK="$S8_MARK" '
     $0 ~ ("^  " JOB ":[[:space:]]*$") { in_job = 1; next }
     in_job && /^  [[:alnum:]_-]+:[[:space:]]*$/ { exit }
     in_job && /^[[:space:]]+run:[[:space:]]*[|][[:space:]]*$/ { in_run = 1; next }
@@ -188,18 +197,40 @@ s8_harness() { # s8_harness <job-key> -> the run: block with invocations strippe
       if ($0 ~ /^[[:space:]]*$/) { print ""; next }
       if ($0 !~ /^          /) { in_run = 0; next }
       sub(/^          /, "")
-      if ($0 ~ /^run_one /) next
+      if ($0 ~ /^run_one /) { if (!ins) { print MARK; ins = 1 } next }
       print
     }
   ' "$WORKFLOW"
+}
+s8_script() { # s8_script <body-file> <invocations-file> <out-file>
+  # FAILS LOUDLY, never splices into nothing. A marker that moved, or an empty
+  # invocation file, would write a harness that invokes NOTHING -- and every row
+  # below would then go red for a reason that has nothing to do with routing.
+  # Same doctrine as the FATAL preflight at the top of this file: a scaffold
+  # that could not be built must say so, not hand the rows a vacuous script.
+  [ -s "$2" ] || { echo "FATAL: ${0##*/}: no invocations to splice from $2" >&2; exit 2; }
+  # One statement per line, deliberately: `} close(INV);` on the same line as the
+  # while-block's closing brace parses under BSD awk and is not worth betting on
+  # under the gawk/mawk that run this file on ubuntu and Git Bash.
+  awk -v MARK="$S8_MARK" -v INV="$2" '
+    $0 == MARK {
+      while ((getline line < INV) > 0) { print line; n++ }
+      close(INV)
+      spliced++
+      next
+    }
+    { print }
+    END { if (spliced != 1 || n < 1) exit 3 }
+  ' "$1" >"$3" \
+    || { echo "FATAL: ${0##*/}: $S8_MARK did not splice exactly one non-empty invocation set into $1" >&2; exit 2; }
 }
 S8_BODY="$(s8_harness shape-checks)"
 if [ -z "$S8_BODY" ]; then
   bad "S8: the ubuntu harness extracted empty — the job key or the block shape moved"
 else
   ok "S8: the ubuntu harness extracted non-empty"
+  printf '%s\n' "$S8_BODY" >"$WORK/s8.body"
   {
-    printf '%s\n' "$S8_BODY"
     # Two fixtures, one in the plan and one not, invoked exactly the way the
     # workflow invokes them -- including the zsh spelling, which is the case that
     # makes keying on the FIRST argument wrong.
@@ -214,7 +245,8 @@ else
     printf 'run_one bash tests/flagged.test.sh --artifact-publication-only\n'
     printf 'run_one env MSYSTEM=MSYS bash tests/env-prefixed.test.sh\n'
     printf 'run_one python -I -B tests/pyfixture.test.py\n'
-  } >"$WORK/s8.sh"
+  } >"$WORK/s8.inv"
+  s8_script "$WORK/s8.body" "$WORK/s8.inv" "$WORK/s8.sh"
   S8_OUT="$(
     UBERDEV_SHARD_PLAN="in-plan.test.sh zsh-in-plan.test.sh flagged.test.sh env-prefixed.test.sh pyfixture.test.py" \
     UBERDEV_SHARD=1 UBERDEV_SHARDS=2 \
@@ -253,8 +285,8 @@ else
   # times, silently. Only a .py held OUT of the plan can tell "routed" apart from
   # "fell through", and that mutation survived until this row existed.
   S9_PY="$(
-    printf '%s\n' "$S8_BODY" >"$WORK/s9py.sh"
-    printf 'run_one python -I -B tests/pyfixture.test.py\n' >>"$WORK/s9py.sh"
+    printf 'run_one python -I -B tests/pyfixture.test.py\n' >"$WORK/s9py.inv"
+    s8_script "$WORK/s8.body" "$WORK/s9py.inv" "$WORK/s9py.sh"
     UBERDEV_SHARD_PLAN="in-plan.test.sh" UBERDEV_SHARD=1 UBERDEV_SHARDS=2 \
       bash -e "$WORK/s9py.sh" 2>&1 || true
   )"
@@ -272,8 +304,8 @@ else
   # the shard that WAS given it also runs it. S7 alone could not catch this; the
   # mutation survived until this row drove the harness itself.
   S9_SUB="$(
-    printf '%s\n' "$S8_BODY" >"$WORK/s9sub.sh"
-    printf 'run_one bash tests/plan.test.sh\n' >>"$WORK/s9sub.sh"
+    printf 'run_one bash tests/plan.test.sh\n' >"$WORK/s9sub.inv"
+    s8_script "$WORK/s8.body" "$WORK/s9sub.inv" "$WORK/s9sub.sh"
     UBERDEV_SHARD_PLAN="long-plan.test.sh" UBERDEV_SHARD=1 UBERDEV_SHARDS=2 \
       bash -e "$WORK/s9sub.sh" 2>&1 || true
   )"
@@ -286,8 +318,8 @@ else
   # shape ci-wiring W12.3 executes (`run_one bash <tmpdir>/a.sh`), so a filter
   # that refused it would red a row about something else entirely.
   S8_SYN="$(
-    printf '%s\n' "$S8_BODY" >"$WORK/s9.sh"
-    printf 'run_one true /somewhere/else/a.sh\n' >>"$WORK/s9.sh"
+    printf 'run_one true /somewhere/else/a.sh\n' >"$WORK/s9.inv"
+    s8_script "$WORK/s8.body" "$WORK/s9.inv" "$WORK/s9.sh"
     UBERDEV_SHARD_PLAN="in-plan.test.sh" UBERDEV_SHARD=1 UBERDEV_SHARDS=2 \
       bash -e "$WORK/s9.sh" 2>&1 || true
   )"
@@ -314,6 +346,254 @@ else
   [ "$S8_N" = "6" ] && ok "S8: with no plan set, all six run (the standalone case)" \
     || bad "S8: an unset plan ran $S8_N of 6 — the default is not fail-open"
 fi
+
+echo "== S10: every shard of every job runs its whole plan (aggregate) =="
+# THE ROW ACCEPTANCE CRITERION 3 ASKS FOR, and the one S8 above structurally
+# cannot be. S8 extracts the UBUNTU harness and drives it with a synthetic
+# plan of this file's own making: it measures the routing RULE, and no plan it
+# writes can carry a delimiter the runner introduced. This row replays each
+# job's real argv against its real per-shard plan and compares the AGGREGATE
+# run count to the job's wired fixture count. The denominator comes from
+# tests/ci-job-fixtures.sh, which reads the run_one lines back out of the
+# workflow -- a guard that re-derived the count the way the harness does would
+# agree with the harness by construction and see nothing.
+s10_block() { # $1 = job key -> the run: block WITH its invocations
+  awk -v JOB="$1" '
+    $0 ~ ("^  " JOB ":[[:space:]]*$") { in_job = 1; next }
+    in_job && /^  [[:alnum:]_-]+:[[:space:]]*$/ { exit }
+    in_job && /^[[:space:]]+run:[[:space:]]*[|][[:space:]]*$/ { in_run = 1; next }
+    in_run {
+      if ($0 ~ /^[[:space:]]*$/) { print ""; next }
+      if ($0 !~ /^          /) { in_run = 0; next }
+      sub(/^          /, "")
+      print
+    }
+  ' "$WORKFLOW"
+}
+# The four interpreters the workflow's run_one lines use, stubbed so the
+# replay costs nothing. `--- RUN` is echoed BEFORE the invocation, so the
+# count is unaffected by the stub.
+s10_runner() { # $1 = job key -> path to a replayable script
+  {
+    printf 'bash() { :; }\n'
+    printf 'zsh() { :; }\n'
+    printf 'python() { :; }\n'
+    printf 'env() { shift; "$@"; }\n'
+    s10_block "$1"
+  } >"$WORK/s10.$1.sh"
+  printf '%s\n' "$WORK/s10.$1.sh"
+}
+s10_run_count() { # $1 = script, $2 = plan value, $3 = shard, $4 = shards
+  UBERDEV_SHARD_PLAN="$2" UBERDEV_SHARD="$3" UBERDEV_SHARDS="$4" \
+    bash -e "$1" 2>&1 | grep -c '^--- RUN '
+}
+while IFS= read -r s10_spec; do
+  [ -n "$s10_spec" ] || continue
+  s10_job="${s10_spec%%|*}"
+  s10_shards="${s10_spec##*|}"
+  s10_wired="$(bash "$FIXTURES" "$s10_job" | grep -c .)"
+  s10_script="$(s10_runner "$s10_job")"
+  s10_total=0
+  s10_bad=''
+  s10_k=1
+  while [ "$s10_k" -le "$s10_shards" ]; do
+    s10_plan="$(bash "$FIXTURES" "$s10_job" | python3 -I -B "$PLAN" --shards "$s10_shards" --shard "$s10_k")"
+    s10_len="$(printf '%s\n' "$s10_plan" | grep -c .)"
+    s10_flat="$(printf '%s' "$s10_plan" | tr '\n' ' ')"
+    s10_run="$(s10_run_count "$s10_script" "$s10_flat" "$s10_k" "$s10_shards")"
+    s10_total=$((s10_total + s10_run))
+    [ "$s10_run" = "$s10_len" ] || s10_bad="$s10_bad ${s10_k}(ran=$s10_run,plan=$s10_len)"
+    s10_k=$((s10_k + 1))
+  done
+  if [ -n "$s10_bad" ]; then
+    bad "S10: $s10_job shard(s)$s10_bad ran fewer fixtures than they were planned"
+  else
+    ok "S10: every $s10_job shard ran its whole plan"
+  fi
+  if [ "$s10_total" = "$s10_wired" ]; then
+    ok "S10: $s10_job shards executed $s10_total of $s10_wired wired fixtures (aggregate)"
+  else
+    bad "S10: $s10_job executed $s10_total of $s10_wired wired fixtures — $((s10_wired - s10_total)) never ran in ANY shard"
+  fi
+done <<S10_SPECS
+shape-checks|6
+supervision-smoke-macos|2
+shape-checks-windows|6
+S10_SPECS
+
+echo "== S11: a CR-delimited plan cannot buy a green short run =="
+# S11a is a statement about the PLATFORM and stays true forever: with the
+# plan's entries CR-terminated and the last one's CR eaten at the file
+# boundary, exactly one name is bounded by real spaces, so exactly one runs.
+# S11b is the statement about THIS repo: the harness must refuse to call that
+# a pass. Before the SHARD-COVERAGE tail exists, S11b is RED and S11a is not.
+S11_JOB=shape-checks-windows
+S11_SCRIPT="$(s10_runner "$S11_JOB")"
+S11_VALUE="$(bash "$REPO_ROOT/tests/ci-shard-diagnose.sh" crlf-plan "$S11_JOB" 6 2)"
+S11_LEN="$(bash "$FIXTURES" "$S11_JOB" | python3 -I -B "$PLAN" --shards 6 --shard 2 | grep -c .)"
+S11_OUT="$(UBERDEV_SHARD_PLAN="$S11_VALUE" UBERDEV_SHARD=2 UBERDEV_SHARDS=6 bash -e "$S11_SCRIPT" 2>&1)"
+S11_RC=$?
+S11_RUN="$(printf '%s\n' "$S11_OUT" | grep -c '^--- RUN ')"
+# The `-n` is not decoration. An EMPTY value is read by the harness as an unset
+# plan and fails OPEN, so on a one-fixture shard "ran 1" would be indistinguish-
+# able from the CR signature -- the row would agree with a dead crlf-plan verb.
+if [ -n "$S11_VALUE" ] && [ "$S11_LEN" -gt 1 ] && [ "$S11_RUN" = "1" ]; then
+  ok "S11a: the CR-delimited plan runs 1 of $S11_LEN — the #753 signature reproduces"
+else
+  bad "S11a: expected 1 of $S11_LEN under the CR model, got $S11_RUN — the byte model no longer matches the harness"
+fi
+if [ "$S11_RC" -ne 0 ]; then
+  ok "S11b: the harness exits non-zero rather than reporting a short run as a pass"
+else
+  bad "S11b: the harness ran $S11_RUN of $S11_LEN fixtures and exited 0 — a shard can still report green over a skipped suite"
+fi
+case "$S11_OUT" in
+  *SHARD-COVERAGE*) ok "S11b: the log names the shortfall, so the cause is readable from the job log" ;;
+  *) bad "S11b: nothing in the output names the coverage shortfall" ;;
+esac
+
+echo "== S12: the aggregate comparison is not vacuous =="
+# S10 asserts a number equals a number. Both come out right on a healthy tree,
+# so on its own S10 cannot say whether it would notice a wrong one. Dropping
+# one entry from a shard's plan is the smallest defect it must catch.
+S12_JOB=shape-checks-windows
+S12_SCRIPT="$(s10_runner "$S12_JOB")"
+S12_FULL="$(bash "$FIXTURES" "$S12_JOB" | python3 -I -B "$PLAN" --shards 6 --shard 3)"
+S12_LEN="$(printf '%s\n' "$S12_FULL" | grep -c .)"
+S12_SHORT="$(printf '%s\n' "$S12_FULL" | sed '$d' | tr '\n' ' ')"
+S12_RUN="$(s10_run_count "$S12_SCRIPT" "$S12_SHORT" 3 6)"
+if [ "$S12_RUN" = "$((S12_LEN - 1))" ] && [ "$S12_RUN" != "$S12_LEN" ]; then
+  ok "S12: a plan one fixture short runs one fixture fewer — S10's comparison can see it"
+else
+  bad "S12: a plan of $((S12_LEN - 1)) ran $S12_RUN against a full plan of $S12_LEN — the count is not tracking the plan"
+fi
+
+echo "== S13: the producer refuses a pack its packer delivered with CRs =="
+# Driven through the REAL tests/ci-shard-env.sh with a CR-reapplying python3
+# underneath it -- the Windows condition, reproduced. A producer that strips
+# the CR would pass a weaker version of this row while leaving the packer
+# wrong; the assertion is therefore on the REFUSAL, not on clean output.
+#
+# The shim `simulate` uses re-terminates the packer's lines at the PROCESS
+# BOUNDARY, so this row keeps reproducing the defect after the packer pins its
+# own stdout -- see the TWO SHIMS note in tests/ci-shard-diagnose.sh. A row fed
+# only through the producer it is meant to test stops testing it the moment
+# that producer is fixed.
+S13_OUT="$(bash "$REPO_ROOT/tests/ci-shard-diagnose.sh" simulate shape-checks-windows 6 2 2>"$WORK/s13.err")"
+S13_RC=$?
+if [ "$S13_RC" -ne 0 ]; then
+  ok "S13: ci-shard-env.sh refuses a CR-bearing pack (rc=$S13_RC)"
+else
+  bad "S13: ci-shard-env.sh accepted a CR-bearing pack and emitted a plan — the shard filter will match only its last entry"
+fi
+case "$S13_OUT" in
+  *UBERDEV_SHARD_PLAN=*) bad "S13: a plan line was emitted despite the CR" ;;
+  *) ok "S13: no UBERDEV_SHARD_PLAN line reaches GITHUB_ENV when the pack is tainted" ;;
+esac
+if grep -q 'CR' "$WORK/s13.err"; then
+  ok "S13: the refusal names the CR, so the planning step's failure is self-explaining"
+else
+  bad "S13: the refusal diagnostic does not mention a CR: $(head -c 100 "$WORK/s13.err" | tr '\n' ' ')"
+fi
+
+echo "== S14: the packer pins its own stdout to LF =="
+# The falsifiable form of a Windows-only property. The REAL packer runs with
+# its stdout wrapped in a CRLF-translating text stream -- the same wrapper
+# python.exe installs by default -- and must still emit LF. A packer that
+# leaves the newline to the host emits CRLF here, on every host.
+#
+# THE BYTES ARE CAPTURED BEFORE THEY ARE JUDGED, and the producer's status is
+# read off the producer rather than off `od`. Piping straight into `od | tr`
+# would hand $? the status of `tr`, so a packer that died would arrive as an
+# empty haystack containing no CR -- and the row would report PASS for the one
+# reason that is not a pass.
+bash "$REPO_ROOT/tests/ci-shard-diagnose.sh" packer-bytes shape-checks-windows 6 2 \
+  >"$WORK/s14.bytes" 2>"$WORK/s14.err"
+S14_RC=$?
+if [ "$S14_RC" -ne 0 ] || [ ! -s "$WORK/s14.bytes" ]; then
+  bad "S14: packer-bytes produced nothing to judge (rc=$S14_RC) — $(head -c 100 "$WORK/s14.err")"
+else
+  case "$(od -c "$WORK/s14.bytes" | tr -s ' ')" in
+    *'\r'*) bad "S14: ci-shard-plan.py emitted a CR through a CRLF-translating stdout — the plan reaches the harness CR-delimited" ;;
+    *) ok "S14: ci-shard-plan.py emits LF even when the host's stdout translates newlines" ;;
+  esac
+fi
+
+echo "== S15: every sharded job dumps its plan bytes before it runs =="
+# The od -c dump is the evidence this issue turned on: with it the next
+# delimiter defect is one grep away in the job log, and without it the next one
+# is invisible exactly as this one was. The step is a single line of YAML and
+# nothing else in this suite would notice it going away -- S10 replays the
+# harness, not the job's step list, so a job that had lost its dump would still
+# pass every row above. The expected shard count is read out of the job's own
+# matrix, so a job resharded from 6 to 8 fails here rather than quietly dumping
+# a plan for a shard count it no longer has.
+#
+# THE NEEDLE IS QUALIFIED, and that is not fussiness. `ci-shard-diagnose.sh
+# dump` occurs TWICE inside each of these jobs -- once as the step, once inside
+# the SHARD-COVERAGE tail's own "Dump the plan bytes with:" hint -- so a row
+# keyed on the bare string is satisfied by the prose that merely mentions the
+# step and stays green after the step itself is deleted. Every needle below
+# carries the `run:` prefix, which only the step has.
+S15_PLAN_RE='^[[:space:]]+run:[[:space:]]+bash tests/ci-shard-env[.]sh '
+S15_DUMP_RE='^[[:space:]]+run:[[:space:]]+bash tests/ci-shard-diagnose[.]sh dump '
+S15_HARNESS_RE='^[[:space:]]+run_one '
+s15_dump_line_of() { # $1 = job key -> that job's dump step, leading indent stripped
+  # The trailing CR is stripped because this fixture runs on windows-latest too,
+  # and /.gitattributes:44-51 deliberately scopes `eol=lf` to
+  # plugins/uberdev/hooks/** -- nothing pins the checkout of this workflow, so
+  # whether its lines arrive LF or CRLF on that runner is the runner's
+  # core.autocrlf, not this repo's decision. Only the exact-equality row needs
+  # it: the two helpers below count commas and report line numbers, neither of
+  # which a line terminator can move. This normalises a CHECKOUT artifact and
+  # weakens nothing -- the CR that this issue is about is in the plan the packer
+  # emits at runtime, and S13/S14 are what hold that.
+  awk -v JOB="$1" -v PAT="$S15_DUMP_RE" '
+    $0 ~ ("^  " JOB ":[[:space:]]*$") { in_job = 1; next }
+    in_job && /^  [[:alnum:]_-]+:[[:space:]]*$/ { exit }
+    in_job && $0 ~ PAT { sub(/^[[:space:]]*/, ""); sub(/\r$/, ""); print; exit }
+  ' "$WORKFLOW"
+}
+s15_matrix_shards_of() { # $1 = job key -> how many shards the job's matrix declares
+  awk -v JOB="$1" '
+    $0 ~ ("^  " JOB ":[[:space:]]*$") { in_job = 1; next }
+    in_job && /^  [[:alnum:]_-]+:[[:space:]]*$/ { exit }
+    in_job && /^[[:space:]]+shard:[[:space:]]*\[/ { print gsub(/,/, ",") + 1; exit }
+  ' "$WORKFLOW"
+}
+s15_lineno_of() { # $1 = job key, $2 = ERE -> line number of its first match inside the job
+  awk -v JOB="$1" -v PAT="$2" '
+    $0 ~ ("^  " JOB ":[[:space:]]*$") { in_job = 1; next }
+    in_job && /^  [[:alnum:]_-]+:[[:space:]]*$/ { exit }
+    in_job && $0 ~ PAT { print NR; exit }
+  ' "$WORKFLOW"
+}
+for s15_job in shape-checks supervision-smoke-macos shape-checks-windows; do
+  s15_shards="$(s15_matrix_shards_of "$s15_job")"
+  s15_line="$(s15_dump_line_of "$s15_job")"
+  s15_want="run: bash tests/ci-shard-diagnose.sh dump $s15_job $s15_shards \"\${{ matrix.shard }}\""
+  if [ -z "$s15_shards" ]; then
+    bad "S15: $s15_job declares no shard matrix — the expected shard count cannot be read"
+  elif [ "$s15_line" = "$s15_want" ]; then
+    ok "S15: $s15_job dumps its plan bytes for all $s15_shards shards"
+  else
+    bad "S15: $s15_job's dump step is missing or drifted — want [$s15_want], got [$s15_line]"
+  fi
+  # POSITION IS PART OF THE WIRING, and no amount of matching on the line's TEXT
+  # can see it. A dump placed before the planning step would od an unset
+  # variable and report that absence as the finding; one placed after the
+  # harness would print the bytes of a job that had already decided. The three
+  # landmarks are therefore compared as line numbers inside the job's own block.
+  s15_plan_at="$(s15_lineno_of "$s15_job" "$S15_PLAN_RE")"
+  s15_dump_at="$(s15_lineno_of "$s15_job" "$S15_DUMP_RE")"
+  s15_harness_at="$(s15_lineno_of "$s15_job" "$S15_HARNESS_RE")"
+  if [ -n "$s15_plan_at" ] && [ -n "$s15_dump_at" ] && [ -n "$s15_harness_at" ] &&
+     [ "$s15_plan_at" -lt "$s15_dump_at" ] && [ "$s15_dump_at" -lt "$s15_harness_at" ]; then
+    ok "S15: $s15_job dumps between planning (:$s15_plan_at) and the harness (:$s15_harness_at)"
+  else
+    bad "S15: $s15_job's dump is not between the planning step and the harness — plan=[$s15_plan_at] dump=[$s15_dump_at] harness=[$s15_harness_at]"
+  fi
+done
 
 echo ""
 echo "== Summary =="

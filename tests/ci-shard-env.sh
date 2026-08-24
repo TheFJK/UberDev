@@ -50,6 +50,42 @@ if [ -z "$ci_shard_env_plan" ]; then
   exit 2
 fi
 
+# CR REFUSAL, NOT CR REMOVAL (#753). The working model is that on
+# windows-latest the packer's stdout is a text stream, so every line it prints
+# is terminated CRLF: the $( ) capture above strips the trailing LF and leaves
+# the CR, the `tr` below converts the interior LFs and leaves every CR, and the
+# GITHUB_ENV file's final CRLF is consumed as one line terminator. That
+# PRODUCING half is modelled, not measured — see "What is settled, and what is
+# still a model" in plugins/uberdev/docs/testing.md for its refutation
+# condition. What such a plan then does downstream is NOT modelled: it is
+# settled by execution on any host, and it is the failure this refusal exists
+# to prevent. The harness receives
+# `a<CR> b<CR> ... y<CR> z` and its `case " $PLAN " in *" $name "*` membership
+# test matches only `z`. Six shards ran one fixture each and reported green.
+#
+# Stripping the CR here would work, and would be a band-aid: the plan would be
+# correct while the packer stayed wrong, and the next thing to read that
+# stdout would inherit the bug with nothing left to warn it.
+# tests/ci-shard-plan.py pins its own stdout to LF; this refusal is what makes
+# a regression in that pin kill the planning step instead of silently
+# shrinking the suite. Same rule as the empty-plan refusal above.
+#
+# UNREACHABLE ON A HEALTHY TREE, BY TWO INDEPENDENT MECHANISMS, so this can
+# never fire on a legitimate plan: ci-job-fixtures.sh extracts names with
+# `grep -oE 'tests/[a-zA-Z0-9._-]+\.test\.(sh|py)'`, whose character class
+# cannot match a CR even from a CRLF checkout, and ci-shard-plan.py `.strip()`s
+# every line it reads off stdin. The packer's own stdout is the only remaining
+# CR source on this path, and pinning it is the fix this guard backstops.
+ci_shard_env_cr="$(printf '\r')"
+case "$ci_shard_env_plan" in
+  *"$ci_shard_env_cr"*)
+    echo "${0##*/}: the packed plan for $ci_shard_env_job shard $ci_shard_env_shard/$ci_shard_env_shards carries a CR byte." >&2
+    echo "${0##*/}: a CR-delimited plan makes the shard filter match only the last entry (#753)." >&2
+    echo "${0##*/}: dump the bytes with: bash $ci_shard_env_dir/ci-shard-diagnose.sh dump $ci_shard_env_job $ci_shard_env_shards $ci_shard_env_shard" >&2
+    exit 2
+    ;;
+esac
+
 printf 'UBERDEV_SHARD_PLAN=%s\n' "$(printf '%s' "$ci_shard_env_plan" | tr '\n' ' ')"
 printf 'UBERDEV_SHARD=%s\n' "$ci_shard_env_shard"
 printf 'UBERDEV_SHARDS=%s\n' "$ci_shard_env_shards"
