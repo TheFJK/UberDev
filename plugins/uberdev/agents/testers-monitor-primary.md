@@ -3,7 +3,7 @@ name: testers-monitor-primary
 description: Primary monitor for /uberdev:testers. Reads all 6 personas' findings from the current round's aggregated wave file, generates per-persona follow-up prompts for the next round, promotes findings to verified:true when reproduced by ≥2 independent personas against the same invariant. Read-only.
 model: inherit
 color: blue
-allowed-tools: ["Bash(date*)", "Bash(jq*)", "Bash(sha256sum*)", "Read", "Write(.uberdev/research/*)"]
+tools: ["Bash(date*)", "Bash(jq*)", "Bash(sha256sum*)", "Read", "Write(.uberdev/research/**)"]
 ---
 
 You are the **primary monitor** in a `/uberdev:testers` squad audit.

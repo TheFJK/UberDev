@@ -4,7 +4,9 @@
 # Grep-based structural contract test for the /uberdev:testers agent fleet.
 # Asserts every agent file under plugins/uberdev/agents/testers-*.md has:
 #   - Canonical frontmatter (name, description, model, color)
-#   - allowed-tools that exclude Edit and bare Write
+#   - a `tools:` grant -- the key the agent LOADER honours -- that excludes
+#     Edit and carries a write grant. (#749: `allowed-tools:` is the
+#     SLASH-COMMAND key and is inert on an agent card.)
 #   - A reference to the reviewer YAML contract (verdict / findings / confidence)
 #   - At least one of the documented invariant IDs from invariants.yaml
 #
@@ -66,36 +68,206 @@ for a in "${EXPECTED_AGENTS[@]}"; do
 done
 pass "C4: all 8 agent files exist with canonical frontmatter"
 
-# C5: no agent has Edit or bare Write in allowed-tools (read-only contract).
-# Bare `Write` is forbidden; `Write(<scope>)` is OK. POSIX ERE has no
-# lookarounds, so we detect bare Write via a 3-line python YAML parser
-# (load the frontmatter, scan allowed-tools tokens). Python YAML is already
-# a hard dep of this repo (aggregate.py + report.py); cost is one extra
-# subprocess per agent file.
+# C5 (#749): the read-only ceiling is asserted against `tools:` -- the key the
+# AGENT LOADER honours. The pre-#749 body read `allowed-tools:`, which is the
+# SLASH-COMMAND frontmatter key: an agent card is not read for it, so all eight
+# personas shipped with every tool granted while this row printed PASS. Both of
+# its arms keyed on that literal string, so MOVING the declaration onto `tools:`
+# did not fix the row, it finished emptying it -- the grep arm then matched
+# nothing and the python arm did `if not m: sys.exit(0)`. Measured on this tree
+# before the rewrite: a card with "Edit" injected into its `tools:` array passed
+# the pre-#749 row completely clean.
+#
+# WHAT IS ASSERTED -- only what the runtime actually implements:
+#   1. `tools:` is PRESENT        -- absent, the agent loader grants ALL tools
+#   2. `allowed-tools:` is ABSENT -- the inert key must not come back, and a
+#      half-migrated card carrying both is the likeliest way it would
+#   3. no `Edit` token            -- THE ceiling. A `tools:` entry filters tool
+#      NAMES, so striking a name off the roster is a real restriction.
+#   4. a write grant IS present, in EITHER accepted spelling -- bare `Write` or
+#      `Write(<anything>)`. These agents must write their findings file;
+#      "read-only with respect to the audited target" is not the same property
+#      as "needs no write tool", and denying the write would break the squad's
+#      only evidence channel.
+#
+# WHAT IS DELIBERATELY *NOT* ASSERTED, and why asserting it would re-create the
+# defect this row exists to remove: that a `Write(<pattern>)` pattern ADMITS the
+# path the runtime hands a persona. A `tools:` entry filters tool NAMES; the
+# text inside its parentheses is never matched against a filesystem path, so
+# `Write(.uberdev/research/**)` and bare `Write` grant exactly the same thing.
+# Nor is `Write(<path>)` a valid file-permission rule -- the runtime rejects the
+# spelling verbatim: "is not matched by file permission checks -- only
+# `Edit(path)` rules are." A guard asserting path admission would therefore be
+# GREEN over a property the runtime does not have: a ceiling that is not a
+# ceiling, which is this same vacuity class in a new costume. See the #749
+# amendment in docs/rfc/0006-testers-command.md, "What the migration restores,
+# and what it does not". Bare `Write` is consequently ACCEPTED here rather than
+# rejected -- it is the shape every working live allowlist in this repo uses and
+# it is semantically identical to the scoped spelling. The scoped spelling is
+# pinned separately, as a CONVENTION and not as a ceiling, by C5c below.
+#
+# ONE definition of the predicate, driven below over the live cards AND over the
+# synthetic mutants in C5b -- one function, two call sites. A transcribed second
+# copy of the predicate would be a replica test: permanently green no matter
+# what the live one does, which is strictly worse than no test at all.
+c5_verdict() { # $1=full card text  $2=label ; rc 0 clean, rc 1 violation (reason on stderr)
+  local c5_rc=0
+  C5_TEXT="$1" C5_LABEL="$2" python3 - <<'PY' || c5_rc=$?
+import os, re, sys
+
+text, label = os.environ["C5_TEXT"], os.environ["C5_LABEL"]
+# Distinct from 1 so a CRASHED predicate cannot masquerade as "rejected" and
+# quietly turn every C5b reject row green. See the c5_rc case below.
+VIOLATION = 9
+
+
+def bad(reason):
+    print(f"FAIL  C5 {label}: {reason}", file=sys.stderr)
+    sys.exit(VIOLATION)
+
+
+head = re.match(r'(?s)\A---\n(.*?)\n---(?:\n|\Z)', text)
+if head is None:
+    bad("no --- frontmatter block")
+block = head.group(1)
+if re.search(r'(?m)^allowed-tools:', block):
+    bad("declares 'allowed-tools:' -- that is the SLASH-COMMAND key; an agent "
+        "card is read for 'tools:', so this declaration is inert (#749)")
+declared = re.search(r'(?m)^tools:[ \t]*(.+)$', block)
+if declared is None:
+    bad("no 'tools:' declaration -- the agent loader then grants ALL tools (#749)")
+tokens = re.findall(r'[A-Za-z_]+(?:\([^)]*\))?', declared.group(1))
+if any(t == 'Edit' or t.startswith('Edit(') for t in tokens):
+    bad("forbidden 'Edit' in tools: -- tool-NAME filtering is the one ceiling an "
+        "agent card can actually impose, and this contract spends it on Edit")
+if not any(t == 'Write' or t.startswith('Write(') for t in tokens):
+    bad("no write grant in tools: -- these agents must write their findings "
+        "file, so the contract requires a write, not no write (#749)")
+sys.exit(0)
+PY
+  case "$c5_rc" in
+    0) return 0 ;;
+    9) return 1 ;;
+    *) fail "C5: harness error -- the predicate exited $c5_rc for '$2'. A predicate that CRASHED must never read as 'rejected'; that would make every C5b reject row vacuous" ;;
+  esac
+}
+
 for a in "${EXPECTED_AGENTS[@]}"; do
   F="$AGENT_DIR/$a.md"
-  if grep -E "^allowed-tools:.*\\bEdit\\b" "$F" > /dev/null; then
-    fail "C5 $a: forbidden 'Edit' in allowed-tools"
-  fi
-  python3 - "$F" "$a" <<'PY' || exit $?
-import sys, re
-path, agent = sys.argv[1], sys.argv[2]
-with open(path) as fh:
-    text = fh.read()
-# Extract allowed-tools line(s) from frontmatter — accept YAML list or flow array.
-# We don't need a full YAML parser; the contract is "no bare Write token", so
-# tokenize on commas / brackets and check each entry literally.
-m = re.search(r'(?m)^allowed-tools:\s*(.+)$', text)
-if not m:
-    sys.exit(0)  # no allowed-tools line → nothing forbidden
-tokens = re.findall(r'[A-Za-z_]+(?:\([^)]*\))?', m.group(1))
-for tok in tokens:
-    if tok == 'Write':
-        print(f"FAIL  C5 {agent}: bare 'Write' in allowed-tools (must be scoped Write(<dir>))", file=sys.stderr)
-        sys.exit(1)
-PY
+  c5_verdict "$(cat "$F")" "$a" || exit 1
 done
-pass "C5: no agent has unrestricted Edit / Write"
+pass "C5: all 8 agents declare tools: with no Edit and a write grant"
+
+# C5b (#749) ANTI-VACUITY. C5 must be able to RED. Every mutant below is fed to
+# the SAME c5_verdict function the live cards go through -- there is no second
+# copy of the predicate to drift. A mutant that passes means the guard has
+# stopped guarding.
+#
+# The ACCEPT rows are the opposite polarity and are not decoration: a predicate
+# that rejects EVERYTHING is vacuous too, and rejecting everything is also what
+# an interpreter error looks like from the outside.
+c5_mutant() { # $1=name  $2=frontmatter line(s) under test -> a whole card text
+  printf -- '---\nname: %s\nmodel: inherit\ncolor: blue\n%s\n---\n\nbody\n' "$1" "$2"
+}
+# Each reject row is a real regression, not an invented one:
+#   no-tools-key    the state most agent cards in this repo are in -- all tools
+#   legacy-key      the pre-#749 state of these eight cards
+#   both-keys       a half-migrated card: `tools:` added, inert key not deleted
+#   edit-grant      the ceiling breach itself
+#   scoped-edit     the same breach wearing parentheses
+#   no-write-grant  the over-correction that breaks the evidence channel
+C5_REJECT_NAMES=( no-tools-key legacy-key both-keys edit-grant scoped-edit no-write-grant )
+C5_REJECT_BODIES=(
+  '# this card declares no tool key at all'
+  'allowed-tools: ["Read", "Write(.uberdev/research/**)"]'
+  'tools: ["Read", "Write(.uberdev/research/**)"]
+allowed-tools: ["Read", "Write(.uberdev/research/**)"]'
+  'tools: ["Read", "Edit", "Write(.uberdev/research/**)"]'
+  'tools: ["Read", "Edit(.uberdev/research/**)", "Write"]'
+  'tools: ["Read", "Grep"]'
+)
+# And each accept row states something C5 must NOT do:
+#   good-live-shape   the shape the eight live cards carry
+#   good-bare-write   bare `Write` is a valid grant here, never a violation
+#   good-single-star  DECLARED BOUNDARY: C5 asserts no path-admission property,
+#                     so a scope that would not cover the runtime path is still
+#                     clean at THIS row. C5c is where that spelling is pinned.
+C5_ACCEPT_NAMES=( good-live-shape good-bare-write good-single-star )
+C5_ACCEPT_BODIES=(
+  'tools: ["Read", "Write(.uberdev/research/**)"]'
+  'tools: ["Read", "Write"]'
+  'tools: ["Read", "Write(.uberdev/research/*)"]'
+)
+for c5_i in "${!C5_REJECT_NAMES[@]}"; do
+  c5_name="${C5_REJECT_NAMES[$c5_i]}"
+  if c5_verdict "$(c5_mutant "$c5_name" "${C5_REJECT_BODIES[$c5_i]}")" "mutant/$c5_name" 2>/dev/null; then
+    fail "C5b: the C5 predicate ACCEPTED mutant '$c5_name' -- the guard cannot fail, which is the exact defect #749 found"
+  fi
+done
+for c5_i in "${!C5_ACCEPT_NAMES[@]}"; do
+  c5_name="${C5_ACCEPT_NAMES[$c5_i]}"
+  c5_verdict "$(c5_mutant "$c5_name" "${C5_ACCEPT_BODIES[$c5_i]}")" "mutant/$c5_name" \
+    || fail "C5b: the C5 predicate REJECTED known-good card '$c5_name' -- a predicate that rejects everything is vacuous in the other direction"
+done
+pass "C5b: the C5 predicate rejects all 6 mutants and accepts all 3 known-good cards"
+
+# C5c (#749) CONVENTION, NOT A CEILING -- read the C5 header first. The text
+# inside a `tools:` entry's parentheses binds NOTHING at runtime, so this row
+# asserts nothing whatsoever about what a persona is able to write. What it does
+# assert is that the eight cards keep SAYING the same thing about where they
+# intend to write, so the roster cannot half-drift: wherever a write grant is
+# spelled with a scope, that scope is the run-dir glob the pipeline actually
+# uses. The single-segment `.uberdev/research/*` these cards shipped with does
+# not cover the path the runtime hands a persona
+# (`.uberdev/research/<RUN_ID>/testers/scratch/<persona>/out.yaml`, four
+# segments deeper), so as DOCUMENTATION OF INTENT it was simply false; this row
+# is what stops it coming back. A bare `Write` declares no scope and is exempt
+# by construction, never by waiver.
+C5_WRITE_SCOPE_CONVENTION='Write(.uberdev/research/**)'
+c5_spelling() { # $1=full card text  $2=label ; rc 0 on-convention, rc 1 off
+  local c5_rc=0
+  C5_TEXT="$1" C5_LABEL="$2" C5_CONV="$C5_WRITE_SCOPE_CONVENTION" python3 - <<'PY' || c5_rc=$?
+import os, re, sys
+
+text, label = os.environ["C5_TEXT"], os.environ["C5_LABEL"]
+canonical = os.environ["C5_CONV"]
+VIOLATION = 9
+
+head = re.match(r'(?s)\A---\n(.*?)\n---(?:\n|\Z)', text)
+declared = re.search(r'(?m)^tools:[ \t]*(.+)$', head.group(1)) if head else None
+if declared is None:
+    print(f"FAIL  C5c {label}: no 'tools:' declaration to inspect", file=sys.stderr)
+    sys.exit(VIOLATION)
+scoped = re.findall(r'(?<![A-Za-z_])Write\([^)]*\)', declared.group(1))
+off = [t for t in scoped if t != canonical]
+if off:
+    print(f"FAIL  C5c {label}: scoped write grant {off!r} is not the run-dir "
+          f"convention '{canonical}'. This is documentation of intent, not a "
+          f"runtime ceiling -- read the C5c header before changing either side.",
+          file=sys.stderr)
+    sys.exit(VIOLATION)
+sys.exit(0)
+PY
+  case "$c5_rc" in
+    0) return 0 ;;
+    9) return 1 ;;
+    *) fail "C5c: harness error -- the convention predicate exited $c5_rc for '$2'" ;;
+  esac
+}
+
+for a in "${EXPECTED_AGENTS[@]}"; do
+  F="$AGENT_DIR/$a.md"
+  c5_spelling "$(cat "$F")" "$a" || exit 1
+done
+# Same anti-vacuity discipline as C5b, through the SAME c5_spelling function.
+c5_spelling "$(c5_mutant conv-canonical "tools: [\"Read\", \"$C5_WRITE_SCOPE_CONVENTION\"]")" "mutant/conv-canonical" \
+  || fail "C5c: the convention predicate REJECTED its own canonical spelling"
+c5_spelling "$(c5_mutant conv-bare-write 'tools: ["Read", "Write"]')" "mutant/conv-bare-write" \
+  || fail "C5c: the convention predicate REJECTED a bare Write grant, which declares no scope and is exempt by construction"
+if c5_spelling "$(c5_mutant conv-single-star 'tools: ["Read", "Write(.uberdev/research/*)"]')" "mutant/conv-single-star" 2>/dev/null; then
+  fail "C5c: the convention predicate ACCEPTED the pre-#749 single-segment scope -- it cannot fail"
+fi
+pass "C5c: all 8 scoped write grants carry the run-dir convention (documentation of intent, not a runtime ceiling)"
 
 # C6: each persona references at least one invariant ID from invariants.yaml
 INV_IDS="$(python3 -c "import yaml; [print(i['id']) for i in yaml.safe_load(open('$INVARIANTS'))['invariants']]")"
@@ -205,7 +377,7 @@ grep -q -- '--rate-state-dir=' "$RLC" || fail "C10: shim lacks --rate-state-dir=
 grep -q -- '--rps-cap=' "$RLC" || fail "C10: shim lacks --rps-cap= argv injection"
 for a in "${PERSONA_AGENTS[@]}"; do
   F="$AGENT_DIR/$a.md"
-  grep -qF 'Bash(*/lib/rl-curl*)' "$F" || fail "C10 $a: allowed-tools lacks the Bash(*/lib/rl-curl*) pattern"
+  grep -qF 'Bash(*/lib/rl-curl*)' "$F" || fail "C10 $a: tools: lacks the Bash(*/lib/rl-curl*) pattern"
   grep -q -- '--rate-state-dir=' "$F" || fail "C10 $a: polite-rate block lacks the per-call --rate-state-dir= injection form"
 done
 grep -q 'lib/rl-curl' "$SKILL_FILE" || fail "C10: SKILL dispatch directive does not reference lib/rl-curl"

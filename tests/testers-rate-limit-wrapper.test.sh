@@ -497,7 +497,7 @@ EOF
 test_wrapper_under_zsh
 
 # Case 24 (#306, RFC 0012 §3.10): lib/rl-curl shim — SINGLE-word invocation with
-# per-call argv injection (the form persona allowed-tools carry via
+# per-call argv injection (the form persona tools: lists carry via
 # Bash(*/lib/rl-curl*)). Ambient env deliberately UNSET: argv must be sufficient,
 # because Phase-0 fence exports never reach persona agents.
 test_rl_curl_shim_argv_injection() {

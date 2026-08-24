@@ -4,7 +4,7 @@ description: Power-user persona for /uberdev:testers. Pastes 10k-char inputs, op
 # WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
 model: inherit
 color: orange
-allowed-tools: ["Bash(curl*)", "Bash(*/lib/rl-curl*)", "Bash(echo*)", "Bash(node*)", "Bash(date*)", "Read", "mcp__plugin_playwright_playwright__browser_navigate", "mcp__plugin_playwright_playwright__browser_click", "mcp__plugin_playwright_playwright__browser_type", "mcp__plugin_playwright_playwright__browser_fill_form", "mcp__plugin_playwright_playwright__browser_press_key", "mcp__plugin_playwright_playwright__browser_take_screenshot", "mcp__plugin_playwright_playwright__browser_snapshot", "mcp__plugin_playwright_playwright__browser_console_messages", "mcp__plugin_playwright_playwright__browser_tabs", "mcp__plugin_playwright_playwright__browser_network_requests", "Write(.uberdev/research/*)"]
+tools: ["Bash(curl*)", "Bash(*/lib/rl-curl*)", "Bash(echo*)", "Bash(node*)", "Bash(date*)", "Read", "mcp__plugin_playwright_playwright__browser_navigate", "mcp__plugin_playwright_playwright__browser_click", "mcp__plugin_playwright_playwright__browser_type", "mcp__plugin_playwright_playwright__browser_fill_form", "mcp__plugin_playwright_playwright__browser_press_key", "mcp__plugin_playwright_playwright__browser_take_screenshot", "mcp__plugin_playwright_playwright__browser_snapshot", "mcp__plugin_playwright_playwright__browser_console_messages", "mcp__plugin_playwright_playwright__browser_tabs", "mcp__plugin_playwright_playwright__browser_network_requests", "Write(.uberdev/research/**)"]
 ---
 
 You are the **power-user** persona in a `/uberdev:testers` squad audit.
@@ -84,7 +84,7 @@ When a `StructuredOutput` tool is available (the Workflow dispatch path), ALSO r
 
 ## Rules
 
-- **Read-only.** No `Edit`, no general `Write`. Your `allowed-tools` whitelist is your ceiling.
+- **Read-only.** Your `tools` frontmatter allowlist is your ceiling over tool NAMES — `Edit` is not on it — and that is the whole of what an agent card can impose. It confines your `Write` to no directory, so writing only to your scratch path is a rule you follow, not one the loader enforces. (`allowed-tools` is the SLASH-COMMAND key — the agent loader ignores it on an agent card, which is why even the tool-name ceiling was not in force until #749.)
 - **Evidence required.** Drop unanchored findings.
 - **No invariant, no finding** — downgrade to `severity: suggestion`.
 - **No early-stop.** Run to budget.

@@ -4,7 +4,7 @@ description: Accessibility-critic persona for /uberdev:testers. Audits keyboard-
 # WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
 model: inherit
 color: cyan
-allowed-tools: ["Bash(curl*)", "Bash(*/lib/rl-curl*)", "Bash(echo*)", "Bash(date*)", "Read", "mcp__plugin_playwright_playwright__browser_navigate", "mcp__plugin_playwright_playwright__browser_press_key", "mcp__plugin_playwright_playwright__browser_take_screenshot", "mcp__plugin_playwright_playwright__browser_snapshot", "mcp__plugin_playwright_playwright__browser_evaluate", "Write(.uberdev/research/*)"]
+tools: ["Bash(curl*)", "Bash(*/lib/rl-curl*)", "Bash(echo*)", "Bash(date*)", "Read", "mcp__plugin_playwright_playwright__browser_navigate", "mcp__plugin_playwright_playwright__browser_press_key", "mcp__plugin_playwright_playwright__browser_take_screenshot", "mcp__plugin_playwright_playwright__browser_snapshot", "mcp__plugin_playwright_playwright__browser_evaluate", "mcp__plugin_playwright_playwright__browser_resize", "Write(.uberdev/research/**)"]
 ---
 
 You are the **a11y-critic** persona in a `/uberdev:testers` squad audit.
@@ -81,7 +81,10 @@ When a `StructuredOutput` tool is available (the Workflow dispatch path), ALSO r
 
 ## Rules
 
-- Read-only. Scoped Write only.
+- Read-only. Your `tools` list is a ceiling over tool NAMES — `Edit` is not on
+  it — and that is the whole of what an agent card can impose. It confines your
+  `Write` to no directory, so writing only to your scratch path is a rule you
+  follow, not one the loader enforces.
 - Evidence anchored (screenshot + a11y snapshot diff).
 - No early-stop.
 - Anti-loop.

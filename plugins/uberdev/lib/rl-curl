@@ -2,14 +2,26 @@
 # plugins/uberdev/lib/rl-curl — executable single-word shim over rate-limit-curl.sh.
 #
 # WHY THIS EXISTS (#306 / RFC 0012 §3.10): the testers persona agents run with
-# pattern-scoped allowed-tools (Bash(curl*), Bash(date*), ...). The previously
-# documented compound invocation `export RATE_STATE_DIR=...; source ...;
-# uberdev_rate_limit_curl ...` matches NONE of those patterns, and the testers
-# Phase-0 fence exports never reach a persona agent's environment anyway (each
-# Task agent is a fresh process) — so the rate-limit wrapper was unreachable at
-# every layer. This shim makes the wrapped call a SINGLE command word that the
-# persona allowlists can carry (`Bash(*/lib/rl-curl*)`), with RATE_STATE_DIR /
-# RPS_CAP injected PER CALL via argv (env remains the fallback).
+# a pattern-scoped `tools:` frontmatter allowlist (Bash(curl*), Bash(date*),
+# ...). NOTE (#749): from RFC 0006 until #749 those allowlists were declared
+# under `allowed-tools:` -- the SLASH-COMMAND key, which the agent loader
+# ignores on an agent card -- so for that whole window no allowlist applied at
+# all and the personas held every tool. #749 moves them onto the honoured
+# `tools:` key. That restores the TOOL-NAME half and only that: a `tools:`
+# entry filters tool NAMES, and the pattern inside its parentheses is not a
+# file-permission rule -- `Write(<path>)` is not matched by file permission
+# checks at all (RFC 0006's #749 amendment records the runtime's own wording).
+# So read "pattern-scoped" above as describing the declaration, not a proven
+# runtime ceiling; what a `Bash(...)` pattern narrows is not something #749
+# established.
+#
+# The previously documented compound invocation `export RATE_STATE_DIR=...;
+# source ...; uberdev_rate_limit_curl ...` matches NONE of those patterns, and
+# the testers Phase-0 fence exports never reach a persona agent's environment
+# anyway (each Task agent is a fresh process) — so the rate-limit wrapper was
+# unreachable at every layer. This shim makes the wrapped call a SINGLE command
+# word that the persona allowlists can carry (`Bash(*/lib/rl-curl*)`), with
+# RATE_STATE_DIR / RPS_CAP injected PER CALL via argv (env remains the fallback).
 #
 # Usage:
 #   rl-curl [--rate-state-dir=DIR] [--rps-cap=N] URL [curl-args...]
