@@ -1119,7 +1119,7 @@ EOF_CONSOLIDATE_CLOSES
 }
 
 # review_consolidate_title SCAN_DIR -> `chore(stack): land #A #B …`
-# The shape AGENTS.md blesses for a fleet PR. The `(vX.Y.Z)` suffix and the
+# The shape CLAUDE.md blesses for a fleet PR. The `(vX.Y.Z)` suffix and the
 # version bump belong to the LANDING commit, once per stack -- not here.
 review_consolidate_title() {
   [ "$#" -eq 1 ] || return 2

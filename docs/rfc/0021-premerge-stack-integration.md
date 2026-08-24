@@ -52,7 +52,7 @@ to any per-PR review:
 
 1. **Version collision.** N PRs cut from one base all resolve the same next
    version. Git auto-merges the identical edit with no conflict, so two intended
-   releases silently collapse into one. `AGENTS.md` already responds by binding
+   releases silently collapse into one. `CLAUDE.md` already responds by binding
    the bump to the *landing commit* and forbidding PR authors from bumping —
    which leaves an obvious gap: *something* has to do the bump, once, at landing
    time. Nothing did. `/premerge` Phase 5 is that something.

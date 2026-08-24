@@ -86,7 +86,7 @@ cull would take another lens's finding with it):
 - the quote is verified verbatim against the cited file's own bytes, within a
   bounded window of the cited line, after whitespace normalisation;
 - a cited path outside the allowlist is never opened at all;
-- a rule is scoped to its own directory subtree — `plugins/x/AGENTS.md` does not
+- a rule is scoped to its own directory subtree — `plugins/x/CLAUDE.md` does not
   govern `tools/`;
 - a quote that is secret-shaped, too short to cite anything, or longer than the
   contract's 300-character carve-out is refused;

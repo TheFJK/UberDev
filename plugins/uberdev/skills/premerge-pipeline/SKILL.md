@@ -2319,7 +2319,7 @@ always yes, and never "does this repo have a version ratchet", which is the
 question. The repo-kind signal is a path in the target tree, and it is the same
 signal `/goal` already uses.
 
-**Why the bump belongs here and nowhere else.** `AGENTS.md` binds the version to
+**Why the bump belongs here and nowhere else.** `CLAUDE.md` binds the version to
 the *landing commit*, once per stack — and forbids the individual PR authors from
 bumping precisely because N PRs cut from one base all resolve the **same** next
 version, git auto-merges the identical edit without a conflict, and two intended
@@ -2398,7 +2398,7 @@ Then replace the CHANGELOG stub with real notes derived from the packed PR title
 `chore(release): v<PREMERGE_NEXT>`, and push.
 
 **Do not tag and do not create a GitHub Release.** Both are post-merge operator
-steps in `AGENTS.md`, and both would be wrong on a branch that has not landed.
+steps in `CLAUDE.md`, and both would be wrong on a branch that has not landed.
 
 ### 5b — PARK
 

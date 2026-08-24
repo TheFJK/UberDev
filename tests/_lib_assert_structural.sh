@@ -228,7 +228,7 @@ _assert_version_bump_one() {  # <abs_file> <grep_pattern> <desc>
 # test-lock files (tests/goal.test.sh, tests/solve-claim.test.sh) are NOT
 # asserted here — they are this helper's own call sites, and
 # plugins/uberdev/lib/bump-version.sh is what moves them. Six file surfaces in
-# total; the repo-root AGENTS.md is the SSOT for the list.
+# total; the repo-root CLAUDE.md is the SSOT for the list.
 assert_version_bump() {
   local root="$1" ver="$2"
   local v="${ver//./\\.}"   # escape dots so grep -E matches them literally
