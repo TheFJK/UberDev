@@ -436,6 +436,24 @@ def _beneath_repo_root(root: str, relative: str) -> bool:
     No symlink is tracked in this repo today, which is exactly why the check
     belongs in the code rather than in a sentence about the tree.
 
+    THAT SAMENESS IS ASSERTED IN PROSE AND PINNED BY NOTHING. This body is a
+    transcription of `code_fixer_contract.beneath` (the only difference is that
+    this one takes a repo-relative argument and joins it), and no test imports
+    both and compares them. The two agree today -- executed across eleven
+    inputs, including a non-str argument, an absolute path, `..` and a
+    normalising path, with zero disagreements -- but agreeing today is what a
+    copy does right up until one side is hardened. This module has already been
+    burned by exactly that: `_repo_path`'s docstring records a prose-asserted
+    equivalence in this same file that was FALSE and would have shipped the
+    symlink escape this function exists to refuse. So: any change to either side
+    must be mirrored by hand, and the durable fix is an executed cross-module
+    equality row in tests/premerge-findings.test.sh, or importing the sibling
+    the way `code_fixer_contract.py` itself loads `run_manifest` and
+    `atomic_move`. Importing was weighed and not taken here: it would turn a
+    stdlib-only module into one whose import pulls in three sibling files, and
+    couple `/premerge`'s triage half to the fixer-authority half for six lines
+    of pure path arithmetic.
+
     Returns False on any error rather than raising: the caller drops a row it
     cannot vouch for, and a validator that throws where the caller expected a
     verdict is a validator that fails open at the call site.
@@ -1097,6 +1115,31 @@ def _is_carried(finding: object) -> bool:
     return isinstance(finding, dict) and finding.get("blocked_on_carry") is True
 
 
+def _reviewer_blockers(blockers: "list") -> "list":
+    """A blocker array narrowed to the rows a REVIEWER raised.
+
+    ONE derivation of that population, for the three places that need it:
+    `_blocker_fingerprints`, `_growth_ratio`'s denominator, and the
+    `counts.blocker_reviewer` field `cmd_plan` writes. The field used to be a
+    subtraction over `cmd_plan`'s own locals -- `len(blockers) - len(synthesised)`
+    -- which is a THIRD spelling of the same question. It agrees with the filter
+    for every document this file builds, because `_normalise_findings` composes
+    a fixed key set and can therefore never stamp `blocked_on_carry` on a
+    reviewer row. But it is arithmetic over transient locals rather than a
+    predicate over the rows, so it answers on provenance where the other two
+    answer on the marker, and on a hand-edited or resumed artifact where a
+    reviewer row DOES carry the flag the two spellings return different numbers
+    (measured: filter 0, subtraction 1). Routing all three through here removes
+    the possibility rather than documenting it.
+
+    NO VALIDATION HERE, DELIBERATELY. It filters and nothing else, so each
+    caller keeps the refusal it already had for a malformed row -- and a
+    non-object is never `_is_carried`, so it survives this filter and still
+    reaches the caller's own check in the same relative order.
+    """
+    return [row for row in blockers if not _is_carried(row)]
+
+
 def _as_deferred_carry_row(finding: "dict") -> "dict":
     """A carried row as `cmd_defer` files it: same finding, cleanup tier.
 
@@ -1157,9 +1200,7 @@ def _blocker_fingerprints(document: "dict") -> "collections.Counter[str]":
     treating its own scheduling notes as evidence of progress.
     """
     prints: "collections.Counter[str]" = collections.Counter()
-    for finding in document["blockers"]:
-        if _is_carried(finding):
-            continue
+    for finding in _reviewer_blockers(document["blockers"]):
         value = finding.get("fingerprint") if isinstance(finding, dict) else None
         if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{16}", value):
             # Pre-loop artifacts carry no fingerprint. Refusing is the only
@@ -1209,18 +1250,43 @@ def _carry_prior_suggestions(out_dir: str, attempt: int) -> "list[dict]":
 
 # The controller-authored identity text of a carried cross-file consequence.
 #
-# NO ATTEMPT NUMBER IN IT, DELIBERATELY. This string becomes the row's
-# `summary`, and `_fingerprint` hashes the summary into the cross-attempt
-# identity `_blocker_fingerprints` counts on. It used to interpolate the
-# reporting attempt, so one consequence that persisted across two attempts
-# arrived under two different fingerprints: `_blocker_fingerprints` counted the
-# old one as `fixed` and the new one as `new` on every single round, which is
-# manufactured progress. STOP_NO_PROGRESS needs an UNCHANGED multiset and could
-# therefore never fire while such a row was carried, and STOP_REGRESSED needs
-# `fixed == 0`, which the phantom made false every time. The comment on the old
-# site called this summary "controller-authored and deterministic"; the attempt
-# number made it the opposite of deterministic across the only axis that
-# mattered.
+# NO ATTEMPT NUMBER IN IT, DELIBERATELY -- BUT NOT FOR THE CONSUMER THIS
+# COMMENT USED TO NAME. This string becomes the row's `summary`, and
+# `_fingerprint` hashes the summary into the row's stored identity. It used to
+# interpolate the reporting attempt, so one consequence that persisted across
+# two attempts arrived under two different fingerprints: `_blocker_fingerprints`
+# counted the old one as `fixed` and the new one as `new` on every single round,
+# which is manufactured progress. STOP_NO_PROGRESS needs an UNCHANGED multiset
+# and could therefore never fire while such a row was carried, and
+# STOP_REGRESSED needs `fixed == 0`, which the phantom made false every time.
+# The comment on the old site called this summary "controller-authored and
+# deterministic"; the attempt number made it the opposite of deterministic
+# across the only axis that mattered.
+#
+# THAT CONSUMER NO LONGER READS THIS TEXT AT ALL. The same defect was closed a
+# second and wider way, because removing the attempt number never finished the
+# job -- the fingerprint is `hash(file, summary)` and the FILE varies across
+# attempts too. `_blocker_fingerprints` and `_growth_ratio` now drop every
+# carried row through `_reviewer_blockers` BEFORE they read anything off it.
+# Executed against the shipped module: a carried row whose `fingerprint` is the
+# literal `GARBAGE-NOT-HEX` yields an empty multiset and no refusal, while the
+# same row with `blocked_on_carry` removed exits 74 on `fingerprint_missing`.
+# So no progress arithmetic in this file keys on this string any more.
+#
+# THE STABILITY CONSTRAINT IS STILL LIVE, FOR A CONSUMER OUTSIDE THIS FILE.
+# `_encode_aggregate` publishes neither `fingerprint` nor `blocked_on_carry`, so
+# `agents/findings-to-issues.md` derives a carried row's per-finding identity
+# itself: Step 8's `MEMBER_FP = sha256(path:line:normalised_summary)[:16]`. A
+# carried row's `path` is fixed by the row and its `line` is `None` -- encoded
+# as `1` by `_encode_aggregate` -- so THIS TEXT IS THE ONLY VARYING TERM.
+# Reinterpolate the attempt number and one consequence that survives two runs
+# is recorded as two members of that file's container issue instead of one
+# recurring member.
+#
+# AND NOTHING EXECUTES THAT. No test asserts a carried row's summary, and the
+# filer is an agent rather than an importable function, so this comment is the
+# whole of the guard. Do NOT read the skip in `_blocker_fingerprints` as proof
+# the constraint died with it.
 #
 # The attempt number is not lost. It goes into `failure_scenario`, which is
 # where the agent's own words already live precisely because nothing keys on
@@ -1428,9 +1494,13 @@ def _read_blocked_on(
                 "blocked_on_schema_invalid",
                 "blocked_on summary",
             )
-            # The reporting attempt lives here and nowhere else: this field is
-            # the one nothing keys on, which is what lets the summary above stay
-            # identical across attempts.
+            # The reporting attempt lives here and nowhere else: of the three
+            # strings this row carries, `failure_scenario` is the one no
+            # identity is derived from -- not `_fingerprint` below, and not the
+            # filer's `path:line:normalised_summary` member key -- which is what
+            # lets the summary above stay identical across attempts. See
+            # `_BLOCKED_ON_SUMMARY` for who still depends on that stability, and
+            # for why the consumer that comment originally named is not it.
             detail = _bounded_text(
                 "attempt %d's fixer for %s reported: %s" % (prior, origin, reason),
                 MAX_DETAIL_BYTES,
@@ -1500,19 +1570,55 @@ def _read_blocked_on(
                 "failure_scenario": detail,
                 "category": None,
                 "verdict": None,
+                # KEPT ON PURPOSE THOUGH NOTHING READS IT. `_reviewer_blockers`
+                # drops this row before `_blocker_fingerprints` validates
+                # identities and before `_growth_ratio` measures, and
+                # `_encode_aggregate` publishes no `fingerprint` key at all, so
+                # neither a consumer nor a validator ever sees this value. It
+                # stays for SCHEMA UNIFORMITY with reviewer rows -- whole rows
+                # are pasted verbatim into the fixer wave prompt -- and because
+                # dropping it would change the bytes of `classified-NN.json` and
+                # `fix-waves-NN.json` for a value no decision depends on.
                 "fingerprint": _fingerprint(target, summary),
                 "severity": "blocker",
                 "severity_source": "controller",
-                # THE MARKER `_growth_ratio` READS. This row is not something a
-                # reviewer reported and not something the previous repair wrote
-                # -- it is the loop carrying its own bookkeeping forward, and by
-                # construction it names a file that repair did NOT modify. Left
-                # in the GROWTH denominator it can only ever dilute the ratio
-                # downward: three genuinely self-referential blockers plus three
-                # carried consequences measured 0.50 instead of 1.00, and the
-                # suppression is largest on the runs with the most cross-file
-                # churn -- the runs the detector exists for. An additive key, so
-                # a pre-loop artifact that lacks it reads exactly as it did.
+                # THE MARKER FOR "THIS ROW IS THE LOOP'S OWN BOOKKEEPING", AND
+                # IT HAS FOUR READERS, NOT ONE. No reviewer reported this row
+                # and the previous repair did not write it -- the loop is
+                # carrying its own scheduling note forward, and by construction
+                # it names a file that repair did NOT modify. Every reader goes
+                # through `_is_carried`, three of them via `_reviewer_blockers`;
+                # the evidence-versus-work line that decides which way each one
+                # falls is documented above that predicate. The four, and what
+                # each one does:
+                #
+                #   1. `_growth_ratio` -- excluded from BOTH sides. It can never
+                #      enter the numerator (the file is not in the measured
+                #      repair scope), and in the denominator it only dilutes:
+                #      three genuinely self-referential blockers plus three
+                #      carried consequences measured 0.50 instead of 1.00, and
+                #      the suppression is largest on the runs with the most
+                #      cross-file churn -- the runs the detector exists for.
+                #   2. `_blocker_fingerprints` -- excluded from the progress
+                #      multisets, so a carried row can no longer read as
+                #      `FIXED=1 NEW=1` on a round that repaired nothing, which
+                #      is what made STOP_NO_PROGRESS and STOP_REGRESSED
+                #      structurally unreachable.
+                #   3. `cmd_defer` -- `_as_deferred_carry_row` demotes the row to
+                #      cleanup tier, so a stranded consequence is still filed but
+                #      never outranks a proven defect at the filer's `max_new`
+                #      cap.
+                #   4. `cmd_plan` -- excluded from `counts.blocker_reviewer`, the
+                #      field that names the reviewer-raised population instead of
+                #      leaving an operator to subtract `BLOCKED=` from
+                #      `BLOCKER=`. The only one of the four that decides nothing;
+                #      it is routed through the same filter so it cannot answer
+                #      differently from the two that do.
+                #
+                # WHAT IT DOES NOT TOUCH: `_fix_waves` still plans this row and
+                # `assert-green` still counts it into `blockers_remaining=`. An
+                # additive key, so a pre-loop artifact that lacks it reads
+                # exactly as it did.
                 "blocked_on_carry": True,
             }
         )
@@ -1787,11 +1893,9 @@ def _growth_ratio(
         return None
     grown = 0
     measured = 0
-    for finding in document["blockers"]:
+    for finding in _reviewer_blockers(document["blockers"]):
         if not isinstance(finding, dict):
             fail("finding_schema_invalid", "a blocker is not an object")
-        if _is_carried(finding):
-            continue
         measured += 1
         # `_scope_key`, NOT `_repo_path`. Both sides of this test have to be
         # derived the same way or a padded path silently leaves the numerator,
@@ -2249,9 +2353,21 @@ def cmd_plan(args: argparse.Namespace) -> int:
             # numbers, and an operator who reads `BLOCKER=1` on one line and
             # `BLOCKERS=0` on the next deserves better than arithmetic on
             # `BLOCKED=` to reconcile them. This key is that number, written
-            # down. It equals `blocker - blocked_on_admitted` by construction,
-            # which is what makes the artifact self-checking.
-            "blocker_reviewer": len(blockers) - len(synthesised),
+            # down.
+            #
+            # IT IS WRITTEN FOR A HUMAN, NOT FOR A CHECKER. A repo-wide search
+            # finds one writer -- this line -- and no reader: no fence, no test
+            # and no agent parses it, and the loop's own progress arithmetic
+            # runs off `_blocker_fingerprints` and `_growth_ratio` instead. It
+            # still equals `blocker - blocked_on_admitted` by construction, so
+            # the three counts in this object can be reconciled by eye; nothing
+            # reconciles them automatically, and calling that self-checking
+            # overstates it.
+            #
+            # DERIVED THROUGH THE SAME FILTER THE OTHER TWO USE, not by
+            # subtracting `len(synthesised)` -- see `_reviewer_blockers` for the
+            # document shape on which the subtraction and the filter disagree.
+            "blocker_reviewer": len(_reviewer_blockers(blockers)),
             "suggestion": len(suggestions),
             # How many severities were machine-checked rather than judged. The
             # run summary prints this so an operator can see at a glance whether

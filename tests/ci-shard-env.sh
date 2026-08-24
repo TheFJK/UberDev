@@ -79,9 +79,28 @@ fi
 ci_shard_env_cr="$(printf '\r')"
 case "$ci_shard_env_plan" in
   *"$ci_shard_env_cr"*)
+    # THE HINT NAMES packer-bytes, NOT dump, and that is measured rather than
+    # reasoned: with a CR-emitting python3 on PATH, `dump` prints no plan byte
+    # at all. Its [A] re-runs this producer and hits this same refusal, and its
+    # [B] and [C] read a $UBERDEV_SHARD_PLAN that the failed planning step never
+    # wrote -- so they report "unset" and match=0 miss=0. `dump` is still the
+    # right verb for the SHARD-COVERAGE tail, where the plan really is set; it
+    # is the wrong one HERE, which is why this says so out loud.
+    #
+    # `packer-bytes` is the verb whose output flips with the condition: LF-only
+    # against the shipped pin in ci-shard-plan.py, CRLF once anything below that
+    # pin re-terminates the lines. (`crlf-plan` also prints bytes here, but it
+    # prints the same modelled CR-delimited shape on a healthy tree, so it is
+    # not evidence about THIS failure and is deliberately not offered as such.)
+    #
+    # The directory is QUOTED in the printed command. This repo can sit under a
+    # path containing a space, and unquoted interpolation there prints a command
+    # that cannot be pasted.
     echo "${0##*/}: the packed plan for $ci_shard_env_job shard $ci_shard_env_shard/$ci_shard_env_shards carries a CR byte." >&2
     echo "${0##*/}: a CR-delimited plan makes the shard filter match only the last entry (#753)." >&2
-    echo "${0##*/}: dump the bytes with: bash $ci_shard_env_dir/ci-shard-diagnose.sh dump $ci_shard_env_job $ci_shard_env_shards $ci_shard_env_shard" >&2
+    echo "${0##*/}: dump the packer's own bytes with: bash \"$ci_shard_env_dir/ci-shard-diagnose.sh\" packer-bytes $ci_shard_env_job $ci_shard_env_shards $ci_shard_env_shard" >&2
+    echo "${0##*/}: CRLF there means ci-shard-plan.py's newline pin regressed; LF means the CR entered below that pin." >&2
+    echo "${0##*/}: not the 'dump' verb here: it re-runs this same refusal and reads a plan this step never emitted, so all three of its sections come back empty." >&2
     exit 2
     ;;
 esac

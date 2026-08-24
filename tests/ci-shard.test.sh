@@ -52,6 +52,56 @@ plan_shard() { # plan_shard N K -> that shard's fixtures on stdout
   python3 -I -B "$PLAN" --shards "$1" --shard "$2" --weights "$WORK/weights.tsv" <"$WORK/corpus"
 }
 
+# ONE reader per shape of the workflow, shared by every section below.
+#
+# The job anchor, the stop-at-the-next-job rule and the ten-space de-indent the
+# `run: |` block scalar carries are ONE contract about the workflow's YAML, and
+# a second transcription of it is the "one contract, N uncompared copies" class
+# tests/ci-wiring.test.sh W12.4 exists to refuse: a fix to the shape lands on
+# one copy, leaves the other narrow, and every row built on the narrow one then
+# passes over a truncated block instead of failing.
+
+# run_block_of <job-key> <marker> -> that job's `run: |` body, de-indented.
+#   marker NON-EMPTY  every `run_one` line is replaced by ONE marker line, so
+#                     synthetic invocations can be spliced in at that point
+#   marker EMPTY      the block exactly as the workflow ships it, invocations
+#                     included
+run_block_of() {
+  awk -v JOB="$1" -v MARK="$2" '
+    $0 ~ ("^  " JOB ":[[:space:]]*$") { in_job = 1; next }
+    in_job && /^  [[:alnum:]_-]+:[[:space:]]*$/ { exit }
+    in_job && /^[[:space:]]+run:[[:space:]]*[|][[:space:]]*$/ { in_run = 1; next }
+    in_run {
+      if ($0 ~ /^[[:space:]]*$/) { print ""; next }
+      if ($0 !~ /^          /) { in_run = 0; next }
+      sub(/^          /, "")
+      if (MARK != "" && $0 ~ /^run_one /) { if (!ins) { print MARK; ins = 1 } next }
+      print
+    }
+  ' "$WORKFLOW"
+}
+
+# matrix_shards_of <job-key> -> how many shards that job's matrix declares, or
+# the empty string. Read out of the job's own `shard: [1, 2, ...]` row.
+matrix_shards_of() {
+  awk -v JOB="$1" '
+    $0 ~ ("^  " JOB ":[[:space:]]*$") { in_job = 1; next }
+    in_job && /^  [[:alnum:]_-]+:[[:space:]]*$/ { exit }
+    in_job && /^[[:space:]]+shard:[[:space:]]*\[/ { print gsub(/,/, ",") + 1; exit }
+  ' "$WORKFLOW"
+}
+
+# DECLARE, THEN COMPARE — the order tests/ci-wiring.test.sh W13.0 uses, and the
+# reason these are constants rather than literals scattered through the rows.
+# Every row below plans for these counts; S10 checks each one against the job's
+# OWN matrix before any row is allowed to trust it. Written as literals in each
+# row instead, a job resharded in the workflow would leave those rows planning
+# for a count that is no longer shipped — and their properties still hold for
+# that count, so they would stay green over a configuration nobody runs.
+LINUX_SHARDS=6
+MACOS_SHARDS=2
+WINDOWS_SHARDS=6
+
 echo "== S1: the pack is complete and disjoint =="
 : >"$WORK/union"
 S1_RC=0
@@ -139,7 +189,7 @@ s5_refuses "ci-shard-env with a non-numeric shard" \
   sh -c "bash '$ENVSH' shape-checks 6 two"
 
 echo "== S6: ci-shard-env emits exactly the three variables the harness reads =="
-if bash "$ENVSH" supervision-smoke-macos 2 1 >"$WORK/env.out" 2>"$WORK/env.err"; then
+if bash "$ENVSH" supervision-smoke-macos "$MACOS_SHARDS" 1 >"$WORK/env.out" 2>"$WORK/env.err"; then
   S6_KEYS="$(sed -n 's/^\([A-Z_]*\)=.*/\1/p' "$WORK/env.out" | tr '\n' ',')"
   [ "$S6_KEYS" = "UBERDEV_SHARD_PLAN,UBERDEV_SHARD,UBERDEV_SHARDS," ] \
     && ok "S6: the three GITHUB_ENV keys are present and in order" \
@@ -188,20 +238,6 @@ echo "== S8: the WORKFLOW'S OWN run_one routes by the plan =="
 # shape, so the rows below keep measuring the harness rather than the position
 # they happened to be pasted at.
 S8_MARK='@@S8-INVOCATIONS@@'
-s8_harness() { # s8_harness <job-key> -> the run: block, invocations replaced by ONE marker
-  awk -v JOB="$1" -v MARK="$S8_MARK" '
-    $0 ~ ("^  " JOB ":[[:space:]]*$") { in_job = 1; next }
-    in_job && /^  [[:alnum:]_-]+:[[:space:]]*$/ { exit }
-    in_job && /^[[:space:]]+run:[[:space:]]*[|][[:space:]]*$/ { in_run = 1; next }
-    in_run {
-      if ($0 ~ /^[[:space:]]*$/) { print ""; next }
-      if ($0 !~ /^          /) { in_run = 0; next }
-      sub(/^          /, "")
-      if ($0 ~ /^run_one /) { if (!ins) { print MARK; ins = 1 } next }
-      print
-    }
-  ' "$WORKFLOW"
-}
 s8_script() { # s8_script <body-file> <invocations-file> <out-file>
   # FAILS LOUDLY, never splices into nothing. A marker that moved, or an empty
   # invocation file, would write a harness that invokes NOTHING -- and every row
@@ -224,7 +260,7 @@ s8_script() { # s8_script <body-file> <invocations-file> <out-file>
   ' "$1" >"$3" \
     || { echo "FATAL: ${0##*/}: $S8_MARK did not splice exactly one non-empty invocation set into $1" >&2; exit 2; }
 }
-S8_BODY="$(s8_harness shape-checks)"
+S8_BODY="$(run_block_of shape-checks "$S8_MARK")"
 if [ -z "$S8_BODY" ]; then
   bad "S8: the ubuntu harness extracted empty — the job key or the block shape moved"
 else
@@ -264,6 +300,31 @@ else
     *"SKIP bash tests/not-in-plan.test.sh"*) ok "S8: an unplanned fixture is SKIPPED" ;;
     *) bad "S8: an unplanned fixture was not skipped — the shards would each run everything" ;;
   esac
+
+  # Polarity: with no plan the SAME harness must run every row. This is the
+  # standalone case ci-wiring W12.3 depends on, asserted here at the routing seam.
+  #
+  # THE UNSET IS EXPLICIT, and it has to be. This fixture runs INSIDE a shard,
+  # where UBERDEV_SHARD_PLAN is exported by the planning step -- so a subshell
+  # that merely declines to set it inherits the real plan, which holds none of
+  # the synthetic names below and skips all six. It passed locally for the only
+  # reason such a row ever does: the variable happened not to exist in the
+  # author's shell.
+  S8_ALL="$(
+    unset UBERDEV_SHARD_PLAN UBERDEV_SHARD UBERDEV_SHARDS
+    bash -e "$WORK/s8.sh" 2>&1 || true
+  )"
+  S8_N="$(printf '%s\n' "$S8_ALL" | grep -c '^--- RUN ')"
+  [ "$S8_N" = "6" ] && ok "S8: with no plan set, all six run (the standalone case)" \
+    || bad "S8: an unset plan ran $S8_N of 6 — the default is not fail-open"
+
+  # S9 — the routing KEY, driven through the same extracted harness.
+  #
+  # These rows carry their own identifier and therefore their own header: printed
+  # under S8's, twelve S9 rows would read as S8's and a row shipped as a
+  # duplicate of its predecessor would have nothing to distinguish it, which is
+  # the row-id ambiguity ci-wiring's own anti-vacuity row exists to refuse.
+  echo "== S9: the routing key survives every argv shape the workflow uses =="
   case "$S8_OUT" in
     *"RUN  bash tests/flagged.test.sh --artifact-publication-only"*)
       ok "S9: a fixture with a TRAILING FLAG runs (the key is not the last argument)" ;;
@@ -328,23 +389,6 @@ else
       ok "S9: an argv naming no fixture runs — W12.3's synthetic fixtures survive the filter" ;;
     *) bad "S9: a non-fixture argv was skipped — ci-wiring W12.3 would red" ;;
   esac
-
-  # Polarity: with no plan the SAME harness must run every row. This is the
-  # standalone case ci-wiring W12.3 depends on, asserted here at the routing seam.
-  #
-  # THE UNSET IS EXPLICIT, and it has to be. This fixture runs INSIDE a shard,
-  # where UBERDEV_SHARD_PLAN is exported by the planning step -- so a subshell
-  # that merely declines to set it inherits the real plan, which holds none of
-  # the synthetic names below and skips all six. It passed locally for the only
-  # reason such a row ever does: the variable happened not to exist in the
-  # author's shell.
-  S8_ALL="$(
-    unset UBERDEV_SHARD_PLAN UBERDEV_SHARD UBERDEV_SHARDS
-    bash -e "$WORK/s8.sh" 2>&1 || true
-  )"
-  S8_N="$(printf '%s\n' "$S8_ALL" | grep -c '^--- RUN ')"
-  [ "$S8_N" = "6" ] && ok "S8: with no plan set, all six run (the standalone case)" \
-    || bad "S8: an unset plan ran $S8_N of 6 — the default is not fail-open"
 fi
 
 echo "== S10: every shard of every job runs its whole plan (aggregate) =="
@@ -357,19 +401,6 @@ echo "== S10: every shard of every job runs its whole plan (aggregate) =="
 # tests/ci-job-fixtures.sh, which reads the run_one lines back out of the
 # workflow -- a guard that re-derived the count the way the harness does would
 # agree with the harness by construction and see nothing.
-s10_block() { # $1 = job key -> the run: block WITH its invocations
-  awk -v JOB="$1" '
-    $0 ~ ("^  " JOB ":[[:space:]]*$") { in_job = 1; next }
-    in_job && /^  [[:alnum:]_-]+:[[:space:]]*$/ { exit }
-    in_job && /^[[:space:]]+run:[[:space:]]*[|][[:space:]]*$/ { in_run = 1; next }
-    in_run {
-      if ($0 ~ /^[[:space:]]*$/) { print ""; next }
-      if ($0 !~ /^          /) { in_run = 0; next }
-      sub(/^          /, "")
-      print
-    }
-  ' "$WORKFLOW"
-}
 # The four interpreters the workflow's run_one lines use, stubbed so the
 # replay costs nothing. `--- RUN` is echoed BEFORE the invocation, so the
 # count is unaffected by the stub.
@@ -379,7 +410,7 @@ s10_runner() { # $1 = job key -> path to a replayable script
     printf 'zsh() { :; }\n'
     printf 'python() { :; }\n'
     printf 'env() { shift; "$@"; }\n'
-    s10_block "$1"
+    run_block_of "$1" ''
   } >"$WORK/s10.$1.sh"
   printf '%s\n' "$WORK/s10.$1.sh"
 }
@@ -391,13 +422,27 @@ while IFS= read -r s10_spec; do
   [ -n "$s10_spec" ] || continue
   s10_job="${s10_spec%%|*}"
   s10_shards="${s10_spec##*|}"
-  s10_wired="$(bash "$FIXTURES" "$s10_job" | grep -c .)"
+  # DECLARE, THEN COMPARE. The count above comes from this file's own constants;
+  # nothing below may plan for it until the job's own matrix agrees. A job
+  # resharded in the workflow reds here — and stops, rather than measuring a
+  # shard count that is no longer shipped and calling the result green.
+  s10_matrix="$(matrix_shards_of "$s10_job")"
+  if [ "$s10_matrix" != "$s10_shards" ]; then
+    bad "S10: $s10_job's matrix declares ${s10_matrix:-<none>} shard(s), this file plans for $s10_shards — reshard the constants at the top"
+    continue
+  fi
+  # ONE extraction per job, not one per shard. The wired list is a pure function
+  # of (job key, workflow file) and neither moves during the run, so re-deriving
+  # it inside the shard loop bought a fresh process tree per shard and nothing
+  # else. Both consumers below read the same capture.
+  s10_fixtures="$(bash "$FIXTURES" "$s10_job")"
+  s10_wired="$(printf '%s\n' "$s10_fixtures" | grep -c .)"
   s10_script="$(s10_runner "$s10_job")"
   s10_total=0
   s10_bad=''
   s10_k=1
   while [ "$s10_k" -le "$s10_shards" ]; do
-    s10_plan="$(bash "$FIXTURES" "$s10_job" | python3 -I -B "$PLAN" --shards "$s10_shards" --shard "$s10_k")"
+    s10_plan="$(printf '%s\n' "$s10_fixtures" | python3 -I -B "$PLAN" --shards "$s10_shards" --shard "$s10_k")"
     s10_len="$(printf '%s\n' "$s10_plan" | grep -c .)"
     s10_flat="$(printf '%s' "$s10_plan" | tr '\n' ' ')"
     s10_run="$(s10_run_count "$s10_script" "$s10_flat" "$s10_k" "$s10_shards")"
@@ -416,9 +461,9 @@ while IFS= read -r s10_spec; do
     bad "S10: $s10_job executed $s10_total of $s10_wired wired fixtures — $((s10_wired - s10_total)) never ran in ANY shard"
   fi
 done <<S10_SPECS
-shape-checks|6
-supervision-smoke-macos|2
-shape-checks-windows|6
+shape-checks|$LINUX_SHARDS
+supervision-smoke-macos|$MACOS_SHARDS
+shape-checks-windows|$WINDOWS_SHARDS
 S10_SPECS
 
 echo "== S11: a CR-delimited plan cannot buy a green short run =="
@@ -429,9 +474,9 @@ echo "== S11: a CR-delimited plan cannot buy a green short run =="
 # a pass. Before the SHARD-COVERAGE tail exists, S11b is RED and S11a is not.
 S11_JOB=shape-checks-windows
 S11_SCRIPT="$(s10_runner "$S11_JOB")"
-S11_VALUE="$(bash "$REPO_ROOT/tests/ci-shard-diagnose.sh" crlf-plan "$S11_JOB" 6 2)"
-S11_LEN="$(bash "$FIXTURES" "$S11_JOB" | python3 -I -B "$PLAN" --shards 6 --shard 2 | grep -c .)"
-S11_OUT="$(UBERDEV_SHARD_PLAN="$S11_VALUE" UBERDEV_SHARD=2 UBERDEV_SHARDS=6 bash -e "$S11_SCRIPT" 2>&1)"
+S11_VALUE="$(bash "$REPO_ROOT/tests/ci-shard-diagnose.sh" crlf-plan "$S11_JOB" "$WINDOWS_SHARDS" 2)"
+S11_LEN="$(bash "$FIXTURES" "$S11_JOB" | python3 -I -B "$PLAN" --shards "$WINDOWS_SHARDS" --shard 2 | grep -c .)"
+S11_OUT="$(UBERDEV_SHARD_PLAN="$S11_VALUE" UBERDEV_SHARD=2 UBERDEV_SHARDS="$WINDOWS_SHARDS" bash -e "$S11_SCRIPT" 2>&1)"
 S11_RC=$?
 S11_RUN="$(printf '%s\n' "$S11_OUT" | grep -c '^--- RUN ')"
 # The `-n` is not decoration. An EMPTY value is read by the harness as an unset
@@ -458,10 +503,10 @@ echo "== S12: the aggregate comparison is not vacuous =="
 # one entry from a shard's plan is the smallest defect it must catch.
 S12_JOB=shape-checks-windows
 S12_SCRIPT="$(s10_runner "$S12_JOB")"
-S12_FULL="$(bash "$FIXTURES" "$S12_JOB" | python3 -I -B "$PLAN" --shards 6 --shard 3)"
+S12_FULL="$(bash "$FIXTURES" "$S12_JOB" | python3 -I -B "$PLAN" --shards "$WINDOWS_SHARDS" --shard 3)"
 S12_LEN="$(printf '%s\n' "$S12_FULL" | grep -c .)"
 S12_SHORT="$(printf '%s\n' "$S12_FULL" | sed '$d' | tr '\n' ' ')"
-S12_RUN="$(s10_run_count "$S12_SCRIPT" "$S12_SHORT" 3 6)"
+S12_RUN="$(s10_run_count "$S12_SCRIPT" "$S12_SHORT" 3 "$WINDOWS_SHARDS")"
 if [ "$S12_RUN" = "$((S12_LEN - 1))" ] && [ "$S12_RUN" != "$S12_LEN" ]; then
   ok "S12: a plan one fixture short runs one fixture fewer — S10's comparison can see it"
 else
@@ -479,7 +524,7 @@ echo "== S13: the producer refuses a pack its packer delivered with CRs =="
 # own stdout -- see the TWO SHIMS note in tests/ci-shard-diagnose.sh. A row fed
 # only through the producer it is meant to test stops testing it the moment
 # that producer is fixed.
-S13_OUT="$(bash "$REPO_ROOT/tests/ci-shard-diagnose.sh" simulate shape-checks-windows 6 2 2>"$WORK/s13.err")"
+S13_OUT="$(bash "$REPO_ROOT/tests/ci-shard-diagnose.sh" simulate shape-checks-windows "$WINDOWS_SHARDS" 2 2>"$WORK/s13.err")"
 S13_RC=$?
 if [ "$S13_RC" -ne 0 ]; then
   ok "S13: ci-shard-env.sh refuses a CR-bearing pack (rc=$S13_RC)"
@@ -507,7 +552,7 @@ echo "== S14: the packer pins its own stdout to LF =="
 # would hand $? the status of `tr`, so a packer that died would arrive as an
 # empty haystack containing no CR -- and the row would report PASS for the one
 # reason that is not a pass.
-bash "$REPO_ROOT/tests/ci-shard-diagnose.sh" packer-bytes shape-checks-windows 6 2 \
+bash "$REPO_ROOT/tests/ci-shard-diagnose.sh" packer-bytes shape-checks-windows "$WINDOWS_SHARDS" 2 \
   >"$WORK/s14.bytes" 2>"$WORK/s14.err"
 S14_RC=$?
 if [ "$S14_RC" -ne 0 ] || [ ! -s "$WORK/s14.bytes" ]; then
@@ -554,13 +599,6 @@ s15_dump_line_of() { # $1 = job key -> that job's dump step, leading indent stri
     in_job && $0 ~ PAT { sub(/^[[:space:]]*/, ""); sub(/\r$/, ""); print; exit }
   ' "$WORKFLOW"
 }
-s15_matrix_shards_of() { # $1 = job key -> how many shards the job's matrix declares
-  awk -v JOB="$1" '
-    $0 ~ ("^  " JOB ":[[:space:]]*$") { in_job = 1; next }
-    in_job && /^  [[:alnum:]_-]+:[[:space:]]*$/ { exit }
-    in_job && /^[[:space:]]+shard:[[:space:]]*\[/ { print gsub(/,/, ",") + 1; exit }
-  ' "$WORKFLOW"
-}
 s15_lineno_of() { # $1 = job key, $2 = ERE -> line number of its first match inside the job
   awk -v JOB="$1" -v PAT="$2" '
     $0 ~ ("^  " JOB ":[[:space:]]*$") { in_job = 1; next }
@@ -569,7 +607,7 @@ s15_lineno_of() { # $1 = job key, $2 = ERE -> line number of its first match ins
   ' "$WORKFLOW"
 }
 for s15_job in shape-checks supervision-smoke-macos shape-checks-windows; do
-  s15_shards="$(s15_matrix_shards_of "$s15_job")"
+  s15_shards="$(matrix_shards_of "$s15_job")"
   s15_line="$(s15_dump_line_of "$s15_job")"
   s15_want="run: bash tests/ci-shard-diagnose.sh dump $s15_job $s15_shards \"\${{ matrix.shard }}\""
   if [ -z "$s15_shards" ]; then

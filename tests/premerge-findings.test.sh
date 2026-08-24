@@ -2257,9 +2257,9 @@ scope() {
 # substitution runs in a subshell, so an rc stashed inside never reaches the
 # caller -- and rc is half of what is under test here, since a stop exits 1.
 #
-# stderr is kept in DIR/g.err rather than discarded, because one of the four
-# routes to an unmeasured ratio -- an OSError on a scope file that IS present --
-# is indistinguishable from the three benign ones by its `-` alone. Its
+# stderr is kept in DIR/g.err rather than discarded, because one of the five
+# causes of an unmeasured ratio -- an OSError on a scope file that IS present --
+# is indistinguishable from the four benign ones by its `-` alone. Its
 # announcement is the only thing that separates "we could not look" from "there
 # was nothing to look at".
 decide_g() {
@@ -2380,15 +2380,28 @@ plan_at "$D" 2 "$SHA_B" || bad "B32: survivor setup 2 failed"
 expect_g "$(decide_g "$D" 2 6 not_green 'blockers_remaining=2')" 'CONTINUE|0.00|0' \
   "a survivor in the repaired file plus a new blocker elsewhere is 0.00"
 
-# ---- the FOUR routes to `-`, each driven, none of them a stop ---------------
+# ---- the FIVE causes of `-`, over the FOUR branches, none of them a stop ----
 #
-# `-` is not `0.00`: it says the ratio was not measured. Four distinct
-# conditions produce it, and a block that only exercised one of them would pass
-# just as happily over the other three being dead code.
+# `-` is not `0.00`: it says the ratio was not measured. SKILL.md `## Phase 3b`
+# and `_read_repair_scope`'s docstring name FIVE causes, and they reach FOUR
+# distinct branches: (2) and (3) below arrive at the SAME absent-file return, so
+# the one row driven for (2) is the driven test for both. A block that exercised
+# only one BRANCH would pass just as happily over the other three being dead
+# code -- which is why the count that matters here is branches, not causes.
 
 # (1) attempt 1: there is no predecessor to attribute anything to.
 # (2) a predecessor that committed nothing, so the commit fence wrote no scope
-#     list (`REASON=no-edits`) or the repair only re-ran CI.
+#     list (`REASON=no-edits`) or the repair only re-ran CI (`arm=rerun`).
+# (3) a predecessor that repaired through the CI fence's `arm=commit` path: real
+#     code edits, really pushed, but that fence publishes `ci-scope-<NN>.*` and
+#     never `fix-scope-<NN>.modified`. It is the one cause that switches the
+#     detector OFF -- such a loop never accumulates two consecutive eligible
+#     rounds, so STOP_SELF_REFERENTIAL is unreachable for it until that fence
+#     publishes a scope of its own. It gets no case of its own because it has no
+#     BRANCH of its own: `_read_repair_scope` stats exactly one path, no
+#     `ci-scope-*` file is it, and the row below returns None from the same
+#     `os.path.exists` arm. An earlier version of this header counted four and
+#     left this cause out; the enumeration was short, the coverage was not.
 D_DASH="$(new_case)"
 write_input "$D_DASH" '[{"file":"lib/a.sh","line":1,"summary":"alpha","failure_scenario":"crash","severity":"blocker"}]'
 plan_at "$D_DASH" 1 "$SHA_A" || bad "B32: unmeasured setup 1 failed"
@@ -2397,7 +2410,7 @@ expect_g "$(decide_g "$D_DASH" 1 6 not_green 'blockers_remaining=1')" 'CONTINUE|
 write_input "$D_DASH" '[{"file":"lib/q.sh","line":1,"summary":"quebec","failure_scenario":"crash","severity":"blocker"}]'
 plan_at "$D_DASH" 2 "$SHA_B" || bad "B32: unmeasured setup 2 failed"
 expect_g "$(decide_g "$D_DASH" 2 6 not_green 'blockers_remaining=1')" 'CONTINUE|-|0' \
-  "an attempt whose predecessor wrote no scope list reports no ratio"
+  "a predecessor that published no scope list -- no-edits or CI-arm -- reports no ratio"
 
 # And the field is on the line even when it has no value: a line whose field set
 # varies is a line no `case` pattern can match.
@@ -2408,7 +2421,7 @@ case "$B32_LINE" in
   *) bad "B32: the GROWTH field is missing or misplaced: $B32_LINE" ;;
 esac
 
-# (3) an attempt with NO blockers to divide by. The scope list is present and
+# (4) an attempt with NO blockers to divide by. The scope list is present and
 #     the predecessor's evidence is on disk, so the only thing standing between
 #     this row and a ZeroDivisionError traceback is the empty-denominator guard
 #     -- which is why this row asserts rc=0 as well as `-`.
@@ -2422,10 +2435,10 @@ plan_at "$D" 2 "$SHA_B" || bad "B32: zero-blocker setup 2 failed"
 expect_g "$(decide_g "$D" 2 6 not_green 'ci=red')" 'CONTINUE|-|0' \
   "an attempt with no blockers reports no ratio and does not divide by zero"
 
-# (4) an OSError on a scope file that IS present. This one is a FAULT, not an
+# (5) an OSError on a scope file that IS present. This one is a FAULT, not an
 #     absence, and it is the only `-` an operator has to act on -- so it
 #     announces itself on stderr with a token while degrading exactly like the
-#     other three. A directory at the scope path is the portable way to make
+#     other four. A directory at the scope path is the portable way to make
 #     `os.path.exists` true and `open()` raise, with no dependence on the test
 #     running as an unprivileged user.
 D_ERR="$(new_case)"

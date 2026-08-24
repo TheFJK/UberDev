@@ -914,10 +914,26 @@ rcx15_unpinned() {  # rcx15_unpinned FILE OPENER -> offending lines, empty when 
   #
   # Full-line comments are stripped first — the guard carries its own rationale
   # and that paragraph says the words "sort" and "comm" in prose.
+  #
+  # THE TRAILING CLASS IS EVERY COMMAND TERMINATOR, NOT JUST WHITESPACE. This
+  # tail is the TWIN of the one in tests/goal.test.sh (`g56_unpinned`), and it
+  # is widened here for the same measured reason: a `[[:space:]]`-only tail can
+  # only see an invocation that carries an argument, and `sort` needs none — it
+  # reads stdin. So `… | sort)` closing a command substitution, `… | sort` at
+  # end of line, `sort|uniq`, `sort;`, `sort&` and `sort>f` were every one of
+  # them a LIVE unpinned sort that the narrow grep scored as ZERO hits, and
+  # RCX15.live printed PASS over the lot. The two mutants below cannot catch
+  # that: both spell every occurrence with a following flag (`sort -u`,
+  # `comm -13`), which is precisely the whitespace case the old tail already
+  # covered. RCX15.mutation-bare is the row that pins the widened tail.
+  #
+  # `=`, `"`, `'` and `}` stay OUT of the class deliberately — those are how an
+  # ASSIGNMENT or a variable READ ends, so admitting them would red `sort=/bin/x`,
+  # `"$sort"` and `${sort}`, none of which invokes anything.
   rcx15_body "$1" "$2" \
     | grep -vE '^[[:space:]]*#' \
     | sed -E 's/LC_ALL=C[[:space:]]+(sort|comm)/PINNED_\1/g' \
-    | grep -nE '(^|[^=[:alnum:]_./-])(sort|comm)[[:space:]]' || :
+    | grep -nE '(^|[^=[:alnum:]_./-])(sort|comm)([[:space:])|;&<>`]|$)' || :
 }
 RCX15_OPENER='review_consolidate_continue() {'
 RCX15_LINES="$(rcx15_body "$CONSOLIDATE_LIB" "$RCX15_OPENER" | grep -c . || :)"
@@ -963,6 +979,39 @@ if [ -n "$RCX15_HALF_HITS" ]; then
   pass "RCX15.mutation-half: a pinned comm and an unpinned sort on ONE line still reds"
 else
   fail "RCX15.mutation-half: a half-pinned line reads as clean — the predicate is line-level, so RCX15.live is blind to the next edit to that line"
+fi
+# THE BARE-TERMINATOR MUTANT — the hole the two rows above CANNOT see. Both of
+# them spell every occurrence with a following flag (`sort -u`, `comm -13`), so
+# a `[[:space:]]`-only tail was enough to red them and the rest of the offender
+# class went untested. `sort` takes no operand, so these three spellings are the
+# ones a rewrite of the shipped `allowed=` / `staged=` / `extra=` lines actually
+# produces: the word ends at `)`, at end-of-line, or at `|`. Every one of them
+# is a live unpinned sort. Against the pre-widening `[[:space:]]` tail this body
+# scores ZERO hits — which is what makes the widening a fix and not a cosmetic.
+#
+# No `comm` row here, and that is not an omission: `comm` requires TWO operands,
+# so a terminator always follows an operand, never the command name itself. The
+# tail is shared by the `(sort|comm)` alternation and the two mutants above
+# already prove `comm` reaches this grep.
+RCX15_BARE="$TMP/rcx15-mutant-bare.sh"
+cat >"$RCX15_BARE" <<'EOF_RCX15B'
+review_consolidate_continue() {
+  local allowed staged extra
+  allowed="$(printf '%s\n' "$allowed_raw" | sort)"
+  staged="$(printf '%s\n' "$staged_raw" | sort|uniq)"
+  extra="$(LC_ALL=C comm -13 <(printf '%s\n' "$allowed") <(printf '%s\n' "$staged"))"
+  printf '%s\n' "$extra" | sort
+}
+EOF_RCX15B
+RCX15_BARE_HITS="$(rcx15_unpinned "$RCX15_BARE" "$RCX15_OPENER")"
+RCX15_BARE_COUNT="$(printf '%s\n' "$RCX15_BARE_HITS" | grep -c . || :)"
+# ALL THREE, never merely one: a tail widened for `)` alone would satisfy a
+# non-empty check while leaving the end-of-line and `|` bypasses wide open.
+if [ "${RCX15_BARE_COUNT:-0}" -eq 3 ]; then
+  pass "RCX15.mutation-bare: all 3 bare-terminator sorts red — ')', end-of-line and '|' are in the offender class"
+else
+  fail "RCX15.mutation-bare: expected 3 bare-terminator hits, got ${RCX15_BARE_COUNT:-0} — the offender tail is still whitespace-only" \
+    "$RCX15_BARE_HITS"
 fi
 
 echo

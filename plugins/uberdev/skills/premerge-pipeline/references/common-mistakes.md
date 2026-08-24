@@ -39,12 +39,17 @@ repair modified — work this loop made for itself. At `1.00` the loop is review
 its own output, and the response to that is to stop, not to repair again.
 
 **Reading `GROWTH=-` as `GROWTH=0.00`.** The dash means the ratio was not
-measured, and four things produce it: (1) attempt 1, which has no previous repair
+measured, and five things produce it: (1) attempt 1, which has no previous repair
 to attribute anything to; (2) a previous attempt that committed no edits, so the
 commit fence exited `REASON=no-edits` and wrote no `fix-scope-<NN>.modified`;
-(3) an attempt with no blockers to divide by; and (4) a scope file that is
-present but could not be read. Only the fourth is a fault, and it is the one an
-operator otherwise misses: it announces itself as
+(3) a previous attempt that repaired through the Phase 3 CI arm, which pushes
+real code edits but publishes `ci-scope-<NN>.*` and no scope list this
+measurement reads — the one cause that makes the stop unreachable, and the
+subject of *Reading "the round is not measured"…* below; (4) an attempt with no
+**reviewer-raised** blocker to divide by, which includes one holding only
+`blocked_on_carry` rows, since a carried row counts on neither side; and (5) a
+scope file that is present but could not be read. Only the fifth is a fault, and
+it is the one an operator otherwise misses: it announces itself as
 `premerge-findings: repair_scope_unreadable:` on stderr and nowhere else, so a
 `-` on the line is a reason to go and check stderr, not only to note that the
 ratio was undefined. `0.00` by contrast IS a measurement — the previous repair
@@ -62,23 +67,50 @@ either way — it is a not-green stop, so Phase 5 runs with `PREMERGE_SURVIVORS=
 and files every surviving blocker as an issue. The claim is "not *this loop's*
 work", never "not work".
 
-**Firing the growth stop on a single round.** It takes two consecutive measured
-attempts at or above `PREMERGE_GROWTH_CEILING`, and the second one is not
-timidity. Every attempt's blocker set is a fresh sample of an unbounded
-generator, and the files most likely to be resampled are exactly the ones the
-last repair touched — so one high round is equally consistent with a convergence
-whose repairs happen to be concentrated in a few files. A detector that fired on
-it would stop loops that were working, and RFC 0021 A3 records that this — not a
-detector falling silent — is the real failure mode.
+**Firing the growth stop on a single round — or on the ratio alone.** Two ways of
+under-counting the same test, and both stop loops that were working. A round is
+**eligible** on **three** conditions, not one: `GROWTH=` is measured, it is at or
+above `PREMERGE_GROWTH_CEILING`, **and** the round did not reduce the
+reviewer-raised blocker count (`blockers >= previous_blockers`, read off the
+previous attempt's own `converge.jsonl` row rather than a variable a fence could
+forget). Then `PREMERGE_GROWTH_RUNS` consecutive rounds must clear all three.
+The third condition is not decoration: `GROWTH=` answers what the residual is
+made **of**, never which way the run is going, and since the denominator shrinks
+as the loop succeeds while the reviewer keeps resampling the file the repair just
+touched, the ratio RISES toward `1.00` exactly as a run converges. Shipped
+without it, a measured 5 → 2 → 2 run read `0.50` twice and stopped with three of
+its five repair rounds unspent. The second round is not timidity either — every
+attempt's blocker set is a fresh sample of an unbounded generator, so one high
+round is equally consistent with a convergence whose repairs happen to be
+concentrated in a few files. RFC 0021 A3 records that stopping such a loop, not a
+detector falling silent, is the real failure mode; a run log showing `GROWTH=0.90`
+twice and no stop is the count condition doing its job, not the detector failing.
 
 **Making the growth ratio precise before making it used.** File-level membership
-over-counts: a new finding anywhere in a touched file counts as growth, and a
-round whose repair committed nothing is not measured at all. It is a signal, not
-a proof, and that is deliberate — it is also why the stop needs two consecutive
-rounds rather than one. The precise version needs diff-hunk mapping against a
-review pointed at one repair's delta, and RFC 0021 A3 C8 records that no such
-dispatch exists yet — building it here would replace a working coarse signal with
-a keystone nothing can invoke.
+over-counts: a new finding anywhere in a touched file counts as growth. It is a
+signal, not a proof, and that is deliberate — it is also why the stop needs two
+consecutive eligible rounds rather than one. The precise version needs diff-hunk
+mapping against a review pointed at one repair's delta, and RFC 0021 A3 C8 records
+that no such dispatch exists yet — building it here would replace a working coarse
+signal with a keystone nothing can invoke.
+
+**Reading "the round is not measured" as "the round repaired nothing".** The one
+inference that is worth more than the ratio's precision, because it is the case
+where the detector is switched **off** rather than merely coarse.
+`_repair_scope_path` opens `fix-scope-<NN>.modified` and nothing else, so a
+*present, pushed, genuinely code-changing* repair still reads as no scope if it
+published under another name — and one arm does exactly that. Phase 3's CI fence
+on `arm=commit` dispatches `ci-code-fixer`, compares its diff against
+`ci-scope-<NN>.allowed`, pushes, and publishes `ci-scope-<NN>.*` only. The next
+attempt therefore prints `GROWTH=-` and is not eligible, and a loop that keeps
+repairing through that arm can never accumulate two consecutive eligible rounds:
+`STOP_SELF_REFERENTIAL` is structurally **unreachable** for it. Not hypothetical
+— the run that surfaced this took that path at attempt 1. Nor is it closable from
+the findings side: `ci-scope-<NN>.changed` is written before the scope comparison
+and before the push, and attributing a round's findings to edits that may never
+have left the machine trades one wrong measurement for another. The half that
+closes it is a durable publish in the CI fence itself — SKILL.md, not the library
+— and until that lands, `-` is the honest report and it stops nothing.
 
 **Reading `converge`'s exit status as success or failure.** `STOP_GREEN` exits 1.
 1 means "stop", 0 means "go round again". Branch on `DECISION=`.

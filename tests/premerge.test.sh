@@ -78,7 +78,11 @@
 #          exactly one agent owns it. Exactly one producer, and no fence names
 #          the blocked-on artifact
 #   P22c — the widening is declared on both surfaces, capped, and reads exactly
-#          one predecessor; both bypass entries are in common-mistakes.md
+#          one predecessor; both bypass entries are in common-mistakes.md. The
+#          cap is compared VALUE-for-value with the library's MAX_BLOCKED_ON,
+#          and the wave size the SKILL says it equals is compared with what the
+#          fence actually passes as --max-per-wave — a name grep on either side
+#          is green at any value (#370/#371)
 
 set -u
 
@@ -1334,6 +1338,80 @@ assert_fixed "$FENCES" '--carry-blocked' "P22c: a fence turns the widening on"
 assert_fixed "$FENCES" '--repo-root "$PREMERGE_ROOT"' "P22c: and hands it a root to contain against"
 assert_fixed "$SKILL" 'PREMERGE_MAX_BLOCKED_ON' "P22c: the SKILL declares the cap"
 assert_fixed "$LIB" 'MAX_BLOCKED_ON' "P22c: the library declares the cap it enforces"
+# ...and the VALUE behind both those names. The two rows above are
+# `assert_fixed` — a fixed-string grep for the identifier, on each side — so the
+# pair stayed green at any value and the two copies were free to drift the
+# moment either moved: the SKILL's number is what a reader plans against, the
+# library's is what actually drops rows. That is the #370/#371 "one contract, N
+# uncompared copies" class P3b names above, and this stack's other restated
+# constants are not exposed to it — PREMERGE_REPAIR_CEILING /
+# PREMERGE_WAIT_CI_CEILING and the growth pair are compared value-for-value in
+# tests/premerge-findings.test.sh (B15b, B32). This one is compared here,
+# beside the Constants block's other locks (P19, P20).
+#
+# EVALUATE the library's constant, never parse it: P3b states that rule for this
+# repo, and the cross-platform import recipe is P3b's too — cd into the lib dir,
+# hand python3 a RELATIVE filename (a Git Bash absolute path is not openable by
+# native Windows python), strip the CR native-Windows python writes.
+P22C_ERR="$(mktemp)"
+P22C_LIB_CAP="$( (cd "$LIB_DIR" && python3 -c "
+import importlib.util
+spec = importlib.util.spec_from_file_location('premerge_findings', '$LIB_BASE')
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+print(mod.MAX_BLOCKED_ON)
+") 2>"$P22C_ERR" | tr -d '\r')"
+# Spaced (`NAME = 8`) is the documentation, as in P19: the Constants block is the
+# only copy of this number the prose points at.
+P22C_DOC_CAP="$(sed -n 's/^PREMERGE_MAX_BLOCKED_ON[[:space:]][[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*$/\1/p' "$SKILL" | sed -n '1p')"
+case "$P22C_LIB_CAP" in
+  ''|*[!0-9]*)
+    echo "  FAIL  P22c: could not evaluate MAX_BLOCKED_ON from the library (got '$P22C_LIB_CAP')"
+    [ -s "$P22C_ERR" ] && echo "        python stderr: $(tr '\n' ' ' <"$P22C_ERR")"
+    FAIL=$((FAIL + 1)) ;;
+  *)
+    if [ -z "$P22C_DOC_CAP" ]; then
+      echo "  FAIL  P22c: the Constants block declares no PREMERGE_MAX_BLOCKED_ON value"; FAIL=$((FAIL + 1))
+    elif [ "$P22C_DOC_CAP" != "$P22C_LIB_CAP" ]; then
+      echo "  FAIL  P22c: Constants says PREMERGE_MAX_BLOCKED_ON=$P22C_DOC_CAP, the library enforces $P22C_LIB_CAP"
+      FAIL=$((FAIL + 1))
+    else
+      echo "  PASS  P22c: the SKILL's restated cap == the library's enforced MAX_BLOCKED_ON ($P22C_LIB_CAP)"
+      PASS=$((PASS + 1))
+    fi ;;
+esac
+rm -f "$P22C_ERR"
+
+# The equality the SKILL argues from. It says the cap is equal to
+# PREMERGE_MAX_FIX_WAVE "on purpose" — the widening is one extra wave's worth of
+# files rather than a number someone picked — and that reasoning is the entire
+# justification for the value. Nothing enforced it: PREMERGE_MAX_FIX_WAVE exists
+# on its own Constants row and inside the sentence claiming the equality, and
+# nowhere else in tests/ or lib/, so the argument could go false with no row
+# moving. What makes the wave size real is the fence, which passes
+# `--max-per-wave` EXPLICITLY rather than leaning on the library's argparse
+# default — so the fence's literal, not the default, is what the cap must equal.
+P22C_DOC_WAVE="$(sed -n 's/^PREMERGE_MAX_FIX_WAVE[[:space:]][[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*$/\1/p' "$SKILL" | sed -n '1p')"
+P22C_FENCE_WAVES="$(sed -n 's/^[[:space:]]*--max-per-wave[[:space:]][[:space:]]*\([0-9][0-9]*\).*$/\1/p' "$FENCES")"
+P22C_FENCE_WAVE="$(sort -u <<<"$P22C_FENCE_WAVES")"
+P22C_FENCE_WAVE_N="$(grep -c . <<<"$P22C_FENCE_WAVE")"
+if [ -z "$P22C_DOC_WAVE" ]; then
+  echo "  FAIL  P22c: the Constants block declares no PREMERGE_MAX_FIX_WAVE value"; FAIL=$((FAIL + 1))
+elif [ "$P22C_FENCE_WAVE_N" != "1" ]; then
+  echo "  FAIL  P22c: the fences pass $P22C_FENCE_WAVE_N distinct --max-per-wave values:"
+  sed 's/^/          /' <<<"$P22C_FENCE_WAVES"
+  FAIL=$((FAIL + 1))
+elif [ "$P22C_FENCE_WAVE" != "$P22C_DOC_WAVE" ]; then
+  echo "  FAIL  P22c: Constants says PREMERGE_MAX_FIX_WAVE=$P22C_DOC_WAVE, the fence runs --max-per-wave $P22C_FENCE_WAVE"
+  FAIL=$((FAIL + 1))
+elif [ "$P22C_DOC_WAVE" != "$P22C_DOC_CAP" ]; then
+  echo "  FAIL  P22c: the SKILL says the cap equals the wave size, but declares $P22C_DOC_CAP and $P22C_DOC_WAVE"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  P22c: the fence runs the declared wave size and the cap equals it ($P22C_DOC_WAVE)"
+  PASS=$((PASS + 1))
+fi
+
 assert_fixed "$LIB" 'blocked-on-%02d.json' "P22c: the library reads ONE predecessor by name, not a range"
 assert_fixed "$LIB" '_beneath_repo_root' "P22c: containment is a filesystem check the library actually has"
 assert_fixed "$SKILL" 'blocked-on-<NN>.json' "P22c: the SKILL names the artifact the controller writes"

@@ -1365,99 +1365,99 @@ successfully converged stack as a broken one.
 | `CONTINUE` | something is still fixable and the last attempt changed something | repair (3c) → Phase 1 at attempt+1 |
 | `STOP_NO_PROGRESS` | an attempt changed neither the blockers nor the CI reason | **Phase 5, not green** |
 | `STOP_REGRESSED` | our own fixes grew the blocker set | **Phase 5, not green** |
-| `STOP_SELF_REFERENTIAL` | two rounds running, most of the blockers were defects that did not exist before this loop's own repairs wrote them | **Phase 5, not green** |
+| `STOP_SELF_REFERENTIAL` | two **eligible** rounds running (below), at least half the blockers were defects that did not exist before this loop's own repairs wrote them | **Phase 5, not green** |
 | `STOP_EXHAUSTED` | the runaway backstop | **Phase 5, not green** |
 | `STOP_UNREADABLE` | stale evidence, or CI that never settled | **Phase 5, not green** |
 
-`STOP_NO_PROGRESS` and `STOP_REGRESSED` are the ones that matter. A counter alone
-would stop a loop that was converging perfectly well *and* let three useless
-attempts run; these two stop the moment repairing stops working, and they are
-computed from blocker **fingerprints**, not from prose.
+`STOP_NO_PROGRESS` and `STOP_REGRESSED` are the ones that matter: a counter alone would
+stop a converging loop *and* let three useless attempts run, while these two stop the
+moment repairing stops working — computed from blocker **fingerprints**, not prose.
 
 **Why a fingerprint and not `file:line`.** A fix moves lines — including in other
-findings' hunks — so an identity keyed on the line reports every survivor as
-brand new. The loop would see infinite progress and never stop. `lib/premerge-findings.py`
-hashes `path` + a case-folded, punctuation-stripped `summary` instead, which is
-stable across exactly the edits the loop makes. It is deliberately **not** either
-fingerprint `findings-to-issues` computes. That agent keys a per-finding identity
-on `file:line:summary` because a finding is about a location, and a per-ISSUE
-identity on the owning file alone because an issue is now about a file. Same
-width, three different questions.
+findings' hunks — so an identity keyed on the line reports every survivor as brand new,
+and the loop would see infinite progress and never stop. `lib/premerge-findings.py`
+hashes `path` + a case-folded, punctuation-stripped `summary` instead, stable across
+exactly the edits the loop makes. It is deliberately **not** either fingerprint
+`findings-to-issues` computes: a per-finding identity on `file:line:summary` because a
+finding is about a location, and a per-ISSUE identity on the owning file because an
+issue is now about a file. Same width, three different questions.
 
-**The growth ratio, and why it is a different question.** `FIXED=` and `NEW=`
-compare two fingerprint multisets, and RFC 0021 A3 records what that cannot see.
-A critic asked *"what is wrong with this?"* samples an **unbounded** set, so the
-two multisets are independent draws from a generator, not two readings of a fixed
-population: a blocker the sampler simply did not roll counts `FIXED`, a defect
-that was always there counts `NEW`, and `findings == 0` is a property of the
-sample, never of the artifact. That is why find→fix→re-find has no fixed point
-and runs until something outside it says stop. `GROWTH=` is that something. It
-asks the one question the fingerprints cannot: **of this attempt's blockers, what
-fraction did not exist last attempt AND sits in a file the last repair actually
-modified?** At `1.00` the loop is reviewing what its own repairs wrote, and the
-answer to that is to stop, not to repair again.
+**The growth ratio, and why it is a different question.** `FIXED=` and `NEW=` compare
+two fingerprint multisets; RFC 0021 A3 records what that cannot see. A critic asked
+*"what is wrong with this?"* samples an **unbounded** set, so the two multisets are
+independent draws from a generator, not two readings of one population: a blocker the
+sampler did not roll counts `FIXED`, an always-present defect counts `NEW`, and
+`findings == 0` is a property of the sample, never of the artifact. Find→fix→re-find
+therefore has no fixed point; it runs until something outside says stop, and `GROWTH=`
+asks what the fingerprints cannot: **of this attempt's reviewer-raised blockers, what
+fraction did not exist last attempt AND sits in a file the last repair modified?** At
+`1.00` the loop is reviewing what its own repairs wrote; stop, do not repair again.
 
-- **Denominator** — every blocker in this attempt's `classified-<NN>.json`, the
-  same number printed as `BLOCKERS=`.
+- **Denominator** — this attempt's **reviewer-raised** blockers in
+  `classified-<NN>.json` (`blocked_on_carry` rows excluded): the number printed as
+  `BLOCKERS=`.
 - **Numerator** — those blockers whose `file` is in the previous attempt's
-  `fix-scope-<NN-1>.modified` and whose fingerprint the previous attempt's
-  evidence did not carry. Excluding carried fingerprints is what keeps a
-  *survivor* out of the count: the wave plan assigns exactly the files this
-  attempt's blockers named, so a finding the fixer did not clear is always in a
-  touched file, and counting it would make a converging loop stop on its own
-  success. The numerator is therefore a strict subset of `NEW=`.
-- **Both inputs are already on disk** in the run directory. Nothing new is
-  written, no phase is added, and `converge` takes no new argument.
+  `fix-scope-<NN-1>.modified` and whose fingerprint the previous evidence did not carry.
+  That exclusion keeps a *survivor* out: the wave plan assigns exactly the files this
+  attempt's blockers named, so an uncleared finding is always in a touched file, and
+  counting it would stop a converging loop on its own success. The numerator is
+  therefore a strict subset of `NEW=`.
+- **Both inputs are already on disk** in the run directory: nothing new is written, no
+  phase is added, and `converge` takes no new argument.
 
-**Two consecutive rounds, and never one.** `PREMERGE_GROWTH_CEILING` is compared
-with `>=`, but one round at or above it changes no decision: the stop needs
-`PREMERGE_GROWTH_RUNS` consecutive **measured** rounds, read back off the previous
-attempt's own `converge.jsonl` row rather than carried in a variable a fence could
-forget. This is not caution for its own sake, and it is the part most likely to be
-"simplified" away by someone who has not read why it is there. A3 §2 establishes
-that attempt N's blocker set is a *fresh sample*, so a defect present since
-attempt 1 but first rolled at attempt 3 counts as new — and the files most likely
-to be resampled are exactly the ones the repair just touched. One high round is
-therefore what a healthy convergence with concentrated repairs looks like, and
-firing on it would stop a loop that was working, which is the failure A3 C3 names
-outright. A loop that really is pumping pays one extra round for this, every time;
-that is the deliberate price. **Do not reduce the requirement to a single round.**
+**Two consecutive ELIGIBLE rounds, and never one.** `PREMERGE_GROWTH_CEILING` is
+compared with `>=`, but one round at or above it changes no decision: the stop needs
+`PREMERGE_GROWTH_RUNS` consecutive **eligible** rounds — measured, at or above the
+ceiling, **and** not having cut the reviewer-raised blocker count
+(`blockers >= previous_blockers`) — read off the previous attempt's own `converge.jsonl`
+row, not a variable a fence could forget. That third test is why a run can print
+`GROWTH=0.90` twice and not stop: a round that cut the count demonstrably repaired
+something, whatever its residual is made of. Without it a measured 5 → 2 → 2 run read
+`0.50` twice and stopped with three of five repair rounds unspent. A3 §2 makes attempt
+N's blocker set a *fresh sample*: a defect present all along but first rolled at attempt
+3 counts as new, and the files likeliest to be resampled are the ones the repair just
+touched. One high round is therefore healthy concentrated convergence, and firing on it
+would stop a loop that was working — the failure A3 C3 names outright. A real pump pays
+one extra round every time: the deliberate price. **Do not reduce the requirement to a
+single round, or eligibility to the ratio alone.**
 
-**Where it sits in the cascade, and what it pre-empts.** The ratio is read after
-`STOP_NO_PROGRESS` — the two fingerprint detectors are sharper diagnoses and keep
-their place — and **before** `STOP_EXHAUSTED`, which it pre-empts on purpose.
-"The loop was still winning, raise `--converge`" and "the loop was reviewing
-itself" are opposite operator responses, and the budget stop says the first about
-a run that did the second.
+**Where it sits in the cascade.** The ratio is read after `STOP_NO_PROGRESS` — the
+fingerprint detectors are sharper diagnoses and keep their place — and **before**
+`STOP_EXHAUSTED`: "still winning, raise `--converge`" and "the loop was reviewing
+itself" are opposite operator responses, and the budget stop says the first about a run
+that did the second.
 
-`GROWTH=-` means *not measured*, not *zero*, and it has **four** causes:
+`GROWTH=-` means *not measured*, not *zero*, and it has **five** causes:
 
 1. **attempt 1** — there is no predecessor to attribute anything to;
 2. **a previous attempt that committed no edits**, so wrote no scope list — the
-   fix-commit fence's `REASON=no-edits` early exit. A repair that only re-ran CI
-   is a real `CONTINUE`, and there is no repair to blame this round's findings on;
-3. **no blockers this attempt** — nothing to divide by;
-4. **a scope list that *is* present but could not be read** — the only one of the
-   four that is a **fault** rather than an undefined ratio. It announces itself,
-   printing `premerge-findings: repair_scope_unreadable:` with the path on
-   **stderr**. So a `-` on the line is the cue to check stderr before concluding
-   the ratio was merely undefined.
+   fix-commit fence's `REASON=no-edits` early exit, leaving nothing to blame this
+   round's findings on;
+3. **a previous attempt repaired through the CI arm** — `arm=commit` makes real code
+   edits and pushes but publishes only `ci-scope-<NN>.*`, never
+   `fix-scope-<NN>.modified`. This is the one cause that switches the detector **off**:
+   such a loop never gets two consecutive eligible rounds, so `STOP_SELF_REFERENTIAL` is
+   unreachable until that fence publishes a scope of its own;
+4. **no reviewer-raised blocker this attempt** — nothing to divide by;
+5. **a scope list that *is* present but could not be read** — the only one of the five
+   that is a **fault** rather than an undefined ratio. It announces itself on **stderr**
+   as `premerge-findings: repair_scope_unreadable:` with the path, so `-` is the cue to
+   check stderr before reading the ratio as undefined.
 
-None of the four stops the loop, and none of them is `0.00`. Reading `-` as zero
-turns *we did not look* into *we looked and it was fine*.
+None of the five stops the loop, and none of them is `0.00`. Reading `-` as zero turns
+*we did not look* into *we looked and it was fine*.
 
-**Deliberately the coarse proxy.** The precise question is whether a finding
-landed in text the previous repair *wrote*, which needs diff-hunk mapping nothing
-in this pipeline produces (A3 C8: the reviewer accepts a PR, a branch or a path,
-not a two-SHA range). File-level membership counts a new finding anywhere in a
-touched file, so it errs toward stopping — which the two-round requirement is
-there to absorb. Do not build the hunk-mapping version to "fix" this; build it, if
+**Deliberately the coarse proxy.** The precise question — did this finding land in text
+the previous repair *wrote* — needs diff-hunk mapping nothing here produces (A3 C8: the
+reviewer takes a PR, a branch or a path, not a two-SHA range). File membership counts a
+new finding anywhere in a touched file, so it errs toward stopping, which the two-round
+requirement absorbs. Do not build the hunk-mapping version to "fix" this; build it, if
 ever, as the C1–C8 design A3 is waiting for.
 
-**The findings that trip it are not discarded.** `STOP_SELF_REFERENTIAL` is a
-not-green stop like the others, so Phase 5 runs with `PREMERGE_SURVIVORS=1` and
-`defer` is handed `--include-blockers`. Every surviving blocker becomes an issue.
-The ratio's claim is "not *this loop's* work", never "not work".
+**The findings that trip it are not discarded.** `STOP_SELF_REFERENTIAL` is a not-green
+stop, so Phase 5 runs with `PREMERGE_SURVIVORS=1` and `defer` gets `--include-blockers`:
+every surviving blocker becomes an issue. The claim is "not *this loop's* work", never
+"not work".
 
 ### 3c — Repair, by reason
 

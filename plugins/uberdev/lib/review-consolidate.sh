@@ -169,7 +169,9 @@ review_consolidate_survivors() {
   excluded_numbers="$(review_consolidate_excluded_numbers "$scan_dir")" || return 2
   numeric="$(jq -R 'tonumber?' <<<"$excluded_numbers")" || return 2
   dropped="$(jq -sc '.' <<<"$numeric")" || return 2
-  [ -n "$dropped" ] || dropped='[]'
+  # No empty-string fallback for $dropped: the line above returns 2 on any
+  # non-zero jq, and `jq -sc '.'` writes an array -- `[]` at minimum -- on every
+  # zero exit, so the empty case a fallback would cover cannot occur.
   jq -c --argjson dropped "$dropped" \
     '[ .[] | select((.number as $n | $dropped | index($n)) == null) ]' \
     <"$scan_dir/candidates.json" 2>/dev/null || printf '[]\n'
@@ -1031,8 +1033,31 @@ review_consolidate_push_branch() {
       return 79
       ;;
   esac
-  git -C "$worktree" push -u origin "$branch" >/dev/null 2>&1 || {
-    _uberdev_consolidate_error "pushing $branch to origin failed"
+  # git's own words are CAPTURED, not discarded. `>/dev/null 2>&1 || return 2`
+  # sent the explanation of a non-fast-forward, an expired token or a
+  # protected-branch rule to the same place as the progress output, and this is
+  # the push the rest of Phase 0 depends on: it aborts the run mid-loop with the
+  # cause already thrown away. The five push sites in
+  # skills/premerge-pipeline/SKILL.md are the model; this one lives in the
+  # library, outside the fence corpus tests/premerge.test.sh P18 scans.
+  local push_err
+  push_err="$(git -C "$worktree" push -u origin "$branch" 2>&1 1>/dev/null)" || {
+    # Bounded and defused BEFORE anything reads it, because a pre-receive hook
+    # chooses the length and the content of every `remote:` line. The same three
+    # jobs the fences' one-liner does -- references/phase-contracts.md, `### What
+    # a failed push is allowed to say`: 200 chars, one line, no live token.
+    #
+    # BOTH scraped markers are broken, because this library's stderr is the
+    # stream BOTH callers scrape positionally: commands/review-pr.md prints
+    # `REVIEW_CONSOLIDATE PR_NUMBER=... SCAN_ID=...` from the very fence that
+    # calls this function, and the premerge fences that source this file print
+    # `PREMERGE ...`. Either spelling arriving on a `remote:` line is a
+    # well-formed result no matter where it sits. `tr` and `cut` read to EOF, so
+    # this pipeline is not the early-exiting shape tests/epipe-guard.test.sh bans.
+    push_err="${push_err//PREMERGE/PRE-MERGE}"
+    push_err="${push_err//REVIEW_CONSOLIDATE/REVIEW-CONSOLIDATE}"
+    push_err="$(printf '%s' "$push_err" | tr -s '\n\r\t' ' ' | cut -c1-200)"
+    _uberdev_consolidate_error "pushing $branch to origin failed: $push_err"
     return 2
   }
   return 0

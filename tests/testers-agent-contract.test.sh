@@ -41,6 +41,18 @@ EXPECTED_AGENTS=(
 
 pass() { printf 'PASS  %s\n' "$1"; }
 fail() { printf 'FAIL  %s\n' "$1" >&2; exit 1; }
+# A HARNESS error -- a predicate that CRASHED instead of judging -- must reach an
+# operator, and `fail` cannot carry it. Every rejection-expecting call site below
+# runs its predicate under `2>/dev/null` to swallow the EXPECTED rejection
+# message, and that redirection used to eat the harness diagnostic with it:
+# measured by making the predicate exit an unexpected status for one row, the run
+# stopped with a failing status and printed NOTHING -- not the harness text, not
+# even the row name. FD 3 is a duplicate of this script's stderr taken before any
+# redirection exists; `2>/dev/null` rebinds FD 2 for one command only, so it
+# cannot reach FD 3. Pass/fail outcomes are unchanged -- only the explanation of
+# why the suite died is recovered.
+exec 3>&2
+fail_harness() { printf 'FAIL  %s\n' "$1" >&3; exit 1; }
 
 # C1: invariants.yaml exists and has 10 invariants
 [ -f "$INVARIANTS" ] || fail "C1: invariants.yaml missing at $INVARIANTS"
@@ -215,7 +227,7 @@ $C5_VERDICT_PY" || c5_rc=$?
   case "$c5_rc" in
     0) return 0 ;;
     9) return 1 ;;
-    *) fail "C5: harness error -- the predicate exited $c5_rc for '$2'. A predicate that CRASHED must never read as 'rejected'; that would make every C5b reject row vacuous" ;;
+    *) fail_harness "C5: harness error -- the predicate exited $c5_rc for '$2'. A predicate that CRASHED must never read as 'rejected'; that would make every C5b reject row vacuous" ;;
   esac
 }
 
@@ -351,7 +363,7 @@ $C5_SPELLING_PY" || c5_rc=$?
   case "$c5_rc" in
     0) return 0 ;;
     9) return 1 ;;
-    *) fail "C5c: harness error -- the convention predicate exited $c5_rc for '$2'" ;;
+    *) fail_harness "C5c: harness error -- the convention predicate exited $c5_rc for '$2'" ;;
   esac
 }
 
@@ -381,6 +393,15 @@ if c5_spelling "$(c5_mutant conv-block-single-star 'tools:
   - Read
   - Write(.uberdev/research/*)')" "mutant/conv-block-single-star" 2>/dev/null; then
   fail "C5c: the convention predicate ACCEPTED an off-convention scope written as a block sequence -- block-form scopes are recognised but not compared"
+fi
+# The "nothing to inspect" arm is otherwise UNREACHABLE from every call site: the
+# live-card loop above runs only after C5 has already exited on any card lacking
+# a declaration, and every other mutant here carries one. This row is what keeps
+# that arm executed, so it cannot rot into dead code that silently stops
+# rejecting. It is a reject row because there is genuinely nothing to compare
+# against the convention -- absence is not compliance.
+if c5_spelling "$(c5_mutant conv-no-tools-key '# this card declares no tool key at all')" "mutant/conv-no-tools-key" 2>/dev/null; then
+  fail "C5c: the convention predicate ACCEPTED a card with no 'tools:' declaration -- there is nothing to inspect, so it must not report on-convention"
 fi
 pass "C5c: all 8 scoped write grants carry the run-dir convention (documentation of intent, not a runtime ceiling)"
 
@@ -506,31 +527,64 @@ pass "C10: rl-curl shim, persona allowlists and per-call injection are consisten
 # The disk YAML stays the evidence channel (C7 keeps verdict/findings/confidence);
 # this asserts the ADDED dual-channel stanza names the exact schema.* field set
 # workflow.js sends (S.persona / S.monitorPrimary / S.monitorDA).
+#
+# SCOPED TO THE `## Output` SECTION, never to the whole file. `StructuredOutput`
+# is also a TOOL NAME, and all eight cards grant it in the `tools:` frontmatter
+# array -- so a whole-file grep for it is satisfied by the GRANT and says nothing
+# about the body. Measured on this tree: every card carries exactly one
+# frontmatter occurrence and one body occurrence, and stripping the stanza from
+# the body of all eight (frontmatter untouched) left this row printing PASS with
+# the suite green. That is the "whole-file grep satisfied by text the file
+# carries for another reason" class, and the extractor below is what makes the
+# row able to red again. Every needle is checked against the extracted section
+# for the same reason -- an assertion about what the `## Output` section says
+# must read only the `## Output` section.
+c11_output_section() { # $1=card path -> the `## Output...` heading line through
+  # the line before the next `## ` heading, or EOF. `###` subsections (the
+  # stanza lives under one) are NOT boundaries: `^## ` cannot match `###`.
+  awk '
+    /^## / { if (inside) exit; if ($0 ~ /^## Output/) inside = 1 }
+    inside { print }
+  ' "$1"
+}
+# Herestrings, never `printf ... | grep -q`: an early-exiting reader on the right
+# of a pipe poisons the pipeline rc under pipefail (tests/epipe-guard.test.sh).
+c11_names() { # $1=section text  $2=label  $3=needle  $4=which schema
+  grep -qF -- "$3" <<<"$1" \
+    || fail "C11 $2: ## Output section does not name '$3' ($4)"
+}
 for a in "${PERSONA_AGENTS[@]}"; do
   F="$AGENT_DIR/$a.md"
-  grep -q 'StructuredOutput' "$F" || fail "C11 $a: ## Output lacks the StructuredOutput dual-channel stanza (DR-4 prompt tension — the schema dispatch is undocumented)"
+  C11_OUT="$(c11_output_section "$F")"
+  [ -n "$C11_OUT" ] || fail "C11 $a: no '## Output' section -- the dual-channel stanza has nowhere to live"
+  grep -qF 'StructuredOutput' <<<"$C11_OUT" \
+    || fail "C11 $a: ## Output lacks the StructuredOutput dual-channel stanza (DR-4 prompt tension — the schema dispatch is undocumented)"
   for field in scratchPath findingCount; do
-    grep -qF "$field" "$F" || fail "C11 $a: StructuredOutput stanza missing the '$field' schema field (S.persona)"
+    c11_names "$C11_OUT" "$a" "$field" "S.persona"
   done
   # The persona return field is `persona`; assert the stanza names it as a return field.
-  grep -qE '`persona`' "$F" || fail "C11 $a: StructuredOutput stanza missing the 'persona' return field (S.persona)"
+  c11_names "$C11_OUT" "$a" '`persona`' "the 'persona' return field, S.persona"
 done
 # monitor-primary: scratchPath + followUps (camelCase return) + verifiedAdded,
 # AND the explicit reconciliation with the snake_case disk key.
 MP="$AGENT_DIR/testers-monitor-primary.md"
-grep -q 'StructuredOutput' "$MP" || fail "C11 monitor-primary: missing the StructuredOutput dual-channel stanza"
+MP_OUT="$(c11_output_section "$MP")"
+[ -n "$MP_OUT" ] || fail "C11 monitor-primary: no '## Output' section -- the dual-channel stanza has nowhere to live"
+grep -qF 'StructuredOutput' <<<"$MP_OUT" || fail "C11 monitor-primary: missing the StructuredOutput dual-channel stanza"
 for field in scratchPath followUps verifiedAdded; do
-  grep -qF "$field" "$MP" || fail "C11 monitor-primary: StructuredOutput stanza missing the '$field' schema field (S.monitorPrimary)"
+  c11_names "$MP_OUT" "monitor-primary" "$field" "S.monitorPrimary"
 done
 # The camelCase return vs snake_case disk-key reconciliation must be explicit
 # (both names present so the two channels are documented in lockstep).
-grep -q 'follow_ups_for_next_wave' "$MP" \
+grep -qF 'follow_ups_for_next_wave' <<<"$MP_OUT" \
   || fail "C11 monitor-primary: stanza does not reconcile the snake_case follow_ups_for_next_wave disk key with the camelCase followUps return"
 # monitor-devils-advocate: scratchPath + rejected.
 MDA="$AGENT_DIR/testers-monitor-devils-advocate.md"
-grep -q 'StructuredOutput' "$MDA" || fail "C11 monitor-devils-advocate: missing the StructuredOutput dual-channel stanza"
+MDA_OUT="$(c11_output_section "$MDA")"
+[ -n "$MDA_OUT" ] || fail "C11 monitor-devils-advocate: no '## Output' section -- the dual-channel stanza has nowhere to live"
+grep -qF 'StructuredOutput' <<<"$MDA_OUT" || fail "C11 monitor-devils-advocate: missing the StructuredOutput dual-channel stanza"
 for field in scratchPath rejected; do
-  grep -qF "$field" "$MDA" || fail "C11 monitor-devils-advocate: StructuredOutput stanza missing the '$field' schema field (S.monitorDA)"
+  c11_names "$MDA_OUT" "monitor-devils-advocate" "$field" "S.monitorDA"
 done
 pass "C11: all 8 agents document the StructuredOutput dual-channel return matching the workflow schema (DR-4)"
 

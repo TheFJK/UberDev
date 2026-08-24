@@ -242,6 +242,27 @@ check(policy["delegation_contracts"]["leaf"] == {"features_multi_agent": False, 
 #     FAILURE, so the list cannot rot into a permanent exemption, and a NEW agent
 #     shipped with no declaration reds instead of silently joining them.
 FRONTMATTER_RE = re.compile(r"(?s)\A---\n(.*?)\n---\n")
+# WHAT COUNTS AS A DECLARATION. This has to be the SAME answer declared_tools()
+# gives in tests/testers-agent-contract.test.sh -- that function and this block
+# ask one question of one set of cards, and the eight testers personas are inside
+# both subjects.
+#
+# Bare key PRESENCE is not that answer. `tools:` with nothing after it and no
+# block-sequence items is YAML null: the loader grants EVERY tool, exactly as if
+# the key were absent. Keying on presence therefore made every row below vacuous
+# on precisely the state #749 exists to red on -- measured on this tree by
+# emptying the value on a live testers card, the role stayed in declares_tools,
+# so the testers-subset row and the read-only projection row both still printed
+# PASS while that agent held every tool. It is also the exact spelling a
+# half-finished migration produces, which is what this stack IS.
+#
+# So a declaration is a `tools:` key with a NON-EMPTY value, in either YAML
+# spelling of a list -- a same-line flow value, or the block-sequence item lines
+# that follow an empty same-line value. ONLY `- item` lines are absorbed: an
+# indented continuation of another key's folded scalar is not a tool declaration.
+# Widening WHICH SPELLINGS count is not a relaxation; requiring the value be
+# non-empty is the strictness the guard was always meant to have.
+TOOLS_RE = re.compile(r"(?m)^tools:[ \t]*(.*(?:\n[ \t]*-[ \t]+\S.*)*)$")
 declares_tools = set()
 declares_allowed_tools = set()
 for agent_path in sorted((ROOT / "plugins/uberdev/agents").glob("*.md")):
@@ -250,7 +271,8 @@ for agent_path in sorted((ROOT / "plugins/uberdev/agents").glob("*.md")):
     block = matched.group(1)
     named = re.search(r"(?m)^name:[ \t]*(\S+)", block)
     role = named.group(1).strip() if named else agent_path.stem
-    if re.search(r"(?m)^tools:", block):
+    declared = TOOLS_RE.search(block)
+    if declared is not None and declared.group(1).strip():
         declares_tools.add(role)
     if re.search(r"(?m)^allowed-tools:", block):
         declares_allowed_tools.add(role)

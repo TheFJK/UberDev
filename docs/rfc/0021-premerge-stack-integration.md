@@ -1016,3 +1016,134 @@ The A1 ordering (gate before repair), the line-independent multiset fingerprint,
 controller-only commits, and the wave scope guard are all untouched. The
 reviewed surface is still the whole stack, every attempt. C1–C8 remain the open
 constraint set for the design that changes that, and A5 is not it.
+
+### A6 — the growth population narrowed after A5 (2026-08-24)
+
+A5 is the design authority for `STOP_SELF_REFERENTIAL`, and it was accurate
+against the tree it landed on. Two later changes narrowed the detector without
+touching the amendment: #766 put a second kind of row into the array A5's formula
+divides by, and the first two `/premerge` repair rounds on the stack that
+combined #765 with #766 excluded that row from the ratio and added a term to the
+stop. A5 is **retained as written** — the record of what was decided on
+2026-08-23 — and narrowed here, the way A5 narrows A3 and A4 narrows §8.
+
+Both narrowings run the same way. `GROWTH` speaks about a **smaller** population
+than A5 gives it, and the stop asks **one more question** than A5 records.
+
+#### 1. A carried row counts on neither side
+
+A5's *What it computes* reads, verbatim:
+
+> ```
+> GROWTH(N) = |{ b in blockers(N) : b.file in modified(N-1)
+>                                   and b.fingerprint not in blockers(N-1) }|
+>             / |blockers(N)|
+> ```
+>
+> `blockers(N)` is attempt N's `classified-<NN>.json`
+
+When that was written, the array held one kind of row: a blocker a reviewer
+raised. A5 says nothing about carried rows because there were none to say
+anything about.
+
+**#766 put a second kind in the same array.** A fixer whose honest scope spans
+two files now returns `blocked_on_file`, and `_read_blocked_on` turns each such
+path into a blocker finding on the **next** attempt, stamped
+`blocked_on_carry: True` and carrying a controller-authored summary that states a
+scheduling fact rather than a defect. Up to `MAX_BLOCKED_ON` (`8`) of them can
+enter one attempt. They are blockers because the wave plan and the clean gate
+have to see them — otherwise a run whose only outstanding work was carried gated
+green, dispatched nothing and filed nothing — but no reviewer raised them.
+
+**They are excluded from both sides, not one.** `_growth_ratio` iterates
+`_reviewer_blockers(document["blockers"])`, and the previous attempt's evidence
+reaches it through `_blocker_fingerprints`, which iterates the same filter. So
+`blockers(N)`, `blockers(N-1)` and the divisor all mean *the reviewer-raised rows
+of* that array — and `-` for "no blockers to divide by" now means no
+reviewer-raised blocker: an attempt holding nothing but carried rows reports `-`,
+not a ratio.
+
+The numerator half is forced. A path is carried precisely BECAUSE the previous
+fixer could not edit it, so it is never in `fix-scope-<NN-1>.modified` and could
+not have satisfied the membership test anyway. The **denominator** half is the
+load-bearing one: left in the divisor, a row that can never be counted dilutes
+the ratio every round, and the suppression is largest on the runs with the most
+cross-file churn — exactly the runs `STOP_SELF_REFERENTIAL` exists for. Two
+suppressed rounds in a row is all it takes for it never to fire.
+
+Executed against the shipped module — one reviewer-raised blocker in a file the
+last repair modified, alongside one carried consequence:
+
+| | stored `blockers` array | divisor | `BLOCKERS=` | `GROWTH=` |
+| --- | --- | --- | --- | --- |
+| shipped | 2 | 1 | 1 | `1.00` |
+| A5's formula as written | 2 | 2 | — | `0.50` |
+
+**A5's other denominator claim survives intact.** "the denominator is the same
+population `BLOCKERS=` already reports" is still true: `BLOCKERS=` is
+`_blocker_fingerprints`' multiset total, and the two narrowed together through
+`_reviewer_blockers` — which is also the single derivation
+`counts.blocker_reviewer` uses, so the three spellings of that population cannot
+drift apart. What changed is what the shared population *is*, not that the two
+agree.
+
+#### 2. The streak test has a third term
+
+A5's *The stop* reads, verbatim:
+
+> It fires when `GROWTH` is at or above `CONVERGE_GROWTH_CEILING` (`0.50`) on
+> `CONVERGE_GROWTH_RUNS` (`2`) consecutive **measured** attempts
+
+`_growth_round_counts` — one predicate, applied to this round's numbers and then
+to the previous round's own `converge.jsonl` columns — asks **three** things of
+each round. It is measured; it is at or above the ceiling; **and
+`blockers >= previous_blockers`**, the round did not reduce the reviewer-raised
+blocker count.
+
+The third term is not defensive plumbing. `GROWTH=` answers *what is the residual
+made of*, never *which way is this going*, and those two come apart in one
+direction: the denominator is the residual, so it shrinks as the loop succeeds,
+while the numerator counts findings the reviewer newly sampled in the file the
+repair just touched — the file it was always likeliest to resample. **The ratio
+therefore rises toward `1.00` precisely as a run converges.** Reproduced against
+the shipped module with `--max-repairs 5`: five blockers, then four cleared
+leaving one survivor and one new (`0.50`), then one more cleared leaving one
+survivor and one new (`0.50`) — `STOP_SELF_REFERENTIAL` on a run that went
+5 → 2 → 2, with three of five repair rounds unspent. `CONVERGE_GROWTH_RUNS` does
+not mitigate it: at two rounds, a single new finding in a repaired file *is*
+`0.50`, twice running.
+
+That is C3's failure with the ratio's own name on it — the failure A5 argues
+against for one high round and then leaves undefended for two. A round that
+removed more of the reviewer's blockers than it was left holding is a round in
+which repairing demonstrably worked, whatever its residual is made of, so it is
+not eligible to be half of a divergence streak. The ratio is still measured,
+still printed and still recorded on such a round; a genuine pump, which by
+definition is not reducing the count, reaches the ceiling on consecutive eligible
+rounds exactly as A5 describes.
+
+Executed against the shipped predicate at `GROWTH=0.50`:
+
+| round | `previous_blockers` → `blockers` | eligible |
+| --- | --- | --- |
+| count held | 5 → 5 | yes |
+| count grew | 2 → 5 | yes |
+| count fell | 5 → 2 | **no** |
+| not measured (`GROWTH=-`) | any | **no** |
+
+#### What this does not change
+
+The threshold (`0.50`), the streak length (`2`), the cascade position (after
+`STOP_NO_PROGRESS`, before `STOP_EXHAUSTED`), the file-granularity proxy and its
+recorded limits, `GROWTH=-` meaning *not measured* rather than `0.00`, and the
+survivors reaching Phase 5 through `--include-blockers` are all as A5 wrote them.
+Carried rows leave the **evidence** questions only: they still enter the wave
+plan, still gate `blockers_remaining=`, and are still filed — at the §5
+`SUGGESTION` tier, via `_as_deferred_carry_row` — when the loop stops with the
+edit outstanding.
+
+`skills/premerge-pipeline/SKILL.md` (`## Phase 3b — CONVERGE`) and the docstrings
+on `_growth_ratio`, `_reviewer_blockers` and `_growth_round_counts` state both
+narrowings at the code. This amendment is what stops the design authority
+outranking them with the wider population. C1–C8 remain the open constraint set,
+and A6, like A5, is not the design that closes them.

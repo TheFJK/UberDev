@@ -491,7 +491,14 @@ jobs:
                     echo "      The plan value and the membership test disagree about these names -- that is what the dump above shows."
                   fi
                   if [ -z "$shard_unrun_mentioned" ] && [ -z "$shard_unrun_skipped" ]; then
-                    echo "    Every name in the plan ran, yet the counts differ: the plan's word count and its distinct names disagree (a repeated entry, or separators splitting into more words than names)."
+                    # ONE cause reaches here, not two. A separator the split
+                    # above does not recognise cannot: it merges its neighbours
+                    # into a token no name the harness ran can match, so it
+                    # prints in the NEVER INVOKED arm above -- as the two names
+                    # run together -- and never gets this far. What is left is a
+                    # plan that names one fixture twice.
+                    echo "    Every name in the plan ran, yet the counts differ: the plan names one fixture more than once, so its word count exceeds the number of distinct names run."
+                    echo "      The plan producer cannot emit that -- it de-duplicates by first occurrence and refuses a repeated name outright -- so this value did not come from it."
                   fi
                   fail=$((fail + 1))
                   failed="${failed}${failed:+ | }SHARD-COVERAGE($shard_ran/$shard_plan_len)"
@@ -779,7 +786,14 @@ jobs:
                     echo "      The plan value and the membership test disagree about these names -- that is what the dump above shows."
                   fi
                   if [ -z "$shard_unrun_mentioned" ] && [ -z "$shard_unrun_skipped" ]; then
-                    echo "    Every name in the plan ran, yet the counts differ: the plan's word count and its distinct names disagree (a repeated entry, or separators splitting into more words than names)."
+                    # ONE cause reaches here, not two. A separator the split
+                    # above does not recognise cannot: it merges its neighbours
+                    # into a token no name the harness ran can match, so it
+                    # prints in the NEVER INVOKED arm above -- as the two names
+                    # run together -- and never gets this far. What is left is a
+                    # plan that names one fixture twice.
+                    echo "    Every name in the plan ran, yet the counts differ: the plan names one fixture more than once, so its word count exceeds the number of distinct names run."
+                    echo "      The plan producer cannot emit that -- it de-duplicates by first occurrence and refuses a repeated name outright -- so this value did not come from it."
                   fi
                   fail=$((fail + 1))
                   failed="${failed}${failed:+ | }SHARD-COVERAGE($shard_ran/$shard_plan_len)"
@@ -1347,7 +1361,14 @@ jobs:
                     echo "      The plan value and the membership test disagree about these names -- that is what the dump above shows."
                   fi
                   if [ -z "$shard_unrun_mentioned" ] && [ -z "$shard_unrun_skipped" ]; then
-                    echo "    Every name in the plan ran, yet the counts differ: the plan's word count and its distinct names disagree (a repeated entry, or separators splitting into more words than names)."
+                    # ONE cause reaches here, not two. A separator the split
+                    # above does not recognise cannot: it merges its neighbours
+                    # into a token no name the harness ran can match, so it
+                    # prints in the NEVER INVOKED arm above -- as the two names
+                    # run together -- and never gets this far. What is left is a
+                    # plan that names one fixture twice.
+                    echo "    Every name in the plan ran, yet the counts differ: the plan names one fixture more than once, so its word count exceeds the number of distinct names run."
+                    echo "      The plan producer cannot emit that -- it de-duplicates by first occurrence and refuses a repeated name outright -- so this value did not come from it."
                   fi
                   fail=$((fail + 1))
                   failed="${failed}${failed:+ | }SHARD-COVERAGE($shard_ran/$shard_plan_len)"

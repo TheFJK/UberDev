@@ -70,11 +70,15 @@ see infinite progress and never stop.
 A third measurement catches what those two cannot. Both compare fingerprint sets
 drawn from independent full-stack reviews, so neither can tell a defect the
 fixers just wrote from one that was always there. `STOP_SELF_REFERENTIAL` fires
-when, for two attempts running, at least half of the blockers a round returned
-did not exist the round before **and** sit in files the previous repair
-modified — the loop reviewing its own output. It reports `GROWTH=` on every
-attempt so you can see the difference between a run that was still converging
-and one that had started generating its own work. The findings that trip it are
+on two consecutive **eligible** rounds, and eligibility is three conditions you
+can read straight off the `PREMERGE_CONVERGE` line: `GROWTH=` is measured, it is
+at or above `0.50` — at least half of the blockers the round returned did not
+exist the round before **and** sit in files the previous repair modified — and
+`BLOCKERS=` did not fall below `PREV=`. That last condition is what keeps the
+stop off a loop that is working: a round that cut the reviewer's blocker count
+repaired something, whatever its residual is made of, so it is never half of a
+streak however high its ratio. A run log showing `GROWTH=0.90` twice and no stop
+is that rule firing, not the detector failing. The findings that trip it are
 filed as issues like every other survivor, not dropped.
 
 Why that measurement has to exist at all: a reviewer asked *what is wrong with
@@ -90,19 +94,23 @@ the correct response to that is to **stop**, not to repair again.
 still winning, raise `--converge`"* and *"the loop was reviewing itself"* are
 **opposite** operator responses — and an operator shown the budget stop for a run
 that did the second will raise the budget on a loop that can never converge. For
-the same reason the stop takes **two consecutive measured rounds** at or above
-that half-mark, never one. Each review is a fresh sample, and the files most
-likely to be resampled next round are exactly the ones the last repair touched,
-so a single high round is equally consistent with a healthy convergence whose
-repairs happen to be concentrated in a few files. Removing the two-round
-requirement makes the detector stop loops that were working — the failure it
-exists to avoid.
+the same reason the stop takes **two consecutive eligible rounds**, never one.
+Each review is a fresh sample, and the files most likely to be resampled next
+round are exactly the ones the last repair touched, so a single high round is
+equally consistent with a healthy convergence whose repairs happen to be
+concentrated in a few files. Dropping the two-round requirement — or reducing
+eligibility to the ratio alone — makes the detector stop loops that were
+working, the failure it exists to avoid.
 
 `GROWTH=` is a signal, not a proof. Attribution is at file granularity, so a
-genuinely new defect elsewhere in a repaired file over-counts as growth; and a
-round whose repair committed nothing leaves no scope list to attribute against,
-so it prints `GROWTH=-` — *not measured*, which is a different answer from
-`0.00`.
+genuinely new defect elsewhere in a repaired file over-counts as growth. And it
+prints `GROWTH=-` — *not measured*, a different answer from `0.00` — on attempt
+1, on a round with no reviewer-raised blocker to divide by, and whenever the
+previous repair left no readable scope list: it committed nothing, its list was
+unreadable (announced on stderr), or it went through the Phase 3 CI arm, which
+pushes real code edits but publishes no `fix-scope` list. That last one is the
+case to watch — while a loop keeps repairing through CI it cannot accumulate two
+eligible rounds, so `STOP_SELF_REFERENTIAL` is unreachable for it.
 
 `--converge` is the runaway backstop behind those three, not the stop condition,
 and that distinction is the answer to the hazard RFC 0021 originally refused a

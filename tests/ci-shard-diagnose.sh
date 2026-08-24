@@ -7,6 +7,13 @@
 # fewer fixtures than it was planned. Keeping the reporter separate from them
 # is what lets it run on a runner whose plan is already broken.
 #
+# It prints, but it does not merely READ. `dump`'s section [C] carves the job's
+# own `run_one` out of the live workflow and runs it, with every interpreter its
+# invocations name stubbed out, so the routing verdict it reports is the one the
+# job reaches rather than a transcription of the rule that reaches it. See "The
+# live harness" below for why a copy there was worse than a copy anywhere else
+# in this file.
+#
 # WHY BOTH SIDES OF THE GITHUB_ENV BOUNDARY. The plan is produced by one step
 # and consumed by the next, and between them sits a file this repo's shell
 # writes and the runner reads back. Under Git Bash the packer's stdout is a
@@ -162,8 +169,160 @@ ci_diag_make_boundary_shim() {
 }
 
 # ---------------------------------------------------------------------------
+# The live harness — for `dump`'s section [C]
+# ---------------------------------------------------------------------------
+#
+# THE ROUTING RULE IS EXECUTED, NEVER TRANSCRIBED. [C] used to hand-write the
+# sentinel-space membership test and run it over names parsed out of the plan.
+# That was a COPY, and the worst-placed one in this file: `dump` is the verb CI
+# actually runs, and both the SHARD-COVERAGE tail and tests/ci-shard-env.sh's
+# refusal name it as the thing to read when a shard comes back short. A copy
+# would keep agreeing with itself while the job's `run_one` drifted, and would
+# report MATCH from a rule the job no longer runs — exonerating the exact bug
+# the operator was sent here to find.
+#
+# It also could not model the other half of the rule. `run_one` keys on the
+# ARGV of an invocation, not on a plan entry: it scans the arguments for the one
+# that is a fixture path and strips it to a basename. A planned name therefore
+# runs only if some invocation in that job hands run_one an argument that rule
+# reads as that fixture — which is a fact about the job block, not about the
+# plan string, and no amount of re-reading the plan can see it.
+#
+# So the block is carved out of the LIVE workflow and run. This is the shape
+# tests/ci-shard.test.sh's S8/S10 already use against this same file, for the
+# reason stated there: a copy here would keep agreeing with itself while CI
+# drifted away from it. Nothing below re-implements the membership test; the
+# only thing this file still decides is WHICH of the harness's own RUN/SKIP
+# lines is about which planned name.
+ci_diag_workflow="$ci_diag_dir/../.github/workflows/test.yml"
+
+ci_diag_harness_block() { # $1 = job key -> that job's run: block, invocations included
+  awk -v JOB="$1" '
+    $0 ~ ("^  " JOB ":[[:space:]]*$") { in_job = 1; next }
+    in_job && /^  [[:alnum:]_-]+:[[:space:]]*$/ { exit }
+    in_job && /^[[:space:]]+run:[[:space:]]*[|][[:space:]]*$/ { in_run = 1; next }
+    in_run {
+      if ($0 ~ /^[[:space:]]*$/) { print ""; next }
+      if ($0 !~ /^          /) { in_run = 0; next }
+      sub(/^          /, "")
+      print
+    }
+  ' "$ci_diag_workflow"
+}
+
+# Runs that harness against the plan in THIS process's environment and writes
+# its stdout+stderr to $2. rc: 0 ran, 2 could not be built, 3 extracted without
+# invocations.
+#
+# The stubs are DERIVED from the invocation lines rather than listed here. A job
+# that grows a fifth interpreter must not quietly turn this reporter into
+# something that executes the suite — and a list kept here would be one more
+# copy of the workflow to drift. Stubbing the leading word changes nothing the
+# routing reads: `run_one` still receives the whole argv, `env MSYSTEM=MSYS bash
+# tests/x.test.sh` included, and still prints it on the RUN/SKIP line.
+#
+# The harness's own rc is dropped on purpose. Its SHARD-COVERAGE tail exits
+# non-zero on a short run, and a short run is the FINDING this section exists to
+# print, not a failure of the dump. `dump` stays a reporter, never a gate.
+ci_diag_harness_decisions() { # $1 = job key, $2 = destination file
+  [ -r "$ci_diag_workflow" ] || return 2
+  ci_diag_hdir="$(mktemp -d)" || return 2
+  ci_diag_harness_block "$1" >"$ci_diag_hdir/block" || { rm -rf "$ci_diag_hdir"; return 2; }
+  ci_diag_inv="$(awk '$1 == "run_one" { n++ } END { print n + 0 }' "$ci_diag_hdir/block")"
+  [ "${ci_diag_inv:-0}" -ge 1 ] || { rm -rf "$ci_diag_hdir"; return 3; }
+  {
+    awk '$1 == "run_one" && $2 != "" && !ci_diag_seen[$2]++ { printf "%s() { :; }\n", $2 }' \
+      "$ci_diag_hdir/block"
+    cat "$ci_diag_hdir/block"
+  } >"$ci_diag_hdir/harness.sh" || { rm -rf "$ci_diag_hdir"; return 2; }
+  # `-e` is what the runner uses for a `run: |` block on all three platforms.
+  bash -e "$ci_diag_hdir/harness.sh" >"$2" 2>&1
+  rm -rf "$ci_diag_hdir"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Verbs
 # ---------------------------------------------------------------------------
+
+# [C] of `dump`: what the job's OWN harness did with the plan this step
+# inherited, one line per planned name, in plan order.
+ci_diag_dump_routing() {
+  echo "--- [C] routing verdict: the plan in [B] driven through the $ci_diag_job job's OWN run_one"
+  ci_diag_probe="$(mktemp -d)" || {
+    echo "    !! no scratch directory; no routing verdict"
+    return 0
+  }
+  # Split exactly as before: CRs deleted, then spaces. This decides only which
+  # names to ASK about — every verdict below comes from the harness.
+  printf '%s' "${UBERDEV_SHARD_PLAN-}" | tr -d "$ci_diag_cr" | tr ' ' '\n' >"$ci_diag_probe/names"
+  ci_diag_harness_decisions "$ci_diag_job" "$ci_diag_probe/decisions"
+  ci_diag_hrc=$?
+  if [ "$ci_diag_hrc" -ne 0 ]; then
+    # NO FALLBACK, deliberately. Re-implementing the rule here when the carve-out
+    # fails would restore the copy this section exists not to be, and it would do
+    # it at the one moment the workflow is known to have moved.
+    echo "    !! the $ci_diag_job harness could not be carved out of $ci_diag_workflow (rc=$ci_diag_hrc)."
+    echo "    No routing verdict. tests/ci-shard.test.sh S8/S10 gate that extraction and will name the cause."
+    rm -rf "$ci_diag_probe"
+    return 0
+  fi
+  ci_diag_cov="$(awk '/^=== SHARD-COVERAGE shard=/ { ci_diag_line = $0 } END { print ci_diag_line }' \
+    "$ci_diag_probe/decisions")"
+  # Matched before it is stripped. A bare `##*ran=` on a line that carries no
+  # `ran=` returns the WHOLE line, which reads as 0 and would raise the drift
+  # alarm below against a run that never disagreed with anything.
+  case "$ci_diag_cov" in
+    *ran=*) ci_diag_ran="${ci_diag_cov##*ran=}" ;;
+    *)      ci_diag_ran="" ;;
+  esac
+  # Pass 1 reads the harness's verdicts; pass 2 walks the planned names. The
+  # files are told apart by FILENAME rather than by FNR == NR, which silently
+  # mis-files the second file when the first one comes back empty.
+  #
+  # A name is matched against the BASENAME of each argument the harness printed,
+  # which is line identification, not the routing rule: if run_one's key ever
+  # stopped being the basename of a tests/ path, the verdict read off that line
+  # would still be the one the job reached.
+  awk -v DEC="$ci_diag_probe/decisions" -v RAN="$ci_diag_ran" '
+    FILENAME == DEC {
+      if ($1 == "---" && ($2 == "RUN" || $2 == "SKIP")) {
+        for (i = 3; i <= NF; i++) {
+          tok = $i
+          sub(/^.*\//, "", tok)
+          seen[tok] = 1
+          if ($2 == "RUN") ran[tok] = 1
+        }
+      }
+      next
+    }
+    {
+      name = $1
+      if (name == "") next
+      if (name in ran)       { verdict = "MATCH"; m++ }
+      else if (name in seen) { verdict = "MISS";  s++ }
+      else                   { verdict = "UNWIRED"; u++ }
+      printf "    %-5s %s\n", verdict, name
+    }
+    END {
+      printf "    match=%d miss=%d\n", m + 0, s + 0
+      if (u + 0 > 0) {
+        printf "    unwired=%d: planned, but no invocation in this job ever handed that name to run_one.\n", u + 0
+      }
+      # The harness counts what it ran itself. Two readings of one run that
+      # disagree mean this reporter has drifted from the job, which is the one
+      # failure a probe like this cannot be allowed to make quietly.
+      if (RAN != "" && RAN + 0 != m + 0) {
+        printf "    !! this section read %d planned name(s) as run; the harness tallied ran=%s on the SAME run.\n", m + 0, RAN
+      }
+    }
+  ' "$ci_diag_probe/decisions" "$ci_diag_probe/names"
+  [ -z "$ci_diag_cov" ] || printf '    [harness] %s\n' "$ci_diag_cov"
+  echo "    A plan of length N with match=1 is the #753 signature: only the entry"
+  echo "    whose trailing CR was consumed at the file boundary is space-bounded."
+  rm -rf "$ci_diag_probe"
+  return 0
+}
 
 ci_diag_dump() {
   echo "=== ci-shard-diagnose dump: $ci_diag_job shard $ci_diag_shard/$ci_diag_shards"
@@ -190,22 +349,7 @@ ci_diag_dump() {
     echo "    (unset in this step's environment)"
   fi
 
-  echo "--- [C] membership probe, using the harness's own rule against [B]"
-  ci_diag_hit=0
-  ci_diag_miss=0
-  while IFS= read -r ci_diag_name; do
-    [ -n "$ci_diag_name" ] || continue
-    case " ${UBERDEV_SHARD_PLAN-} " in
-      *" ${ci_diag_name} "*) ci_diag_hit=$((ci_diag_hit + 1)); ci_diag_verdict=MATCH ;;
-      *) ci_diag_miss=$((ci_diag_miss + 1)); ci_diag_verdict=MISS ;;
-    esac
-    printf '    %-5s %s\n' "$ci_diag_verdict" "$ci_diag_name"
-  done <<CI_DIAG_NAMES
-$(printf '%s' "${UBERDEV_SHARD_PLAN-}" | tr -d "$ci_diag_cr" | tr ' ' '\n')
-CI_DIAG_NAMES
-  echo "    match=$ci_diag_hit miss=$ci_diag_miss"
-  echo "    A plan of length N with match=1 is the #753 signature: only the entry"
-  echo "    whose trailing CR was consumed at the file boundary is space-bounded."
+  ci_diag_dump_routing
   return 0
 }
 

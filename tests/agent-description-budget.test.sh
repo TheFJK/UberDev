@@ -163,10 +163,24 @@ note_fail() { echo "  FAIL  $1"; FAIL=$((FAIL + 1)); }
 # (finding-verifier), which carries a real dispatch contract rather than
 # scaffolding. Set it any looser and it stops being a cap.
 #
-# MAX_TOTAL is the post-#746 measured total plus a deliberate ~7% of headroom,
-# so adding a normal-sized agent does not red CI on the day it lands, while a
-# second `<example>`-scale regression (thousands of chars) does. Measured
-# post-#746 total: 11,720.
+# MAX_TOTAL is the post-#746 measured total plus a deliberate ~7% of headroom
+# (780 chars). Measured post-#746 total: 11,720.
+#
+# That headroom is for GROWING AN EXISTING description, not for adding an agent.
+# Editing a description in place leaves the corpus size alone, so it never goes
+# near A0 and A4 absorbs the growth without anyone re-pinning anything — while a
+# second `<example>`-scale regression (thousands of chars) still blows straight
+# through it. Measured: growing one description by 348 chars lands A4 at
+# 12,068/12,500 and every row stays green.
+#
+# ADDING an agent is gated by A0's exact pin, never by this headroom. A 48th
+# file reds A0 the day it lands however small its description is — measured, a
+# 48th agent at the corpus mean of 249 chars passes A4 with 531 chars to spare
+# and reds A0 anyway — and the fix is to re-pin EXPECT_AGENTS and MAX_TOTAL in
+# the same diff. That is the design and not an oversight: MAX_TOTAL is only
+# meaningful as a calibration against a known corpus size, so the count it was
+# calibrated against has to move with it, under the same human approval (see the
+# EXACT-pin note above, and A0's own failure message).
 #
 # MIN_SKILLS / MIN_COMMANDS are floors for the two corpora A1 gained in #744.
 # Deliberately well below the live counts (30 skills, 18 commands) so a routine
