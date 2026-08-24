@@ -669,11 +669,8 @@ _tbx_cmd_worktree_add() {
 #   task, an exhausted cap and a refused wave each leave a line behind,
 #   because the controller's own memory of the run is a context that can be
 #   compacted away.
-#
-#   --basename exists because this executable is shared with the /fix lean
-#   lane (RFC 0022), which writes `fix-audit.jsonl`. It is a BASENAME, not a
-#   path: a `/` or a `..` in it would let a caller write outside the run dir,
-#   which is the one thing an audit sink must not do.
+#   --basename exists because /fix shares this executable (RFC 0022 sec 4.1);
+#   the refusal below is why it is a name and not a path.
 # ---------------------------------------------------------------------------
 _tbx_cmd_audit() {
   # `audit_name`, not `basename`: a local that shadows a command name is the

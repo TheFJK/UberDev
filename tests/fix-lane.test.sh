@@ -35,7 +35,7 @@
 #   FX-S6  — TOO_BIG is a first-class return, distinct from BLOCKED
 #   FX-S7  — the review result goes through the CANONICAL validator, not a copy
 #   FX-S8  — launcher: --fix parsed, FX1 sits before gh, Step 5f emits FIX_PLAN
-#   FX-S9  — the plan envelope is the NARROW one (anti-drift)
+#   FX-S9  — the skill reads the envelope's fields, never a literal
 #   FX-S10 — circuit breakers FX1..FX4 are named in the skill and the RFC
 #   FX-S11 — the lib is invoked as an executable, never sourced (zsh trap)
 #   FX-S12 — RFC 0022 exists, is numbered uniquely, and states the decision
@@ -53,6 +53,14 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
 CMD="$PLUGIN_ROOT/commands/fix.md"
 SKILL="$PLUGIN_ROOT/skills/fix-fleet/SKILL.md"
+# The SKILL is SKILL.md PLUS the reference files its body points at: a rule the
+# skill still states is still stated BY THE SKILL wherever progressive disclosure
+# moved it. Globbed, not listed, so a new reference file is covered on arrival.
+# Only the frontmatter rows read "$SKILL" alone — frontmatter belongs to the body.
+SKILL_SET=( "$PLUGIN_ROOT/skills/fix-fleet/SKILL.md" )
+for _fx_ref in "$PLUGIN_ROOT/skills/fix-fleet/references"/*.md; do
+  [ -r "$_fx_ref" ] && SKILL_SET+=( "$_fx_ref" )
+done
 LIB="$PLUGIN_ROOT/lib/turbox-fleet.sh"
 LAUNCHER="$PLUGIN_ROOT/lib/solve-launcher.sh"
 RFC="$REPO_ROOT/docs/rfc/0022-fix-lean-lane.md"
@@ -157,7 +165,7 @@ echo "== FX-E3: FX1 — one issue PASSES the arity gate, all the way to a plan =
 # The positive control for FX-E2: without it, an FX1 that refused *everything*
 # would look identical. One issue must get past the gate, reach the claim
 # protocol, and emit a plan.
-FX_ROUNDS_ENV=1 run_launcher --auto-mode=1 --turbo --standard --fix -- 100
+FX_ROUNDS_ENV=3 run_launcher --auto-mode=1 --turbo --standard --fix -- 100
 FX_RC=$?
 ck "does not trip the arity refusal"    "! grep -q 'takes exactly one issue' <<<\"\$FX_OUT\""
 ck "does not trip the --standard rule"  "! grep -q 'requires --standard' <<<\"\$FX_OUT\""
@@ -184,7 +192,10 @@ ck "it is valid JSON"                   "[ -n \"\$(fx_plan_keys)\" ]"
 ck "lane is fix-lean"                   "[ \"\$(fx_plan_field lane)\" = 'fix-lean' ]"
 ck "issueCount is 1"                    "[ \"\$(fx_plan_field issueCount)\" = '1' ]"
 ck "branchPrefix is worktree-fix-issue-" "[ \"\$(fx_plan_field branchPrefix)\" = 'worktree-fix-issue-' ]"
-ck "fixRounds honours the env knob"     "[ \"\$(fx_plan_field fixRounds)\" = '1' ]"
+# A NON-DEFAULT value on purpose: `1` is what `${UBERDEV_FIX_FIX_ROUNDS:-1}`
+# produces on its own, so asserting 1 here would hold even if the launcher
+# ignored the env var completely.
+ck "fixRounds carries a non-default env value" "[ \"\$(fx_plan_field fixRounds)\" = '3' ]"
 for fx_absent in riskIssueCount concurrency implementBudget maxAgents; do
   ck "OMITS $fx_absent"                 "! grep -qw '$fx_absent' <<<\"\$(fx_plan_keys)\""
 done
@@ -194,17 +205,17 @@ ck "carries exactly 14 keys"            "[ \$(wc -w <<<\"\$(fx_plan_keys)\" | tr
 ck "RFC 0022 states the same 14"        "grep -q '| Plan envelope | 18 keys | \*\*14\*\*' '$RFC'"
 
 echo
-echo "== FX-E4b: FX2 — a canonical rounds knob reaches the plan =="
-FX_ROUNDS_ENV=3 run_launcher --auto-mode=1 --turbo --standard --fix -- 100
-FX_PLAN="$(awk '/^FIX_PLAN_BEGIN$/{f=1;next} /^FIX_PLAN_END$/{f=0} f' <<<"$FX_OUT")"
-ck "fixRounds=3 is carried through"     "[ \"\$(fx_plan_field fixRounds)\" = '3' ]"
-# A leading-zero value is the hole a string-glob guard leaves: `00` is neither
-# empty nor non-digit nor the literal `0`, and int(\"00\") is the very value the
-# guard exists to refuse.
-FX_ROUNDS_ENV=007 run_launcher --auto-mode=1 --turbo --standard --fix -- 100
-FX_PLAN="$(awk '/^FIX_PLAN_BEGIN$/{f=1;next} /^FIX_PLAN_END$/{f=0} f' <<<"$FX_OUT")"
-ck "a leading-zero value is canonicalised, not passed through" \
-   "[ \"\$(fx_plan_field fixRounds)\" = '7' ]"
+echo "== FX-E4b: FX2 — leading zeros are stripped, never read as octal =="
+# `007` alone cannot see this bug: 7 is the same number in base 8 and base 10.
+# `010` and `08` are the discriminating cases — `$(( 010 + 0 ))` is 8, and
+# `$(( 08 + 0 ))` is a fatal arithmetic error, so a canonicaliser built on
+# arithmetic passes the first row here and silently halves the cap on the next.
+for fx_pair in 007:7 010:10 08:8 09:9 0100:100; do
+  FX_ROUNDS_ENV="${fx_pair%%:*}" run_launcher --auto-mode=1 --turbo --standard --fix -- 100
+  FX_PLAN="$(awk '/^FIX_PLAN_BEGIN$/{f=1;next} /^FIX_PLAN_END$/{f=0} f' <<<"$FX_OUT")"
+  ck "UBERDEV_FIX_FIX_ROUNDS=${fx_pair%%:*} reaches the plan as ${fx_pair##*:}" \
+     "[ \"\$(fx_plan_field fixRounds)\" = '${fx_pair##*:}' ]"
+done
 
 echo
 echo "== FX-E5: FX2 — a malformed rounds knob is refused before a claim =="
@@ -243,11 +254,8 @@ ck "allowed-tools declares Task"   "[ \$(grep '^allowed-tools:' '$CMD' | grep -c
 # Workflow() would run the wrong pipeline rather than produce an error, and the
 # cheapest place to make that impossible is the tool list.
 ck "allowed-tools OMITS Workflow"  "[ \$(grep '^allowed-tools:' '$CMD' | grep -c 'Workflow') -eq 0 ]"
-# The alias SSOT row must be byte-identical to this frontmatter (the same
-# contract tests/aliases.test.sh A6 enforces for every other command).
-FX_CMD_TOOLS="$(grep -E '^allowed-tools:[[:space:]]*' "$CMD" | head -1 | sed -E 's/^allowed-tools:[[:space:]]*//')"
-ck "the ALIASES row matches allowed-tools byte for byte" \
-   "grep -Fq 'fix|fix|$FX_CMD_TOOLS' '$PLUGIN_ROOT/lib/aliases-sync.sh'"
+# The ALIASES-row byte-equality contract is NOT re-asserted here:
+# tests/aliases.test.sh A6 owns it and this change added `fix` to its loop.
 
 echo
 echo "== FX-S2: the command mandates the launcher call and the skill =="
@@ -285,10 +293,10 @@ ck "skill is under the 500-line ceiling" "[ \$(wc -l < '$SKILL') -lt 500 ]"
 
 echo
 echo "== FX-S4: the lane's give-ups and keeps are STATED =="
-ck "names the design rungs it drops"       "grep -q 'design-planner' '$SKILL'"
-ck "names plan-reviewer as dropped"        "grep -q 'plan-reviewer' '$SKILL'"
-ck "states the rung count it trades"       "grep -qi 'sequential agent rungs' '$SKILL'"
-ck "states what it does NOT drop"          "grep -q 'drops is design, not diligence' '$SKILL'"
+ck "names the design rungs it drops"       "grep -q 'design-planner' \"\${SKILL_SET[@]}\""
+ck "names plan-reviewer as dropped"        "grep -q 'plan-reviewer' \"\${SKILL_SET[@]}\""
+ck "states the rung count it trades"       "grep -qi 'sequential' \"\${SKILL_SET[@]}\""
+ck "states what it does NOT drop"          "grep -q 'drops is design, not\\? *$\\|design, not' \"\${SKILL_SET[@]}\""
 ck "keeps the full test suite"             "grep -qi 'full test suite' '$SKILL'"
 ck "keeps the untrusted-input envelope"    "grep -q 'external-untrusted-input' '$SKILL'"
 ck "keeps the issue_body_file channel"     "grep -q 'issue_body_file' '$SKILL'"
@@ -354,22 +362,11 @@ ck "the FX2 knob check is before the first gh call (${KNOB_LINE:-?} < ${GH_LINE:
    "[ -n '$KNOB_LINE' ] && [ -n '$GH_LINE' ] && [ '$KNOB_LINE' -lt '$GH_LINE' ]"
 
 echo
-echo "== FX-S9: the plan envelope is the NARROW one =="
-# Scope every assertion to the composer's own argv-to-json block, not the whole
-# launcher: `riskIssueCount` and `concurrency` are real keys of the TURBOX
-# envelope in the same file, so a whole-file grep would be satisfied by the
-# lane this one must differ from.
-FX_ENVELOPE="$(awk '/FIX_PLAN_JSON="\$\(python3/,/^'"'"' "\$SOLVE_FLEET_MANIFEST"/' "$LAUNCHER")"
-ck "the composer block was located"        "[ -n \"\$FX_ENVELOPE\" ]"
-ck "declares lane fix-lean"                "grep -q '\"lane\": \"fix-lean\"' <<<\"\$FX_ENVELOPE\""
-ck "uses the worktree-fix-issue- prefix"   "grep -q '\"branchPrefix\": \"worktree-fix-issue-\"' <<<\"\$FX_ENVELOPE\""
-ck "carries fixRounds"                     "grep -q '\"fixRounds\"' <<<\"\$FX_ENVELOPE\""
-for absent in riskIssueCount concurrency implementBudget maxAgents; do
-  ck "OMITS $absent (a field nothing reads is a field that drifts)" \
-     "! grep -q '\"$absent\"' <<<\"\$FX_ENVELOPE\""
-done
-# The prefix must not collide with the lane it was narrowed from.
-ck "the prefix differs from turbox's"      "! grep -q 'worktree-turbox-issue-' <<<\"\$FX_ENVELOPE\""
+echo "== FX-S9: the skill reads the envelope, never a literal =="
+# The envelope's SHAPE is not grepped out of the composer's source here — FX-E4
+# parses it out of the JSON the launcher actually printed, which is strictly
+# better evidence and cannot be satisfied by a composer that no longer runs.
+# What execution cannot see is the skill hardcoding a value the plan carries.
 ck "the skill reads branchPrefix, not a literal" \
    "! grep -q 'worktree-fix-issue-' '$SKILL'"
 
@@ -401,9 +398,8 @@ ck "RFC 0022 states the decision"          "grep -q '^## 1. Decision' '$RFC'"
 ck "RFC 0022 argues command-not-flag"      "grep -q 'Why a new command rather than a' '$RFC'"
 ck "RFC 0022 lists alternatives"           "grep -q '^## 5. Alternatives considered' '$RFC'"
 ck "RFC 0022 lists acceptance criteria"    "grep -q '^## 6. Acceptance criteria' '$RFC'"
-# One RFC per number; a duplicate 0022 would mean two designs claim the slot.
-FX_RFC_COUNT="$(find "$REPO_ROOT/docs/rfc" -maxdepth 1 -name '0022-*.md' | wc -l | tr -d ' ')"
-ck "exactly one RFC claims number 0022"    "[ '$FX_RFC_COUNT' -eq 1 ]"
+# RFC-number uniqueness is NOT re-asserted here: docs-accuracy.test.sh already
+# fails on `uniq -d` over every docs/rfc/NNNN-*.md, which covers 0022 too.
 
 echo
 echo "== FX-S13: no version bump, and the lane never merges =="

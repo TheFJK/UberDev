@@ -137,25 +137,18 @@ if [ "$FIX_MODE" = "1" ]; then
   # FX2's ceiling, resolved beside FX1 so a malformed knob cannot abort a run
   # that has already written a claim. Its own default of one round, NOT the
   # turbox per-task cap — that value stays with its owner (RFC 0022 sec 3.6).
-  UBERDEV_FIX_ROUNDS_RESOLVED="${UBERDEV_FIX_FIX_ROUNDS:-1}"
-  # Two gates, both load-bearing. The glob rejects empty and non-digit ONLY —
-  # it accepts `0`, `00`, `000` — so the numeric test is what enforces
-  # "positive", and it runs second because `-lt` on a non-digit is an error.
+  UBERDEV_FIX_FIX_ROUNDS_RAW="${UBERDEV_FIX_FIX_ROUNDS:-1}"
+  # Strip leading zeros BEFORE validating, never with `$(( ))`: arithmetic
+  # reads `010` as octal 8 and dies outright on `08`. Stripping first also
+  # collapses `0`/`00` to the empty string, so ONE glob gate covers every case.
+  UBERDEV_FIX_ROUNDS_RESOLVED="${UBERDEV_FIX_FIX_ROUNDS_RAW#"${UBERDEV_FIX_FIX_ROUNDS_RAW%%[!0]*}"}"
   case "$UBERDEV_FIX_ROUNDS_RESOLVED" in
     ''|*[!0-9]*)
-      echo "error: UBERDEV_FIX_FIX_ROUNDS must be a positive integer (got '$UBERDEV_FIX_ROUNDS_RESOLVED')" >&2
+      echo "error: UBERDEV_FIX_FIX_ROUNDS must be a positive integer (got '$UBERDEV_FIX_FIX_ROUNDS_RAW')" >&2
       echo "no claims written; no agents dispatched" >&2
       exit 2
       ;;
   esac
-  if [ "$UBERDEV_FIX_ROUNDS_RESOLVED" -lt 1 ]; then
-    echo "error: UBERDEV_FIX_FIX_ROUNDS must be a positive integer (got '$UBERDEV_FIX_ROUNDS_RESOLVED')" >&2
-    echo "no claims written; no agents dispatched" >&2
-    exit 2
-  fi
-  # Canonical, not merely valid: the value is interpolated into a JSON literal
-  # in the audit row, and JSON forbids a leading zero in a number.
-  UBERDEV_FIX_ROUNDS_RESOLVED="$(( UBERDEV_FIX_ROUNDS_RESOLVED + 0 ))"
 fi
 
 # Env ownership (#97/#241) — see header. AUTO_MODE gates turbo-vs-interactive
@@ -1462,9 +1455,6 @@ print(sum(1 for r in d["issues"]
   # relaying a fix plan into Workflow() or into the turbox lane would run the
   # wrong pipeline rather than error. Narrower envelope: RFC 0022 section 4.
   if [[ "$FIX_MODE" == "1" ]]; then
-    # UBERDEV_FIX_ROUNDS_RESOLVED (FX2's ceiling) was resolved and validated
-    # back at the FX1 arity refusal, before gh ran and therefore before any
-    # claim was written. Nothing between there and here changes it.
     _uberdev_audit_emit fix_lean_lane_prepared \
       "{\"issues\":${#ISSUE_NUMS[@]},\"manifest\":\"$SOLVE_FLEET_MANIFEST\",\"fix_rounds\":$UBERDEV_FIX_ROUNDS_RESOLVED}"
 

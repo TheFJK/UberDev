@@ -31,38 +31,23 @@ meaning *this issue wants a decomposition — run `/turbox`*. It ends the run wi
 the worktree and the claim intact, and the controller is told never to argue an
 agent out of it.
 
-Four circuit breakers, FX1–FX4:
-
-- **FX1** — a second issue number is refused **before `gh` runs**, and therefore
-  before Step 4.5 can write a claim. A lane that discovered its second issue
-  after claiming both would leave `uberdev:active` labels behind with nothing
-  running.
-- **FX2** — `fixRounds`, its own knob defaulting to **1**
-  (`UBERDEV_FIX_FIX_ROUNDS`), deliberately not turbox's `fix_rounds` of 3: that
-  cap bounds a per-task ladder inside a wave loop. Resolved and validated
-  beside FX1, before any claim.
-- **FX3** — `retest_rounds`, shared with `/turbox` because it bounds the same
-  thing on both lanes.
-- **FX4** — an unparseable implementer return, or a review result the canonical
-  validator rejects: one re-prompt, then stop or count the run `UNREVIEWED`.
-
-Three things open the PR as a **draft** — a red suite, blockers still standing
-after FX2's cap, or a run counted `UNREVIEWED` because the review result never
-validated — each named in both the body and the report. Committed work never strands in a worktree, and the lane
+Four circuit breakers (FX1–FX4) bound the arity, the fix ladder, the retest
+ladder and unparseable returns. The one worth knowing at the CLI: a second
+issue number is refused **before `gh` runs**, so a rejected invocation never
+leaves an `uberdev:active` label behind. A red suite, standing blockers, or a
+review result that never validated each open the PR as a **draft**. RFC 0022
+section 3.6 has the table. Committed work never strands in a worktree, and the lane
 never re-runs a suite hoping for a different answer.
 
 ### Changed
 
 - `lib/turbox-fleet.sh` — `audit` gained an optional `--basename` (default
-  `turbox-audit.jsonl`; `/fix` passes `fix-audit.jsonl`). It is a basename, not
-  a path: a `/` or `..` is refused, because the one thing an audit sink must
-  not do is write outside the run dir.
+  `turbox-audit.jsonl`; `/fix` passes `fix-audit.jsonl`). A name, not a path —
+  a `/` or `..` is refused.
 - `lib/solve-launcher.sh` — the `--fix` launcher option (requires
   `--standard`), the FX1 arity refusal and the FX2 knob validation ahead of the
-  first `gh` call, and Step 5f's `FIX_PLAN_BEGIN`/`FIX_PLAN_END` envelope. A
-  third marker pair on purpose: each marker names exactly one executor, and
-  relaying a fix plan into `Workflow()` or into the turbox lane would run the
-  wrong pipeline rather than produce an error message.
+  first `gh` call, and Step 5f's `FIX_PLAN_BEGIN`/`FIX_PLAN_END` envelope — a
+  third marker pair, because each marker names exactly one executor.
 - `CLAUDE.md` — the bump-lane table gained a fourth row. `/turbox` and `/fix`
   open one PR per issue rather than a stack, so there is no once-per-stack
   commit to carry the bump; it rides whatever lands the PR. Reviewing such a PR

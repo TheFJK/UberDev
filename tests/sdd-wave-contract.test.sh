@@ -682,8 +682,7 @@ REGISTER = [
 ]
 
 # The reasoned ignore-list. The sweep predicate needs a cap NAME and a DIGIT on
-# the same line, so a name-only mention never trips it. Exactly twenty-one lines
-# do.
+# the same line, so a name-only mention never trips it. Exactly eighteen lines do.
 # Every key is (root-relative path, value-agnostic regex) — value-agnostic so a
 # §C6 scratch mutation cannot turn a registered line into an unregistered one
 # and make the mutant "disagree" for the wrong reason.
@@ -930,21 +929,21 @@ for _v in "$c5_total" "$c5_registered" "$c5_ignored"; do
   esac
 done
 
-[ "${c5_total:-0}" -eq 43 ] \
-  || fail "§C5 VACUOUS or drifted: the sweep harvested ${c5_total:-0} hit line(s), the register dispositions exactly 43"
-row "§C5 the sweep harvested exactly 43 cap-name-plus-digit lines"
+[ "${c5_total:-0}" -eq 40 ] \
+  || fail "§C5 VACUOUS or drifted: the sweep harvested ${c5_total:-0} hit line(s), the register dispositions exactly 40"
+row "§C5 the sweep harvested exactly 40 cap-name-plus-digit lines"
 
 [ "$c5_registered" -eq 22 ] \
   || fail "§C5 $c5_registered hit line(s) were dispositioned by a register site, the register declares 22"
 row "§C5 22 hit lines dispositioned by a register site"
 
-[ "$c5_ignored" -eq 21 ] \
-  || fail "§C5 $c5_ignored hit line(s) were dispositioned by the ignore-list, it declares 21"
-row "§C5 21 hit lines dispositioned by the reasoned ignore-list"
+[ "$c5_ignored" -eq 18 ] \
+  || fail "§C5 $c5_ignored hit line(s) were dispositioned by the ignore-list, it declares 18"
+row "§C5 18 hit lines dispositioned by the reasoned ignore-list"
 
 [ "$((c5_registered + c5_ignored))" -eq "$c5_total" ] \
   || fail "§C5 partition broken: $c5_registered + $c5_ignored != $c5_total"
-row "§C5 the partition closes: 22 + 21 == 43, every hit dispositioned exactly once"
+row "§C5 the partition closes: 22 + 18 == 40, every hit dispositioned exactly once"
 
 # ---------------------------------------------------------------------------
 # §C6 — mutation anti-vacuity over scratch copy trees.
