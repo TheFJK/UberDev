@@ -20,6 +20,16 @@
 #   B7  the `--converge` upper bound is EXECUTED — the shipped argument parser
 #       accepts the library's CONVERGE_REPAIR_CEILING and refuses one past it,
 #       so raising the library value reds until the fence follows (#724)
+#   B8  the Phase 5-trail decision fence emits NOTHING when the loop did not stop
+#       green, when the attempt's gate file is missing, when its verdict/rc is
+#       not green, when the JSON is unreadable, and when HEAD moved after the
+#       gate — five refusals, each with its own typed reason, each exiting 0
+#   B9  and it prints TRAIL=emit for the one state that earns it, so B8 is not
+#       vacuously green over a fence that refuses everything (#716)
+#   B10 the PUBLICATION fence publishes nothing on TRAIL=skipped — no commit, no
+#       push, no gh call — proved by a recording git/gh shim rather than by the
+#       absence of an error, with a real emit run as the control that shows the
+#       shim can see a call at all (#716)
 #
 # Every case runs bytes EXTRACTED from SKILL.md. Nothing here is a transcription
 # of the shipped logic: a test that executes its own copy of the code is green
@@ -377,6 +387,295 @@ elif [ -n "$CEILING" ]; then
     bad "B7: --converge=1 was refused (rc=$RC): $OUT"
   fi
 fi
+
+# --- Phase 5-trail: the emission gate, EXECUTED (#716) -----------------------
+# AC1 is "a trail is emitted ONLY on a green gate", which is a claim about the
+# five states that must emit NOTHING. Every one of them is satisfiable by prose,
+# so the whole point of putting the decision in its own fence — no git write, no
+# network — was to make it runnable here against a throwaway repo. These cases
+# run the SHIPPED bytes: nothing below transcribes the fence.
+#
+# Run under bash AND zsh. The fences reach the runtime through the Bash tool,
+# which is /bin/zsh on the maintainer's machine, and this repo has a standing
+# class of bugs visible only there (`for x in $SCALAR` iterating once over the
+# whole string; a `local path=` colliding with the tied PATH array).
+TRAIL_GATE_FENCE="$(fence_body premerge-trail-gate)"
+TRAIL_EMIT_FENCE="$(fence_body premerge-trail-emit)"
+TRAIL_GATE_LINES="$(grep -c . <<<"$TRAIL_GATE_FENCE")"
+TRAIL_EMIT_LINES="$(grep -c . <<<"$TRAIL_EMIT_FENCE")"
+TRAIL_RUN_ID=20260824-111213-deadbe
+TRAIL_BRANCH="chore/stack-$TRAIL_RUN_ID"
+TRAIL_PR=4242
+TRAIL_REAL_GIT="$(command -v git)"
+
+echo
+echo "== B8/B9/B10 pre-flight: both trail fences extracted, and split as designed =="
+# A floor, not a band: unlike B7's slice these bodies are bounded at BOTH ends by
+# the fence markers themselves, so they cannot run away into a neighbouring
+# fence. What a floor is here to catch is the extraction yielding nothing at all
+# — which would pass every `case` below for the wrong reason.
+if [ "$TRAIL_GATE_LINES" -ge 20 ]; then
+  ok "pre-flight: the gate fence extracted $TRAIL_GATE_LINES non-blank lines"
+else
+  bad "pre-flight: the gate fence extracted $TRAIL_GATE_LINES non-blank lines (want >= 20) — the origin= tag moved; every B8/B9 row would be meaningless"
+fi
+if [ "$TRAIL_EMIT_LINES" -ge 20 ]; then
+  ok "pre-flight: the emit fence extracted $TRAIL_EMIT_LINES non-blank lines"
+else
+  bad "pre-flight: the emit fence extracted $TRAIL_EMIT_LINES non-blank lines (want >= 20) — the origin= tag moved; every B10 row would be meaningless"
+fi
+# The split is what makes B8 runnable at all: a single fence that pushed and
+# called gh could only ever be grep-proved. So assert the DECISION half stays a
+# decision. This is a structural row about a different property; the emission
+# behaviour itself is executed below, never asserted as text.
+case "$TRAIL_GATE_FENCE" in
+  *"git push"*|*"gh "*) bad "pre-flight: the decision fence has grown a git push or a gh call — it can no longer be executed here, and AC1 falls back to being grep-only" ;;
+  *)                    ok "pre-flight: the decision fence still writes nothing and calls nothing remote" ;;
+esac
+
+# trail_repo NAME -> a fresh committed repo carrying an empty premerge run dir
+trail_repo() {
+  local d; d="$(new_repo "$1")"
+  mkdir -p "$d/.uberdev/premerge/$TRAIL_RUN_ID"
+  printf '%s' "$d"
+}
+
+# trail_gate_file REPO ATTEMPT_PAD VERDICT RC HEAD_SHA -> writes gate-NN.json
+trail_gate_file() {
+  printf '{"verdict":"%s","rc":%s,"head_sha":"%s"}\n' "$3" "$4" "$5" \
+    >"$1/.uberdev/premerge/$TRAIL_RUN_ID/gate-$2.json"
+}
+
+# run_trail_gate SHELL REPO STOP ATTEMPT -> merged output on stdout, rc in $?.
+# Merged, because every line this fence prints goes to stderr on purpose.
+run_trail_gate() {
+  local sh="$1" repo="$2" stop="$3" attempt="$4"
+  case "$sh" in
+    # -f so a developer's ~/.zshenv cannot change the answer. No array: bash 3.2
+    # is still the /bin/bash on macOS and this stays inside the POSIX subset.
+    zsh) set -- zsh -f -c ;;
+    *)   set -- bash -c ;;
+  esac
+  ( cd "$repo" \
+    && RUN_ID="$TRAIL_RUN_ID" PREMERGE_ATTEMPT="$attempt" PREMERGE_STOP="$stop" \
+       "$@" "$TRAIL_GATE_FENCE" ) 2>&1
+}
+
+# trail_refusal SHELL LABEL EXPECT REPO STOP ATTEMPT
+trail_refusal() {
+  local sh="$1" label="$2" expect="$3" repo="$4" stop="$5" attempt="$6"
+  local out rc
+  out="$(run_trail_gate "$sh" "$repo" "$stop" "$attempt")"; rc=$?
+  case "$out" in
+    *"$expect"*) ok "$label [$sh]: $expect" ;;
+    *)           bad "$label [$sh]: expected '$expect', got: $out" ;;
+  esac
+  # A refusal to emit is an ordinary outcome the run parks past, not a fence
+  # failure — a non-zero here would abort Phase 5 on every not-green stack.
+  check "$rc" 0 "$label [$sh]: exits 0"
+}
+
+# trail_stack_repo NAME -> a repo with a real (bare, local) origin, the stack
+# branch checked out over one commit of work, and the three run-dir files the
+# publication fence reads. Local bare remote so the push is real and offline.
+trail_stack_repo() {
+  local d="$WORK/$1"
+  rm -rf "$d" "$d.git"
+  git init -q --bare "$d.git"
+  mkdir -p "$d"
+  git -C "$d" init -q .
+  git -C "$d" config user.email premerge-test@example.invalid
+  git -C "$d" config user.name "premerge test"
+  git -C "$d" remote add origin "$d.git"
+  printf 'x\n' >"$d/README.md"
+  git -C "$d" add README.md >/dev/null
+  git -C "$d" commit -qm init
+  git -C "$d" branch -M main
+  git -C "$d" push -q -u origin main
+  git -C "$d" checkout -q -b "$TRAIL_BRANCH"
+  printf 'y\n' >"$d/stacked.txt"
+  git -C "$d" add stacked.txt >/dev/null
+  git -C "$d" commit -qm "feat(x): the stacked work a trail would describe"
+  mkdir -p "$d/.uberdev/premerge/$TRAIL_RUN_ID"
+  printf '{"combined_pr":%s}\n' "$TRAIL_PR" >"$d/.uberdev/premerge/$TRAIL_RUN_ID/manifest.json"
+  printf '%s\n' "$TRAIL_BRANCH" >"$d/.uberdev/premerge/$TRAIL_RUN_ID/combine-branch.txt"
+  printf 'main\n' >"$d/.uberdev/premerge/$TRAIL_RUN_ID/combine-base.txt"
+  printf '%s' "$d"
+}
+
+# trail_shims DIR -> a PATH prefix whose `git` records every call before running
+# the real one, and whose `gh` records and returns without a network.
+# "Published nothing" is a claim about calls that were NEVER MADE, and the only
+# honest way to prove one is to record every call and find the log empty. An
+# unchanged HEAD would not do it: a fence that pushed a stale ref or edited a
+# label leaves HEAD exactly where it was.
+trail_shims() {
+  local s="$1"
+  rm -rf "$s"; mkdir -p "$s"
+  cat >"$s/git" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>'$s/git.log'
+exec '$TRAIL_REAL_GIT' "\$@"
+EOF
+  cat >"$s/gh" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>'$s/gh.log'
+exit 0
+EOF
+  chmod +x "$s/git" "$s/gh"
+  : >"$s/git.log"; : >"$s/gh.log"
+}
+
+# run_trail_emit SHELL REPO SHIMDIR TRAIL ATTEMPT -> merged output, rc in $?
+run_trail_emit() {
+  local sh="$1" repo="$2" shim="$3" trail="$4" attempt="$5"
+  case "$sh" in
+    zsh) set -- zsh -f -c ;;
+    *)   set -- bash -c ;;
+  esac
+  ( cd "$repo" \
+    && PATH="$shim:$PATH" RUN_ID="$TRAIL_RUN_ID" PREMERGE_TRAIL="$trail" \
+       PREMERGE_TRAIL_ATTEMPT="$attempt" "$@" "$TRAIL_EMIT_FENCE" ) 2>&1
+}
+
+for TSH in bash zsh; do
+  if [ "$TSH" = zsh ] && ! command -v zsh >/dev/null 2>&1; then
+    echo "  ----  B8/B9/B10: zsh is not on PATH — the zsh half is not run"
+    continue
+  fi
+
+  echo
+  echo "== B8 [$TSH]: the trail gate emits NOTHING unless every condition holds =="
+  # 1. The loop did not stop green. The gate file below is otherwise PERFECT —
+  #    green, rc 0, bound to this very HEAD — so the only thing refusing is the
+  #    stop token, which is the whole claim.
+  R="$(trail_repo "trail-$TSH-stop")"
+  trail_gate_file "$R" 02 green 0 "$(git -C "$R" rev-parse HEAD)"
+  trail_refusal "$TSH" B8.stop "TRAIL=skipped REASON=stop_not_green" "$R" STOP_NO_PROGRESS 2
+
+  # 2. Stopped green, but this attempt left no gate file. `.uberdev/` is
+  #    gitignored and a fresh clone has none, so absence is a live state.
+  R="$(trail_repo "trail-$TSH-nogate")"
+  trail_refusal "$TSH" B8.nogate "TRAIL=skipped REASON=gate_unreadable" "$R" STOP_GREEN 2
+
+  # 3. Stopped green, gate says otherwise. The loop's own stop token and the
+  #    attempt's recorded verdict are two separate facts; the fence needs both.
+  R="$(trail_repo "trail-$TSH-notgreen")"
+  trail_gate_file "$R" 02 not_green 1 "$(git -C "$R" rev-parse HEAD)"
+  trail_refusal "$TSH" B8.notgreen "TRAIL=skipped REASON=not_green VERDICT=not_green RC=1" "$R" STOP_GREEN 2
+
+  # 4. Unreadable JSON reaches the classifier AS A VALUE. jq fails, both reads
+  #    come back empty, and the fence must say `unreadable` rather than default
+  #    an empty verdict into anything — a silent default here would emit a trail
+  #    over a gate file nobody could parse.
+  R="$(trail_repo "trail-$TSH-malformed")"
+  printf '{ this is not json\n' >"$R/.uberdev/premerge/$TRAIL_RUN_ID/gate-02.json"
+  trail_refusal "$TSH" B8.malformed "REASON=not_green VERDICT=unreadable RC=unreadable" "$R" STOP_GREEN 2
+
+  # 5. Green, but about a different commit. This is the binding that stops a
+  #    late fixup or a rebase from inheriting a gate it was never read against.
+  R="$(trail_repo "trail-$TSH-headmoved")"
+  trail_gate_file "$R" 02 green 0 0000000000000000000000000000000000000000
+  trail_refusal "$TSH" B8.headmoved "TRAIL=skipped REASON=head_moved" "$R" STOP_GREEN 2
+  # ...and it names the LIVE head, so the comparison is a comparison and not a
+  # constant that happens to read as one.
+  TRAIL_OUT="$(run_trail_gate "$TSH" "$R" STOP_GREEN 2)"
+  case "$TRAIL_OUT" in
+    *"HEAD=$(git -C "$R" rev-parse HEAD)"*) ok "B8.headmoved [$TSH]: the refusal names the live HEAD" ;;
+    *) bad "B8.headmoved [$TSH]: the refusal does not name the live HEAD: $TRAIL_OUT" ;;
+  esac
+
+  echo
+  echo "== B9 [$TSH]: and it emits for the one state that earns it =="
+  # Without this row B8 is satisfied by a fence that refuses everything, which
+  # is exactly what a broken emitter looks like from the outside.
+  R="$(trail_repo "trail-$TSH-emit")"
+  TRAIL_HEAD="$(git -C "$R" rev-parse HEAD)"
+  # Attempt 2, not 1: the padding is part of the token /merge reads back out of
+  # the commit body as `attempt=NN`, so an unpadded 2 must not satisfy this.
+  trail_gate_file "$R" 02 green 0 "$TRAIL_HEAD"
+  TRAIL_OUT="$(run_trail_gate "$TSH" "$R" STOP_GREEN 2)"; RC=$?
+  case "$TRAIL_OUT" in
+    *"TRAIL=emit ATTEMPT=02 HEAD=$TRAIL_HEAD"*)
+      ok "B9 [$TSH]: TRAIL=emit ATTEMPT=02 bound to the gated HEAD" ;;
+    *) bad "B9 [$TSH]: expected TRAIL=emit ATTEMPT=02 HEAD=$TRAIL_HEAD, got: $TRAIL_OUT" ;;
+  esac
+  check "$RC" 0 "B9 [$TSH]: exits 0"
+
+  echo
+  echo "== B10 [$TSH]: the publication fence publishes nothing on TRAIL=skipped =="
+  R="$(trail_stack_repo "trailstack-$TSH-skip")"; S="$WORK/trailshim-$TSH-skip"
+  trail_shims "$S"
+  TRAIL_HEAD="$(git -C "$R" rev-parse HEAD)"
+  TRAIL_OUT="$(run_trail_emit "$TSH" "$R" "$S" skipped 02)"; RC=$?
+  check "$RC" 0 "B10.skip [$TSH]: exits 0"
+  if [ -s "$S/git.log" ]; then
+    bad "B10.skip [$TSH]: the fence ran git despite TRAIL=skipped: $(tr '\n' ';' <"$S/git.log")"
+  else
+    ok "B10.skip [$TSH]: no git call at all — no commit, no push"
+  fi
+  if [ -s "$S/gh.log" ]; then
+    bad "B10.skip [$TSH]: the fence called gh despite TRAIL=skipped: $(tr '\n' ';' <"$S/gh.log")"
+  else
+    ok "B10.skip [$TSH]: no gh call — no label, no PR edit"
+  fi
+  check "$(git -C "$R" rev-parse HEAD)" "$TRAIL_HEAD" "B10.skip [$TSH]: HEAD did not move"
+  if git -C "$R.git" rev-parse --verify -q "refs/heads/$TRAIL_BRANCH" >/dev/null; then
+    bad "B10.skip [$TSH]: the stack branch reached the remote"
+  else
+    ok "B10.skip [$TSH]: the remote never heard of the stack branch"
+  fi
+
+  # The control. Without it B10.skip is equally satisfied by a shim that cannot
+  # see anything and by a fence that is dead on every input — and by a run that
+  # died on a missing manifest before it reached the decision.
+  echo "== B10 [$TSH]: ...and the same fence DOES publish on TRAIL=emit (the control) =="
+  R="$(trail_stack_repo "trailstack-$TSH-emit")"; S="$WORK/trailshim-$TSH-emit"
+  trail_shims "$S"
+  TRAIL_PARENT="$(git -C "$R" rev-parse HEAD)"
+  TRAIL_BASE_OID="$(git -C "$R" rev-parse origin/main)"
+  TRAIL_OUT="$(run_trail_emit "$TSH" "$R" "$S" emit 02)"; RC=$?
+  check "$RC" 0 "B10.emit [$TSH]: exits 0"
+  case "$TRAIL_OUT" in
+    *"TRAIL=emitted"*"PR=$TRAIL_PR"*) ok "B10.emit [$TSH]: reports the emission" ;;
+    *) bad "B10.emit [$TSH]: expected TRAIL=emitted for PR=$TRAIL_PR, got: $TRAIL_OUT" ;;
+  esac
+  TRAIL_GIT_LOG="$(cat "$S/git.log")"
+  TRAIL_GH_LOG="$(cat "$S/gh.log")"
+  case "$TRAIL_GIT_LOG" in
+    *"commit --allow-empty"*) ok "B10.emit [$TSH]: the shim SAW the anchor commit (so B10.skip's empty log means something)" ;;
+    *) bad "B10.emit [$TSH]: no commit reached the shim: $TRAIL_GIT_LOG" ;;
+  esac
+  case "$TRAIL_GIT_LOG" in
+    *"push origin $TRAIL_BRANCH"*) ok "B10.emit [$TSH]: the shim SAW the push" ;;
+    *) bad "B10.emit [$TSH]: no push reached the shim: $TRAIL_GIT_LOG" ;;
+  esac
+  case "$TRAIL_GH_LOG" in
+    *"label create --force premerge-approved"*"pr edit $TRAIL_PR --add-label premerge-approved"*)
+      ok "B10.emit [$TSH]: the shim SAW both gh calls, label provisioned before it is applied" ;;
+    *) bad "B10.emit [$TSH]: the gh calls are missing or out of order: $TRAIL_GH_LOG" ;;
+  esac
+  # The payload /merge reads back out of the immutable commit body: both
+  # endpoints of the delta, the instrument as data, and the gate token.
+  TRAIL_BODY="$(git -C "$R" log -1 --format=%B)"
+  case "$TRAIL_BODY" in
+    *"Reviewed-by: uberdev/premerge@$TRAIL_PARENT gate=green attempt=02"*)
+      ok "B10.emit [$TSH]: the anchor carries the head trailer with the gate token" ;;
+    *) bad "B10.emit [$TSH]: head trailer missing or unbound: $TRAIL_BODY" ;;
+  esac
+  case "$TRAIL_BODY" in
+    *"Reviewed-base: uberdev/premerge@$TRAIL_BASE_OID ref=main"*)
+      ok "B10.emit [$TSH]: the anchor carries the base endpoint too" ;;
+    *) bad "B10.emit [$TSH]: base trailer missing or unbound: $TRAIL_BODY" ;;
+  esac
+  if git -C "$R" diff --quiet HEAD~1 HEAD; then
+    ok "B10.emit [$TSH]: the anchor is empty — a trail over changed bytes is refused"
+  else
+    bad "B10.emit [$TSH]: the anchor commit carries a diff"
+  fi
+  check "$(git -C "$R.git" rev-parse "refs/heads/$TRAIL_BRANCH")" "$(git -C "$R" rev-parse HEAD)" \
+    "B10.emit [$TSH]: the remote branch now points at the anchor"
+done
 
 echo ""
 echo "== Summary =="

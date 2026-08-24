@@ -160,11 +160,24 @@ sandboxing than `code-fixer`, in exchange for not lying about provenance.
 
 ## 7. No trust trail
 
-`/premerge` emits no `uberdev-approved` label, no `Reviewed-by:` trailer and no
-audit JSON. `/merge`'s PATH_2 therefore does not accept a `/premerge` run as
-review evidence, and that is intended: the trail is a claim that uberdev's
+`/premerge` emits no `uberdev-approved` label, ~~no `Reviewed-by:` trailer~~ and no
+audit JSON. ~~`/merge`'s PATH_2 therefore does not accept a `/premerge` run as
+review evidence, and that is intended:~~ the trail is a claim that uberdev's
 seven-lens fanout, its finding-verification gate and its CI-health phase all ran,
 and under `/premerge` none of them did.
+
+> **AMENDED 2026-08-24 — see §10 A7.** The unstruck closing clause — *the trail
+> is a claim that … none of them did* — stands, and it is the reason the
+> amendment exists; the two struck spans do not. On a run that
+> reaches green `/premerge` now emits a `Reviewed-by: uberdev/premerge@<sha>`
+> trailer and a `premerge-approved` label, and `/merge`'s PATH_2 resolves them —
+> because the producing command became a **data field** inside the trailer, so a
+> trail can now be emitted without claiming another command's phases. The
+> unstruck words are still exact and are load-bearing: the label is never
+> `uberdev-approved` (P10 in `tests/premerge.test.sh` fails the build if that
+> literal appears anywhere in either premerge file, prose included), and no
+> `review-pr-verdict.json` is written. The `gate-NN.json` the run already wrote
+> under the gitignored `.uberdev/` is a corroborator, not that artifact.
 
 Run `/uberdev:review-pr <stack-pr>` on the parked stack PR when you want a trail.
 The two compose in that order and `/premerge` leaves the branch in exactly the
@@ -1147,3 +1160,132 @@ on `_growth_ratio`, `_reviewer_blockers` and `_growth_round_counts` state both
 narrowings at the code. This amendment is what stops the design authority
 outranking them with the wider population. C1–C8 remain the open constraint set,
 and A6, like A5, is not the design that closes them.
+
+### A7 — the trail exists, and it names its own instrument (2026-08-24)
+
+§7 chose to emit nothing. That was a claim about **honesty**, and the claim was
+right. What it did not anticipate was its own consequence at the landing gate:
+`/merge` Phase 1.4 offers exactly two trust paths, `reviewDecision == "APPROVED"`
+and an uberdev trust trail, and a parked stack PR could satisfy neither. So the
+command whose entire purpose is to make a pile of PRs landable ended at a PR
+`/merge` structurally could not land, leaving a manual CLI merge or a hand-forged
+trail as the only remaining routes.
+
+**§7's reasoning survives intact and is what this amendment implements.** The
+objection was never *a trail is inappropriate here*. It was: the trail that
+exists claims uberdev's seven-lens fanout, its finding-verification gate and its
+CI-health phase all ran, and under `/premerge` none of them did. That is an
+objection to a trail naming the wrong **instrument**, not to a trail existing.
+
+#### The instrument becomes data
+
+`Reviewed-by: uberdev/<instrument>@<sha>`, with `<instrument>` drawn from a closed
+set declared as `TRUST_INSTRUMENT_ENUM` in `skills/merge-pipeline/SKILL.md`, and
+one declared label per instrument in `TRUST_LABEL_ENUM` beside it. Phase 1.4
+resolves the instrument from **both** halves — the label at sub-condition (a), the
+commit body at (b.5) — and refuses when they disagree, because a trail wearing one
+command's label and another's trailer is a trail neither command emitted.
+
+`/premerge` emits that shape with its own value at `### 5-trail — the premerge
+trust trail` in `skills/premerge-pipeline/SKILL.md`, and only when its clean gate
+returned green bound to the branch's current HEAD. The gate verdict rides the
+immutable commit body as the trailer suffix `gate=green attempt=NN`, so the tier
+never rests on a bare label plus a bare trailer — the same reasoning that put the
+base endpoint in the commit body under #440. `/merge` records the tier under a
+distinct `TRUST_ANCHOR_ENUM` member, `uberdev_premerge_trail`, so an audit
+consumer can tell the two tiers apart without re-reading the trailer.
+
+Emission is split across two fences, `premerge-trail-gate` (a pure decision — no
+git write, no network) and `premerge-trail-emit`, so the *not-green emits nothing*
+property is executable in a throwaway repo rather than only grep-provable. The
+gate runs **before** the `### 5a` version bump: `/merge`'s trust-head resolution
+tolerates one `chore(release): vX.Y.Z` commit above the anchor, but only once
+`skills/merge-pipeline/lib/release-anchor.sh` has proved it inert with respect to
+reviewed code, so anchoring first gets the release commit *proved* rather than
+merely tolerated.
+
+#### What is dropped, and only for the `premerge` instrument
+
+The Phase 2.5 audit-JSON discovery with its halt/override semantics, and the three
+acknowledgement flags (`--accept-blocker-deferred`, `--accept-critical-deferred`,
+`--i-know-what-im-doing`). Those encode *`/review-pr`'s own phases ran*, which is
+the single claim a premerge trail must not make; Phase 1.4 forces all three
+`false` for any other instrument regardless of what the operator typed, so a flag
+cannot silently widen a gate it was never scoped to.
+
+The dispatch therefore carries `audit_state=not_applicable`, which is deliberately
+**not** `absent`. `absent` is a proven negative from a completed search;
+`not_applicable` is the absence of a search. Collapsing them would let a stale
+`review-pr-verdict.json` filed under the same PR number be read as telemetry about
+a run `/review-pr` never performed.
+
+**This is the only relaxation the instrument buys, and it relaxes a check about
+*which reviewer ran*, never a check about *whether this evidence describes this
+code*.** Head-SHA binding, the release-anchor trust-head resolution, base-identity
+equivalence and the evaluator's cumulative-diff and force-push primitives are
+unchanged in substance for every instrument.
+
+#### Two deliberate deviations from #716's AC3
+
+AC3 read: *"`/merge` gains PATH_3 with its own `TRUST_ANCHOR_ENUM` member (e.g.
+`uberdev_premerge_trail`) so audit consumers can tell the tiers apart. PATH_3
+re-reads `gate-NN.json` and refuses on anything but a green verdict."* Its
+`TRUST_ANCHOR_ENUM` clause shipped verbatim. The other two — a literal `PATH_3`,
+and a `gate-NN.json` refusal — did not, and both departures are choices rather
+than shortfalls.
+
+**1. There is no `PATH_3`.** The premerge tier is the *same* PATH_2 with a
+different instrument value, not a third path. `commands/merge.md` states in two
+separate places that there is no PATH_3 admin-bypass anchor, and two assertions in
+`tests/merge.test.sh` — `M35.no-path3` and `M49.no-path3-bypass` — fail the build
+if that literal appears anywhere inside the extracted Phase 1.4 body. Generalising
+the existing path was therefore both the cheaper edit and the only one the tree
+admits. Audit consumers still tell the tiers apart, via the anchor value.
+
+**2. `gate-NN.json` is a corroborator, not a gate.** `.uberdev/` is gitignored, so
+a verdict living only there is unreadable on every clone but the producer's, and a
+tier that *refused* without it would be unresolvable off the machine that ran
+`/premerge`. So the load-bearing verdict moved into the commit body as the
+`gate=green attempt=NN` token that (b) requires, and the JSON was demoted to
+corroboration that never gates harder than sub-condition (c) — exactly as the
+`review-pr` arm's audit JSON does not.
+
+Sub-condition (d) selects that corroborator **by `head_sha`, never by attempt
+number alone.** The `*` in `.uberdev/premerge/*/gate-<NN>.json` is a run id, so
+every earlier `/premerge` run in the same checkout left its own file at the same
+attempt number; choosing by attempt would pick an unrelated run's evidence, find a
+`head_sha` naming a different commit, and refuse a perfectly good trail as stale.
+Only candidates that parse *and* bind to the trailer's SHA are classified.
+
+**The property a later reader should weigh before calling this a bug.** When no
+candidate survives — the ordinary state on a clone that never ran `/premerge`, and
+also the state when two bound candidates disagree — (d) emits an advisory `error`
+event and then `gate_pass`. On such a clone the tier therefore rests entirely on
+what the producer itself wrote: the `premerge-approved` label, and the
+`Reviewed-by:` / `Reviewed-base:` pair in the anchor commit body carrying the
+instrument, both delta endpoints and the `gate=green attempt=NN` token. That
+is the accepted cost of keeping the tier resolvable anywhere, and it is bounded by
+what the other sub-conditions still prove independently: (b.5) binds both endpoints
+of the reviewed delta and refuses on label/trailer disagreement, and (c) is the
+tamper detector and is untouched. Hardening (d) into a refusal would trade a
+property nothing else supplies — off-producer resolvability — for one (c) already
+provides.
+
+#### Three things this amendment deliberately does not do
+
+It adds **no auto-merge path, no auto-chain from `/premerge` to `/merge`, and no
+flag implying either**. Relaxing a trust gate changes which PRs are *eligible*; it
+never changes who pulls the trigger. `/premerge` still ends at a parked PR and
+dispatches nothing.
+
+It relaxes **no structural check** — the list is under *What is dropped, and only
+for the `premerge` instrument* above, and every item on it is untouched.
+
+It changes **nothing about `/goal`**. `lib/goal-state.sh` filters convergence
+labels with `select(. == "uberdev-approved")`, an exact string equality that
+`premerge-approved` cannot satisfy, so a premerge trail is invisible to `/goal`'s
+convergence read by construction rather than by convention.
+
+**Supersedes:** §7's first paragraph, as struck there. §7's second paragraph
+stands unchanged — `/premerge` and `/review-pr` still compose in that order, and
+running `/review-pr` on a parked stack PR still upgrades the tier.

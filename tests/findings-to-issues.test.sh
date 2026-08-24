@@ -1103,9 +1103,10 @@ else
   echo "  FAIL  S17.9 — suggestion-tier gate failures=$GATE_FAILURES"; FAIL=$((FAIL + 1))
 fi
 
-# Shape lock scoped to the FUNCTION BODY, not the whole file: the whole-file
-# count in tests/premerge.test.sh:241 is satisfied by an assignment anywhere,
-# including back inside the derivation where #685 put it.
+# Shape lock scoped to the FUNCTION BODY, not the whole file: P5b's whole-file
+# count in tests/premerge.test.sh is satisfied by an assignment anywhere,
+# including back inside the derivation where #685 put it. Cited by assertion
+# id, not line number: the line moves whenever that file grows.
 assert_no_grep_nonempty "$ORIGIN_TMP/canonical.sh" 'SUGGESTION_TIER_ENABLED' \
   'S17.10 — the derivation never assigns a gate it cannot carry out of the subshell (#685)'
 

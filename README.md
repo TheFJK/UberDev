@@ -354,7 +354,7 @@ invisible to any per-PR review:
 | 2 TRIAGE | classify the review's findings and plan the fixer waves (one agent per file, disjoint files per wave, agents never touch git). Stamps the reviewed SHA into the evidence. Runs once per attempt; the cleanup findings accumulate as a union deduped by fingerprint across attempts, because a suggestion the reviewer stops repeating is unmentioned, not resolved |
 | 3 CLEAN GATE + CONVERGE | blockers cleared **and** CI green **and** not conflicting; fails closed on unreadable evidence. Not green routes each failing term at something that can repair it — fixer waves at a blocker, `ci-failure-classifier` → `ci-code-fixer` / `ci-rebase-handler` at a red build, a controller-owned base merge at `CONFLICTING` — and re-enters Phase 1. A build that has not answered yet is re-probed without spending an attempt |
 | 4 SIMPLIFY + VERIFY | the three lenses — **last, and only on a green stack**. Applies only behaviour-preserving findings, then re-probes CI and re-gates the polish commit on its own SHA — because Phase 4 is the last thing to touch the branch and every earlier gate was computed before it. A refactor that broke a stack which was green is `git revert`ed, not handed to a human at 3am |
-| 5 BUMP + PARK | everything the run could not fix becomes an issue — surviving blockers at `BLOCKER` tier with a `Blocks: #<stack-pr>` backref, suggestions and un-applied lens findings at `SUGGESTION` — then one `bump-version.sh` for the whole stack, push, stop |
+| 5 BUMP + PARK | everything the run could not fix becomes an issue — surviving blockers at `BLOCKER` tier with a `Blocks: #<stack-pr>` backref, suggestions and un-applied lens findings at `SUGGESTION` — then, on a green run only, the trust trail `/merge` reads, then one `bump-version.sh` for the whole stack, push, stop |
 
 **The counter is a backstop, not the stop condition.** `--converge=<n>` **repair rounds** (default 3,
 ceiling 6, refused rather than clamped outside that range) only bounds a runaway.
@@ -381,11 +381,23 @@ machine-checked rather than judged — so you can see which regime a run was in.
 **It never merges.** Not on green CI, not on an approving review, not under any
 flag. It ends at a pushed, open, bumped, parked PR. Landing is `/merge`.
 
-**It emits no trust trail**, so `/merge`'s PATH_2 will not accept a `/premerge`
-run as review evidence — that trail claims the seven-lens fanout, the
-finding-verification gate and the CI-health phase all ran, and here none did. Run
-`/review-pr <stack-pr>` on the parked PR when you want one; the two compose in
-that order.
+**It emits its own trust trail — and only its own.** On a run that reaches green
+it leaves a `premerge-approved` label and an empty anchor commit carrying
+`Reviewed-by: uberdev/premerge@<sha> gate=green attempt=NN` plus the base
+endpoint, and `/merge`'s trust gate resolves that instead of refusing the parked
+stack PR structurally. A run that does not reach green emits nothing at all. The
+gate generalised rather than loosened: the producing command is now an
+**instrument** field carried inside the trailer instead of a hardcoded prefix, and
+`/merge` reads it from both the label and the commit body and refuses when the two
+disagree. So a `/premerge` trail claims `/premerge`'s clean gate and nothing else
+— not the seven-lens fanout, not the finding-verification gate, not the CI-health
+phase, none of which ran here — and `/merge` records it under a distinct trust
+anchor so an audit can tell the two tiers apart. Run `/review-pr <stack-pr>` on
+the parked PR when you want the higher tier; the two compose in that order.
+
+**A trail is not permission to merge.** It changes which PRs are *eligible*, never
+who pulls the trigger: `/merge` still lands nothing without your explicit command
+for that specific PR, and `/premerge` never dispatches it.
 
 Design rationale and full topology in [`docs/rfc/0021-premerge-stack-integration.md`](./docs/rfc/0021-premerge-stack-integration.md).
 

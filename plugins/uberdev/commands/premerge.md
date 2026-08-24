@@ -32,6 +32,17 @@ before the polish and broken after it.
 **`/premerge` never merges.** It ends at a pushed, open, bumped stack PR — parked.
 Landing it is `/merge`, and only when you say so.
 
+On a run that reaches green, it also leaves a **premerge trust trail** — a
+`premerge-approved` label and an empty anchor commit whose body carries
+`Reviewed-by: uberdev/premerge@<sha> gate=green attempt=NN` plus the base
+endpoint. That is what makes the parked PR resolvable by `/merge` instead of
+structurally unlandable, and it is emitted only when the clean gate returned
+green on the branch's current head — a not-green run emits nothing. It claims
+`/premerge`'s gate and nothing else: `/merge` records it under its own trust
+anchor, distinct from a `/review-pr` trail. It is **not** permission to merge.
+`/merge` still lands nothing without your explicit command for that specific PR,
+and `/premerge` never dispatches it.
+
 ## Usage
 
 `/premerge [<level>] [flags]` — no arguments: every open non-draft PR, reviewed at `xhigh`.
