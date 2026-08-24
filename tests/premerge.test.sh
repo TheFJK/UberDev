@@ -41,6 +41,11 @@
 #          argument-hint starts advertising a refusal
 #   P13  — the loop is bounded: a ceiling is named and the never-merge and
 #          never-loop-forever claims are both stated
+#   P16  — repo-agnosticism: Phase 5's bump probes the TARGET repo (not the
+#          plugin install), passes that root through to bump-version.sh, and
+#          skips with a typed reason elsewhere; Phase 0 publishes the private
+#          ignore policy that keeps the run dir out of a foreign repo's
+#          cleanliness gate
 #   P17  — the stack-gate blockers, every row scoped to an extracted fence body:
 #          the scope guard's two halves fail in the same direction (#693), one
 #          rule for advancing PREMERGE_ATTEMPT (#692), one aggregate_path (#694),
@@ -59,11 +64,25 @@
 #          runtime and no test noticed (#724)
 #   P20  — every backticked heading reference in the Constants block resolves to
 #          a heading that exists in this file (#724)
-#   P16  — repo-agnosticism: Phase 5's bump probes the TARGET repo (not the
-#          plugin install), passes that root through to bump-version.sh, and
-#          skips with a typed reason elsewhere; Phase 0 publishes the private
-#          ignore policy that keeps the run dir out of a foreign repo's
-#          cleanliness gate
+#   P21  — the growth ratio's surfaces: the library declares the ceiling and the
+#          decision, the SKILL documents both and prints GROWTH=, and the command
+#          file names the stop for the operator. The BEHAVIOUR — that the ratio
+#          is computed, that one round warns and two stop, and that repointing
+#          the repair scope moves the decision — is driven in B32 of
+#          tests/premerge-findings.test.sh, which executes the module
+#   P22  — the fixer-wave return contract names `blocked_on_file` and BOTH of
+#          its emission cases, scoped to the §2a prompt block rather than to the
+#          whole file
+#   P22b — the security row: the commit fence's allowed set STILL derives only
+#          from `fix-waves-<NN>.json`, so a path is committable only while
+#          exactly one agent owns it. Exactly one producer, and no fence names
+#          the blocked-on artifact
+#   P22c — the widening is declared on both surfaces, capped, and reads exactly
+#          one predecessor; both bypass entries are in common-mistakes.md. The
+#          cap is compared VALUE-for-value with the library's MAX_BLOCKED_ON,
+#          and the wave size the SKILL says it equals is compared with what the
+#          fence actually passes as --max-per-wave — a name grep on either side
+#          is green at any value (#370/#371)
 
 set -u
 
@@ -1193,6 +1212,231 @@ fi
 # re-file a constant whose consumer is the controller by design.
 assert_fixed "$SKILL" '`PREMERGE_CI_SETTLE_SECS` is consumed by the **controller**' \
   "P20: the settle constant's consumer is stated, not left to be re-discovered"
+
+echo "== P21: the growth ratio's surfaces (#754) =="
+# Grep-only, on purpose, and NOT the proof that the detector works: a literal in
+# the source is satisfied by a comment mentioning it. What these rows catch is a
+# surface DELETED or renamed — a library constant with no restatement, a
+# decision the SKILL stopped documenting, an operator file that never learned
+# the loop grew a third stop. B32 in tests/premerge-findings.test.sh is the half
+# that executes.
+assert_fixed "$LIB" 'CONVERGE_GROWTH_CEILING = 0.50' "P21: the library declares the break-even ceiling"
+assert_fixed "$LIB" 'CONVERGE_GROWTH_RUNS = 2' "P21: the library declares the consecutive-round requirement"
+assert_fixed "$LIB" '"STOP_SELF_REFERENTIAL",' "P21: the decision is a member of the closed vocabulary"
+assert_fixed "$LIB" 'fix-scope-%02d.modified' "P21: the ratio reads the scope list the commit fence already writes"
+assert_grep  "$SKILL" '^PREMERGE_GROWTH_CEILING' "P21: the SKILL restates the ceiling in the Constants block"
+assert_grep  "$SKILL" '^PREMERGE_GROWTH_RUNS' "P21: the SKILL restates the consecutive-round requirement"
+assert_fixed "$SKILL" '| `STOP_SELF_REFERENTIAL` |' "P21: the decision table routes the new stop"
+assert_fixed "$SKILL" 'GROWTH=<0.00-1.00|->' "P21: the documented output line carries the ratio"
+assert_fixed "$SKILL" 'growth=0.20' "P21: the run summary's converge row carries the ratio per attempt"
+assert_fixed "$CMD" 'STOP_SELF_REFERENTIAL' "P21: the command file names the stop for the operator"
+assert_fixed "$SKILL_MISTAKES" 'GROWTH=-' "P21: Common Mistakes warns against reading unmeasured as zero"
+assert_fixed "$RFC" '### A5 — the growth ratio is computed and stops the loop' "P21: RFC 0021 records the amendment"
+# The measurement takes NO new argument: both its inputs are in the run
+# directory the fence already passes. This row reds if someone "fixes" the
+# measurement by widening the verb's surface and threading a value through a
+# fence.
+#
+# LINE-BASED, and deliberately NOT `converge.*--growth` on one line: grep judges
+# one line at a time, and this fence writes every argument on its own
+# backslash-continued line — `--run-dir`, `--attempt`, `--max-repairs`,
+# `--verdict`, `--reasons`, `--wait-passes` all sit BELOW the word `converge`.
+# A same-line pattern is therefore blind to the only shape a seventh argument
+# would ever be written in. Measured, not reasoned: with
+# `--growth "$PREMERGE_GROWTH" \` spliced into the converge invocation exactly
+# the way its six siblings are written, the same-line pattern still reported
+# PASS on this suite. It would have shipped permanently green.
+#
+# The widened claim — no fence passes a growth argument AT ALL — is true today
+# and errs in the safe direction: it also catches the value being threaded into
+# the `plan` or `defer` call instead, which is the same mistake wearing a
+# different verb.
+#
+# `^[^#]*` is P15's idiom, for P15's reason: a fence COMMENT that mentions the
+# flag while explaining why nothing passes it must not red this row. The
+# `[^-[:alnum:]]` before the flag keeps `----growth` and `x--growth` out, and
+# the trailing class keeps `--growth-ceiling` out.
+#
+# Anti-vacuity is already established ABOVE, in this same run, and is not
+# restated here: P11c FAILS the extraction outright below 100 lines, and P11c's
+# own `assert_fixed "$FENCES" 'premerge-findings.py" converge'` is what proves
+# the converge invocation is in the slice at all. A second copy of either
+# predicate is the drift this suite exists to prevent.
+assert_no_grep "$FENCES" '^[^#]*[^-[:alnum:]]--growth([^[:alnum:]_-]|$)' \
+  "P21: no fence passes a growth argument — the inputs are in the run dir"
+
+echo "== P22: the fixer-wave return contract names blocked_on_file (#755) =="
+# AC 1: the field and BOTH emission cases. Scoped to the §2a prompt block, not
+# to the whole file — SKILL.md holds the contract AND the paragraphs about it,
+# and a whole-file grep for the field name is satisfied by the paragraph that
+# explains it after the contract itself has gone.
+P22_PROMPT="$(awk '
+  $0 == "### 2a — The fixer-wave mechanism" { in2a = 1 }
+  in2a && $0 == "Return exactly this YAML and nothing else:" { infield = 1 }
+  infield && index($0, "```") == 1 { exit }
+  infield { print }
+' "$SKILL")"
+P22_PROMPT_LINES="$(grep -c . <<<"$P22_PROMPT")"
+if [ "$P22_PROMPT_LINES" -ge 6 ]; then
+  echo "  PASS  P22: the §2a return block extracted $P22_PROMPT_LINES lines"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  P22: the §2a return block extracted $P22_PROMPT_LINES lines — every row below is vacuous"; FAIL=$((FAIL + 1))
+fi
+assert_in "$P22_PROMPT" 'blocked_on_file:' "P22: the return contract declares the field"
+assert_in "$P22_PROMPT" '- file:' "P22: and it carries a path"
+assert_in "$P22_PROMPT" 'reason:' "P22: and a reason"
+# BOTH emission cases, against the RULES block that the agent actually obeys.
+P22_RULES="$(awk '
+  $0 == "### 2a — The fixer-wave mechanism" { in2a = 1 }
+  in2a && $0 == "Rules:" { inrules = 1; next }
+  inrules && $0 == "Return exactly this YAML and nothing else:" { exit }
+  inrules { print }
+' "$SKILL")"
+P22_RULE_LINES="$(grep -c . <<<"$P22_RULES")"
+if [ "$P22_RULE_LINES" -ge 8 ]; then
+  echo "  PASS  P22: the §2a rules block extracted $P22_RULE_LINES lines"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  P22: the §2a rules block extracted $P22_RULE_LINES lines — the rows below are vacuous"; FAIL=$((FAIL + 1))
+fi
+assert_in "$P22_RULES" 'status: REFUSED' "P22: the REFUSED emission case is stated in the rules"
+assert_in "$P22_RULES" 'status: APPLIED' "P22: the APPLIED emission case is stated in the rules"
+assert_in "$P22_RULES" 'blocked_on_file' "P22: both cases name the field the agent must emit"
+assert_in "$P22_RULES" 'never a line range' "P22: the reason is carried, the coordinates are not"
+
+echo "== P22b: the allowed set still derives ONLY from the wave plan (#755) =="
+# THE SECURITY ROW. `blocked_on_file` must reach the next attempt through
+# `_fix_waves`, so a path is committable only while exactly one agent owns it.
+# A fence that reads the blocked-on artifact directly has bypassed that, and
+# the symptom is two agents editing one file with the disjointness guard silent.
+#
+# The two bypass patterns are HOISTED into variables because P22c drives the
+# SAME strings over a body that does bypass. A second, freshly-typed copy of a
+# pattern down there would make that anti-vacuity row constant-true: a typo in
+# either pattern here leaves the row it guards matching nothing, and the row
+# that exists to catch exactly that stays green because it reads its own copy.
+# One string, two readers — that is the whole mechanism.
+P22B_BYPASS_RE='blocked.on'
+P22B_APPEND_RE='PREMERGE_ASSIGNED_LIST"$'
+assert_in "$FIX_FENCE" 'jq -r '"'"'.waves[][].file'"'"' <"$PREMERGE_WAVES_FILE" >"$PREMERGE_SCOPE_RAW" || exit 2' \
+  "P22b: the allowed set is still derived from the wave plan, unchanged"
+assert_not_in "$FIX_FENCE" "$P22B_BYPASS_RE" \
+  "P22b: and the fix-commit fence names no blocked-on artifact"
+assert_not_in "$FIX_FENCE" "$P22B_APPEND_RE" \
+  "P22b: nothing appends to the assigned list after it is built"
+# Exactly ONE producer for the assigned list. A second `>>` or a second `jq`
+# writing it is the widening this design refuses, and a row asserting only that
+# the first producer survives would pass with both present.
+P22B_PRODUCERS="$(grep -cE '>+[[:space:]]*"\$PREMERGE_ASSIGNED_LIST"' <<<"$FIX_FENCE")"
+if [ "$P22B_PRODUCERS" = "1" ]; then
+  echo "  PASS  P22b: the assigned list has exactly one producer"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  P22b: the assigned list has $P22B_PRODUCERS producers, wanted 1"; FAIL=$((FAIL + 1))
+fi
+
+echo "== P22c: the widening is declared, bounded and non-accumulating (#755) =="
+assert_fixed "$FENCES" '--carry-blocked' "P22c: a fence turns the widening on"
+assert_fixed "$FENCES" '--repo-root "$PREMERGE_ROOT"' "P22c: and hands it a root to contain against"
+assert_fixed "$SKILL" 'PREMERGE_MAX_BLOCKED_ON' "P22c: the SKILL declares the cap"
+assert_fixed "$LIB" 'MAX_BLOCKED_ON' "P22c: the library declares the cap it enforces"
+# ...and the VALUE behind both those names. The two rows above are
+# `assert_fixed` — a fixed-string grep for the identifier, on each side — so the
+# pair stayed green at any value and the two copies were free to drift the
+# moment either moved: the SKILL's number is what a reader plans against, the
+# library's is what actually drops rows. That is the #370/#371 "one contract, N
+# uncompared copies" class P3b names above, and this stack's other restated
+# constants are not exposed to it — PREMERGE_REPAIR_CEILING /
+# PREMERGE_WAIT_CI_CEILING and the growth pair are compared value-for-value in
+# tests/premerge-findings.test.sh (B15b, B32). This one is compared here,
+# beside the Constants block's other locks (P19, P20).
+#
+# EVALUATE the library's constant, never parse it: P3b states that rule for this
+# repo, and the cross-platform import recipe is P3b's too — cd into the lib dir,
+# hand python3 a RELATIVE filename (a Git Bash absolute path is not openable by
+# native Windows python), strip the CR native-Windows python writes.
+P22C_ERR="$(mktemp)"
+P22C_LIB_CAP="$( (cd "$LIB_DIR" && python3 -c "
+import importlib.util
+spec = importlib.util.spec_from_file_location('premerge_findings', '$LIB_BASE')
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+print(mod.MAX_BLOCKED_ON)
+") 2>"$P22C_ERR" | tr -d '\r')"
+# Spaced (`NAME = 8`) is the documentation, as in P19: the Constants block is the
+# only copy of this number the prose points at.
+P22C_DOC_CAP="$(sed -n 's/^PREMERGE_MAX_BLOCKED_ON[[:space:]][[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*$/\1/p' "$SKILL" | sed -n '1p')"
+case "$P22C_LIB_CAP" in
+  ''|*[!0-9]*)
+    echo "  FAIL  P22c: could not evaluate MAX_BLOCKED_ON from the library (got '$P22C_LIB_CAP')"
+    [ -s "$P22C_ERR" ] && echo "        python stderr: $(tr '\n' ' ' <"$P22C_ERR")"
+    FAIL=$((FAIL + 1)) ;;
+  *)
+    if [ -z "$P22C_DOC_CAP" ]; then
+      echo "  FAIL  P22c: the Constants block declares no PREMERGE_MAX_BLOCKED_ON value"; FAIL=$((FAIL + 1))
+    elif [ "$P22C_DOC_CAP" != "$P22C_LIB_CAP" ]; then
+      echo "  FAIL  P22c: Constants says PREMERGE_MAX_BLOCKED_ON=$P22C_DOC_CAP, the library enforces $P22C_LIB_CAP"
+      FAIL=$((FAIL + 1))
+    else
+      echo "  PASS  P22c: the SKILL's restated cap == the library's enforced MAX_BLOCKED_ON ($P22C_LIB_CAP)"
+      PASS=$((PASS + 1))
+    fi ;;
+esac
+rm -f "$P22C_ERR"
+
+# The equality the SKILL argues from. It says the cap is equal to
+# PREMERGE_MAX_FIX_WAVE "on purpose" — the widening is one extra wave's worth of
+# files rather than a number someone picked — and that reasoning is the entire
+# justification for the value. Nothing enforced it: PREMERGE_MAX_FIX_WAVE exists
+# on its own Constants row and inside the sentence claiming the equality, and
+# nowhere else in tests/ or lib/, so the argument could go false with no row
+# moving. What makes the wave size real is the fence, which passes
+# `--max-per-wave` EXPLICITLY rather than leaning on the library's argparse
+# default — so the fence's literal, not the default, is what the cap must equal.
+P22C_DOC_WAVE="$(sed -n 's/^PREMERGE_MAX_FIX_WAVE[[:space:]][[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*$/\1/p' "$SKILL" | sed -n '1p')"
+P22C_FENCE_WAVES="$(sed -n 's/^[[:space:]]*--max-per-wave[[:space:]][[:space:]]*\([0-9][0-9]*\).*$/\1/p' "$FENCES")"
+P22C_FENCE_WAVE="$(sort -u <<<"$P22C_FENCE_WAVES")"
+P22C_FENCE_WAVE_N="$(grep -c . <<<"$P22C_FENCE_WAVE")"
+if [ -z "$P22C_DOC_WAVE" ]; then
+  echo "  FAIL  P22c: the Constants block declares no PREMERGE_MAX_FIX_WAVE value"; FAIL=$((FAIL + 1))
+elif [ "$P22C_FENCE_WAVE_N" != "1" ]; then
+  echo "  FAIL  P22c: the fences pass $P22C_FENCE_WAVE_N distinct --max-per-wave values:"
+  sed 's/^/          /' <<<"$P22C_FENCE_WAVES"
+  FAIL=$((FAIL + 1))
+elif [ "$P22C_FENCE_WAVE" != "$P22C_DOC_WAVE" ]; then
+  echo "  FAIL  P22c: Constants says PREMERGE_MAX_FIX_WAVE=$P22C_DOC_WAVE, the fence runs --max-per-wave $P22C_FENCE_WAVE"
+  FAIL=$((FAIL + 1))
+elif [ "$P22C_DOC_WAVE" != "$P22C_DOC_CAP" ]; then
+  echo "  FAIL  P22c: the SKILL says the cap equals the wave size, but declares $P22C_DOC_CAP and $P22C_DOC_WAVE"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  P22c: the fence runs the declared wave size and the cap equals it ($P22C_DOC_WAVE)"
+  PASS=$((PASS + 1))
+fi
+
+assert_fixed "$LIB" 'blocked-on-%02d.json' "P22c: the library reads ONE predecessor by name, not a range"
+assert_fixed "$LIB" '_beneath_repo_root' "P22c: containment is a filesystem check the library actually has"
+assert_fixed "$SKILL" 'blocked-on-<NN>.json' "P22c: the SKILL names the artifact the controller writes"
+assert_fixed "$SKILL" 'BLOCKED=<n>' "P22c: the triage line documents the new field"
+assert_grep "$SKILL_MISTAKES" 'Adding a `blocked_on_file` path straight to the commit fence' \
+  "P22c: the bypass is written down as a mistake, not left to be rediscovered"
+assert_grep "$SKILL_MISTAKES" 'Unioning `blocked_on_file` across every earlier attempt' \
+  "P22c: and so is the accumulating union"
+# ANTI-VACUITY for the two assert_not_in rows above: the SAME two patterns —
+# read out of $P22B_BYPASS_RE and $P22B_APPEND_RE, never re-typed — over a body
+# that DOES bypass. Both must match here, or the row they guard is asserting
+# nothing about the real fence. Herestrings, not pipes: an early-exiting reader
+# behind a pipe is the EPIPE class tests/epipe-guard.test.sh bans.
+P22C_MUTANT='PREMERGE_ASSIGNED_LIST="$PREMERGE_RUN_DIR/x.assigned"
+jq -r ".blocked_on[].file" <"$PREMERGE_RUN_DIR/blocked-on-01.json" >>"$PREMERGE_ASSIGNED_LIST"'
+if grep -qE -e "$P22B_BYPASS_RE" <<<"$P22C_MUTANT"; then
+  echo "  PASS  P22c: the bypass detector sees a bypass when there is one"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  P22c: the bypass detector cannot see a bypass — P22b is vacuous"; FAIL=$((FAIL + 1))
+fi
+if grep -qE -e "$P22B_APPEND_RE" <<<"$P22C_MUTANT"; then
+  echo "  PASS  P22c: the append detector sees an append when there is one"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  P22c: the append detector cannot see an append — P22b is vacuous"; FAIL=$((FAIL + 1))
+fi
 
 echo ""
 echo "== Summary =="

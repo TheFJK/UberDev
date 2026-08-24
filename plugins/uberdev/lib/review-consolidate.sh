@@ -131,19 +131,47 @@ review_consolidate_exclude() {
 }
 
 # review_consolidate_excluded_numbers SCAN_DIR -> one excluded PR number per line.
+#
+# NOT `jq ... | sort -un`. A command substitution around that pipeline takes the
+# status of `sort`, which succeeds on empty input, so a `jq` that CRASHED on a
+# truncated or half-written excluded.jsonl reported rc 0 and the empty set --
+# and the empty set is "nothing was excluded", which puts every excluded
+# candidate straight back into the combine. That is the same fail-OPEN shape as
+# the staged-set guard in review_consolidate_continue and it is fixed the same
+# way: a producer whose own status is checked into a variable, then a `sort`
+# whose own status is checked. rc 2 means UNKNOWN and never "none".
+#
+# The absent/empty file keeps returning 0 with no output, because there it is
+# not an unknown: nothing has been excluded yet.
 review_consolidate_excluded_numbers() {
-  local scan_dir="${1:-}"
+  local scan_dir="${1:-}" raw
   [ -s "$scan_dir/excluded.jsonl" ] || return 0
-  jq -r '.number' <"$scan_dir/excluded.jsonl" 2>/dev/null | sort -un
+  raw="$(jq -r '.number' <"$scan_dir/excluded.jsonl")" || {
+    _uberdev_consolidate_error "the exclusion record at $scan_dir/excluded.jsonl is unreadable; refusing to report it as an empty exclusion set"
+    return 2
+  }
+  [ -n "$raw" ] || return 0
+  sort -un <<<"$raw" || return 2
 }
 
 # review_consolidate_survivors SCAN_DIR -> the candidate array minus exclusions.
 review_consolidate_survivors() {
   local scan_dir="${1:-}"
   [ -s "$scan_dir/candidates.json" ] || { printf '[]\n'; return 0; }
-  local dropped
-  dropped="$(review_consolidate_excluded_numbers "$scan_dir" | jq -R 'tonumber?' | jq -sc '.')" || dropped='[]'
-  [ -n "$dropped" ] || dropped='[]'
+  # Same rule as the producer above, one level out: the old
+  # `"$(excluded_numbers | jq | jq -sc '.')" || dropped='[]'` bound its `||` to
+  # the LAST jq, which emits `[]` and exits 0 on empty input -- so a producer
+  # that failed and a repo with no exclusions arrived here as the same value,
+  # and the fallback then wrote that fail-open answer down as if it were a
+  # decision. Each stage is checked on its own, and an unreadable exclusion
+  # record refuses instead of silently widening the survivor set.
+  local dropped excluded_numbers numeric
+  excluded_numbers="$(review_consolidate_excluded_numbers "$scan_dir")" || return 2
+  numeric="$(jq -R 'tonumber?' <<<"$excluded_numbers")" || return 2
+  dropped="$(jq -sc '.' <<<"$numeric")" || return 2
+  # No empty-string fallback for $dropped: the line above returns 2 on any
+  # non-zero jq, and `jq -sc '.'` writes an array -- `[]` at minimum -- on every
+  # zero exit, so the empty case a fallback would cover cannot occur.
   jq -c --argjson dropped "$dropped" \
     '[ .[] | select((.number as $n | $dropped | index($n)) == null) ]' \
     <"$scan_dir/candidates.json" 2>/dev/null || printf '[]\n'
@@ -654,12 +682,64 @@ review_consolidate_continue() {
 
   # The staged set may not have grown past what the merge itself staged plus the
   # conflicted paths.
-  local allowed staged extra
-  allowed="$(
-    { cat "$scan_dir/staged-at-conflict-$number.txt" 2>/dev/null || :; tr '\0' '\n' <"$conflicts"; } | sort -u
-  )"
-  staged="$(git -C "$worktree" diff --cached --name-only 2>/dev/null | sort -u)"
-  extra="$(comm -13 <(printf '%s\n' "$allowed") <(printf '%s\n' "$staged"))"
+  local allowed_raw allowed staged_raw staged extra
+  # NEITHER LIST MAY BE PRODUCED BY A PIPELINE. `X="$(<producer> | LC_ALL=C
+  # sort -u)"` hands the ASSIGNMENT the status of `sort`, and `sort` succeeds on
+  # empty input -- so a producer that FAILED is indistinguishable from one that
+  # had nothing to say. On the staged half that is the fail-OPEN direction and it
+  # disarms this guard completely: under index.lock contention from a concurrent
+  # agent, a corrupt index, or a `$worktree` that moved under the function, the
+  # `git diff --cached` fails, `staged` is empty, the comparison finds nothing,
+  # `extra` is empty, and `git merge --continue` commits a staged set NOTHING
+  # examined -- the exact fail-open this guard exists to prevent, inside the
+  # guard itself. Worse, the two halves fail in OPPOSITE directions under the
+  # identical shape: an empty `allowed` makes every staged path extra (loud,
+  # closed) while an empty `staged` makes none (silent, open), so the half that
+  # matters is the half that looks fine. Both are therefore written the same
+  # way, and so is the comparison: a producer whose OWN status is checked into a
+  # variable, THEN a `sort` (and then a `comm`) whose OWN status is checked.
+  # Stderr is not discarded on the producers either -- a guard that refuses has
+  # to be able to say what it could not read.
+  #
+  # The one deliberate tolerance is `cat` on staged-at-conflict-<number>.txt:
+  # review_consolidate_merge_one writes it best-effort, and an absent or short
+  # file can only SHRINK `allowed`, which can only turn a path into an extra and
+  # refuse. That direction is the closed one, so it stays a `|| :` rather than
+  # becoming a refusal on a record that was never load-bearing.
+  #
+  # LC_ALL=C ON EVERY MEMBER OF THE sort/comm TRIO, INCLUDING `comm` ITSELF.
+  # This guard compares PATHS AS BYTES. `sort` orders by the ambient collation
+  # and `comm`'s merge walk assumes the order its own collation would produce;
+  # when the two disagree the walk desynchronises and reports a path present in
+  # BOTH lists as extra -- refusing a merge whose staged set was correct. That
+  # consequence is not theoretical: feed `comm -13` two lists holding the SAME
+  # three paths in two different orders and it names one of them as extra.
+  # The two sorts share a shell today and so agree by accident; pinning makes
+  # the guard's correctness a property of the code rather than of whatever
+  # LC_ALL / LC_COLLATE / LANG the operator's shell happened to inherit, which
+  # varies by platform -- and this guard runs on every platform UberDev does.
+  allowed_raw="$(
+    { cat "$scan_dir/staged-at-conflict-$number.txt" 2>/dev/null || :; tr '\0' '\n' <"$conflicts"; }
+  )" || {
+    _uberdev_consolidate_error "#$number: could not read the enumerated conflict set; refusing to complete a merge whose allowed set is unknown"
+    return 2
+  }
+  allowed="$(LC_ALL=C sort -u <<<"$allowed_raw")" || {
+    _uberdev_consolidate_error "#$number: could not order the allowed set; refusing to complete a merge whose allowed set is unknown"
+    return 2
+  }
+  staged_raw="$(git -C "$worktree" diff --cached --name-only)" || {
+    _uberdev_consolidate_error "#$number: could not read the staged set; refusing to complete a merge whose staged set is unknown"
+    return 2
+  }
+  staged="$(LC_ALL=C sort -u <<<"$staged_raw")" || {
+    _uberdev_consolidate_error "#$number: could not order the staged set; refusing to complete a merge whose staged set is unknown"
+    return 2
+  }
+  extra="$(LC_ALL=C comm -13 <(printf '%s\n' "$allowed") <(printf '%s\n' "$staged"))" || {
+    _uberdev_consolidate_error "#$number: the staged-set comparison itself failed; refusing to complete a merge whose staged set is unverified"
+    return 2
+  }
   if [ -n "$extra" ]; then
     _uberdev_consolidate_error "#$number: the staged set grew beyond the merge's own set plus the conflicted paths: $(tr '\n' ' ' <<<"$extra")"
     return 2
@@ -746,8 +826,19 @@ review_consolidate_drive() {
     return 2
   }
   local number done_numbers dropped
-  done_numbers="$(sort -un "$scan_dir/included.txt" 2>/dev/null)"
-  dropped="$(review_consolidate_excluded_numbers "$scan_dir")"
+  # included.txt is legitimately ABSENT on the first entry -- that is the "no
+  # candidate is done yet" answer and not a failure -- so the absence is tested
+  # for rather than inferred from a swallowed `sort` status. Once the file does
+  # exist, a `sort` that fails is an unknown skip-set, and an unknown skip-set
+  # silently re-merges candidates the loop already placed.
+  done_numbers=""
+  if [ -s "$scan_dir/included.txt" ]; then
+    done_numbers="$(sort -un <"$scan_dir/included.txt")" || {
+      _uberdev_consolidate_error "could not read the already-included set; refusing to walk the merge order without it"
+      return 2
+    }
+  fi
+  dropped="$(review_consolidate_excluded_numbers "$scan_dir")" || return 2
   while IFS= read -r number; do
     [ -n "$number" ] || continue
     case "
@@ -942,8 +1033,31 @@ review_consolidate_push_branch() {
       return 79
       ;;
   esac
-  git -C "$worktree" push -u origin "$branch" >/dev/null 2>&1 || {
-    _uberdev_consolidate_error "pushing $branch to origin failed"
+  # git's own words are CAPTURED, not discarded. `>/dev/null 2>&1 || return 2`
+  # sent the explanation of a non-fast-forward, an expired token or a
+  # protected-branch rule to the same place as the progress output, and this is
+  # the push the rest of Phase 0 depends on: it aborts the run mid-loop with the
+  # cause already thrown away. The five push sites in
+  # skills/premerge-pipeline/SKILL.md are the model; this one lives in the
+  # library, outside the fence corpus tests/premerge.test.sh P18 scans.
+  local push_err
+  push_err="$(git -C "$worktree" push -u origin "$branch" 2>&1 1>/dev/null)" || {
+    # Bounded and defused BEFORE anything reads it, because a pre-receive hook
+    # chooses the length and the content of every `remote:` line. The same three
+    # jobs the fences' one-liner does -- references/phase-contracts.md, `### What
+    # a failed push is allowed to say`: 200 chars, one line, no live token.
+    #
+    # BOTH scraped markers are broken, because this library's stderr is the
+    # stream BOTH callers scrape positionally: commands/review-pr.md prints
+    # `REVIEW_CONSOLIDATE PR_NUMBER=... SCAN_ID=...` from the very fence that
+    # calls this function, and the premerge fences that source this file print
+    # `PREMERGE ...`. Either spelling arriving on a `remote:` line is a
+    # well-formed result no matter where it sits. `tr` and `cut` read to EOF, so
+    # this pipeline is not the early-exiting shape tests/epipe-guard.test.sh bans.
+    push_err="${push_err//PREMERGE/PRE-MERGE}"
+    push_err="${push_err//REVIEW_CONSOLIDATE/REVIEW-CONSOLIDATE}"
+    push_err="$(printf '%s' "$push_err" | tr -s '\n\r\t' ' ' | cut -c1-200)"
+    _uberdev_consolidate_error "pushing $branch to origin failed: $push_err"
     return 2
   }
   return 0

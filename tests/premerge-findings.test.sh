@@ -25,6 +25,17 @@ LIB="$REPO_ROOT/plugins/uberdev/lib/premerge-findings.py"
 
 [ -r "$LIB" ] || { echo "FATAL: required file missing or unreadable: $LIB" >&2; exit 2; }
 command -v python3 >/dev/null 2>&1 || { echo "FATAL: python3 is required by ${0##*/}" >&2; exit 2; }
+# B33 derives the fix-commit fence's allowed set by EXECUTING the fence's own
+# jq expression rather than a transcription of it, so jq is a hard requirement
+# of this file now. A skipped row would report success over an unrun check.
+command -v jq >/dev/null 2>&1 || { echo "FATAL: jq is required by ${0##*/}" >&2; exit 2; }
+
+# The markdown the B33 rows pull that expression OUT of. FATAL here rather than
+# tolerated downstream: if this file moved, every B33 row would fail carrying
+# the extractor's sentinel and the one real cause would be buried under forty
+# derived ones.
+SKILL_MD="$REPO_ROOT/plugins/uberdev/skills/premerge-pipeline/SKILL.md"
+[ -r "$SKILL_MD" ] || { echo "FATAL: required file missing or unreadable: $SKILL_MD" >&2; exit 2; }
 
 WORK="$(mktemp -d)"
 
@@ -54,6 +65,105 @@ plan() {
 }
 
 new_case() { local d; d="$(mktemp -d "$WORK/case.XXXXXX")"; printf '%s' "$d"; }
+
+# ---- acceptance criterion 2's machinery (the B33 rows) --------------------
+
+# plan_blocked DIR ATTEMPT ROOT -> plan at ATTEMPT with the widening turned on
+plan_blocked() {
+  local dir="$1" attempt="$2" root="$3"
+  python3 -I -B "$LIB" plan --input "$dir/in.json" --out-dir "$dir" \
+    --attempt "$attempt" --carry-blocked --repo-root "$root" \
+    >"$dir/out.txt" 2>"$dir/err.txt"
+}
+
+# write_blocked DIR NN JSON_ROWS -> DIR/blocked-on-NN.json
+write_blocked() {
+  local dir="$1" pad="$2" rows="$3"
+  python3 -I -B -c '
+import json, sys
+path, attempt, rows = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump({"schema_version": 1, "attempt": attempt,
+               "blocked_on": json.loads(rows)}, fh)
+' "$dir/blocked-on-$pad.json" "$((10#$pad))" "$rows"
+}
+
+# ONE copy of the extractor, never two. `fence_jq_line` drives it over the
+# SHIPPED SKILL.md for every live row, and B33h drives THE SAME variable over
+# deliberately broken SKILL-shaped bodies. A freshly typed second copy in the
+# mutation rows would leave a typo in the live one green forever -- which is
+# how an anti-vacuity row ends up being the vacuous one.
+FENCE_JQ_AWK='
+$0 == "```bash uberdev-executable origin=premerge-fix-commit" { inf = 1; next }
+inf && index($0, "```") == 1 { exit }
+inf && index($0, "jq -r") == 1 { print; exit }
+'
+
+# fence_jq_line FILE -> the fix-commit fence's own column-0 `jq -r` line, or
+# nothing. Column 0 AND inside THAT fence, because two other jq calls would
+# otherwise answer for the scope guard: the ordering guard's `jq -r '.verdict'`
+# lives in a command substitution in this same fence (so it is not at column 0),
+# and other fences in the file carry jq of their own (so the walk must stop at
+# this fence's closing backticks). B33h drives both decoys.
+fence_jq_line() { awk "$FENCE_JQ_AWK" "$1"; }
+
+# allowed_set DIR NN [SKILL_FILE] -> the allowed set the fix-commit fence would
+# derive, computed with the fence's OWN expression, extracted from SKILL.md
+# rather than transcribed. A transcribed copy is a test of the copy.
+allowed_set() {
+  local dir="$1" pad="$2" skill="${3:-$SKILL_MD}" expr
+  expr="$(fence_jq_line "$skill")"
+  [ -n "$expr" ] || { printf 'NO-JQ-LINE-IN-FENCE'; return 0; }
+  # A SUBSHELL, because the fence line ends in `|| exit 2` and that is the
+  # point -- it is the shipped bytes. `eval` runs in the CURRENT shell, so an
+  # unguarded eval of that line would exit this whole fixture on a jq failure:
+  # nothing after it prints, and a suite that dies early looks exactly like a
+  # silent pass. The subshell absorbs the exit and the `||` arm sees it.
+  (
+    PREMERGE_WAVES_FILE="$dir/fix-waves-$pad.json"
+    PREMERGE_SCOPE_RAW="$dir/scope-$pad.raw"
+    eval "$expr"
+  ) || { printf 'JQ-FAILED'; return 0; }
+  LC_ALL=C sort -u <"$dir/scope-$pad.raw"
+}
+
+# admits SET PATH -> true when the space-joined SET holds PATH as a whole entry.
+# ONE membership predicate for every positive AND negative row in the section,
+# so a broken one cannot leave the negative rows quietly green: the same call is
+# expected to succeed somewhere and to fail somewhere else on every run.
+admits() { case " $1 " in *" $2 "*) return 0 ;; *) return 1 ;; esac; }
+
+# dup_lines FILE -> the lines FILE holds MORE THAN ONCE.
+#
+# Pointed at the RAW `jq -r` output and NOT at `allowed_set`'s stdout, which
+# ends in `sort -u`: a duplicate detector reading THAT is green whatever the
+# wave plan holds -- a guard that cannot fail. The raw file is `.waves[][].file`
+# verbatim, which is the surface a second owner for one path shows up on.
+dup_lines() { LC_ALL=C sort <"$1" | uniq -d; }
+
+# triage_blocked DIR -> the BLOCKED= field of the triage line, or a loud
+# sentinel. BLOCKED is the line's last field, so the suffix strip is exact --
+# and one reader serves both the widened row (1) and the opt-out row (0), which
+# is what keeps either from passing over a broken extraction.
+triage_blocked() {
+  local line
+  line="$(grep '^PREMERGE_TRIAGE ' "$1/out.txt")"
+  case "$line" in
+    *" BLOCKED="*) printf '%s' "${line##* BLOCKED=}" ;;
+    *)             printf 'NO-TRIAGE-LINE' ;;
+  esac
+}
+
+# counts_field DIR NN NAME -> classified-NN.json's counts.NAME. A renamed key
+# answers with a sentinel instead of a traceback, so the row that reads it fails
+# saying which key went missing.
+counts_field() {
+  python3 -I -B -c '
+import json, sys
+counts = json.load(open(sys.argv[1] + "/classified-" + sys.argv[2] + ".json"))["counts"]
+print(counts.get(sys.argv[3], "NO-SUCH-COUNT"))
+' "$1" "$2" "$3"
+}
 
 # --------------------------------------------------------------------------
 echo "== B1: plan happy path — the three severity provenances =="
@@ -2122,6 +2232,686 @@ if python3 -I -B "$LIB" defer --run-dir "$D" --attempt 2 >"$D/b29.txt" 2>"$D/b29
 else
   bad "B29: one corrupt artifact still costs the whole run: $(cat "$D/b29.err")"
 fi
+
+# --------------------------------------------------------------------------
+echo "== B32: the growth ratio, and the stop it drives (#754) =="
+# DRIVEN, not grepped. A detector whose only test is "the identifier appears in
+# the source" is a detector that can be made unreachable without any row going
+# red -- the exact class this file's own header is about. Every case below runs
+# the shipped verb against a synthetic run directory and reads the DECISION, the
+# GROWTH field and the exit status off the real output line.
+
+# scope DIR ATTEMPT PATH... -> writes DIR/fix-scope-<NN>.modified
+# The same shape the fix-commit fence writes: one repo-relative path per line,
+# already sorted and unique.
+scope() {
+  local dir="$1" attempt="$2" pad
+  shift 2
+  pad="$(printf '%02d' "$attempt")"
+  printf '%s\n' "$@" >"$dir/fix-scope-$pad.modified"
+}
+
+# decide_g DIR ATTEMPT MAX VERDICT REASONS -> prints "<DECISION>|<GROWTH>|<rc>"
+#
+# All three on ONE line for the reason `decide` already documents: a command
+# substitution runs in a subshell, so an rc stashed inside never reaches the
+# caller -- and rc is half of what is under test here, since a stop exits 1.
+#
+# stderr is kept in DIR/g.err rather than discarded, because one of the five
+# causes of an unmeasured ratio -- an OSError on a scope file that IS present --
+# is indistinguishable from the four benign ones by its `-` alone. Its
+# announcement is the only thing that separates "we could not look" from "there
+# was nothing to look at".
+decide_g() {
+  local dir="$1" attempt="$2" maxa="$3" verdict="$4" reasons="$5"
+  local line rc
+  line="$(python3 -I -B "$LIB" converge --run-dir "$dir" --attempt "$attempt" \
+    --max-repairs "$maxa" --verdict "$verdict" --reasons "$reasons" 2>"$dir/g.err")"
+  rc=$?
+  printf '%s|%s|%s' \
+    "$(printf '%s' "$line" | sed -n 's/.*DECISION=\([A-Z_]*\).*/\1/p')" \
+    "$(printf '%s' "$line" | sed -n 's/.*GROWTH=\([0-9.-]*\).*/\1/p')" \
+    "$rc"
+}
+
+expect_g() {  # expect_g "<got>" "<want>" "<what>"
+  if [ "$1" = "$2" ]; then
+    ok "B32: $3 -> $2"
+  else
+    bad "B32: $3 -> got '$1', wanted '$2'"
+  fi
+}
+
+# 0.00 -- every blocker this round is new, and NONE of them is in a file the
+# last repair touched. This is a loop finding real work elsewhere in the stack.
+D="$(new_case)"
+write_input "$D" '[{"file":"lib/a.sh","line":1,"summary":"alpha","failure_scenario":"crash","severity":"blocker"},
+                   {"file":"lib/b.sh","line":2,"summary":"beta","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D" 1 "$SHA_A" || bad "B32: setup attempt 1 failed"
+decide_g "$D" 1 6 not_green 'blockers_remaining=2' >/dev/null
+scope "$D" 1 'lib/a.sh'
+write_input "$D" '[{"file":"lib/z.sh","line":1,"summary":"zulu","failure_scenario":"crash","severity":"blocker"},
+                   {"file":"lib/y.sh","line":2,"summary":"yankee","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D" 2 "$SHA_B" || bad "B32: setup attempt 2 failed"
+expect_g "$(decide_g "$D" 2 6 not_green 'blockers_remaining=2')" 'CONTINUE|0.00|0' \
+  "two new blockers, neither in a repaired file"
+
+scope "$D" 2 'lib/z.sh' 'lib/y.sh'
+write_input "$D" '[{"file":"lib/w.sh","line":1,"summary":"whiskey","failure_scenario":"crash","severity":"blocker"},
+                   {"file":"lib/v.sh","line":2,"summary":"victor","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D" 3 "$SHA_C" || bad "B32: setup attempt 3 failed"
+expect_g "$(decide_g "$D" 3 6 not_green 'blockers_remaining=2')" 'CONTINUE|0.00|0' \
+  "a second round at 0.00 still continues"
+
+# EXACTLY at the ceiling, twice. The comparison is `>=` and the number compared
+# is the same rounded value the line prints, so the boundary has one defined
+# answer and this is it. The first round at 0.50 must NOT stop -- that is the
+# warn half, and a detector that fired on one round would stop a convergence
+# whose repairs happened to be concentrated.
+#
+# THE PAIR IS ITSELF THE MUTATION for CONVERGE_GROWTH_RUNS. One ratio, one
+# scope, two decisions: nothing but the consecutive-round requirement can
+# produce CONTINUE from 0.50 and then STOP_SELF_REFERENTIAL from 0.50. Collapse
+# the constant to one round and the first row reds; delete the stop and the
+# second does.
+D_THRESH="$(new_case)"
+write_input "$D_THRESH" '[{"file":"lib/a.sh","line":1,"summary":"alpha","failure_scenario":"crash","severity":"blocker"},
+                          {"file":"lib/b.sh","line":2,"summary":"beta","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D_THRESH" 1 "$SHA_A" || bad "B32: threshold setup 1 failed"
+decide_g "$D_THRESH" 1 6 not_green 'blockers_remaining=2' >/dev/null
+scope "$D_THRESH" 1 'lib/a.sh'
+write_input "$D_THRESH" '[{"file":"lib/a.sh","line":7,"summary":"delta","failure_scenario":"crash","severity":"blocker"},
+                          {"file":"lib/b.sh","line":2,"summary":"beta","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D_THRESH" 2 "$SHA_B" || bad "B32: threshold setup 2 failed"
+expect_g "$(decide_g "$D_THRESH" 2 6 not_green 'blockers_remaining=2')" 'CONTINUE|0.50|0' \
+  "the FIRST round at the threshold warns and continues"
+
+scope "$D_THRESH" 2 'lib/a.sh'
+write_input "$D_THRESH" '[{"file":"lib/a.sh","line":9,"summary":"epsilon","failure_scenario":"crash","severity":"blocker"},
+                          {"file":"lib/b.sh","line":2,"summary":"beta","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D_THRESH" 3 "$SHA_C" || bad "B32: threshold setup 3 failed"
+expect_g "$(decide_g "$D_THRESH" 3 6 not_green 'blockers_remaining=2')" 'STOP_SELF_REFERENTIAL|0.50|1' \
+  "the SECOND consecutive round at the threshold stops, with budget to spare"
+
+# 1.00 -- every blocker this round is new and in the file the repair just wrote.
+# This is the shape the recorded pumped run had on its final attempt.
+b32_pump() {  # b32_pump DIR SCOPE2 -> replays three attempts, prints attempt 3's result
+  local dir="$1" scope2="$2"
+  write_input "$dir" '[{"file":"lib/a.sh","line":1,"summary":"alpha","failure_scenario":"crash","severity":"blocker"}]'
+  plan_at "$dir" 1 "$SHA_A" || bad "B32: pump setup 1 failed"
+  decide_g "$dir" 1 6 not_green 'blockers_remaining=1' >/dev/null
+  scope "$dir" 1 'lib/a.sh'
+  write_input "$dir" '[{"file":"lib/a.sh","line":7,"summary":"delta","failure_scenario":"crash","severity":"blocker"}]'
+  plan_at "$dir" 2 "$SHA_B" || bad "B32: pump setup 2 failed"
+  decide_g "$dir" 2 6 not_green 'blockers_remaining=1' >/dev/null
+  scope "$dir" 2 "$scope2"
+  write_input "$dir" '[{"file":"lib/a.sh","line":9,"summary":"epsilon","failure_scenario":"crash","severity":"blocker"}]'
+  plan_at "$dir" 3 "$SHA_C" || bad "B32: pump setup 3 failed"
+  decide_g "$dir" 3 6 not_green 'blockers_remaining=1'
+}
+
+D="$(new_case)"
+expect_g "$(b32_pump "$D" 'lib/a.sh')" 'STOP_SELF_REFERENTIAL|1.00|1' \
+  "two rounds of blockers only in the file the repair rewrote"
+
+# THE MUTATION, THROUGH THE SAME PREDICATE. Identical replay, identical
+# assertion path, one byte range changed: the second repair's scope names a
+# file no attempt-3 blocker sits in. If the decision does not move, the rows
+# above were passing for some reason other than the measurement.
+D="$(new_case)"
+expect_g "$(b32_pump "$D" 'lib/untouched.sh')" 'CONTINUE|0.00|0' \
+  "MUTATION: repoint the repair scope and the same run continues"
+
+# The false positive the fingerprint exclusion exists to remove. The wave plan
+# assigns exactly the files this round's blockers named, so a finding the fixer
+# did not clear is ALWAYS in a modified file. Counted, the survivor below would
+# make this round measure 0.50 -- and 1.00 on a round with no new work elsewhere
+# -- and stop a converging loop on its own success. Drop the fingerprint
+# exclusion from `_growth_ratio` and this row reds on the GROWTH field.
+D="$(new_case)"
+write_input "$D" '[{"file":"lib/a.sh","line":1,"summary":"alpha","failure_scenario":"crash","severity":"blocker"},
+                   {"file":"lib/a.sh","line":4,"summary":"bravo","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D" 1 "$SHA_A" || bad "B32: survivor setup 1 failed"
+decide_g "$D" 1 6 not_green 'blockers_remaining=2' >/dev/null
+scope "$D" 1 'lib/a.sh'
+write_input "$D" '[{"file":"lib/a.sh","line":1,"summary":"alpha","failure_scenario":"crash","severity":"blocker"},
+                   {"file":"lib/c.sh","line":3,"summary":"charlie","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D" 2 "$SHA_B" || bad "B32: survivor setup 2 failed"
+expect_g "$(decide_g "$D" 2 6 not_green 'blockers_remaining=2')" 'CONTINUE|0.00|0' \
+  "a survivor in the repaired file plus a new blocker elsewhere is 0.00"
+
+# ---- the FIVE causes of `-`, over the FOUR branches, none of them a stop ----
+#
+# `-` is not `0.00`: it says the ratio was not measured. SKILL.md `## Phase 3b`
+# and `_read_repair_scope`'s docstring name FIVE causes, and they reach FOUR
+# distinct branches: (2) and (3) below arrive at the SAME absent-file return, so
+# the one row driven for (2) is the driven test for both. A block that exercised
+# only one BRANCH would pass just as happily over the other three being dead
+# code -- which is why the count that matters here is branches, not causes.
+
+# (1) attempt 1: there is no predecessor to attribute anything to.
+# (2) a predecessor that committed nothing, so the commit fence wrote no scope
+#     list (`REASON=no-edits`) or the repair only re-ran CI (`arm=rerun`).
+# (3) a predecessor that repaired through the CI fence's `arm=commit` path: real
+#     code edits, really pushed, but that fence publishes `ci-scope-<NN>.*` and
+#     never `fix-scope-<NN>.modified`. It is the one cause that switches the
+#     detector OFF -- such a loop never accumulates two consecutive eligible
+#     rounds, so STOP_SELF_REFERENTIAL is unreachable for it until that fence
+#     publishes a scope of its own. It gets no case of its own because it has no
+#     BRANCH of its own: `_read_repair_scope` stats exactly one path, no
+#     `ci-scope-*` file is it, and the row below returns None from the same
+#     `os.path.exists` arm. An earlier version of this header counted four and
+#     left this cause out; the enumeration was short, the coverage was not.
+D_DASH="$(new_case)"
+write_input "$D_DASH" '[{"file":"lib/a.sh","line":1,"summary":"alpha","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D_DASH" 1 "$SHA_A" || bad "B32: unmeasured setup 1 failed"
+expect_g "$(decide_g "$D_DASH" 1 6 not_green 'blockers_remaining=1')" 'CONTINUE|-|0' \
+  "attempt 1 has no predecessor and reports no ratio"
+write_input "$D_DASH" '[{"file":"lib/q.sh","line":1,"summary":"quebec","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D_DASH" 2 "$SHA_B" || bad "B32: unmeasured setup 2 failed"
+expect_g "$(decide_g "$D_DASH" 2 6 not_green 'blockers_remaining=1')" 'CONTINUE|-|0' \
+  "a predecessor that published no scope list -- no-edits or CI-arm -- reports no ratio"
+
+# And the field is on the line even when it has no value: a line whose field set
+# varies is a line no `case` pattern can match.
+B32_LINE="$(python3 -I -B "$LIB" converge --run-dir "$D_DASH" --attempt 2 --max-repairs 6 \
+  --verdict not_green --reasons 'blockers_remaining=1' 2>/dev/null)"
+case "$B32_LINE" in
+  *"NEW=1 GROWTH=- WAIT="*) ok "B32: GROWTH sits between NEW and WAIT on every line" ;;
+  *) bad "B32: the GROWTH field is missing or misplaced: $B32_LINE" ;;
+esac
+
+# (4) an attempt with NO blockers to divide by. The scope list is present and
+#     the predecessor's evidence is on disk, so the only thing standing between
+#     this row and a ZeroDivisionError traceback is the empty-denominator guard
+#     -- which is why this row asserts rc=0 as well as `-`.
+D="$(new_case)"
+write_input "$D" '[{"file":"lib/a.sh","line":1,"summary":"alpha","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D" 1 "$SHA_A" || bad "B32: zero-blocker setup 1 failed"
+decide_g "$D" 1 6 not_green 'blockers_remaining=1' >/dev/null
+scope "$D" 1 'lib/a.sh'
+write_input "$D" '[]'
+plan_at "$D" 2 "$SHA_B" || bad "B32: zero-blocker setup 2 failed"
+expect_g "$(decide_g "$D" 2 6 not_green 'ci=red')" 'CONTINUE|-|0' \
+  "an attempt with no blockers reports no ratio and does not divide by zero"
+
+# (5) an OSError on a scope file that IS present. This one is a FAULT, not an
+#     absence, and it is the only `-` an operator has to act on -- so it
+#     announces itself on stderr with a token while degrading exactly like the
+#     other four. A directory at the scope path is the portable way to make
+#     `os.path.exists` true and `open()` raise, with no dependence on the test
+#     running as an unprivileged user.
+D_ERR="$(new_case)"
+write_input "$D_ERR" '[{"file":"lib/a.sh","line":1,"summary":"alpha","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D_ERR" 1 "$SHA_A" || bad "B32: unreadable setup 1 failed"
+decide_g "$D_ERR" 1 6 not_green 'blockers_remaining=1' >/dev/null
+mkdir "$D_ERR/fix-scope-01.modified"
+write_input "$D_ERR" '[{"file":"lib/a.sh","line":7,"summary":"delta","failure_scenario":"crash","severity":"blocker"}]'
+plan_at "$D_ERR" 2 "$SHA_B" || bad "B32: unreadable setup 2 failed"
+expect_g "$(decide_g "$D_ERR" 2 6 not_green 'blockers_remaining=1')" 'CONTINUE|-|0' \
+  "an unreadable scope file degrades to no ratio and stops nothing"
+if grep -q 'premerge-findings: repair_scope_unreadable:' "$D_ERR/g.err"; then
+  ok "B32: the unreadable scope file announces itself on stderr"
+else
+  bad "B32: an unreadable scope file was absorbed silently: $(cat "$D_ERR/g.err")"
+fi
+
+# THE MUTATION FOR THAT ROW, THROUGH THE SAME PREDICATE. Same run directory,
+# same attempt, same assertion path: replace the directory with the scope list
+# it was standing in for, and both halves must move -- the ratio becomes a
+# number and the announcement must stop. Without this, the two rows above pass
+# just as happily over a `_read_repair_scope` that never reads anything.
+rmdir "$D_ERR/fix-scope-01.modified"
+scope "$D_ERR" 1 'lib/a.sh'
+expect_g "$(decide_g "$D_ERR" 2 6 not_green 'blockers_remaining=1')" 'CONTINUE|1.00|0' \
+  "MUTATION: a readable scope list at the same path is measured"
+if grep -q 'repair_scope_unreadable' "$D_ERR/g.err"; then
+  bad "B32: a readable scope file still announced an unreadable one"
+else
+  ok "B32: MUTATION: the stderr announcement is gone once the file is readable"
+fi
+
+# ---- the ledger row, and the SKILL's restatement ---------------------------
+#
+# Acceptance 4 reads the ratio out of `converge.jsonl`, per attempt, so the
+# summary can render it. Asserted on the ledger the run actually wrote.
+#
+# MEMBERSHIP BEFORE VALUE. `r.get("growth")` alone cannot tell "key present,
+# value null" from "the module never wrote a growth key at all" -- both are
+# `None` -- so a row keyed on it is the one row that PASSES against a module
+# with no growth key whatsoever. `"growth" in r` is the half that reds.
+b32_growths() {  # b32_growths LEDGER -> "<attempt>:<key present>=<value>,..."
+  python3 -I -B -c '
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8").read().splitlines() if l.strip()]
+print(",".join("%s:%s=%r" % (r.get("attempt"), "growth" in r, r.get("growth")) for r in rows))
+' "$1"
+}
+
+B32_GROWTHS="$(b32_growths "$D_DASH/converge.jsonl")"
+case "$B32_GROWTHS" in
+  *"2:True=None"*) ok "B32: every ledger row carries a growth key, null when unmeasured" ;;
+  *) bad "B32: the ledger row has no growth key (got '$B32_GROWTHS')" ;;
+esac
+
+# And the measured half: an assertion that only ever sees null is satisfied by a
+# module that writes the key and never populates it.
+B32_GROWTHS="$(b32_growths "$D_THRESH/converge.jsonl")"
+case "$B32_GROWTHS" in
+  *"2:True=0.5"*"3:True=0.5"*) ok "B32: a measured ledger row carries the ratio itself" ;;
+  *) bad "B32: the ledger did not record the measured ratio (got '$B32_GROWTHS')" ;;
+esac
+
+# B15b's technique, applied to the new constants: import one side, read the
+# shipped bytes of the other. A restated number a human keeps in step is a
+# number that has already drifted.
+B32_DRIFT="$(python3 -I -B -c '
+import importlib.util, re, sys
+spec = importlib.util.spec_from_file_location("pmf", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+text = open(sys.argv[2], encoding="utf-8").read()
+bad = []
+for name, value in (("PREMERGE_GROWTH_CEILING", module.CONVERGE_GROWTH_CEILING),
+                    ("PREMERGE_GROWTH_RUNS", module.CONVERGE_GROWTH_RUNS)):
+    found = re.search(r"^%s\s*=\s*([0-9.]+)" % name, text, re.M)
+    if found is None:
+        bad.append("%s:absent" % name)
+    elif float(found.group(1)) != float(value):
+        bad.append("%s:skill=%s lib=%s" % (name, found.group(1), value))
+print(";".join(bad) or "agree")
+' "$LIB" "$REPO_ROOT/plugins/uberdev/skills/premerge-pipeline/SKILL.md")"
+if [ "$B32_DRIFT" = "agree" ]; then
+  ok "B32: the SKILL's restated growth constants match the library's enforced ones"
+else
+  bad "B32: growth constant drift ($B32_DRIFT)"
+fi
+
+# --------------------------------------------------------------------------
+echo "== B33: attempt N+1's wave plan widens from attempt N's blocked_on_file =="
+# The whole acceptance criterion, executed. The allowed set is derived by the
+# FENCE'S OWN jq expression, pulled out of SKILL.md — so a change to that line
+# in the shipped fence changes what this row measures, which is the only way a
+# fixture can prove anything about a guard that lives in a markdown fence.
+D="$(new_case)"
+B33_ROOT="$(mktemp -d "$WORK/root.XXXXXX")"
+mkdir -p "$B33_ROOT/lib" "$B33_ROOT/tests"
+: >"$B33_ROOT/lib/a.sh"; : >"$B33_ROOT/lib/b.sh"; : >"$B33_ROOT/tests/fixture.sh"
+write_input "$D" '[
+  {"file":"lib/a.sh","line":1,"summary":"one","failure_scenario":"y","severity":"blocker"}
+]'
+write_blocked "$D" 01 '[
+  {"file":"tests/fixture.sh","from_file":"lib/a.sh","reason":"two-way contract: both halves move together"}
+]'
+if plan_blocked "$D" 2 "$B33_ROOT"; then
+  ok "B33: plan accepted --carry-blocked --repo-root"
+else
+  bad "B33: plan refused: $(cat "$D/err.txt")"
+fi
+# Kept for B33e, which greps THIS stderr — the run where nothing was skipped —
+# with the same pattern it uses on the run where something was.
+B33_CLEAN_ERR="$D/err.txt"
+B33_GOT="$(allowed_set "$D" 02 | tr '\n' ' ')"
+if [ "$B33_GOT" = "lib/a.sh tests/fixture.sh " ]; then
+  ok "B33: the allowed set is exactly the reviewer's file plus the blocked-on file"
+else
+  bad "B33: allowed set was '$B33_GOT', wanted 'lib/a.sh tests/fixture.sh '"
+fi
+[ "$(triage_blocked "$D")" = "1" ] \
+  && ok "B33: the triage line reports BLOCKED=1" \
+  || bad "B33: BLOCKED was $(triage_blocked "$D"), wanted 1: $(cat "$D/out.txt")"
+# AND NO OTHERS. lib/b.sh exists in the root and is named by nothing, so it
+# must not be admitted — the row that tells "widened correctly" apart from
+# "widened to whatever was lying around". All three rows drive the SAME
+# `admits`, two expecting a hit and one expecting a miss, so a predicate that
+# answered the same way every time would red here rather than pass everywhere.
+admits "$B33_GOT" "lib/a.sh" \
+  && ok "B33: the reviewer's own file is admitted" \
+  || bad "B33: the reviewer's file is missing from '$B33_GOT'"
+admits "$B33_GOT" "tests/fixture.sh" \
+  && ok "B33: the blocked-on file is admitted" \
+  || bad "B33: the blocked-on file is missing from '$B33_GOT'"
+admits "$B33_GOT" "lib/b.sh" \
+  && bad "B33: an unnamed file reached the allowed set: '$B33_GOT'" \
+  || ok "B33: a file named by nothing is not admitted"
+# Exactly one owner. Two entries for one path would put two agents on one file.
+B33_DUP="$(dup_lines "$D/scope-02.raw")"
+[ -z "$B33_DUP" ] && ok "B33: every assigned path appears exactly once" \
+  || bad "B33: duplicated wave entry: $B33_DUP"
+# ANTI-VACUITY for the row above, through the SAME `dup_lines`: a raw list that
+# genuinely repeats a path. Without it `dup_lines` could be broken outright —
+# or pointed at a `sort -u`ed stream — and the live row would stay green.
+printf 'lib/a.sh\nlib/a.sh\ntests/fixture.sh\n' >"$D/dupe.raw"
+[ -n "$(dup_lines "$D/dupe.raw")" ] \
+  && ok "B33: and dup_lines can actually see a repeat" \
+  || bad "B33: dup_lines saw nothing in a list that repeats lib/a.sh"
+
+echo "== B33a: a blocked-on path the reviewer already named adds no second owner =="
+# `_read_blocked_on` seeds its dedupe with THIS attempt's blocker files, so the
+# row is dropped rather than made a second wave member. The check that can see
+# it is the raw list: a second entry for lib/a.sh vanishes into `sort -u`.
+D="$(new_case)"
+write_input "$D" '[
+  {"file":"lib/a.sh","line":1,"summary":"one","failure_scenario":"y","severity":"blocker"}
+]'
+write_blocked "$D" 01 '[
+  {"file":"lib/a.sh","from_file":"lib/a.sh","reason":"the fixer named its own file"}
+]'
+plan_blocked "$D" 2 "$B33_ROOT" || bad "B33a: plan failed: $(cat "$D/err.txt")"
+B33A_GOT="$(allowed_set "$D" 02 | tr '\n' ' ')"
+[ "$B33A_GOT" = "lib/a.sh " ] && ok "B33a: the already-named row widens nothing" \
+  || bad "B33a: allowed set was '$B33A_GOT', wanted 'lib/a.sh '"
+B33A_DUP="$(dup_lines "$D/scope-02.raw")"
+[ -z "$B33A_DUP" ] && ok "B33a: and lib/a.sh still has exactly one owner" \
+  || bad "B33a: lib/a.sh gained a second owner: $B33A_DUP"
+[ "$(counts_field "$D" 02 blocked_on_dropped)" = "1" ] \
+  && ok "B33a: the dropped duplicate is counted, not silent" \
+  || bad "B33a: blocked_on_dropped was $(counts_field "$D" 02 blocked_on_dropped), wanted 1"
+
+echo "== B33b: the union does not accumulate across attempts =="
+# Attempt 3 reads blocked-on-02.json and NOTHING else. A monotonically growing
+# allowed set admits most of the tree by CONVERGE_REPAIR_CEILING, at which
+# point it is no longer a guard.
+D="$(new_case)"
+: >"$B33_ROOT/tests/older.sh"; : >"$B33_ROOT/tests/newer.sh"
+write_input "$D" '[
+  {"file":"lib/a.sh","line":1,"summary":"one","failure_scenario":"y","severity":"blocker"}
+]'
+write_blocked "$D" 01 '[
+  {"file":"tests/older.sh","from_file":"lib/a.sh","reason":"attempt 1 said so"}
+]'
+write_blocked "$D" 02 '[
+  {"file":"tests/newer.sh","from_file":"lib/a.sh","reason":"attempt 2 said so"}
+]'
+# THE CONTROL FIRST, same case dir and same predicate: at attempt 2 the
+# attempt-1 artifact IS read and tests/older.sh IS admitted. Without it the row
+# below would be just as green if tests/older.sh were unadmittable for some
+# unrelated reason, and it would then be proving nothing about accumulation.
+plan_blocked "$D" 2 "$B33_ROOT" || bad "B33b: the control plan failed: $(cat "$D/err.txt")"
+B33B_CTL="$(allowed_set "$D" 02 | tr '\n' ' ')"
+admits "$B33B_CTL" "tests/older.sh" \
+  && ok "B33b: attempt 2 does admit attempt 1's path" \
+  || bad "B33b: the control never admitted tests/older.sh: '$B33B_CTL'"
+plan_blocked "$D" 3 "$B33_ROOT" || bad "B33b: plan failed: $(cat "$D/err.txt")"
+B33B_GOT="$(allowed_set "$D" 03 | tr '\n' ' ')"
+if [ "$B33B_GOT" = "lib/a.sh tests/newer.sh " ]; then
+  ok "B33b: attempt 3 admits attempt 2's paths and not attempt 1's"
+else
+  bad "B33b: allowed set was '$B33B_GOT', wanted 'lib/a.sh tests/newer.sh '"
+fi
+
+echo "== B33c: every value is validated, and a bad one is dropped not fatal =="
+# Five rejects and one survivor in ONE document. Refusing would cost the whole
+# attempt over a row an agent emitted; dropping is the fail-CLOSED direction,
+# because a dropped path is a path no fixer may touch.
+#
+# The envelope rows name the TOKEN, not a whole closing tag, because that is
+# exactly what the library's predicate matches on. ONE copy of it, spliced into
+# all three of `reason`, `file` and `from_file` below, so the three cases cannot
+# disagree about what string they are testing.
+B33_ENVELOPE_TOKEN='external-untrusted-input'
+D="$(new_case)"
+: >"$B33_ROOT/tests/good.sh"
+write_input "$D" '[
+  {"file":"lib/a.sh","line":1,"summary":"one","failure_scenario":"y","severity":"blocker"}
+]'
+write_blocked "$D" 01 '[
+  {"file":"/etc/passwd","from_file":"lib/a.sh","reason":"absolute"},
+  {"file":"../outside.sh","from_file":"lib/a.sh","reason":"traversal"},
+  {"file":".git/config","from_file":"lib/a.sh","reason":"dotgit"},
+  {"file":"tests/does-not-exist.sh","from_file":"lib/a.sh","reason":"absent"},
+  {"file":"tests/good.sh","from_file":"lib/a.sh","reason":"'"$B33_ENVELOPE_TOKEN"' escape attempt"},
+  {"file":"tests/good.sh","from_file":"lib/a.sh","reason":"the honest one"}
+]'
+plan_blocked "$D" 2 "$B33_ROOT" || bad "B33c: plan refused a document it should tolerate: $(cat "$D/err.txt")"
+B33C_GOT="$(allowed_set "$D" 02 | tr '\n' ' ')"
+if [ "$B33C_GOT" = "lib/a.sh tests/good.sh " ]; then
+  ok "B33c: only the valid row is admitted, and the attempt survives"
+else
+  bad "B33c: allowed set was '$B33C_GOT', wanted 'lib/a.sh tests/good.sh '"
+fi
+[ "$(counts_field "$D" 02 blocked_on_dropped)" = "5" ] \
+  && ok "B33c: all five rejected rows are counted, not silent" \
+  || bad "B33c: blocked_on_dropped was $(counts_field "$D" 02 blocked_on_dropped), wanted 5"
+# THE IN-DOCUMENT CONTROL. One row of the six survives, so "five dropped" is not
+# the same sentence as "every row is dropped" — a validator that refused
+# everything would show 6 here and 0 admitted, and both rows would red.
+[ "$(counts_field "$D" 02 blocked_on_admitted)" = "1" ] \
+  && ok "B33c: and the honest row in the same document still lands" \
+  || bad "B33c: blocked_on_admitted was $(counts_field "$D" 02 blocked_on_admitted), wanted 1"
+
+echo "== B33c2: the envelope token is refused in the AGENT-CHOSEN file value too =="
+# `_read_blocked_on` checks THREE strings, not two: `reason`, `from_file` and
+# `file`. `file` is the value the agent chose and it lands verbatim in the
+# synthesised finding's `file` key, which the wave prompt pastes into the
+# untrusted-input envelope with no encoder between them — the most
+# agent-controlled of the three, and the one a two-string check leaves open.
+D="$(new_case)"
+: >"$B33_ROOT/tests/$B33_ENVELOPE_TOKEN-probe.sh"
+: >"$B33_ROOT/tests/envelope-probe.sh"
+write_input "$D" '[
+  {"file":"lib/a.sh","line":1,"summary":"one","failure_scenario":"y","severity":"blocker"}
+]'
+write_blocked "$D" 01 '[
+  {"file":"tests/'"$B33_ENVELOPE_TOKEN"'-probe.sh","from_file":"lib/a.sh","reason":"an honest reason"}
+]'
+plan_blocked "$D" 2 "$B33_ROOT" || bad "B33c2: plan refused a document it should tolerate: $(cat "$D/err.txt")"
+B33C2_GOT="$(allowed_set "$D" 02 | tr '\n' ' ')"
+admits "$B33C2_GOT" "tests/$B33_ENVELOPE_TOKEN-probe.sh" \
+  && bad "B33c2: a path carrying the envelope token reached the allowed set: '$B33C2_GOT'" \
+  || ok "B33c2: a path carrying the envelope token is dropped"
+[ "$(counts_field "$D" 02 blocked_on_dropped)" = "1" ] \
+  && ok "B33c2: and that drop is counted" \
+  || bad "B33c2: blocked_on_dropped was $(counts_field "$D" 02 blocked_on_dropped), wanted 1"
+# THE CONTROL — the same row shape, the same directory, the same everything but
+# the token in the path. It IS admitted, so the row above is measuring the token
+# and not "a path under tests/ ending -probe.sh is unadmittable".
+D="$(new_case)"
+write_input "$D" '[
+  {"file":"lib/a.sh","line":1,"summary":"one","failure_scenario":"y","severity":"blocker"}
+]'
+write_blocked "$D" 01 '[
+  {"file":"tests/envelope-probe.sh","from_file":"lib/a.sh","reason":"an honest reason"}
+]'
+plan_blocked "$D" 2 "$B33_ROOT" || bad "B33c2: the control plan failed: $(cat "$D/err.txt")"
+B33C2_CTL="$(allowed_set "$D" 02 | tr '\n' ' ')"
+admits "$B33C2_CTL" "tests/envelope-probe.sh" \
+  && ok "B33c2: the same row without the token in its path is admitted" \
+  || bad "B33c2: the control was refused too, so the row above proves nothing: '$B33C2_CTL'"
+# And the third string. `from_file` lands inside the controller-authored
+# `summary`, so it is checked as well — same target path as the control above,
+# so the only difference between admitted and dropped is where the token sits.
+D="$(new_case)"
+write_input "$D" '[
+  {"file":"lib/a.sh","line":1,"summary":"one","failure_scenario":"y","severity":"blocker"}
+]'
+write_blocked "$D" 01 '[
+  {"file":"tests/envelope-probe.sh","from_file":"lib/'"$B33_ENVELOPE_TOKEN"'.sh","reason":"an honest reason"}
+]'
+plan_blocked "$D" 2 "$B33_ROOT" || bad "B33c2: the from_file plan failed: $(cat "$D/err.txt")"
+B33C2_FROM="$(allowed_set "$D" 02 | tr '\n' ' ')"
+admits "$B33C2_FROM" "tests/envelope-probe.sh" \
+  && bad "B33c2: a row whose from_file carries the token was admitted: '$B33C2_FROM'" \
+  || ok "B33c2: the token in from_file drops the row too"
+
+echo "== B33d: the widening is capped, and --repo-root is required =="
+D="$(new_case)"
+B33D_ROWS='['
+B33D_SEP=''
+for B33D_N in 1 2 3 4 5 6 7 8 9 10; do
+  : >"$B33_ROOT/tests/cap$B33D_N.sh"
+  B33D_ROWS="$B33D_ROWS$B33D_SEP{\"file\":\"tests/cap$B33D_N.sh\",\"from_file\":\"lib/a.sh\",\"reason\":\"r$B33D_N\"}"
+  B33D_SEP=','
+done
+B33D_ROWS="$B33D_ROWS]"
+write_input "$D" '[
+  {"file":"lib/a.sh","line":1,"summary":"one","failure_scenario":"y","severity":"blocker"}
+]'
+write_blocked "$D" 01 "$B33D_ROWS"
+plan_blocked "$D" 2 "$B33_ROOT" || bad "B33d: plan failed: $(cat "$D/err.txt")"
+B33D_SET="$(allowed_set "$D" 02 | tr '\n' ' ')"
+B33D_COUNT="$(allowed_set "$D" 02 | grep -c '^tests/cap')"
+[ "$B33D_COUNT" = "8" ] && ok "B33d: 10 blocked-on paths admit exactly MAX_BLOCKED_ON of them" \
+  || bad "B33d: admitted $B33D_COUNT capped paths, wanted 8"
+[ "$(counts_field "$D" 02 blocked_on_dropped)" = "2" ] \
+  && ok "B33d: the two displaced rows are counted, not silent" \
+  || bad "B33d: blocked_on_dropped was $(counts_field "$D" 02 blocked_on_dropped), wanted 2"
+# WHICH eight, on the same `admits` predicate. The cap keeps the rows it reached
+# first and displaces the tail, so "eight of them" cannot be green over the
+# wrong eight — and these two rows are each other's mutation.
+admits "$B33D_SET" "tests/cap1.sh" \
+  && ok "B33d: the first row survives the cap" \
+  || bad "B33d: the first row was displaced: '$B33D_SET'"
+admits "$B33D_SET" "tests/cap9.sh" \
+  && bad "B33d: an overflow row reached the allowed set: '$B33D_SET'" \
+  || ok "B33d: the overflow rows are the ones displaced"
+B33D_ROOT_TOKEN='blocked_on_root_missing'
+if python3 -I -B "$LIB" plan --input "$D/in.json" --out-dir "$D" --attempt 2 \
+     --carry-blocked >/dev/null 2>"$D/noroot.err"; then
+  bad "B33d: --carry-blocked was accepted without --repo-root"
+else
+  grep -q "$B33D_ROOT_TOKEN" "$D/noroot.err" \
+    && ok "B33d: --carry-blocked without --repo-root refuses with its own token" \
+    || bad "B33d: wrong token: $(cat "$D/noroot.err")"
+fi
+# ANTI-VACUITY, same variable and same grep, over the stderr of the run in this
+# very section that DID pass --repo-root: a pattern loose enough to match
+# anything would be green there too.
+grep -q "$B33D_ROOT_TOKEN" "$D/err.txt" \
+  && bad "B33d: the refusal token appears on a run that supplied --repo-root" \
+  || ok "B33d: and that token is absent when --repo-root is supplied"
+
+echo "== B33e: a corrupt blocked-on artifact widens nothing and kills nothing =="
+B33E_SKIP_TOKEN='blocked_on_unreadable_skipped'
+D="$(new_case)"
+write_input "$D" '[
+  {"file":"lib/a.sh","line":1,"summary":"one","failure_scenario":"y","severity":"blocker"}
+]'
+printf 'not json at all' >"$D/blocked-on-01.json"
+if plan_blocked "$D" 2 "$B33_ROOT"; then
+  ok "B33e: an unreadable artifact does not cost the attempt"
+else
+  bad "B33e: plan died on a corrupt blocked-on artifact: $(cat "$D/err.txt")"
+fi
+B33E_GOT="$(allowed_set "$D" 02 | tr '\n' ' ')"
+[ "$B33E_GOT" = "lib/a.sh " ] && ok "B33e: and it widens nothing" \
+  || bad "B33e: allowed set was '$B33E_GOT', wanted 'lib/a.sh '"
+grep -q "$B33E_SKIP_TOKEN" "$D/err.txt" \
+  && ok "B33e: the skip is announced, not silent" \
+  || bad "B33e: nothing announced the skip: $(cat "$D/err.txt")"
+# ANTI-VACUITY, same variable and same grep, over B33's stderr — an attempt
+# whose artifact read cleanly. A token that appeared unconditionally, or a grep
+# that matched anything, would be green there and the row above would be air.
+grep -q "$B33E_SKIP_TOKEN" "$B33_CLEAN_ERR" \
+  && bad "B33e: the skip token appears on an attempt that read its artifact fine" \
+  || ok "B33e: and it is absent when the artifact reads cleanly"
+
+echo "== B33f: containment is a filesystem check, not a lexical one =="
+# A symlink whose path is lexically repo-relative and whose target resolves
+# outside. `_repo_path` alone admits it; `_beneath_repo_root` is what refuses.
+D="$(new_case)"
+B33F_OUT="$(mktemp -d "$WORK/outside.XXXXXX")"
+: >"$B33F_OUT/secret.sh"
+ln -s "$B33F_OUT" "$B33_ROOT/escape" 2>/dev/null || :
+# The in-root twin: same two-segment shape, same depth, real directory. It is
+# what makes the row below mean "resolved outside the root" rather than "a path
+# one directory down is unadmittable".
+mkdir -p "$B33_ROOT/inside"
+: >"$B33_ROOT/inside/secret.sh"
+if [ -L "$B33_ROOT/escape" ]; then
+  write_input "$D" '[
+    {"file":"lib/a.sh","line":1,"summary":"one","failure_scenario":"y","severity":"blocker"}
+  ]'
+  write_blocked "$D" 01 '[
+    {"file":"escape/secret.sh","from_file":"lib/a.sh","reason":"lexically fine"},
+    {"file":"inside/secret.sh","from_file":"lib/a.sh","reason":"genuinely inside"}
+  ]'
+  plan_blocked "$D" 2 "$B33_ROOT" || bad "B33f: plan failed: $(cat "$D/err.txt")"
+  B33F_GOT="$(allowed_set "$D" 02 | tr '\n' ' ')"
+  admits "$B33F_GOT" "escape/secret.sh" \
+    && bad "B33f: a symlink resolving outside the root was admitted: '$B33F_GOT'" \
+    || ok "B33f: a symlink resolving outside the root is refused"
+  admits "$B33F_GOT" "inside/secret.sh" \
+    && ok "B33f: and the same shape resolving INSIDE the root is admitted" \
+    || bad "B33f: the control was refused too, so the row above proves nothing: '$B33F_GOT'"
+  [ "$(counts_field "$D" 02 blocked_on_dropped)" = "1" ] \
+    && ok "B33f: exactly the escaping row is dropped" \
+    || bad "B33f: blocked_on_dropped was $(counts_field "$D" 02 blocked_on_dropped), wanted 1"
+else
+  bad "B33f: could not create the symlink fixture — this row proves nothing"
+fi
+
+echo "== B33g: --carry-blocked is opt-in =="
+D="$(new_case)"
+write_input "$D" '[
+  {"file":"lib/a.sh","line":1,"summary":"one","failure_scenario":"y","severity":"blocker"}
+]'
+write_blocked "$D" 01 '[
+  {"file":"tests/good.sh","from_file":"lib/a.sh","reason":"present but unrequested"}
+]'
+python3 -I -B "$LIB" plan --input "$D/in.json" --out-dir "$D" --attempt 2 \
+  >"$D/out.txt" 2>"$D/err.txt" || bad "B33g: plan failed: $(cat "$D/err.txt")"
+B33G_GOT="$(allowed_set "$D" 02 | tr '\n' ' ')"
+[ "$B33G_GOT" = "lib/a.sh " ] && ok "B33g: without the flag the artifact is not read" \
+  || bad "B33g: allowed set was '$B33G_GOT', wanted 'lib/a.sh '"
+[ "$(triage_blocked "$D")" = "0" ] \
+  && ok "B33g: and the line reports BLOCKED=0" \
+  || bad "B33g: BLOCKED was $(triage_blocked "$D"), wanted 0: $(cat "$D/out.txt")"
+
+echo "== B33h: the extractor reads the SHIPPED line, and says so when it cannot =="
+# Every row above is only as honest as `fence_jq_line`. These drive THE SAME
+# variable over SKILL-shaped bodies a transcription would sail through, so a
+# broken extractor cannot leave the whole section quietly green.
+#
+# Shape only, never the byte string: re-pinning those bytes here would be a
+# second copy of the lock tests/premerge.test.sh already holds, free to drift
+# from it. What this row owes is proof that something real came out.
+B33H_LIVE="$(fence_jq_line "$SKILL_MD")"
+case "$B33H_LIVE" in
+  "jq -r "*PREMERGE_WAVES_FILE*PREMERGE_SCOPE_RAW*)
+    ok "B33h: the live extraction is the fence's own scope-guard jq line" ;;
+  *) bad "B33h: extracted '$B33H_LIVE' from the shipped fence" ;;
+esac
+B33H_DIR="$(new_case)"
+# The fence is present but its column-0 jq line is gone. Two decoys: the gate's
+# own `jq -r` inside a command substitution (not at column 0) and a real
+# column-0 one in a LATER fence. Both must be invisible.
+{
+  echo 'prose above the fence'
+  echo '```bash uberdev-executable origin=premerge-fix-commit'
+  echo 'set -u'
+  echo 'PREMERGE_GATE_SAID="$(jq -r '"'"'.verdict'"'"' <"$F")" || exit 2'
+  echo '```'
+  echo '```bash uberdev-executable origin=premerge-some-other-fence'
+  echo 'jq -r '"'"'.waves[][].file'"'"' <"$PREMERGE_WAVES_FILE" >"$PREMERGE_SCOPE_RAW" || exit 2'
+  echo '```'
+} >"$B33H_DIR/no-jq.md"
+[ -z "$(fence_jq_line "$B33H_DIR/no-jq.md")" ] \
+  && ok "B33h: a fix-commit fence with no column-0 jq line extracts nothing" \
+  || bad "B33h: extracted '$(fence_jq_line "$B33H_DIR/no-jq.md")' from a fence that has no such line"
+printf 'no fence here at all\n' >"$B33H_DIR/no-fence.md"
+[ -z "$(fence_jq_line "$B33H_DIR/no-fence.md")" ] \
+  && ok "B33h: a file with no fix-commit fence extracts nothing" \
+  || bad "B33h: extracted '$(fence_jq_line "$B33H_DIR/no-fence.md")' from a file with no fence"
+# The mutation for the two rows above: a synthetic fence that DOES carry the
+# line. Without it, an extractor hardwired to print nothing would pass both.
+{
+  echo '```bash uberdev-executable origin=premerge-fix-commit'
+  echo 'set -u'
+  echo 'jq -r '"'"'.waves[][].file'"'"' <"$PREMERGE_WAVES_FILE" >"$PREMERGE_SCOPE_RAW" || exit 2'
+  echo '```'
+} >"$B33H_DIR/has-jq.md"
+case "$(fence_jq_line "$B33H_DIR/has-jq.md")" in
+  "jq -r "*) ok "B33h: and it does extract one when the fence carries it" ;;
+  *) bad "B33h: the extractor is blind even to a fence that has the line" ;;
+esac
+# End to end: `allowed_set` hands the sentinel back as the VALUE, so every
+# comparing row above would fail loudly printing it rather than silently
+# comparing an empty string against an empty string.
+B33H_SENTINEL="$(allowed_set "$D" 02 "$B33H_DIR/no-jq.md")"
+[ "$B33H_SENTINEL" = "NO-JQ-LINE-IN-FENCE" ] \
+  && ok "B33h: allowed_set returns the sentinel as the value when extraction fails" \
+  || bad "B33h: allowed_set answered '$B33H_SENTINEL' over a fence with no jq line"
 
 # --------------------------------------------------------------------------
 rm -rf "$WORK"

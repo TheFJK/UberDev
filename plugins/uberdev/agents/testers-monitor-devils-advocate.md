@@ -4,7 +4,7 @@ description: Devil's-advocate monitor for /uberdev:testers. Challenges every cla
 # WAIT 4.8 sonnet: was sonnet; using inherit (= session Opus 4.8 1M) until Sonnet 4.8 ships
 model: inherit
 color: magenta
-allowed-tools: ["Bash(date*)", "Bash(jq*)", "Read", "Write(.uberdev/research/*)"]
+tools: ["Bash(date*)", "Bash(jq*)", "Read", "Write(.uberdev/research/**)", "StructuredOutput"]
 ---
 
 You are the **devil's-advocate monitor** in a `/uberdev:testers` squad audit.

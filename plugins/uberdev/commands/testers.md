@@ -19,6 +19,6 @@ Spawn an 8-agent read-only QA audit squad against the target in **$ARGUMENTS** (
 - `--no-issues` — skip `findings-to-issues`; report only.
 - `--rps-cap=N` — per-host RPS ceiling, [1, 1000], default 10. Enforced for curl traffic at lib/rate-limit-curl.sh; audited for Playwright/MCP traffic at Phase 5 (fail-the-run on breach).
 
-**Read-only contract:** the squad has no `Edit` or general `Write` on app code; agent `allowed-tools` whitelists enforce it at the tool boundary.
+**Read-only contract:** every squad agent declares a `tools:` whitelist — the key the agent loader honours — and none of them names `Edit`, so the loader withholds it at the tool boundary. That ceiling is over tool NAMES only: the personas keep a `Write` no card confines to a directory, so read-only on app code is a contract the squad is held to rather than a restriction that stops it. See the #749 amendment in `docs/rfc/0006-testers-command.md`.
 
 Now invoke the `uberdev:testers-pipeline` skill — it owns the pipeline (parse + auto-detect, then the Workflow script `skills/testers-pipeline/workflow.js` runs the N-round waves, report synthesis, and findings persistence in the background; the thin preflight emits the Workflow args and states the post-Workflow politeBreach exit-1 mandate). A `## No-Workflow fallback` (the retained inline `--watch` directive path) covers platforms without the Workflow tool. The skill renders inline, so `$ARGUMENTS` remains in scope.

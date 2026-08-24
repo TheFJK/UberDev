@@ -98,6 +98,22 @@ jobs:
         # right default when it is extracted and run standalone and the wrong
         # one when a pack has broken.
         run: bash tests/ci-shard-env.sh shape-checks 6 "${{ matrix.shard }}" >> "$GITHUB_ENV"
+      - name: Dump shard plan bytes
+        # DIAGNOSTIC, NEVER A GATE (#753). The plan crosses a $GITHUB_ENV file
+        # between the step above and the step below: this repo's shell writes
+        # it, the runner reads it back. The working model is that on
+        # windows-latest that boundary is where a trailing CR disappears while
+        # the interior ones survive, which is the shape that makes the harness
+        # membership test match only the last entry of the plan and reports a
+        # green job that ran one fixture. A dump of ONE side cannot tell that
+        # apart from a plan with no CR at all, so this step dumps both and
+        # probes each planned name through the harness's own rule. It exits 0
+        # by design; the gates are the CR refusal in tests/ci-shard-env.sh and
+        # the SHARD-COVERAGE tail below. That producing half is MODELLED, not
+        # measured — this step is where a Windows runner settles it; see "What
+        # is settled, and what is still a model" in
+        # plugins/uberdev/docs/testing.md for the refutation condition.
+        run: bash tests/ci-shard-diagnose.sh dump shape-checks 6 "${{ matrix.shard }}"
       - name: Run shape-check tests
         # SYNC: this list MUST match the windows-latest job below, PLUS the
         # ubuntu-only Unix-runtime fixtures the Windows job intentionally skips:
@@ -150,7 +166,12 @@ jobs:
           # planning step instead of silently running the whole suite six times.
           fail=0
           failed=""
+          shard_routed=0
+          shard_ran=0
+          shard_ran_names=""
+          shard_seen_names=""
           run_one() {
+            run_one_routed=0
             if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
               # Keyed on the argument that IS a fixture path, found by scanning.
               # Neither the first nor the last argument works: the interpreter
@@ -175,11 +196,44 @@ jobs:
                 esac
               done
               if [ -n "$run_one_fixture" ]; then
+                shard_routed=$((shard_routed + 1))
+                run_one_routed=1
+                # Every fixture this job OFFERS, plan membership aside. The
+                # coverage tail needs it to tell a plan entry that no
+                # invocation ever handed to this function -- one the plan
+                # producer grepped out of a step name:, another step's run:,
+                # an echo, or a trailing comment -- apart from one that WAS
+                # handed here and then filtered out below. Folded through the
+                # same sentinel-space rule as every other membership test in
+                # this harness, for the same undercounting reason.
+                case " ${shard_seen_names} " in
+                  *" ${run_one_fixture} "*) : ;;
+                  *) shard_seen_names="${shard_seen_names}${shard_seen_names:+ }${run_one_fixture}" ;;
+                esac
                 case " ${UBERDEV_SHARD_PLAN} " in
                   *" ${run_one_fixture} "*) : ;;
                   *) echo "--- SKIP $* (shard ${UBERDEV_SHARD:-?}/${UBERDEV_SHARDS:-?})"; return 0 ;;
                 esac
               fi
+            fi
+            if [ "$run_one_routed" -eq 1 ]; then
+              # DISTINCT fixtures, never invocations. The plan is de-duplicated
+              # by its producer -- first occurrence wins -- so a fixture named by
+              # two run_one lines in one job contributes ONE plan entry. Tallying
+              # invocations here would report ran=N+1 against a plan of N and red
+              # a shard that had run everything it was planned; the gate below is
+              # an equality, so both sides must be counting the same thing.
+              #
+              # Folded through the SAME sentinel-space rule the plan gate uses,
+              # for the same reason: a bare substring test would let one basename
+              # that contains another swallow its neighbour and undercount.
+              case " ${shard_ran_names} " in
+                *" ${run_one_fixture} "*) : ;;
+                *)
+                  shard_ran_names="${shard_ran_names}${shard_ran_names:+ }${run_one_fixture}"
+                  shard_ran=$((shard_ran + 1))
+                  ;;
+              esac
             fi
             echo "--- RUN  $*"
             if "$@"; then
@@ -323,6 +377,135 @@ jobs:
           run_one bash tests/premerge.test.sh
           run_one bash tests/premerge-findings.test.sh
           run_one bash tests/premerge-phase5.test.sh
+          # SHARD-COVERAGE (#753) -- a shard that ran fewer fixtures than its
+          # plan named must not be able to report green. A skip is not a
+          # failure, so before this tail existed six windows-latest shards
+          # executed one fixture each and the job passed.
+          #
+          # Guarded on the plan being SET. Unset means "run everything", which
+          # is the documented default above and the one the standalone
+          # extraction of this harness relies on; that path runs against no
+          # plan and must keep exiting 0.
+          #
+          # The denominator is `wc -w`, which splits on ANY whitespace, while
+          # the membership gate above splits on spaces only. That asymmetry is
+          # the point: a plan whose separators carry a stray byte routes almost
+          # nothing while `wc -w` still reports its true length, so the guard
+          # disagrees with the corruption instead of inheriting it. Re-deriving
+          # the length the way the gate derives it would make this vacuous.
+          #
+          # The numerator counts DISTINCT fixtures for the same reason the
+          # denominator is de-duplicated: run_one folds repeat invocations of
+          # one fixture into a single tally, so a job that names a fixture on
+          # two lines still measures as one against the one plan entry it
+          # produced. Counting invocations would make this guard fire on a
+          # shard that ran its whole plan.
+          #
+          # No echo below may name a tests/<name>.test.{sh,py} path: the
+          # fixture extractor greps the whole JOB BLOCK for exactly that shape
+          # once full-line comments are stripped, so an echo carrying one would
+          # be read back as a wiring line, enter every shard plan, and -- now
+          # that the comparison is an equality -- RED the shard it inflated
+          # rather than merely padding a number nobody compared.
+          #
+          # That convention is no longer hand-checked, and it could not honestly
+          # be checked from in here: the same extractor also reads step name:
+          # lines and other steps' run: lines, which are outside this block
+          # entirely, and re-deriving its regex down here would be a second
+          # uncompared copy of it -- the defect this suite exists to refuse.
+          # So the failing arm below names the shortfall BY CAUSE instead, out
+          # of what the harness was actually handed: a plan entry no invocation
+          # ever offered is reported separately from one that was offered and
+          # then filtered out. A stray mention now arrives as a named fixture
+          # with its reason attached, not as a bare count mismatch.
+          if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
+            shard_plan_len="$(printf '%s' "$UBERDEV_SHARD_PLAN" | wc -w | tr -d ' ')"
+            echo "=== SHARD-COVERAGE shard=${UBERDEV_SHARD:-?}/${UBERDEV_SHARDS:-?} plan=$shard_plan_len routed=$shard_routed ran=$shard_ran"
+            case "$shard_plan_len" in
+              ''|*[!0-9]*|0)
+                # A plan that is set but measures no entries would make the
+                # comparison below read `0 -ne 0` and buy a green job that ran
+                # nothing -- the same silent green this tail exists to refuse.
+                # A non-numeric length is worse: `[` exits 2, which `if` reads
+                # as false, so the guard would pass BY erroring out.
+                echo "=== SHARD-COVERAGE FAIL: the plan is set but its length reads [$shard_plan_len]."
+                fail=$((fail + 1))
+                failed="${failed}${failed:+ | }SHARD-COVERAGE(plan length unreadable)"
+                ;;
+              *)
+                if [ "$shard_ran" -ne "$shard_plan_len" ]; then
+                  echo "=== SHARD-COVERAGE FAIL: planned $shard_plan_len fixture(s), ran $shard_ran."
+                  echo "    A shard that runs fewer fixtures than its plan reports green, because a skip is not a failure."
+                  echo "    Dump the plan bytes with: bash tests/ci-shard-diagnose.sh dump <job-key> <shards> <shard>"
+                  # WHICH names went unrun, and by WHICH of the two mechanisms.
+                  # They need opposite repairs -- one is a fixture path spelled
+                  # somewhere in the job block that nothing invokes, the other
+                  # is a plan whose bytes the membership test cannot match --
+                  # and a bare count cannot tell them apart.
+                  #
+                  # Built ONLY inside this arm. The verdict is still the same
+                  # equality over the same two numbers, so nothing below can
+                  # turn a red shard green or a green shard red; it decides
+                  # only what an already-failing job prints. Planned entries
+                  # are never dropped from the count to make it agree.
+                  #
+                  # Whitespace is canonicalised before the split, deliberately
+                  # unlike the membership test (spaces only) and unlike the
+                  # `wc -w` denominator above. A plan whose separators carry a
+                  # stray CR is the case this tail was written for, and a
+                  # splitter that inherited that byte would file every entry
+                  # under the wrong cause -- naming the wrong cause is worse
+                  # than naming none.
+                  shard_unrun_mentioned=""
+                  shard_unrun_skipped=""
+                  shard_plan_rest="$(printf '%s' "$UBERDEV_SHARD_PLAN" | tr -s ' \t\r\n' ' ')"
+                  while [ -n "$shard_plan_rest" ]; do
+                    # Split by parameter expansion, never `for x in $plan`: zsh
+                    # does not word-split an unquoted scalar and would walk the
+                    # whole plan once, as one entry.
+                    shard_plan_entry="${shard_plan_rest%% *}"
+                    case "$shard_plan_rest" in
+                      *' '*) shard_plan_rest="${shard_plan_rest#* }" ;;
+                      *) shard_plan_rest="" ;;
+                    esac
+                    [ -n "$shard_plan_entry" ] || continue
+                    case " ${shard_ran_names} " in
+                      *" ${shard_plan_entry} "*) continue ;;
+                    esac
+                    case " ${shard_seen_names} " in
+                      *" ${shard_plan_entry} "*)
+                        shard_unrun_skipped="${shard_unrun_skipped}${shard_unrun_skipped:+ }${shard_plan_entry}"
+                        ;;
+                      *)
+                        shard_unrun_mentioned="${shard_unrun_mentioned}${shard_unrun_mentioned:+ }${shard_plan_entry}"
+                        ;;
+                    esac
+                  done
+                  if [ -n "$shard_unrun_mentioned" ]; then
+                    echo "    NEVER INVOKED (planned, but no invocation in this job ever handed them to run_one): $shard_unrun_mentioned"
+                    echo "      Those names reached the plan by being MENTIONED in the job block -- a step name:, another step's run:, an echo, or a trailing comment."
+                    echo "      The plan producer greps the whole job block for fixture paths; only argv reaching run_one runs. Wire them, or stop spelling the path where it is not an invocation."
+                  fi
+                  if [ -n "$shard_unrun_skipped" ]; then
+                    echo "    SKIPPED (planned and handed to run_one, then filtered out by the plan-membership test): $shard_unrun_skipped"
+                    echo "      The plan value and the membership test disagree about these names -- that is what the dump above shows."
+                  fi
+                  if [ -z "$shard_unrun_mentioned" ] && [ -z "$shard_unrun_skipped" ]; then
+                    # ONE cause reaches here, not two. A separator the split
+                    # above does not recognise cannot: it merges its neighbours
+                    # into a token no name the harness ran can match, so it
+                    # prints in the NEVER INVOKED arm above -- as the two names
+                    # run together -- and never gets this far. What is left is a
+                    # plan that names one fixture twice.
+                    echo "    Every name in the plan ran, yet the counts differ: the plan names one fixture more than once, so its word count exceeds the number of distinct names run."
+                    echo "      The plan producer cannot emit that -- it de-duplicates by first occurrence and refuses a repeated name outright -- so this value did not come from it."
+                  fi
+                  fail=$((fail + 1))
+                  failed="${failed}${failed:+ | }SHARD-COVERAGE($shard_ran/$shard_plan_len)"
+                fi
+                ;;
+            esac
+          fi
           if [ "$fail" -ne 0 ]; then
             echo "=== $fail test file(s) FAILED: $failed"
             exit 1
@@ -355,6 +538,22 @@ jobs:
         # right default when it is extracted and run standalone and the wrong
         # one when a pack has broken.
         run: bash tests/ci-shard-env.sh supervision-smoke-macos 2 "${{ matrix.shard }}" >> "$GITHUB_ENV"
+      - name: Dump shard plan bytes
+        # DIAGNOSTIC, NEVER A GATE (#753). The plan crosses a $GITHUB_ENV file
+        # between the step above and the step below: this repo's shell writes
+        # it, the runner reads it back. The working model is that on
+        # windows-latest that boundary is where a trailing CR disappears while
+        # the interior ones survive, which is the shape that makes the harness
+        # membership test match only the last entry of the plan and reports a
+        # green job that ran one fixture. A dump of ONE side cannot tell that
+        # apart from a plan with no CR at all, so this step dumps both and
+        # probes each planned name through the harness's own rule. It exits 0
+        # by design; the gates are the CR refusal in tests/ci-shard-env.sh and
+        # the SHARD-COVERAGE tail below. That producing half is MODELLED, not
+        # measured — this step is where a Windows runner settles it; see "What
+        # is settled, and what is still a model" in
+        # plugins/uberdev/docs/testing.md for the refutation condition.
+        run: bash tests/ci-shard-diagnose.sh dump supervision-smoke-macos 2 "${{ matrix.shard }}"
       - name: Run focused supervision smoke tests
         # The two dispatch-* fixtures below also run on ubuntu and Windows, but
         # only here do their preflight-arm rows discriminate: the resolver tries
@@ -386,7 +585,12 @@ jobs:
           # planning step instead of silently running the whole suite six times.
           fail=0
           failed=""
+          shard_routed=0
+          shard_ran=0
+          shard_ran_names=""
+          shard_seen_names=""
           run_one() {
+            run_one_routed=0
             if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
               # Keyed on the argument that IS a fixture path, found by scanning.
               # Neither the first nor the last argument works: the interpreter
@@ -411,11 +615,44 @@ jobs:
                 esac
               done
               if [ -n "$run_one_fixture" ]; then
+                shard_routed=$((shard_routed + 1))
+                run_one_routed=1
+                # Every fixture this job OFFERS, plan membership aside. The
+                # coverage tail needs it to tell a plan entry that no
+                # invocation ever handed to this function -- one the plan
+                # producer grepped out of a step name:, another step's run:,
+                # an echo, or a trailing comment -- apart from one that WAS
+                # handed here and then filtered out below. Folded through the
+                # same sentinel-space rule as every other membership test in
+                # this harness, for the same undercounting reason.
+                case " ${shard_seen_names} " in
+                  *" ${run_one_fixture} "*) : ;;
+                  *) shard_seen_names="${shard_seen_names}${shard_seen_names:+ }${run_one_fixture}" ;;
+                esac
                 case " ${UBERDEV_SHARD_PLAN} " in
                   *" ${run_one_fixture} "*) : ;;
                   *) echo "--- SKIP $* (shard ${UBERDEV_SHARD:-?}/${UBERDEV_SHARDS:-?})"; return 0 ;;
                 esac
               fi
+            fi
+            if [ "$run_one_routed" -eq 1 ]; then
+              # DISTINCT fixtures, never invocations. The plan is de-duplicated
+              # by its producer -- first occurrence wins -- so a fixture named by
+              # two run_one lines in one job contributes ONE plan entry. Tallying
+              # invocations here would report ran=N+1 against a plan of N and red
+              # a shard that had run everything it was planned; the gate below is
+              # an equality, so both sides must be counting the same thing.
+              #
+              # Folded through the SAME sentinel-space rule the plan gate uses,
+              # for the same reason: a bare substring test would let one basename
+              # that contains another swallow its neighbour and undercount.
+              case " ${shard_ran_names} " in
+                *" ${run_one_fixture} "*) : ;;
+                *)
+                  shard_ran_names="${shard_ran_names}${shard_ran_names:+ }${run_one_fixture}"
+                  shard_ran=$((shard_ran + 1))
+                  ;;
+              esac
             fi
             echo "--- RUN  $*"
             if "$@"; then
@@ -435,6 +672,135 @@ jobs:
           run_one bash tests/dispatch-wezterm.test.sh
           run_one bash tests/review-pr-workflow.test.sh
           run_one bash tests/atomic-move.test.sh
+          # SHARD-COVERAGE (#753) -- a shard that ran fewer fixtures than its
+          # plan named must not be able to report green. A skip is not a
+          # failure, so before this tail existed six windows-latest shards
+          # executed one fixture each and the job passed.
+          #
+          # Guarded on the plan being SET. Unset means "run everything", which
+          # is the documented default above and the one the standalone
+          # extraction of this harness relies on; that path runs against no
+          # plan and must keep exiting 0.
+          #
+          # The denominator is `wc -w`, which splits on ANY whitespace, while
+          # the membership gate above splits on spaces only. That asymmetry is
+          # the point: a plan whose separators carry a stray byte routes almost
+          # nothing while `wc -w` still reports its true length, so the guard
+          # disagrees with the corruption instead of inheriting it. Re-deriving
+          # the length the way the gate derives it would make this vacuous.
+          #
+          # The numerator counts DISTINCT fixtures for the same reason the
+          # denominator is de-duplicated: run_one folds repeat invocations of
+          # one fixture into a single tally, so a job that names a fixture on
+          # two lines still measures as one against the one plan entry it
+          # produced. Counting invocations would make this guard fire on a
+          # shard that ran its whole plan.
+          #
+          # No echo below may name a tests/<name>.test.{sh,py} path: the
+          # fixture extractor greps the whole JOB BLOCK for exactly that shape
+          # once full-line comments are stripped, so an echo carrying one would
+          # be read back as a wiring line, enter every shard plan, and -- now
+          # that the comparison is an equality -- RED the shard it inflated
+          # rather than merely padding a number nobody compared.
+          #
+          # That convention is no longer hand-checked, and it could not honestly
+          # be checked from in here: the same extractor also reads step name:
+          # lines and other steps' run: lines, which are outside this block
+          # entirely, and re-deriving its regex down here would be a second
+          # uncompared copy of it -- the defect this suite exists to refuse.
+          # So the failing arm below names the shortfall BY CAUSE instead, out
+          # of what the harness was actually handed: a plan entry no invocation
+          # ever offered is reported separately from one that was offered and
+          # then filtered out. A stray mention now arrives as a named fixture
+          # with its reason attached, not as a bare count mismatch.
+          if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
+            shard_plan_len="$(printf '%s' "$UBERDEV_SHARD_PLAN" | wc -w | tr -d ' ')"
+            echo "=== SHARD-COVERAGE shard=${UBERDEV_SHARD:-?}/${UBERDEV_SHARDS:-?} plan=$shard_plan_len routed=$shard_routed ran=$shard_ran"
+            case "$shard_plan_len" in
+              ''|*[!0-9]*|0)
+                # A plan that is set but measures no entries would make the
+                # comparison below read `0 -ne 0` and buy a green job that ran
+                # nothing -- the same silent green this tail exists to refuse.
+                # A non-numeric length is worse: `[` exits 2, which `if` reads
+                # as false, so the guard would pass BY erroring out.
+                echo "=== SHARD-COVERAGE FAIL: the plan is set but its length reads [$shard_plan_len]."
+                fail=$((fail + 1))
+                failed="${failed}${failed:+ | }SHARD-COVERAGE(plan length unreadable)"
+                ;;
+              *)
+                if [ "$shard_ran" -ne "$shard_plan_len" ]; then
+                  echo "=== SHARD-COVERAGE FAIL: planned $shard_plan_len fixture(s), ran $shard_ran."
+                  echo "    A shard that runs fewer fixtures than its plan reports green, because a skip is not a failure."
+                  echo "    Dump the plan bytes with: bash tests/ci-shard-diagnose.sh dump <job-key> <shards> <shard>"
+                  # WHICH names went unrun, and by WHICH of the two mechanisms.
+                  # They need opposite repairs -- one is a fixture path spelled
+                  # somewhere in the job block that nothing invokes, the other
+                  # is a plan whose bytes the membership test cannot match --
+                  # and a bare count cannot tell them apart.
+                  #
+                  # Built ONLY inside this arm. The verdict is still the same
+                  # equality over the same two numbers, so nothing below can
+                  # turn a red shard green or a green shard red; it decides
+                  # only what an already-failing job prints. Planned entries
+                  # are never dropped from the count to make it agree.
+                  #
+                  # Whitespace is canonicalised before the split, deliberately
+                  # unlike the membership test (spaces only) and unlike the
+                  # `wc -w` denominator above. A plan whose separators carry a
+                  # stray CR is the case this tail was written for, and a
+                  # splitter that inherited that byte would file every entry
+                  # under the wrong cause -- naming the wrong cause is worse
+                  # than naming none.
+                  shard_unrun_mentioned=""
+                  shard_unrun_skipped=""
+                  shard_plan_rest="$(printf '%s' "$UBERDEV_SHARD_PLAN" | tr -s ' \t\r\n' ' ')"
+                  while [ -n "$shard_plan_rest" ]; do
+                    # Split by parameter expansion, never `for x in $plan`: zsh
+                    # does not word-split an unquoted scalar and would walk the
+                    # whole plan once, as one entry.
+                    shard_plan_entry="${shard_plan_rest%% *}"
+                    case "$shard_plan_rest" in
+                      *' '*) shard_plan_rest="${shard_plan_rest#* }" ;;
+                      *) shard_plan_rest="" ;;
+                    esac
+                    [ -n "$shard_plan_entry" ] || continue
+                    case " ${shard_ran_names} " in
+                      *" ${shard_plan_entry} "*) continue ;;
+                    esac
+                    case " ${shard_seen_names} " in
+                      *" ${shard_plan_entry} "*)
+                        shard_unrun_skipped="${shard_unrun_skipped}${shard_unrun_skipped:+ }${shard_plan_entry}"
+                        ;;
+                      *)
+                        shard_unrun_mentioned="${shard_unrun_mentioned}${shard_unrun_mentioned:+ }${shard_plan_entry}"
+                        ;;
+                    esac
+                  done
+                  if [ -n "$shard_unrun_mentioned" ]; then
+                    echo "    NEVER INVOKED (planned, but no invocation in this job ever handed them to run_one): $shard_unrun_mentioned"
+                    echo "      Those names reached the plan by being MENTIONED in the job block -- a step name:, another step's run:, an echo, or a trailing comment."
+                    echo "      The plan producer greps the whole job block for fixture paths; only argv reaching run_one runs. Wire them, or stop spelling the path where it is not an invocation."
+                  fi
+                  if [ -n "$shard_unrun_skipped" ]; then
+                    echo "    SKIPPED (planned and handed to run_one, then filtered out by the plan-membership test): $shard_unrun_skipped"
+                    echo "      The plan value and the membership test disagree about these names -- that is what the dump above shows."
+                  fi
+                  if [ -z "$shard_unrun_mentioned" ] && [ -z "$shard_unrun_skipped" ]; then
+                    # ONE cause reaches here, not two. A separator the split
+                    # above does not recognise cannot: it merges its neighbours
+                    # into a token no name the harness ran can match, so it
+                    # prints in the NEVER INVOKED arm above -- as the two names
+                    # run together -- and never gets this far. What is left is a
+                    # plan that names one fixture twice.
+                    echo "    Every name in the plan ran, yet the counts differ: the plan names one fixture more than once, so its word count exceeds the number of distinct names run."
+                    echo "      The plan producer cannot emit that -- it de-duplicates by first occurrence and refuses a repeated name outright -- so this value did not come from it."
+                  fi
+                  fail=$((fail + 1))
+                  failed="${failed}${failed:+ | }SHARD-COVERAGE($shard_ran/$shard_plan_len)"
+                fi
+                ;;
+            esac
+          fi
           if [ "$fail" -ne 0 ]; then
             echo "=== $fail test file(s) FAILED: $failed"
             exit 1
@@ -477,6 +843,22 @@ jobs:
         # right default when it is extracted and run standalone and the wrong
         # one when a pack has broken.
         run: bash tests/ci-shard-env.sh shape-checks-windows 6 "${{ matrix.shard }}" >> "$GITHUB_ENV"
+      - name: Dump shard plan bytes
+        # DIAGNOSTIC, NEVER A GATE (#753). The plan crosses a $GITHUB_ENV file
+        # between the step above and the step below: this repo's shell writes
+        # it, the runner reads it back. The working model is that on
+        # windows-latest that boundary is where a trailing CR disappears while
+        # the interior ones survive, which is the shape that makes the harness
+        # membership test match only the last entry of the plan and reports a
+        # green job that ran one fixture. A dump of ONE side cannot tell that
+        # apart from a plan with no CR at all, so this step dumps both and
+        # probes each planned name through the harness's own rule. It exits 0
+        # by design; the gates are the CR refusal in tests/ci-shard-env.sh and
+        # the SHARD-COVERAGE tail below. That producing half is MODELLED, not
+        # measured — this step is where a Windows runner settles it; see "What
+        # is settled, and what is still a model" in
+        # plugins/uberdev/docs/testing.md for the refutation condition.
+        run: bash tests/ci-shard-diagnose.sh dump shape-checks-windows 6 "${{ matrix.shard }}"
       - name: Run shape-check tests
         # This list MUST match the ubuntu-latest job above MINUS the ubuntu-only
         # Unix-runtime fixtures, which are intentionally skipped here because Git
@@ -668,7 +1050,7 @@ jobs:
 #                                         portable shape gates live in
 #                                         premerge.test.sh, which DOES run on
 #                                         both jobs)
-#   - agent-description-budget.test.sh   (the A0-A4 probe does `import yaml`
+#   - agent-description-budget.test.sh   (the A0-A5 probe does `import yaml`
 #                                         and PyYAML is not importable on
 #                                         windows-latest — the same dependency
 #                                         that already declares
@@ -716,7 +1098,12 @@ jobs:
           # planning step instead of silently running the whole suite six times.
           fail=0
           failed=""
+          shard_routed=0
+          shard_ran=0
+          shard_ran_names=""
+          shard_seen_names=""
           run_one() {
+            run_one_routed=0
             if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
               # Keyed on the argument that IS a fixture path, found by scanning.
               # Neither the first nor the last argument works: the interpreter
@@ -741,11 +1128,44 @@ jobs:
                 esac
               done
               if [ -n "$run_one_fixture" ]; then
+                shard_routed=$((shard_routed + 1))
+                run_one_routed=1
+                # Every fixture this job OFFERS, plan membership aside. The
+                # coverage tail needs it to tell a plan entry that no
+                # invocation ever handed to this function -- one the plan
+                # producer grepped out of a step name:, another step's run:,
+                # an echo, or a trailing comment -- apart from one that WAS
+                # handed here and then filtered out below. Folded through the
+                # same sentinel-space rule as every other membership test in
+                # this harness, for the same undercounting reason.
+                case " ${shard_seen_names} " in
+                  *" ${run_one_fixture} "*) : ;;
+                  *) shard_seen_names="${shard_seen_names}${shard_seen_names:+ }${run_one_fixture}" ;;
+                esac
                 case " ${UBERDEV_SHARD_PLAN} " in
                   *" ${run_one_fixture} "*) : ;;
                   *) echo "--- SKIP $* (shard ${UBERDEV_SHARD:-?}/${UBERDEV_SHARDS:-?})"; return 0 ;;
                 esac
               fi
+            fi
+            if [ "$run_one_routed" -eq 1 ]; then
+              # DISTINCT fixtures, never invocations. The plan is de-duplicated
+              # by its producer -- first occurrence wins -- so a fixture named by
+              # two run_one lines in one job contributes ONE plan entry. Tallying
+              # invocations here would report ran=N+1 against a plan of N and red
+              # a shard that had run everything it was planned; the gate below is
+              # an equality, so both sides must be counting the same thing.
+              #
+              # Folded through the SAME sentinel-space rule the plan gate uses,
+              # for the same reason: a bare substring test would let one basename
+              # that contains another swallow its neighbour and undercount.
+              case " ${shard_ran_names} " in
+                *" ${run_one_fixture} "*) : ;;
+                *)
+                  shard_ran_names="${shard_ran_names}${shard_ran_names:+ }${run_one_fixture}"
+                  shard_ran=$((shard_ran + 1))
+                  ;;
+              esac
             fi
             echo "--- RUN  $*"
             if "$@"; then
@@ -827,6 +1247,135 @@ jobs:
           run_one bash tests/contract-markers.test.sh
           run_one bash tests/schema-property-reads.test.sh
           run_one bash tests/premerge.test.sh
+          # SHARD-COVERAGE (#753) -- a shard that ran fewer fixtures than its
+          # plan named must not be able to report green. A skip is not a
+          # failure, so before this tail existed six windows-latest shards
+          # executed one fixture each and the job passed.
+          #
+          # Guarded on the plan being SET. Unset means "run everything", which
+          # is the documented default above and the one the standalone
+          # extraction of this harness relies on; that path runs against no
+          # plan and must keep exiting 0.
+          #
+          # The denominator is `wc -w`, which splits on ANY whitespace, while
+          # the membership gate above splits on spaces only. That asymmetry is
+          # the point: a plan whose separators carry a stray byte routes almost
+          # nothing while `wc -w` still reports its true length, so the guard
+          # disagrees with the corruption instead of inheriting it. Re-deriving
+          # the length the way the gate derives it would make this vacuous.
+          #
+          # The numerator counts DISTINCT fixtures for the same reason the
+          # denominator is de-duplicated: run_one folds repeat invocations of
+          # one fixture into a single tally, so a job that names a fixture on
+          # two lines still measures as one against the one plan entry it
+          # produced. Counting invocations would make this guard fire on a
+          # shard that ran its whole plan.
+          #
+          # No echo below may name a tests/<name>.test.{sh,py} path: the
+          # fixture extractor greps the whole JOB BLOCK for exactly that shape
+          # once full-line comments are stripped, so an echo carrying one would
+          # be read back as a wiring line, enter every shard plan, and -- now
+          # that the comparison is an equality -- RED the shard it inflated
+          # rather than merely padding a number nobody compared.
+          #
+          # That convention is no longer hand-checked, and it could not honestly
+          # be checked from in here: the same extractor also reads step name:
+          # lines and other steps' run: lines, which are outside this block
+          # entirely, and re-deriving its regex down here would be a second
+          # uncompared copy of it -- the defect this suite exists to refuse.
+          # So the failing arm below names the shortfall BY CAUSE instead, out
+          # of what the harness was actually handed: a plan entry no invocation
+          # ever offered is reported separately from one that was offered and
+          # then filtered out. A stray mention now arrives as a named fixture
+          # with its reason attached, not as a bare count mismatch.
+          if [ -n "${UBERDEV_SHARD_PLAN-}" ]; then
+            shard_plan_len="$(printf '%s' "$UBERDEV_SHARD_PLAN" | wc -w | tr -d ' ')"
+            echo "=== SHARD-COVERAGE shard=${UBERDEV_SHARD:-?}/${UBERDEV_SHARDS:-?} plan=$shard_plan_len routed=$shard_routed ran=$shard_ran"
+            case "$shard_plan_len" in
+              ''|*[!0-9]*|0)
+                # A plan that is set but measures no entries would make the
+                # comparison below read `0 -ne 0` and buy a green job that ran
+                # nothing -- the same silent green this tail exists to refuse.
+                # A non-numeric length is worse: `[` exits 2, which `if` reads
+                # as false, so the guard would pass BY erroring out.
+                echo "=== SHARD-COVERAGE FAIL: the plan is set but its length reads [$shard_plan_len]."
+                fail=$((fail + 1))
+                failed="${failed}${failed:+ | }SHARD-COVERAGE(plan length unreadable)"
+                ;;
+              *)
+                if [ "$shard_ran" -ne "$shard_plan_len" ]; then
+                  echo "=== SHARD-COVERAGE FAIL: planned $shard_plan_len fixture(s), ran $shard_ran."
+                  echo "    A shard that runs fewer fixtures than its plan reports green, because a skip is not a failure."
+                  echo "    Dump the plan bytes with: bash tests/ci-shard-diagnose.sh dump <job-key> <shards> <shard>"
+                  # WHICH names went unrun, and by WHICH of the two mechanisms.
+                  # They need opposite repairs -- one is a fixture path spelled
+                  # somewhere in the job block that nothing invokes, the other
+                  # is a plan whose bytes the membership test cannot match --
+                  # and a bare count cannot tell them apart.
+                  #
+                  # Built ONLY inside this arm. The verdict is still the same
+                  # equality over the same two numbers, so nothing below can
+                  # turn a red shard green or a green shard red; it decides
+                  # only what an already-failing job prints. Planned entries
+                  # are never dropped from the count to make it agree.
+                  #
+                  # Whitespace is canonicalised before the split, deliberately
+                  # unlike the membership test (spaces only) and unlike the
+                  # `wc -w` denominator above. A plan whose separators carry a
+                  # stray CR is the case this tail was written for, and a
+                  # splitter that inherited that byte would file every entry
+                  # under the wrong cause -- naming the wrong cause is worse
+                  # than naming none.
+                  shard_unrun_mentioned=""
+                  shard_unrun_skipped=""
+                  shard_plan_rest="$(printf '%s' "$UBERDEV_SHARD_PLAN" | tr -s ' \t\r\n' ' ')"
+                  while [ -n "$shard_plan_rest" ]; do
+                    # Split by parameter expansion, never `for x in $plan`: zsh
+                    # does not word-split an unquoted scalar and would walk the
+                    # whole plan once, as one entry.
+                    shard_plan_entry="${shard_plan_rest%% *}"
+                    case "$shard_plan_rest" in
+                      *' '*) shard_plan_rest="${shard_plan_rest#* }" ;;
+                      *) shard_plan_rest="" ;;
+                    esac
+                    [ -n "$shard_plan_entry" ] || continue
+                    case " ${shard_ran_names} " in
+                      *" ${shard_plan_entry} "*) continue ;;
+                    esac
+                    case " ${shard_seen_names} " in
+                      *" ${shard_plan_entry} "*)
+                        shard_unrun_skipped="${shard_unrun_skipped}${shard_unrun_skipped:+ }${shard_plan_entry}"
+                        ;;
+                      *)
+                        shard_unrun_mentioned="${shard_unrun_mentioned}${shard_unrun_mentioned:+ }${shard_plan_entry}"
+                        ;;
+                    esac
+                  done
+                  if [ -n "$shard_unrun_mentioned" ]; then
+                    echo "    NEVER INVOKED (planned, but no invocation in this job ever handed them to run_one): $shard_unrun_mentioned"
+                    echo "      Those names reached the plan by being MENTIONED in the job block -- a step name:, another step's run:, an echo, or a trailing comment."
+                    echo "      The plan producer greps the whole job block for fixture paths; only argv reaching run_one runs. Wire them, or stop spelling the path where it is not an invocation."
+                  fi
+                  if [ -n "$shard_unrun_skipped" ]; then
+                    echo "    SKIPPED (planned and handed to run_one, then filtered out by the plan-membership test): $shard_unrun_skipped"
+                    echo "      The plan value and the membership test disagree about these names -- that is what the dump above shows."
+                  fi
+                  if [ -z "$shard_unrun_mentioned" ] && [ -z "$shard_unrun_skipped" ]; then
+                    # ONE cause reaches here, not two. A separator the split
+                    # above does not recognise cannot: it merges its neighbours
+                    # into a token no name the harness ran can match, so it
+                    # prints in the NEVER INVOKED arm above -- as the two names
+                    # run together -- and never gets this far. What is left is a
+                    # plan that names one fixture twice.
+                    echo "    Every name in the plan ran, yet the counts differ: the plan names one fixture more than once, so its word count exceeds the number of distinct names run."
+                    echo "      The plan producer cannot emit that -- it de-duplicates by first occurrence and refuses a repeated name outright -- so this value did not come from it."
+                  fi
+                  fail=$((fail + 1))
+                  failed="${failed}${failed:+ | }SHARD-COVERAGE($shard_ran/$shard_plan_len)"
+                fi
+                ;;
+            esac
+          fi
           if [ "$fail" -ne 0 ]; then
             echo "=== $fail test file(s) FAILED: $failed"
             exit 1

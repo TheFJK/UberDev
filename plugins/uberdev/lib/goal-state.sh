@@ -3859,14 +3859,38 @@ _uberdev_goal_rebase_collision_chain() {
   # comm -12 cares only about set contents, not iteration count, so this
   # saves one `sort -u` per remaining-PR iteration.
   local merged_sorted
-  merged_sorted="$(printf '%s\n' "$merged_diff" | sort -u)"
+  # LC_ALL=C ON EVERY MEMBER OF THE sort/comm TRIO, INCLUDING `comm` ITSELF.
+  # This compares PATHS AS BYTES. `sort` orders by the ambient collation and
+  # `comm`'s merge walk assumes the order its own collation would produce; when
+  # the two disagree the walk desynchronises and a `comm -12` intersection can
+  # miss a shared path, reporting NO collision between two PRs that do collide.
+  #
+  # THAT MISS IS NOT A DEFECT IN ITSELF, and this pin does not claim otherwise.
+  # The contract above is best-effort by design -- rc 0 always, collision
+  # detection never halts the goal -- and the `gh pr diff` arm right above
+  # already routes EVERY API failure to an empty path-set and so to the same
+  # silent non-collision, by a far more likely route. That fail-open is
+  # accepted by the contract and is deliberately left as it stands. Nor is the
+  # miss wholly unguarded downstream: its renumbering half is re-derived by
+  # `_uberdev_goal_ensure_version_bump`, which re-fetches `origin/<base>` and
+  # compares head-vs-base itself before every merge dispatch (goal-watch.sh
+  # step 2c) and fails CLOSED when it cannot guarantee the bump.
+  #
+  # What the pin buys is narrower, and sits INSIDE that best-effort guarantee:
+  # when both path-sets ARE in hand, the comparison answers correctly instead
+  # of silently desynchronising. A collision missed because the API was
+  # unreachable is degraded INPUT, which the contract blesses; one missed while
+  # computing over complete input is a wrong ANSWER, which it does not. The
+  # sorts happen to share a shell today, so they agree by accident; pinning
+  # makes the agreement a property of the code.
+  merged_sorted="$(printf '%s\n' "$merged_diff" | LC_ALL=C sort -u)"
   local pr
   while IFS= read -r pr; do
     [ -n "$pr" ] || continue
     [ "$pr" = "$merged_pr" ] && continue
     local pr_diff intersection
     pr_diff="$(gh pr diff "$pr" --name-only 2>/dev/null || true)"
-    intersection="$(comm -12 <(printf '%s\n' "$merged_sorted") <(printf '%s\n' "$pr_diff" | sort -u))"
+    intersection="$(LC_ALL=C comm -12 <(printf '%s\n' "$merged_sorted") <(printf '%s\n' "$pr_diff" | LC_ALL=C sort -u))"
     if [ -n "$intersection" ]; then
       # Collision detected — refresh main and audit the transition.
       git fetch origin main 2>/dev/null || true

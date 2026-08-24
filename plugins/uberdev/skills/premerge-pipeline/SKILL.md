@@ -116,14 +116,34 @@ PREMERGE_VERSION_MANIFEST = plugins/uberdev/.claude-plugin/plugin.json
 PREMERGE_CONVERGE_DEFAULT= 3              # REPAIR rounds, --converge dials it
 PREMERGE_REPAIR_CEILING  = 6              # the runaway backstop --converge cannot pass
 PREMERGE_WAIT_CI_CEILING = 8              # WAIT_CI re-probes before the loop calls CI dead
+PREMERGE_GROWTH_CEILING  = 0.50           # self-referential growth that stops the loop
+PREMERGE_GROWTH_RUNS     = 2              # consecutive attempts at/above it before it stops
 PREMERGE_RERUN_FLAKY_CAP = 1              # `gh run rerun` attempts per RUN
+PREMERGE_MAX_BLOCKED_ON  = 8              # blocked_on_file paths one attempt may add — see `### 2a — The fixer-wave mechanism`
 ```
+
+`PREMERGE_MAX_BLOCKED_ON` is **declared in `lib/premerge-findings.py`**
+(`MAX_BLOCKED_ON`) and restated here for the reader. It is equal to
+`PREMERGE_MAX_FIX_WAVE` on purpose: one attempt's `blocked_on_file` returns may
+add at most one extra wave's worth of files to the next attempt's plan, so the
+widening is bounded by something a reader can check rather than by a number
+someone picked. Rows past the cap are **dropped and counted**, never refused —
+a dropped path is simply a path no fixer may touch, and the finding survives to
+the next attempt exactly as it does today.
 
 `PREMERGE_REPAIR_CEILING` and `PREMERGE_WAIT_CI_CEILING` are **declared in
 `lib/premerge-findings.py`** (`CONVERGE_REPAIR_CEILING`, `CONVERGE_WAIT_CI_CEILING`)
 and restated here for the reader. The library is the enforcer — it refuses an
 out-of-range `--max-repairs` rather than clamping it, so these two numbers being
 prose does not make them advisory.
+
+`PREMERGE_GROWTH_CEILING` and `PREMERGE_GROWTH_RUNS` are declared the same way
+(`CONVERGE_GROWTH_CEILING`, `CONVERGE_GROWTH_RUNS`) and restated here for the
+same reason. `0.50` is the break-even point of the loop's own accounting rather
+than a round number: above it a repair round manufactures more new work than it
+inherited, so every further round enlarges its own haystack. `2` is what makes
+it a warning before it is a stop — one high round is consistent with a
+convergence whose repairs happen to be concentrated in a few files.
 
 `PREMERGE_CI_SETTLE_SECS` is consumed by the **controller**, not by a fence, and
 that is deliberate. It is named in exactly one instruction — the waitable-reasons
@@ -738,14 +758,25 @@ python3 -I -B "$UBERDEV_PREMERGE_PLUGIN_ROOT/lib/premerge-findings.py" plan \
   --attempt "$PREMERGE_ATTEMPT" \
   --head-sha "$PREMERGE_HEAD_SHA" \
   --carry-prior \
+  --carry-blocked \
+  --repo-root "$PREMERGE_ROOT" \
   --max-per-wave 8 || exit 74
 ```
 
 The fence prints one line:
 
 ```
-PREMERGE_TRIAGE TOTAL=<n> BLOCKER=<n> SUGGESTION=<n> WAVES=<n> CATEGORY_BACKED=<n> ATTEMPT=<n> CARRIED=<n>
+PREMERGE_TRIAGE TOTAL=<n> BLOCKER=<n> SUGGESTION=<n> WAVES=<n> CATEGORY_BACKED=<n> ATTEMPT=<n> CARRIED=<n> BLOCKED=<n>
 ```
+
+`--carry-blocked` is why `BLOCKED` exists: it is how many paths the PREVIOUS
+attempt's `blocked_on_file` returns added to this attempt's wave plan. It counts
+admitted paths only; rows refused by validation or displaced by
+`PREMERGE_MAX_BLOCKED_ON` are counted in `classified.json` under
+`counts.blocked_on_dropped`. A `BLOCKED=` above zero on a run whose reviewer
+found nothing new is the loop finishing a cross-file fix the previous attempt
+could only report — the round that would otherwise have been spent
+rediscovering the block.
 
 `--carry-prior` is why `CARRIED` exists. Blockers are things the loop is actively
 removing, so only the latest review's blocker set means anything. **Suggestions
@@ -792,7 +823,17 @@ Fix the code-review findings listed below in the single file <path>.
 
 Rules:
   * Edit ONLY <path>. If the honest fix requires touching another file, do not
-    make it — return `status: REFUSED` naming the file you would have needed.
+    make it — return `status: REFUSED` and name that file under
+    `blocked_on_file`. That is the FIRST emission case.
+  * The SECOND emission case is `status: APPLIED`. If your fix is correct and
+    complete in <path> but leaves a CONSEQUENCE in another file — a comment,
+    a doc line or a sibling half of a two-way contract that your edit has just
+    made false — name that file under `blocked_on_file` too. Nobody else is
+    scoped to it, so a consequence you do not report is a consequence that
+    survives the round untouched.
+  * Give the REASON, never a line range. Other agents are editing their own
+    files in this same wave, so the coordinates you read may already have
+    moved by the time anyone acts on them.
   * Do NOT run git. No add, no commit, no stash, no checkout, no push.
   * Do NOT create new files.
   * If a finding is wrong, already handled, or would change intended behaviour
@@ -814,7 +855,44 @@ outcomes:
   - rank: <the finding's rank>
     outcome: fixed | skipped | no_change_needed
     reason: <one line>
+blocked_on_file:          # OPTIONAL, repeatable. Omit the key entirely when empty.
+  - file: <repo-relative POSIX path of the OTHER file>
+    reason: <one line: why the two files must move together. NEVER a line number.>
 ```
+
+**Before that commit, write what the wave reported.** Collect every
+`blocked_on_file` entry from every agent in every wave of this attempt into
+`$PREMERGE_RUN_DIR/blocked-on-<NN>.json`, `<NN>` zero-padded to this attempt's
+index, in exactly this shape:
+
+```json
+{
+  "schema_version": 1,
+  "attempt": 3,
+  "blocked_on": [
+    { "file": "tests/agent-description-budget.test.sh",
+      "from_file": ".github/workflows/test.yml",
+      "reason": "the windows-skip-list is a two-way runtime contract; the marker block and the fixture's own guard must move together" }
+  ]
+}
+```
+
+Write `"blocked_on": []` when the wave reported nothing, and **do not skip the
+artifact** — an absent file and an empty array must never be the same
+observable state, for the same reason `review-input.json` may not be skipped.
+
+**This file does not widen anything by itself.** The next attempt's `plan`
+reads it, validates every value, caps the count at `PREMERGE_MAX_BLOCKED_ON`,
+and turns each survivor into a blocker finding on that file — which
+`_fix_waves` then groups into a wave like any other, with exactly one owner.
+The commit fence below keeps deriving its allowed set from
+`fix-waves-<NN>.json` and from nothing else, which is what keeps "committable"
+and "owned by exactly one agent" the same set. Never add a path to the fence's
+allowed list directly: that is the one edit this whole design exists to avoid.
+
+**Only the immediately preceding attempt is read.** `plan` opens
+`blocked-on-<N-1>.json` by name and never a range, so the set cannot accumulate
+across the repair budget into an allow-list that constrains nothing.
 
 After the last wave returns, **the controller makes exactly one commit** —
 agents never touch git, and the fence checks what they actually changed against
@@ -888,41 +966,43 @@ if [ ! -s "$PREMERGE_WAVES_FILE" ]; then
   exit 2
 fi
 PREMERGE_ASSIGNED_LIST="$PREMERGE_RUN_DIR/fix-scope-$PREMERGE_ATTEMPT_PAD.assigned"
-PREMERGE_MODIFIED_LIST="$PREMERGE_RUN_DIR/fix-scope-$PREMERGE_ATTEMPT_PAD.modified"
+PREMERGE_MODIFIED_LIST="$PREMERGE_RUN_DIR/fix-scope-$PREMERGE_ATTEMPT_PAD.pending"  # .modified is published after the push
 PREMERGE_SCOPE_RAW="$PREMERGE_RUN_DIR/fix-scope-$PREMERGE_ATTEMPT_PAD.raw"
-# NEITHER list may be produced by a pipeline. `<producer> | sort -u >LIST || exit 2`
-# binds the `||` to the PIPELINE's status, which is `sort`'s -- and `sort`
-# succeeds on empty input. A `git diff` that failed (index.lock contention from a
-# concurrent agent, a corrupt index, a `$PREMERGE_ROOT` that moved under the
-# fence) therefore produced an EMPTY modified list, an empty `comm -23`, an empty
-# `PREMERGE_STRAY`, and this fence fell through to `git add -u` and swept every
-# tracked modification in the tree into the stack commit. That is the exact
+# NEITHER list may be produced by a pipeline. `<producer> | sort -u >LIST ||
+# exit 2` binds the `||` to the PIPELINE's status, which is `sort`'s -- and
+# `sort` succeeds on empty input. A failed `git diff` (index.lock contention
+# from a concurrent agent, a corrupt index, a `$PREMERGE_ROOT` that moved under
+# the fence) therefore produced an EMPTY modified list, an empty `comm -23`, an
+# empty `PREMERGE_STRAY`, and this fence fell through to `git add -u`, sweeping
+# every tracked modification in the tree into the stack commit -- the exact
 # fail-OPEN the scope guard exists to prevent, inside the guard itself, on the
-# half `## Common Mistakes` calls "the enforcement".
-#
-# Worse, the two halves failed in OPPOSITE directions under the identical shape:
-# an empty ASSIGNED makes every file stray (loud, closed), an empty MODIFIED
-# makes none (silent, open). So both are written the same way -- a producer whose
-# own status is checked, then a `sort` whose own status is checked.
-# `LC_ALL=C` ON EVERY MEMBER OF THE sort/comm TRIO, INCLUDING `comm` ITSELF.
-#
-# This guard compares PATHS AS BYTES, and locale collation has no business in
-# it. `sort` orders by the ambient collation and `comm`'s merge walk assumes the
-# order its own collation would produce; when the two disagree the walk
-# desynchronises and reports a file present in BOTH lists as a stray -- which
-# aborts an attempt whose fixers behaved correctly. Demonstrated: the same two
+# half `## Common Mistakes` calls "the enforcement". Worse, the two halves
+# failed in OPPOSITE directions under the identical shape: an empty ASSIGNED
+# makes every file stray (loud, closed), an empty MODIFIED makes none (silent,
+# open). So both are written the same way: a producer whose status is checked,
+# then a `sort` whose status is checked. `LC_ALL=C` ON EVERY MEMBER OF THE
+# sort/comm TRIO, INCLUDING `comm` ITSELF. This guard compares PATHS AS BYTES,
+# and locale collation has no business in it: `sort` orders by the ambient
+# collation, `comm`'s merge walk assumes its own, and when they disagree the
+# walk desynchronises and reports a file present in BOTH lists as a stray --
+# aborting an attempt whose fixers behaved correctly. Demonstrated: the same two
 # paths sorted under en_US.UTF-8 and under C, compared with `comm -23`, print
-# `lib/Zebra.sh` as a stray. The two sorts happen to share a shell today, so
-# they agree with each other by accident; pinning makes the guard's correctness
-# a property of the code rather than of an inherited environment variable that
-# differs across the three CI runners.
+# `lib/Zebra.sh` as a stray. The two sorts share a shell today, agreeing by
+# accident; pinning makes the guard's correctness a property of the code rather
+# than of an inherited environment variable that differs across the three CI
+# runners.
 jq -r '.waves[][].file' <"$PREMERGE_WAVES_FILE" >"$PREMERGE_SCOPE_RAW" || exit 2
 LC_ALL=C sort -u <"$PREMERGE_SCOPE_RAW" >"$PREMERGE_ASSIGNED_LIST" || exit 2
 # `--no-renames`, because rename detection reports only the NEW path and a scope
 # guard reading `--name-only` alone is bypassable by a rename -- a defect this
 # repo has already shipped once. Against `HEAD`, since nothing is staged yet,
 # and `-C "$PREMERGE_ROOT"` so the paths are repo-relative like the plan's are.
-git -C "$PREMERGE_ROOT" diff --name-only --no-renames HEAD >"$PREMERGE_SCOPE_RAW" || exit 2
+# `core.quotePath=false` for the same byte-equality reason: the default C-quotes
+# a non-ASCII path (`"caf\303\251.md"`) out of equality with the plan's raw
+# UTF-8 -- a false stray here, and a GROWTH miss that outlives it in
+# `fix-scope-<NN>.modified`. Via `GIT_CONFIG_*`, not `git -c`, so #693's
+# exact-shape lock still matches.
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.quotePath GIT_CONFIG_VALUE_0=false git -C "$PREMERGE_ROOT" diff --name-only --no-renames HEAD >"$PREMERGE_SCOPE_RAW" || exit 2
 LC_ALL=C sort -u <"$PREMERGE_SCOPE_RAW" >"$PREMERGE_MODIFIED_LIST" || exit 2
 PREMERGE_STRAY="$(LC_ALL=C comm -23 "$PREMERGE_MODIFIED_LIST" "$PREMERGE_ASSIGNED_LIST")" || exit 2
 if [ -n "$PREMERGE_STRAY" ]; then
@@ -947,6 +1027,8 @@ PREMERGE_PUSH_ERR="$(git push origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
     "$PREMERGE_ATTEMPT" "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2
   exit 2
 }
+# The durable publish: the next attempt's GROWTH reads `fix-scope-<NN>.modified`, so only a pushed repair may write it.
+mv "$PREMERGE_MODIFIED_LIST" "$PREMERGE_RUN_DIR/fix-scope-$PREMERGE_ATTEMPT_PAD.modified" || exit 2
 printf 'PREMERGE FIX COMMIT=%s ATTEMPT=%s\n' "$(git rev-parse HEAD)" "$PREMERGE_ATTEMPT" >&2
 ```
 
@@ -1266,7 +1348,7 @@ exit 0
 The fence prints one line and appends one row to `converge.jsonl`:
 
 ```
-PREMERGE_CONVERGE ATTEMPT=<n> DECISION=<D> BLOCKERS=<n> PREV=<n|-> FIXED=<n> NEW=<n> WAIT=<n> MAXREPAIRS=<n> REASONS=<csv>
+PREMERGE_CONVERGE ATTEMPT=<n> DECISION=<D> BLOCKERS=<n> PREV=<n|-> FIXED=<n> NEW=<n> GROWTH=<0.00-1.00|-> WAIT=<n> MAXREPAIRS=<n> REASONS=<csv>
 ```
 
 **Branch on `DECISION=`, never on the exit status.** `STOP_GREEN` — the outcome
@@ -1283,23 +1365,99 @@ successfully converged stack as a broken one.
 | `CONTINUE` | something is still fixable and the last attempt changed something | repair (3c) → Phase 1 at attempt+1 |
 | `STOP_NO_PROGRESS` | an attempt changed neither the blockers nor the CI reason | **Phase 5, not green** |
 | `STOP_REGRESSED` | our own fixes grew the blocker set | **Phase 5, not green** |
+| `STOP_SELF_REFERENTIAL` | two **eligible** rounds running (below), at least half the blockers were defects that did not exist before this loop's own repairs wrote them | **Phase 5, not green** |
 | `STOP_EXHAUSTED` | the runaway backstop | **Phase 5, not green** |
 | `STOP_UNREADABLE` | stale evidence, or CI that never settled | **Phase 5, not green** |
 
-`STOP_NO_PROGRESS` and `STOP_REGRESSED` are the ones that matter. A counter alone
-would stop a loop that was converging perfectly well *and* let three useless
-attempts run; these two stop the moment repairing stops working, and they are
-computed from blocker **fingerprints**, not from prose.
+`STOP_NO_PROGRESS` and `STOP_REGRESSED` are the ones that matter: a counter alone would
+stop a converging loop *and* let three useless attempts run, while these two stop the
+moment repairing stops working — computed from blocker **fingerprints**, not prose.
 
 **Why a fingerprint and not `file:line`.** A fix moves lines — including in other
-findings' hunks — so an identity keyed on the line reports every survivor as
-brand new. The loop would see infinite progress and never stop. `lib/premerge-findings.py`
-hashes `path` + a case-folded, punctuation-stripped `summary` instead, which is
-stable across exactly the edits the loop makes. It is deliberately **not** either
-fingerprint `findings-to-issues` computes. That agent keys a per-finding identity
-on `file:line:summary` because a finding is about a location, and a per-ISSUE
-identity on the owning file alone because an issue is now about a file. Same
-width, three different questions.
+findings' hunks — so an identity keyed on the line reports every survivor as brand new,
+and the loop would see infinite progress and never stop. `lib/premerge-findings.py`
+hashes `path` + a case-folded, punctuation-stripped `summary` instead, stable across
+exactly the edits the loop makes. It is deliberately **not** either fingerprint
+`findings-to-issues` computes: a per-finding identity on `file:line:summary` because a
+finding is about a location, and a per-ISSUE identity on the owning file because an
+issue is now about a file. Same width, three different questions.
+
+**The growth ratio, and why it is a different question.** `FIXED=` and `NEW=` compare
+two fingerprint multisets; RFC 0021 A3 records what that cannot see. A critic asked
+*"what is wrong with this?"* samples an **unbounded** set, so the two multisets are
+independent draws from a generator, not two readings of one population: a blocker the
+sampler did not roll counts `FIXED`, an always-present defect counts `NEW`, and
+`findings == 0` is a property of the sample, never of the artifact. Find→fix→re-find
+therefore has no fixed point; it runs until something outside says stop, and `GROWTH=`
+asks what the fingerprints cannot: **of this attempt's reviewer-raised blockers, what
+fraction did not exist last attempt AND sits in a file the last repair modified?** At
+`1.00` the loop is reviewing what its own repairs wrote; stop, do not repair again.
+
+- **Denominator** — this attempt's **reviewer-raised** blockers in
+  `classified-<NN>.json` (`blocked_on_carry` rows excluded): the number printed as
+  `BLOCKERS=`.
+- **Numerator** — those blockers whose `file` is in the previous attempt's
+  `fix-scope-<NN-1>.modified` and whose fingerprint the previous evidence did not carry.
+  That exclusion keeps a *survivor* out: the wave plan assigns exactly the files this
+  attempt's blockers named, so an uncleared finding is always in a touched file, and
+  counting it would stop a converging loop on its own success. The numerator is
+  therefore a strict subset of `NEW=`.
+- **Both inputs are already on disk** in the run directory: nothing new is written, no
+  phase is added, and `converge` takes no new argument.
+
+**Two consecutive ELIGIBLE rounds, and never one.** `PREMERGE_GROWTH_CEILING` is
+compared with `>=`, but one round at or above it changes no decision: the stop needs
+`PREMERGE_GROWTH_RUNS` consecutive **eligible** rounds — measured, at or above the
+ceiling, **and** not having cut the reviewer-raised blocker count
+(`blockers >= previous_blockers`) — read off the previous attempt's own `converge.jsonl`
+row, not a variable a fence could forget. That third test is why a run can print
+`GROWTH=0.90` twice and not stop: a round that cut the count demonstrably repaired
+something, whatever its residual is made of. Without it a measured 5 → 2 → 2 run read
+`0.50` twice and stopped with three of five repair rounds unspent. A3 §2 makes attempt
+N's blocker set a *fresh sample*: a defect present all along but first rolled at attempt
+3 counts as new, and the files likeliest to be resampled are the ones the repair just
+touched. One high round is therefore healthy concentrated convergence, and firing on it
+would stop a loop that was working — the failure A3 C3 names outright. A real pump pays
+one extra round every time: the deliberate price. **Do not reduce the requirement to a
+single round, or eligibility to the ratio alone.**
+
+**Where it sits in the cascade.** The ratio is read after `STOP_NO_PROGRESS` — the
+fingerprint detectors are sharper diagnoses and keep their place — and **before**
+`STOP_EXHAUSTED`: "still winning, raise `--converge`" and "the loop was reviewing
+itself" are opposite operator responses, and the budget stop says the first about a run
+that did the second.
+
+`GROWTH=-` means *not measured*, not *zero*, and it has **five** causes:
+
+1. **attempt 1** — there is no predecessor to attribute anything to;
+2. **a previous attempt that committed no edits**, so wrote no scope list — the
+   fix-commit fence's `REASON=no-edits` early exit, leaving nothing to blame this
+   round's findings on;
+3. **a previous attempt repaired through the CI arm** — `arm=commit` makes real code
+   edits and pushes but publishes only `ci-scope-<NN>.*`, never
+   `fix-scope-<NN>.modified`. This is the one cause that switches the detector **off**:
+   such a loop never gets two consecutive eligible rounds, so `STOP_SELF_REFERENTIAL` is
+   unreachable until that fence publishes a scope of its own;
+4. **no reviewer-raised blocker this attempt** — nothing to divide by;
+5. **a scope list that *is* present but could not be read** — the only one of the five
+   that is a **fault** rather than an undefined ratio. It announces itself on **stderr**
+   as `premerge-findings: repair_scope_unreadable:` with the path, so `-` is the cue to
+   check stderr before reading the ratio as undefined.
+
+None of the five stops the loop, and none of them is `0.00`. Reading `-` as zero turns
+*we did not look* into *we looked and it was fine*.
+
+**Deliberately the coarse proxy.** The precise question — did this finding land in text
+the previous repair *wrote* — needs diff-hunk mapping nothing here produces (A3 C8: the
+reviewer takes a PR, a branch or a path, not a two-SHA range). File membership counts a
+new finding anywhere in a touched file, so it errs toward stopping, which the two-round
+requirement absorbs. Do not build the hunk-mapping version to "fix" this; build it, if
+ever, as the C1–C8 design A3 is waiting for.
+
+**The findings that trip it are not discarded.** `STOP_SELF_REFERENTIAL` is a not-green
+stop, so Phase 5 runs with `PREMERGE_SURVIVORS=1` and `defer` gets `--include-blockers`:
+every surviving blocker becomes an issue. The claim is "not *this loop's* work", never
+"not work".
 
 ### 3c — Repair, by reason
 
@@ -1534,10 +1692,9 @@ if [ -n "$PREMERGE_DIRTY" ]; then
 fi
 
 # ---- check 3: the scope comparison ----------------------------------------
-# Same shape as the Phase 2a scope guard, including the producer-then-sort split:
-# `producer | sort -u >LIST || exit 2` binds the `||` to `sort`'s status and
-# `sort` succeeds on empty input, so a failed producer reads as "changed
-# nothing" and every later check passes over an empty set.
+# Same shape as Phase 2a, producer-then-sort split included: `producer | sort -u
+# >LIST || exit 2` binds `||` to `sort`, which succeeds on empty input -- a
+# failed producer reads as "changed nothing" and later checks pass an empty set.
 PREMERGE_CI_RAW="$PREMERGE_RUN_DIR/ci-scope-$PREMERGE_ATTEMPT_PAD.raw"
 case "$PREMERGE_CI_ARM" in
   commit)
@@ -1552,13 +1709,11 @@ case "$PREMERGE_CI_ARM" in
     fi
     PREMERGE_CI_ALLOWED="$PREMERGE_RUN_DIR/ci-scope-$PREMERGE_ATTEMPT_PAD.sorted"
     PREMERGE_CI_CHANGED="$PREMERGE_RUN_DIR/ci-scope-$PREMERGE_ATTEMPT_PAD.changed"
-    # `LC_ALL=C` on the sort/comm trio for the same reason the fix-commit guard
-    # pins it: this compares paths as bytes, and a sort/comm collation
-    # disagreement reports a file present in both lists as a stray.
+    # `LC_ALL=C` on the sort/comm trio, for the reason the fix-commit guard
+    # gives: this compares paths as bytes, and collation drift invents strays.
     LC_ALL=C sort -u <"$PREMERGE_CI_SCOPE" >"$PREMERGE_CI_ALLOWED" || exit 2
-    # `--no-renames`, because rename detection reports only the NEW path and a
-    # scope guard reading `--name-only` alone is bypassable by a rename.
-    git -C "$PREMERGE_ROOT" diff --name-only --no-renames "$PREMERGE_CI_BEFORE" HEAD >"$PREMERGE_CI_RAW" || exit 2
+    # `--no-renames` and `core.quotePath=false`: exactly as the Phase 2a guard sets them, for its reasons.
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.quotePath GIT_CONFIG_VALUE_0=false git -C "$PREMERGE_ROOT" diff --name-only --no-renames "$PREMERGE_CI_BEFORE" HEAD >"$PREMERGE_CI_RAW" || exit 2
     LC_ALL=C sort -u <"$PREMERGE_CI_RAW" >"$PREMERGE_CI_CHANGED" || exit 2
     if [ ! -s "$PREMERGE_CI_CHANGED" ]; then
       printf 'PREMERGE CI PUBLISH=none REASON=no-edits ARM=commit ATTEMPT=%s\n' "$PREMERGE_ATTEMPT" >&2
@@ -1811,9 +1966,8 @@ PREMERGE_SIMPLIFY_ALLOWED="$PREMERGE_RUN_DIR/simplify-scope-$PREMERGE_ATTEMPT_PA
 PREMERGE_SIMPLIFY_RAW="$PREMERGE_RUN_DIR/simplify-scope-$PREMERGE_ATTEMPT_PAD.raw"
 PREMERGE_SIMPLIFY_MODIFIED="$PREMERGE_RUN_DIR/simplify-scope-$PREMERGE_ATTEMPT_PAD.modified"
 LC_ALL=C sort -u <"$PREMERGE_SIMPLIFY_SCOPE" >"$PREMERGE_SIMPLIFY_ALLOWED" || exit 2
-# `--no-renames`: rename detection reports only the NEW path, and a scope guard
-# reading `--name-only` alone is bypassable by a rename.
-git -C "$PREMERGE_ROOT" diff --name-only --no-renames HEAD >"$PREMERGE_SIMPLIFY_RAW" || exit 2
+# `--no-renames` and `core.quotePath=false`: exactly as the Phase 2a guard sets them, for its reasons.
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.quotePath GIT_CONFIG_VALUE_0=false git -C "$PREMERGE_ROOT" diff --name-only --no-renames HEAD >"$PREMERGE_SIMPLIFY_RAW" || exit 2
 LC_ALL=C sort -u <"$PREMERGE_SIMPLIFY_RAW" >"$PREMERGE_SIMPLIFY_MODIFIED" || exit 2
 PREMERGE_SIMPLIFY_STRAY="$(LC_ALL=C comm -23 "$PREMERGE_SIMPLIFY_MODIFIED" "$PREMERGE_SIMPLIFY_ALLOWED")" || exit 2
 if [ -n "$PREMERGE_SIMPLIFY_STRAY" ]; then
@@ -2256,9 +2410,9 @@ Print the run summary and **stop**:
   packed        #A #B #C            (base: <base>, branch: chore/stack-<run-id>)
   excluded      #D (conflict_unresolved)
   review        <level> — <n> findings (<n> category-backed)
-  converge      <n>/<max> attempts — STOP_GREEN | STOP_NO_PROGRESS | …
-                  attempt 1: <n> blockers, ci=red      → fixed <n>, class=code_bug
-                  attempt 2: <n> blockers, ci=green    → fixed <n>
+  converge      <n>/<max> attempts — STOP_GREEN | STOP_NO_PROGRESS | STOP_SELF_REFERENTIAL | …
+                  attempt 1: <n> blockers, ci=red      → fixed <n>, growth=-, class=code_bug
+                  attempt 2: <n> blockers, ci=green    → fixed <n>, growth=0.20
   blockers      <n> found / <n> fixed / <n> surviving
   ci            <state> before simplify / <state> after
   clean gate    green | not_green (<reasons>)
@@ -2279,6 +2433,15 @@ STOP_NO_PROGRESS" and "3/3 attempts, STOP_EXHAUSTED" call for opposite next move
 — the first says the fixers are stuck and a human should look, the second says
 the loop was still winning and `--converge=5` would probably finish it. A summary
 that collapses both to `not_green` withholds the one thing the operator needs.
+
+**Every attempt's row carries its `growth=`**, transcribed from that attempt's
+`converge.jsonl` row, because "it was still converging" and "it was reviewing
+its own output" call for opposite operator responses in exactly the way
+`STOP_NO_PROGRESS` and `STOP_EXHAUSTED` do. A run that ends `STOP_EXHAUSTED`
+with `growth=0.10` on every attempt wants a bigger `--converge`; the same stop
+with `growth=0.90` wants a smaller stack and a lower level. Print `growth=-`
+unchanged where the ledger row carries none — it means the ratio was not
+measured, and rendering it as `0.00` would invent a measurement.
 
 The trace is `converge.jsonl` — one row per decision, append-only, in the run
 directory. `CATEGORY_BACKED` still belongs in the review row: it says how much of

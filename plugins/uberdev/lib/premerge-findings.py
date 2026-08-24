@@ -168,6 +168,7 @@ CONVERGE_DECISIONS = (
     "STOP_GREEN",       # the gate passed -- the loop's whole purpose
     "STOP_NO_PROGRESS",  # an attempt changed neither the blockers nor the CI reason
     "STOP_REGRESSED",   # our own fixes grew the blocker set
+    "STOP_SELF_REFERENTIAL",  # the loop is now reviewing what its own repairs wrote
     "STOP_EXHAUSTED",   # the runaway backstop
     "STOP_UNREADABLE",  # evidence we could not read -- never reported as green
 )
@@ -184,6 +185,33 @@ CONVERGE_CONTINUE = frozenset({"CONTINUE", "WAIT_CI"})
 # a flag documented as reproducing it.
 CONVERGE_REPAIR_CEILING = 6
 CONVERGE_WAIT_CI_CEILING = 8
+
+# The self-referential-growth stop.
+#
+# GROWTH is the fraction of an attempt's blockers that are BOTH new since the
+# previous attempt AND sitting in a file the previous attempt's repair actually
+# modified: work this loop made for itself. RFC 0021 A3 states the law
+# ("never terminate a loop on a generative critic's silence") and its second
+# corollary names this exact quantity as the cheap, computable divergence
+# signal. This is that corollary made mechanical.
+#
+# WHY 0.50, AND WHY IT IS NOT A ROUND NUMBER. The numerator is work the last
+# repair authored; the complement is everything the loop inherited. At 0.50 a
+# repair round manufactured exactly as much new work as it inherited, and above
+# it the repair is a net generator -- every further round enlarges its own
+# haystack. The two recorded runs bound the choice without determining it: the
+# pumped run measured 1.00 and the converging one 0.20.
+#
+# WHY TWO CONSECUTIVE ROUNDS AND NOT ONE. A3 section 2: attempt N's blocker set
+# is a FRESH SAMPLE, so a defect present since attempt 1 but first rolled at
+# attempt 3 counts as new -- and the files most likely to be resampled are
+# exactly the ones the repair just touched. One high round is therefore
+# consistent with a healthy convergence whose repairs are concentrated, and
+# stopping on it is C3's failure: not a detector gone quiet, a detector that
+# stops a loop that was working. Two in a row is what A3's own drafting
+# measured (8/8, then 6/6) before it stopped.
+CONVERGE_GROWTH_CEILING = 0.50
+CONVERGE_GROWTH_RUNS = 2
 
 # `plan` and `defer` legally run ONE ATTEMPT PAST the loop's last attempt.
 #
@@ -252,6 +280,14 @@ MAX_LINE = 999_999_999
 MAX_LINE_DIGITS = len(str(MAX_LINE))
 MAX_FINDINGS = 64
 
+# How many paths ONE attempt may add to the next attempt's wave plan from its
+# fixers' `blocked_on_file` returns. Equal to the default `--max-per-wave`, so
+# the widening can never exceed one extra wave's worth of files -- "optional,
+# repeatable" with no cap is unbounded allow-list growth, and by
+# CONVERGE_REPAIR_CEILING attempts a set that grows every round constrains
+# nothing. Overflow is DROPPED, not refused: see `_read_blocked_on`.
+MAX_BLOCKED_ON = 8
+
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 
@@ -274,11 +310,39 @@ class Refusal(SystemExit):
         self.detail = detail
 
 
-def fail(token: str, detail: str = "") -> "NoReturn":  # type: ignore[valid-type]
+def _refusal_line(token: str, detail: str) -> str:
+    """The module's one hard-refusal format.
+
+    ONE function, two readers -- `main` announces the refusals that actually end
+    the process, and nothing else may re-type this shape. A second copy would
+    drift from the token every calling fence branches on.
+    """
     message = f"premerge-findings: {token}"
     if detail:
         message = f"{message}: {detail}"
-    print(message, file=sys.stderr)
+    return message
+
+
+def fail(token: str, detail: str = "") -> "NoReturn":  # type: ignore[valid-type]
+    """Raise the module's hard refusal. IT DOES NOT PRINT -- `main` does.
+
+    THE PRINT MOVED TO THE ONE PLACE THAT KNOWS THE REFUSAL WAS NOT ABSORBED.
+    Several callers here TOLERATE a refusal by design: `_read_blocked_on` drops
+    a malformed row and counts it, `_carry_prior_suggestions` skips a corrupt
+    attempt, `cmd_defer` falls back to the newest readable one. Printing inside
+    `fail` put this module's own hard-refusal format on stderr for every one of
+    those -- so an artifact with three bad rows emitted three lines that read
+    exactly like a fence abort and then exited 0, on fences contracted `0|74`.
+    An operator cannot tell "we refused" from "we absorbed this and carried on"
+    when both say the same thing in the same words.
+
+    So the announcement happens where the outcome is known: `main` catches
+    `Refusal` and prints `_refusal_line` on the way to exit 74. Every tolerating
+    caller already announces its own absorption with its own token
+    (`attempt_unreadable_skipped`, `blocked_on_unreadable_skipped`,
+    `blocked_on_rows_dropped`, `attempt_fallback`), and `Refusal` carries the
+    token so those messages can name what they swallowed.
+    """
     raise Refusal(token, detail)
 
 
@@ -334,9 +398,18 @@ def _bounded_text(value: object, limit: int, token: str, what: str) -> str:
 def _repo_path(value: object) -> str:
     """Normalise a repo-relative POSIX path, or refuse.
 
-    Same predicate as `code_fixer_contract.py`'s scope validator, restated here
-    only because this file must reject BEFORE the aggregate is written -- a path
-    that escapes the repo has to die at parse time, not at publish time.
+    LEXICAL ONLY, and that is the whole predicate: `posixpath.normpath` plus the
+    `..`/`.git` first-segment check. It never touches the filesystem, so it is
+    NOT the same predicate as `code_fixer_contract.py`'s scope validator -- that
+    one pairs its lexical half with `beneath()`, a realpath+commonpath
+    containment check. This docstring used to claim the equivalence outright,
+    and the claim was false; a caller reading it as containment would have
+    shipped a symlink escape. Any caller turning a path into a FILESYSTEM
+    AUTHORIZATION decision must run `_beneath_repo_root` as well.
+
+    Restated here rather than imported because this file must reject BEFORE the
+    aggregate is written -- a path that escapes the repo has to die at parse
+    time, not at publish time.
     """
     if not isinstance(value, str) or not value:
         fail("finding_schema_invalid", "file must be a non-empty string")
@@ -352,6 +425,45 @@ def _repo_path(value: object) -> str:
     if first in ("..", ".git"):
         fail("finding_schema_invalid", f"file escapes the repository: {value}")
     return value
+
+
+def _beneath_repo_root(root: str, relative: str) -> bool:
+    """The filesystem half `_repo_path` deliberately does not do.
+
+    Same predicate as `code_fixer_contract.beneath`: realpath BOTH sides, then
+    `commonpath`. A tracked symlink whose path is lexically repo-relative and
+    whose target resolves outside the repo passes `_repo_path` and fails here.
+    No symlink is tracked in this repo today, which is exactly why the check
+    belongs in the code rather than in a sentence about the tree.
+
+    THAT SAMENESS IS ASSERTED IN PROSE AND PINNED BY NOTHING. This body is a
+    transcription of `code_fixer_contract.beneath` (the only difference is that
+    this one takes a repo-relative argument and joins it), and no test imports
+    both and compares them. The two agree today -- executed across eleven
+    inputs, including a non-str argument, an absolute path, `..` and a
+    normalising path, with zero disagreements -- but agreeing today is what a
+    copy does right up until one side is hardened. This module has already been
+    burned by exactly that: `_repo_path`'s docstring records a prose-asserted
+    equivalence in this same file that was FALSE and would have shipped the
+    symlink escape this function exists to refuse. So: any change to either side
+    must be mirrored by hand, and the durable fix is an executed cross-module
+    equality row in tests/premerge-findings.test.sh, or importing the sibling
+    the way `code_fixer_contract.py` itself loads `run_manifest` and
+    `atomic_move`. Importing was weighed and not taken here: it would turn a
+    stdlib-only module into one whose import pulls in three sibling files, and
+    couple `/premerge`'s triage half to the fixer-authority half for six lines
+    of pure path arithmetic.
+
+    Returns False on any error rather than raising: the caller drops a row it
+    cannot vouch for, and a validator that throws where the caller expected a
+    verdict is a validator that fails open at the call site.
+    """
+    try:
+        root_abs = os.path.realpath(os.path.abspath(root))
+        path_abs = os.path.realpath(os.path.abspath(os.path.join(root, relative)))
+        return os.path.commonpath((root_abs, path_abs)) == root_abs
+    except (TypeError, ValueError, OSError):
+        return False
 
 
 _RUN_ID_RE = re.compile(r"\A[0-9]{8}-[0-9]{6}-[0-9a-f]+\Z")
@@ -968,8 +1080,88 @@ def _object_rows(values: "list", what: str) -> "list[dict]":
     return out
 
 
+# The key `_read_blocked_on` stamps on a synthesised cross-file consequence, and
+# the ONE predicate every consumer asks about one.
+#
+# A carried row is the loop's own bookkeeping. No reviewer raised it, it names no
+# line, and its `summary` states a scheduling fact ("the fixer for X said it
+# needed this file") rather than a defect. THE LINE THIS PREDICATE DRAWS IS
+# EVIDENCE VERSUS WORK, and it is not the line between "counts" and "does not
+# count":
+#
+#   * NOT EVIDENCE, so it is inert for every question about whether repairing is
+#     WORKING -- the progress multisets (`_blocker_fingerprints`) and both sides
+#     of `_growth_ratio`. Counted there it manufactures churn: a consequence
+#     naming b, then c, then b reads as `FIXED=1 NEW=1` on every round while
+#     nothing is being repaired, which makes STOP_NO_PROGRESS and STOP_REGRESSED
+#     structurally unreachable. Anything that reads it as evidence is reading the
+#     loop's notes to itself as a finding.
+#
+#   * STILL WORK, so it is live for every question about whether the stack is
+#     FINISHED -- the wave plan, the clean gate (`blockers_remaining=`, the only
+#     term SKILL.md `### 3c` routes to a fixer wave) and, once the loop stops
+#     with the edit still outstanding, the deferred issue set. Excluding it from
+#     those was a silent discard: a run whose only remaining blockers were
+#     carried gated green, dispatched nothing, and filed nothing.
+#
+# Filed, it is filed at CLEANUP tier -- see `_as_deferred_carry_row`. "It is work"
+# does not make it a defect the reviewer proved.
+#
+# `isinstance` here and not at the call sites: `_read_attempt` proves `blockers`
+# is an ARRAY and nothing proves its elements are objects, and a predicate that
+# raised on a non-object would turn a malformed stored row into an
+# `AttributeError` instead of whatever refusal its own reader already has.
+def _is_carried(finding: object) -> bool:
+    return isinstance(finding, dict) and finding.get("blocked_on_carry") is True
+
+
+def _reviewer_blockers(blockers: "list") -> "list":
+    """A blocker array narrowed to the rows a REVIEWER raised.
+
+    ONE derivation of that population, for the three places that need it:
+    `_blocker_fingerprints`, `_growth_ratio`'s denominator, and the
+    `counts.blocker_reviewer` field `cmd_plan` writes. The field used to be a
+    subtraction over `cmd_plan`'s own locals -- `len(blockers) - len(synthesised)`
+    -- which is a THIRD spelling of the same question. It agrees with the filter
+    for every document this file builds, because `_normalise_findings` composes
+    a fixed key set and can therefore never stamp `blocked_on_carry` on a
+    reviewer row. But it is arithmetic over transient locals rather than a
+    predicate over the rows, so it answers on provenance where the other two
+    answer on the marker, and on a hand-edited or resumed artifact where a
+    reviewer row DOES carry the flag the two spellings return different numbers
+    (measured: filter 0, subtraction 1). Routing all three through here removes
+    the possibility rather than documenting it.
+
+    NO VALIDATION HERE, DELIBERATELY. It filters and nothing else, so each
+    caller keeps the refusal it already had for a malformed row -- and a
+    non-object is never `_is_carried`, so it survives this filter and still
+    reaches the caller's own check in the same relative order.
+    """
+    return [row for row in blockers if not _is_carried(row)]
+
+
+def _as_deferred_carry_row(finding: "dict") -> "dict":
+    """A carried row as `cmd_defer` files it: same finding, cleanup tier.
+
+    The row is `blocker` in `classified.json` because that is the array
+    `_fix_waves` reads and the gate counts -- it has to be, or no fixer is ever
+    assigned to it. But that severity is `severity_source: controller`
+    bookkeeping rather than a reviewer's judgement, and by the time this verb
+    runs the only thing left to do with the row is file it. See the call site for
+    what blocker tier cost when it reached the filer.
+
+    A SHALLOW COPY, not a mutation: the caller iterates rows read straight off
+    disk and hands them to `_encode_aggregate`, and rewriting a stored row in
+    place would make the same artifact encode differently on a second call.
+    Every value in a finding is a JSON scalar, so nothing here is shared deeply.
+    """
+    row = dict(finding)
+    row["severity"] = "suggestion"
+    return row
+
+
 def _blocker_fingerprints(document: "dict") -> "collections.Counter[str]":
-    """The attempt's blockers as a MULTISET of fingerprints.
+    """The attempt's REVIEWER-RAISED blockers as a MULTISET of fingerprints.
 
     A multiset and not a set, because the fingerprint is deliberately
     line-independent: two genuinely distinct blockers at different lines of one
@@ -979,9 +1171,36 @@ def _blocker_fingerprints(document: "dict") -> "collections.Counter[str]":
     STOP_NO_PROGRESS on an attempt that removed a real blocker -- stopping early,
     with budget unspent, on exactly the success it was built to keep going for.
     Counting them keeps that visible.
+
+    CARRIED ROWS ARE NOT IN IT, AND THAT IS THE SAME DEFECT `_BLOCKED_ON_SUMMARY`
+    ONLY HALF-CLOSED. That comment removed the attempt number from the
+    synthesised summary because one consequence persisting across two attempts
+    was arriving under two fingerprints and reading as `fixed=1 new=1` every
+    round -- manufactured progress. But the fingerprint is `hash(file, summary)`
+    and the FILE varies too: a fixer that reports lib/b.sh on one attempt and
+    lib/c.sh on the next produces exactly the same phantom churn, from the same
+    stalled state. Measured: one reviewer blocker that never changed, with
+    blocked-on rows naming b, c, b, printed `FIXED=1 NEW=1 CONTINUE` on every
+    round while nothing was being repaired. STOP_NO_PROGRESS needs an UNCHANGED
+    multiset and STOP_REGRESSED needs `fixed == 0`, so both were structurally
+    unreachable for as long as any row was carried -- and the loop ran to its
+    counter backstop on a stack it was not repairing. The attempt-2 stall was
+    additionally mislabelled STOP_REGRESSED, because the first carried row is an
+    `appeared` with no `fixed` beside it.
+
+    `_growth_ratio` already excludes these rows from both of its sides for the
+    same reason, so this is the two mechanisms agreeing on one population rather
+    than a new rule: the loop's progress claim is about what the REVIEWER
+    reported, and a carried row is neither the reviewer's finding nor the
+    previous repair's work. It also restores the identity the SKILL asserts
+    between the growth denominator and the `BLOCKERS=` field.
+
+    A carried row is still dispatched to a fixer and still bounds the allowed
+    file set -- nothing here touches `_fix_waves`. What stops is the loop
+    treating its own scheduling notes as evidence of progress.
     """
     prints: "collections.Counter[str]" = collections.Counter()
-    for finding in document["blockers"]:
+    for finding in _reviewer_blockers(document["blockers"]):
         value = finding.get("fingerprint") if isinstance(finding, dict) else None
         if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{16}", value):
             # Pre-loop artifacts carry no fingerprint. Refusing is the only
@@ -1027,6 +1246,397 @@ def _carry_prior_suggestions(out_dir: str, attempt: int) -> "list[dict]":
             if isinstance(record, dict) and isinstance(record.get("fingerprint"), str):
                 carried.append(record)
     return carried
+
+
+# The controller-authored identity text of a carried cross-file consequence.
+#
+# NO ATTEMPT NUMBER IN IT, DELIBERATELY -- BUT NOT FOR THE CONSUMER THIS
+# COMMENT USED TO NAME. This string becomes the row's `summary`, and
+# `_fingerprint` hashes the summary into the row's stored identity. It used to
+# interpolate the reporting attempt, so one consequence that persisted across
+# two attempts arrived under two different fingerprints: `_blocker_fingerprints`
+# counted the old one as `fixed` and the new one as `new` on every single round,
+# which is manufactured progress. STOP_NO_PROGRESS needs an UNCHANGED multiset
+# and could therefore never fire while such a row was carried, and
+# STOP_REGRESSED needs `fixed == 0`, which the phantom made false every time.
+# The comment on the old site called this summary "controller-authored and
+# deterministic"; the attempt number made it the opposite of deterministic
+# across the only axis that mattered.
+#
+# THAT CONSUMER NO LONGER READS THIS TEXT AT ALL. The same defect was closed a
+# second and wider way, because removing the attempt number never finished the
+# job -- the fingerprint is `hash(file, summary)` and the FILE varies across
+# attempts too. `_blocker_fingerprints` and `_growth_ratio` now drop every
+# carried row through `_reviewer_blockers` BEFORE they read anything off it.
+# Executed against the shipped module: a carried row whose `fingerprint` is the
+# literal `GARBAGE-NOT-HEX` yields an empty multiset and no refusal, while the
+# same row with `blocked_on_carry` removed exits 74 on `fingerprint_missing`.
+# So no progress arithmetic in this file keys on this string any more.
+#
+# THE STABILITY CONSTRAINT IS STILL LIVE, FOR A CONSUMER OUTSIDE THIS FILE.
+# `_encode_aggregate` publishes neither `fingerprint` nor `blocked_on_carry`, so
+# `agents/findings-to-issues.md` derives a carried row's per-finding identity
+# itself: Step 8's `MEMBER_FP = sha256(path:line:normalised_summary)[:16]`. A
+# carried row's `path` is fixed by the row and its `line` is `None` -- encoded
+# as `1` by `_encode_aggregate` -- so THIS TEXT IS THE ONLY VARYING TERM.
+# Reinterpolate the attempt number and one consequence that survives two runs
+# is recorded as two members of that file's container issue instead of one
+# recurring member.
+#
+# AND NOTHING EXECUTES THAT. No test asserts a carried row's summary, and the
+# filer is an agent rather than an importable function, so this comment is the
+# whole of the guard. Do NOT read the skip in `_blocker_fingerprints` as proof
+# the constraint died with it.
+#
+# The attempt number is not lost. It goes into `failure_scenario`, which is
+# where the agent's own words already live precisely because nothing keys on
+# them.
+#
+# `from_file` STAYS in it, and that is why `_read_blocked_on` checks the
+# envelope tag in `from_file` as well as in `file` and `reason`: this is the
+# one field of the three that reaches an untrusted-input envelope through the
+# summary rather than through the path.
+_BLOCKED_ON_SUMMARY = (
+    "cross-file consequence: the fixer for %s reported this file as one it "
+    "needed in order to finish the fix"
+)
+
+
+def _wave_certainly_ran(out_dir: str, attempt: int) -> bool:
+    """Did that attempt CERTAINLY dispatch a fixer wave?
+
+    The premise of `blocked_on_artifact_absent`, made checkable. That message
+    asserts a contract violation -- "SKILL.md requires this artifact" -- and it
+    was emitted whenever the file was missing, including on the run shape
+    `/premerge` is designed to reach. The order inside one attempt is review ->
+    plan -> gate -> fixers ONLY IF NOT GREEN, so the last attempt of every
+    successful run gates green and dispatches no wave; Phase 4c then re-plans at
+    `PREMERGE_ATTEMPT + 1` with `--carry-blocked` (the shared triage fence passes
+    it unconditionally) and the absent artifact was reported as a breach. A
+    warning that fires on the happy path teaches the operator to skip the token,
+    which costs it the one run where it is true.
+
+    THE ONLY SUFFICIENT CONDITION THIS MODULE CAN CHECK is that the attempt
+    recorded at least one blocker -- reviewer-raised OR carried. Either kind
+    guarantees `blockers_remaining=` was on the gate's reasons, so the gate
+    cannot have been green, and either kind is a wave member, so `_fix_waves`
+    produced a non-empty plan: both halves of "a wave went out". An attempt whose
+    evidence is absent or corrupt says nothing at all, and stays silent.
+
+    THE CARRIED HALF USED TO BE EXCLUDED HERE, on the premise that such an
+    attempt "may or may not have dispatched". That premise died with the carried
+    -row exclusion in `cmd_assert_green`: a carried row now gates exactly like a
+    reviewer's, which is the only way it reaches a fixer at all. Leaving the
+    exclusion behind would have kept the warning silent on the run shape where
+    the missing artifact is most diagnostic -- a wave dispatched at nothing but
+    cross-file consequences, which is precisely the wave whose `blocked_on_file`
+    returns nobody would otherwise notice were gone.
+
+    UNESTABLISHED MEANS SILENT, and that is the right direction for this
+    particular message and no other in this file. Every other refusal here fails
+    CLOSED because being wrong ships something unverified; this one changes no
+    decision at all -- the caller returns `([], 0)` either way -- so its entire
+    value is that an operator believes it. A missed warning costs a diagnosis; a
+    false one costs the token.
+    """
+    try:
+        document = _read_attempt(out_dir, attempt, required=False)
+    except Refusal:
+        return False
+    if document is None:
+        return False
+    return bool(document["blockers"])
+
+
+def _read_blocked_on(
+    out_dir: str, attempt: int, repo_root: str, findings: "list[dict]"
+) -> "tuple[list[dict], int]":
+    """Attempt N-1's `blocked_on_file` rows, as blocker findings.
+
+    EXACTLY ONE PREDECESSOR, NEVER A RANGE. `_carry_prior_suggestions` walks
+    `range(1, attempt)` because a suggestion is never fixed and must not be
+    lost. A blocked-on path is the opposite -- it widens the set of files a
+    fixer may edit -- so a union accumulated over every earlier attempt grows
+    monotonically and, by CONVERGE_REPAIR_CEILING, constrains nothing.
+
+    A ROW THAT FAILS VALIDATION IS DROPPED AND COUNTED, NEVER FATAL. Refusing
+    would cost the whole attempt over one malformed row an agent emitted --
+    the trade `_drop_unfilable` already declines. Dropping is also the
+    fail-CLOSED direction: a dropped path is a path no fixer may touch.
+
+    THE WHOLE ROW IS BUILT HERE, not by the caller, because every check that
+    makes a row publishable is a check that has to be able to DROP it. The
+    synthesised finding used to be assembled in `cmd_plan` after this function
+    returned, which put its two agent-derived strings outside the only region
+    that tolerates a bad one:
+
+      * `summary` interpolates `from_file`, which `_repo_path` admits at up to
+        MAX_PATH_CHARS. A 4000-character path therefore wrote a 4109-byte
+        summary into `classified-NN.json` -- valid nowhere, refused by nothing
+        until the Phase 5 `defer` called `_encode_aggregate` on it, exited 74
+        behind `|| exit 74`, and filed NOTHING: every surviving blocker, every
+        carried suggestion and every simplify-lens row, gone at the last step.
+        `cmd_plan` calls `_encode_aggregate` on the suggestion union for exactly
+        that reason and the synthesised rows were appended after it.
+      * `_repo_path` is lexical and has no control-character check at all, so a
+        `from_file` of `lib/\\x01a.sh` reached the summary, the fingerprint and
+        the deferred issue text intact. `_bounded_text` on the composed string
+        closes both halves at once, and closes them where a failure is a drop.
+
+    IT IS ALSO WHERE THE TWO GUARANTEES `_normalise_findings` GIVES THE
+    REVIEWER'S OWN ROWS ARE GIVEN TO THESE. That function refuses above
+    MAX_FINDINGS records and refuses a repeated `(file, line, normalised
+    summary)` triple; rows appended after it went through neither, so a
+    64-finding review plus 8 admitted paths wrote `counts.total = 72` and a wave
+    plan with more owners than the reviewer contract admits -- which `cmd_defer`
+    then truncated back to 64 at the FAR end, discarding rows instead of
+    refusing them at the near one. Both bounds are enforced here, in the
+    direction this function already stands for: displaced rows are dropped and
+    counted, never fatal.
+
+    EVERY DROP IS ANNOUNCED, and so is an absent artifact THAT A WAVE SHOULD
+    HAVE WRITTEN. `counts.blocked_on_*` lives in `classified.json`, which no
+    fence reads and no run summary renders, so a fully-refused artifact and an
+    empty one were the same observable state on the operator's line --
+    `BLOCKED=0` either way. Every sibling refusal in this module announces itself
+    with a stable token (`attempt_unreadable_skipped`,
+    `blocked_on_unreadable_skipped`, `repair_scope_unreadable`,
+    `attempt_fallback`); these two now do too. The absence message is gated on
+    `_wave_certainly_ran`, because it asserts a contract violation and the
+    commonest way to reach an absent artifact is an attempt that gated green and
+    therefore legitimately dispatched nobody.
+
+    Returns (synthesised blocker findings, dropped).
+    """
+    prior = attempt - 1
+    if prior < 1:
+        return [], 0
+    path = os.path.join(out_dir, "blocked-on-%02d.json" % prior)
+    if not os.path.exists(path):
+        # ANNOUNCED, because SKILL.md `### 2a` makes the artifact MANDATORY:
+        # "Write `"blocked_on": []` when the wave reported nothing, and do not
+        # skip the artifact -- an absent file and an empty array must never be
+        # the same observable state." Returning ([], 0) in silence made them
+        # exactly that, so a controller that forgot the hand-written JSON got a
+        # widening that no-oped and a `BLOCKED=0` indistinguishable from "the
+        # wave reported nothing to widen".
+        #
+        # Only reachable when the widening was actually REQUESTED: `cmd_plan`
+        # calls this function only under `--carry-blocked`, and an absent
+        # artifact on a run that never asked for one is legitimate.
+        if _wave_certainly_ran(out_dir, prior):
+            print(
+                "premerge-findings: blocked_on_artifact_absent: "
+                "%s is missing; SKILL.md requires it even when the wave reported "
+                "nothing, so nothing is widened from attempt %d" % (path, prior),
+                file=sys.stderr,
+            )
+        return [], 0
+    try:
+        document = _load(path)
+        if not isinstance(document, dict):
+            fail("blocked_on_schema_invalid", "the blocked-on artifact must be a JSON object")
+        if document.get("schema_version") != SCHEMA_VERSION:
+            fail("blocked_on_schema_invalid", f"schema_version must be {SCHEMA_VERSION}")
+        rows = document.get("blocked_on")
+        if not isinstance(rows, list):
+            fail("blocked_on_schema_invalid", "blocked_on must be a JSON array")
+    except Refusal as refusal:
+        # Announced, never silent, and never fatal -- same shape and same
+        # reasoning as `_carry_prior_suggestions`' tolerant arm.
+        print(
+            "premerge-findings: blocked_on_unreadable_skipped: "
+            f"attempt {prior} ({refusal.token}); no path is widened from it",
+            file=sys.stderr,
+        )
+        return [], 0
+
+    # Seeded with the files THIS attempt's reviewer blockers already own, so a
+    # path the reviewer named cannot gain a second owner in the wave plan.
+    seen: "set[str]" = {f["file"] for f in findings if f.get("severity") == "blocker"}
+    # And the uniqueness triple `_normalise_findings` refuses a repeat of, so a
+    # synthesised row cannot collide with a reviewer row on the very key that
+    # function calls a duplicate. Synthesised rows carry `line: None`, which is
+    # a real value in this key and not a wildcard.
+    keys = {
+        (f["file"], f["line"], _normalised_summary(f["summary"])) for f in findings
+    }
+    # The widening's own bound AND what is left of the document-wide cap,
+    # whichever is smaller. MAX_BLOCKED_ON alone let a full review overflow
+    # MAX_FINDINGS; MAX_FINDINGS alone would let one attempt widen by 63 paths.
+    cap = min(MAX_BLOCKED_ON, max(0, MAX_FINDINGS - len(findings)))
+
+    kept: "list[dict]" = []
+    # WHY a tally and not a bare count: "the artifact was written with absolute
+    # paths" and "the fixers deleted the files it names" are different operator
+    # actions, and both look like `BLOCKED=0` without it.
+    refused: "collections.Counter[str]" = collections.Counter()
+    for record in rows:
+        if not isinstance(record, dict):
+            refused["not_an_object"] += 1
+            continue
+        try:
+            target = _repo_path(record.get("file"))
+            origin = _repo_path(record.get("from_file"))
+            reason = _bounded_text(
+                record.get("reason"),
+                MAX_SUMMARY_BYTES,
+                "blocked_on_schema_invalid",
+                "blocked_on reason",
+            )
+            # BOUNDED HERE, where a failure is a drop -- see the docstring.
+            # `_bounded_text` rejects a control character in the composed string
+            # BEFORE it collapses whitespace, so the half of the check
+            # `_repo_path` does not do reaches `from_file` through this call.
+            summary = _bounded_text(
+                _BLOCKED_ON_SUMMARY % origin,
+                MAX_SUMMARY_BYTES,
+                "blocked_on_schema_invalid",
+                "blocked_on summary",
+            )
+            # The reporting attempt lives here and nowhere else: of the three
+            # strings this row carries, `failure_scenario` is the one no
+            # identity is derived from -- not `_fingerprint` below, and not the
+            # filer's `path:line:normalised_summary` member key -- which is what
+            # lets the summary above stay identical across attempts. See
+            # `_BLOCKED_ON_SUMMARY` for who still depends on that stability, and
+            # for why the consumer that comment originally named is not it.
+            detail = _bounded_text(
+                "attempt %d's fixer for %s reported: %s" % (prior, origin, reason),
+                MAX_DETAIL_BYTES,
+                "blocked_on_schema_invalid",
+                "blocked_on failure_scenario",
+            )
+        except Refusal:
+            refused["invalid_field"] += 1
+            continue
+        # The wave prompt pastes finding objects VERBATIM into an
+        # `<external-untrusted-input>` envelope with no encoder between them,
+        # so a row carrying the tag's own name could close the envelope early
+        # and read as the controller's words. `_canonical_json` solves this for
+        # the aggregate by escaping the markup characters; here the row is
+        # dropped, because nothing downstream re-encodes it.
+        #
+        # ALL THREE reachable strings are checked, not the reason alone.
+        # `target` is the value the AGENT chose and it lands verbatim in the
+        # synthesised finding's `file`; `origin` lands inside the
+        # controller-authored `summary`. Checking one of the three would leave
+        # the most agent-controlled of them unchecked, which is the direction
+        # this drop exists to close.
+        if any(
+            "external-untrusted-input" in value.casefold()
+            for value in (reason, origin, target)
+        ):
+            refused["envelope_tag"] += 1
+            continue
+        if not _beneath_repo_root(repo_root, target):
+            refused["outside_repo_root"] += 1
+            continue
+        # It must already exist. A widened path that does not is a path no
+        # commit could carry anyway -- the fix commit fence refuses on
+        # untracked files -- so admitting one only grows the allowed set.
+        #
+        # It also closes the separator injection: the allowed set is derived
+        # NEWLINE-separated by `jq -r`, and a `file` carrying an embedded
+        # newline would split into two entries. No such file exists on disk, so
+        # the row dies here.
+        if not os.path.isfile(os.path.join(repo_root, target)):
+            refused["absent_file"] += 1
+            continue
+        if target in seen:
+            refused["already_owned"] += 1
+            continue
+        key = (target, None, _normalised_summary(summary))
+        if key in keys:
+            refused["duplicate_finding"] += 1
+            continue
+        if len(kept) >= cap:
+            refused["over_cap"] += 1
+            continue
+        seen.add(target)
+        keys.add(key)
+        kept.append(
+            {
+                # After every reviewer finding, so `_fix_waves`'
+                # first-appearance ordering puts the reviewer's own blockers in
+                # the earlier waves.
+                "rank": len(findings) + len(kept) + 1,
+                "file": target,
+                # NEVER A LINE. The consequence was observed at coordinates
+                # other wave members have already moved; the reason survives a
+                # rewrite and a line number does not.
+                "line": None,
+                "summary": summary,
+                "failure_scenario": detail,
+                "category": None,
+                "verdict": None,
+                # KEPT ON PURPOSE THOUGH NOTHING READS IT. `_reviewer_blockers`
+                # drops this row before `_blocker_fingerprints` validates
+                # identities and before `_growth_ratio` measures, and
+                # `_encode_aggregate` publishes no `fingerprint` key at all, so
+                # neither a consumer nor a validator ever sees this value. It
+                # stays for SCHEMA UNIFORMITY with reviewer rows -- whole rows
+                # are pasted verbatim into the fixer wave prompt -- and because
+                # dropping it would change the bytes of `classified-NN.json` and
+                # `fix-waves-NN.json` for a value no decision depends on.
+                "fingerprint": _fingerprint(target, summary),
+                "severity": "blocker",
+                "severity_source": "controller",
+                # THE MARKER FOR "THIS ROW IS THE LOOP'S OWN BOOKKEEPING", AND
+                # IT HAS FOUR READERS, NOT ONE. No reviewer reported this row
+                # and the previous repair did not write it -- the loop is
+                # carrying its own scheduling note forward, and by construction
+                # it names a file that repair did NOT modify. Every reader goes
+                # through `_is_carried`, three of them via `_reviewer_blockers`;
+                # the evidence-versus-work line that decides which way each one
+                # falls is documented above that predicate. The four, and what
+                # each one does:
+                #
+                #   1. `_growth_ratio` -- excluded from BOTH sides. It can never
+                #      enter the numerator (the file is not in the measured
+                #      repair scope), and in the denominator it only dilutes:
+                #      three genuinely self-referential blockers plus three
+                #      carried consequences measured 0.50 instead of 1.00, and
+                #      the suppression is largest on the runs with the most
+                #      cross-file churn -- the runs the detector exists for.
+                #   2. `_blocker_fingerprints` -- excluded from the progress
+                #      multisets, so a carried row can no longer read as
+                #      `FIXED=1 NEW=1` on a round that repaired nothing, which
+                #      is what made STOP_NO_PROGRESS and STOP_REGRESSED
+                #      structurally unreachable.
+                #   3. `cmd_defer` -- `_as_deferred_carry_row` demotes the row to
+                #      cleanup tier, so a stranded consequence is still filed but
+                #      never outranks a proven defect at the filer's `max_new`
+                #      cap.
+                #   4. `cmd_plan` -- excluded from `counts.blocker_reviewer`, the
+                #      field that names the reviewer-raised population instead of
+                #      leaving an operator to subtract `BLOCKED=` from
+                #      `BLOCKER=`. The only one of the four that decides nothing;
+                #      it is routed through the same filter so it cannot answer
+                #      differently from the two that do.
+                #
+                # WHAT IT DOES NOT TOUCH: `_fix_waves` still plans this row and
+                # `assert-green` still counts it into `blockers_remaining=`. An
+                # additive key, so a pre-loop artifact that lacks it reads
+                # exactly as it did.
+                "blocked_on_carry": True,
+            }
+        )
+    dropped = sum(refused.values())
+    if dropped:
+        print(
+            "premerge-findings: blocked_on_rows_dropped: "
+            "attempt %d: %d of %d rows dropped (%s); %d path(s) widened"
+            % (
+                prior,
+                dropped,
+                len(rows),
+                ",".join("%s=%d" % item for item in sorted(refused.items())),
+                len(kept),
+            ),
+            file=sys.stderr,
+        )
+    return kept, dropped
 
 
 # The tag that fronts an unhashable field's stand-in. A one-off object, so the
@@ -1115,6 +1725,248 @@ def _union_suggestions(base: "list[dict]", carried: "list[dict]") -> "list[dict]
             seen.add(key)
             out.append(record)
     return out
+
+
+def _repair_scope_path(run_dir: str, attempt: int) -> str:
+    return os.path.join(run_dir, "fix-scope-%02d.modified" % attempt)
+
+
+def _scope_key(value: object) -> "str | None":
+    """The ONE form both sides of the GROWTH membership test are compared in.
+
+    ONE FUNCTION BECAUSE ONE COMPARISON. `_read_repair_scope` builds the set and
+    `_growth_ratio` looks paths up in it, and the two used different derivations:
+    the set stripped every line, the lookup passed the finding's `file` through
+    `_repo_path`, which trims nothing. A repaired path with surrounding
+    whitespace -- `git diff --name-only` prints a tracked path verbatim -- was
+    therefore stored trimmed and looked up untrimmed, the membership test missed,
+    and the blocker dropped out of the NUMERATOR while staying in the
+    denominator. GROWTH under-reports, a genuinely self-referential round falls
+    below CONVERGE_GROWTH_CEILING and never starts a streak: a fail-OPEN in the
+    one detector whose entire job is to notice the pump. Two derivations of one
+    key cannot be kept in agreement by a comment, so there is one.
+
+    IT REFUSES NOTHING, and that is deliberate rather than lax. Its only caller
+    on the findings side is `_growth_ratio`, which runs inside `cmd_converge` --
+    the one place in this module where failing closed is WRONG (see
+    `_read_repair_scope`'s docstring: a refusal there stops a loop that is
+    working, RFC 0021 A3 C3). `_repo_path` used to be that caller, and it raises
+    `finding_schema_invalid` on an absolute, back-slashed or non-normalised path;
+    `_read_attempt` validates `schema_version`, the two arrays, `pr_number` and
+    `run_id` and never a blocker's `file`, so one hand-edited or resumed-run
+    artifact turned the DECISION step into exit 74 and killed the run. A path
+    this cannot key is simply not in the scope set -- `git diff --name-only`
+    emits neither shape -- so it is excluded from the numerator, which is the
+    same answer the refusal would have produced minus the crash.
+    """
+    if not isinstance(value, str):
+        return None
+    entry = value.strip()
+    return entry or None
+
+
+def _read_repair_scope(run_dir: str, attempt: int) -> "frozenset[str] | None":
+    """The repo-relative files that attempt's repair modified, or None.
+
+    None means NOT MEASURED, and it is a different answer from the empty set.
+    The fix-commit fence publishes `fix-scope-<NN>.modified` only on an attempt
+    that actually committed and pushed edits -- it exits early with
+    `REASON=no-edits` otherwise. There is then no repair to attribute this
+    attempt's findings to, and printing 0.00 for it would be a measurement
+    nobody took.
+
+    A COMMITTED-NOTHING REPAIR IS NOT THE ONLY UNMEASURED CASE, AND SAYING SO
+    WAS FALSE. SKILL.md `## Phase 3`'s CI-repair fence has an `arm=commit` path
+    that dispatches `ci-code-fixer`, validates its diff against
+    `ci-scope-<NN>.allowed`, and PUSHES -- a real repair, with real code edits.
+    It publishes `ci-scope-<NN>.*` and nothing else: no `fix-scope-<NN>.modified`
+    exists on that path, so the next attempt reads None here and prints
+    `GROWTH=-`. A loop whose repairs run through the CI arm therefore cannot
+    accumulate two consecutive eligible rounds, and STOP_SELF_REFERENTIAL is
+    unreachable for it. This is not hypothetical: the `/premerge` run that
+    surfaced it took exactly that path at attempt 1.
+
+    Reading `ci-scope-<NN>.changed` here would NOT close it honestly. That file
+    is written BEFORE the scope comparison and before the push, and the whole
+    point of the `.pending` -> `.modified` rename at the end of the fix-commit
+    fence is that only a PUSHED repair may claim a scope. Attributing this
+    attempt's findings to edits that may never have left the machine trades one
+    wrong measurement for another. The half that closes it is a durable publish
+    in the CI fence itself -- SKILL.md, not this file -- and until that lands the
+    honest report is `-`, which stops nothing.
+
+    NOT FAIL-CLOSED, AND THIS IS THE ONE PLACE IN THIS MODULE WHERE THAT IS
+    RIGHT. Every other refusal here stops a loop that might otherwise ship
+    something unverified. This one would stop a loop that is WORKING, which is
+    the failure RFC 0021 A3 C3 names outright. An unmeasurable ratio is
+    reported as `-`, is visible on the line and in the summary, and changes no
+    decision. An OSError on a file that IS present degrades the same way but
+    announces itself with a token, the way `_carry_prior_suggestions` already
+    announces a skipped attempt.
+    """
+    target = _repair_scope_path(run_dir, attempt)
+    if not os.path.exists(target):
+        return None
+    try:
+        with open(target, "rb") as handle:
+            raw = handle.read()
+    except OSError as exc:
+        print(
+            "premerge-findings: repair_scope_unreadable: "
+            f"{target} ({exc}); this attempt's GROWTH is not measured",
+            file=sys.stderr,
+        )
+        return None
+    # Through `_scope_key`, which is also what the lookup side runs -- see its
+    # docstring for the drop this closes.
+    paths = set()
+    for line in raw.decode("utf-8", "replace").splitlines():
+        entry = _scope_key(line)
+        if entry is not None:
+            paths.add(entry)
+    return frozenset(paths)
+
+
+def _growth_ratio(
+    document: "dict",
+    previous_prints: "collections.Counter[str] | None",
+    scope: "frozenset[str] | None",
+) -> "float | None":
+    """What fraction of this attempt's blockers the previous repair authored.
+
+    numerator   -- blockers whose `file` is in `scope` AND whose fingerprint
+                   the previous attempt's evidence did not carry.
+    denominator -- every blocker in this attempt's evidence that a REVIEWER
+                   raised. That is the number `converge` prints as `BLOCKERS=`
+                   -- the identity SKILL.md `## Phase 3b` asserts -- and it is
+                   the TRIAGE line's `BLOCKER=` minus its `BLOCKED=`, which is
+                   also written down as `counts.blocker_reviewer`. Two blocker
+                   populations, and this is the reviewer-raised one; see the
+                   carried-row exclusion below.
+
+    THE CARRIED-ROW EXCLUSION. `_read_blocked_on` turns the previous attempt's
+    `blocked_on_file` returns into blocker findings, stamped
+    `blocked_on_carry: True`. A path is reported that way precisely BECAUSE the
+    previous fixer could not edit it, so it is never in
+    `fix-scope-<N-1>.modified` and can never enter the numerator -- while, left
+    in the denominator, it dilutes the ratio on every round. Three genuinely
+    self-referential blockers alongside three carried consequences measured
+    0.50 where the honest answer is 1.00, and MAX_BLOCKED_ON lets one attempt
+    add eight such rows. The suppression is largest on the runs with the most
+    cross-file churn, which are exactly the runs STOP_SELF_REFERENTIAL exists
+    for, and two suppressed rounds in a row is all it takes for it never to
+    fire. So a carried row counts on NEITHER side: it is not the reviewer's
+    finding and it is not work the previous repair authored.
+
+    THE FINGERPRINT EXCLUSION IS NOT AN OPTIMISATION. The wave plan assigns
+    exactly the files this attempt's blockers named, so a SURVIVOR -- a blocker
+    the fixer was assigned and did not clear -- is by construction sitting in a
+    file the repair touched. Counted, it would make a converging loop with
+    residual findings measure 1.00 and stop on its own success. Excluded, the
+    numerator is a strict subset of the `NEW=` count already on the output
+    line, which is also what makes that line internally checkable.
+
+    DELIBERATELY THE COARSE PROXY. The precise question is "did this finding
+    land in text the previous repair WROTE", which needs diff-hunk mapping
+    nothing produces today (RFC 0021 A3 C8: the reviewer cannot be pointed at a
+    two-SHA range). File membership over-counts -- a new finding elsewhere in a
+    touched file counts -- so it errs toward stopping, which is precisely why
+    CONVERGE_GROWTH_RUNS requires two consecutive rounds rather than one.
+
+    IT MEASURES COMPOSITION, NOT DIRECTION -- WHICH IS WHY IT IS NOT ON ITS OWN
+    A STOP. The denominator is this attempt's RESIDUAL, so it shrinks as the
+    loop succeeds while the numerator is dominated by whatever the reviewer
+    newly sampled -- and the reviewer resamples the repaired file by
+    construction. A run that cleared 4 of 5 blockers and came back with one
+    survivor plus one new finding in the file it just fixed measures 0.50 on a
+    round that halved the stack, and 5 -> 2 -> 2 measured 0.50 twice and stopped
+    with three of five repair rounds unspent. That is C3's failure with the
+    ratio's own name on it. `_growth_round_counts` is where the direction of
+    travel is put back: the ratio stays exactly what it says it is, and a round
+    that REDUCED the reviewer-raised blocker count is not eligible to be half of
+    a divergence streak.
+
+    None when the ratio is undefined: no previous attempt, no measured repair
+    scope, or no reviewer-raised blocker to divide by.
+    """
+    if scope is None or previous_prints is None:
+        return None
+    grown = 0
+    measured = 0
+    for finding in _reviewer_blockers(document["blockers"]):
+        if not isinstance(finding, dict):
+            fail("finding_schema_invalid", "a blocker is not an object")
+        measured += 1
+        # `_scope_key`, NOT `_repo_path`. Both sides of this test have to be
+        # derived the same way or a padded path silently leaves the numerator,
+        # and `_repo_path` REFUSES rather than answering -- exit 74 out of the
+        # loop's decision step, on a `file` value nothing between here and
+        # `_read_attempt` has validated. Its docstring covers both halves.
+        if _scope_key(finding.get("file")) not in scope:
+            continue
+        if finding.get("fingerprint") in previous_prints:
+            continue
+        grown += 1
+    if not measured:
+        return None
+    # ROUNDED BEFORE THE COMPARISON, not after. The threshold test below uses
+    # the same two-decimal value the line prints, so an operator reading
+    # `GROWTH=0.50` and the decision the run took can never disagree.
+    return round(grown / measured, 2)
+
+
+def _growth_round_counts(
+    growth: object, blockers: object, previous_blockers: object
+) -> bool:
+    """Is this ONE round eligible to be half of a STOP_SELF_REFERENTIAL streak?
+
+    Two conditions, and the second is the one #765 shipped without.
+
+    AT OR ABOVE THE CEILING. `>=`, against the same rounded value the line
+    prints, so an operator reading `GROWTH=0.50` and the decision the run took
+    can never disagree.
+
+    AND THE ROUND DID NOT REDUCE THE REVIEWER-RAISED BLOCKER COUNT. `GROWTH=`
+    answers "what is the residual MADE OF", never "which way is this going", and
+    those two questions come apart in one specific direction: the denominator is
+    the residual, so it shrinks as the loop succeeds, while the numerator counts
+    findings the reviewer newly sampled in the file the repair just touched --
+    which is the file it was always most likely to resample. The ratio therefore
+    RISES toward 1.00 precisely as a run converges. Reproduced against the
+    shipped module with `--max-repairs 5`: 5 blockers, then 4 cleared leaving one
+    survivor and one new (0.50), then one more cleared leaving one survivor and
+    one new (0.50) -- STOP_SELF_REFERENTIAL and exit 1 on a loop that went
+    5 -> 2 -> 2, with three of five repair rounds unspent. CONVERGE_GROWTH_RUNS
+    does not mitigate it, because at n=2 a single new finding in a repaired file
+    IS 0.50, twice running.
+
+    A round that removed more of the reviewer's blockers than it was left
+    holding is a round in which repairing demonstrably worked, whatever the
+    residual is made of, and RFC 0021 A3 C3 is explicit that stopping such a
+    loop is the worse error. So it is not eligible; the ratio is still measured,
+    still printed and still recorded, and a genuine pump -- which by definition
+    is not reducing the count -- reaches the ceiling on consecutive eligible
+    rounds exactly as before.
+
+    THE INPUTS ARE THE LEDGER'S OWN COLUMNS, so the previous round is judged by
+    the same predicate as this one with no new key and no fence to thread it
+    through: `converge.jsonl` already records `growth`, `blockers` and
+    `previous_blockers` per attempt. Every value is type-checked because a
+    hand-edited or truncated ledger is JSON, not a contract -- `blockers >= None`
+    is a TypeError, and `bool` is an `int` in Python, so both are rejected
+    explicitly. Anything unreadable is NOT eligible, which is the fail-safe
+    direction here: the failure this guard exists to prevent is stopping a loop
+    that was working.
+    """
+    if not isinstance(growth, (int, float)) or isinstance(growth, bool):
+        return False
+    if growth < CONVERGE_GROWTH_CEILING:
+        return False
+    if not isinstance(blockers, int) or isinstance(blockers, bool):
+        return False
+    if not isinstance(previous_blockers, int) or isinstance(previous_blockers, bool):
+        return False
+    return blockers >= previous_blockers
 
 
 def _converge_ledger(run_dir: str) -> str:
@@ -1436,6 +2288,38 @@ def cmd_plan(args: argparse.Namespace) -> int:
     # beats being saved by a ranking accident at the end of the run.
     _encode_aggregate(_drop_unfilable(union)[0], pr_number, run_id, allow_blockers=True)
 
+    # THE WIDENING GOES THROUGH `_fix_waves`, NOT AROUND THE SCOPE GUARD.
+    #
+    # The fix-commit fence derives the committable set solely from
+    # `jq -r '.waves[][].file' fix-waves-<NN>.json`. Widening THAT from
+    # agent-returned text would make a path committable while no agent owns it,
+    # and two agents in the next wave could then edit it concurrently against
+    # one un-isolated worktree with the disjointness guard silent. Feeding the
+    # paths in here instead makes each one a first-class wave member with
+    # exactly one owner, and leaves the guard's derivation untouched.
+    if args.carry_blocked and not args.repo_root:
+        fail(
+            "blocked_on_root_missing",
+            "--carry-blocked requires --repo-root: containment is a filesystem check",
+        )
+    # THE ROWS ARRIVE FULLY FORMED AND FULLY CHECKED -- see `_read_blocked_on`.
+    # Assembling them here, after `_normalise_findings` and after the
+    # `_encode_aggregate` validation above, is what let an over-long or
+    # control-charactered `from_file` write a summary into `classified.json`
+    # that only detonated at the Phase 5 `defer`, and what let the widening
+    # push the document past MAX_FINDINGS and past the uniqueness key. Both
+    # bounds now belong to the reader, where a violation is a counted drop
+    # rather than a dead attempt.
+    synthesised, blocked_dropped = (
+        _read_blocked_on(out_dir, attempt, args.repo_root, findings)
+        if args.carry_blocked
+        else ([], 0)
+    )
+    # Both lists, so `counts.total`, `counts.blocker` and `counts.category_backed`
+    # keep describing the same population the artifact actually holds.
+    findings = findings + synthesised
+    blockers = blockers + synthesised
+
     classified = {
         "schema_version": SCHEMA_VERSION,
         "attempt": attempt,
@@ -1450,6 +2334,40 @@ def cmd_plan(args: argparse.Namespace) -> int:
         "counts": {
             "total": len(findings),
             "blocker": len(blockers),
+            # THE OTHER BLOCKER POPULATION, NAMED RATHER THAN INFERRED.
+            #
+            # `blocker` above is every row in the `blockers` array: the
+            # reviewer's findings PLUS the cross-file consequences the previous
+            # attempt's fixers reported. That is the population `_fix_waves`
+            # plans and `assert-green` counts into `blockers_remaining=`, and it
+            # is what `PREMERGE_TRIAGE BLOCKER=` prints -- so `total = blocker +
+            # suggestion` stays true and no field anyone parses changes meaning.
+            #
+            # It is NOT the population the loop's other three blocker numbers
+            # measure. `converge`'s `BLOCKERS=`, the `GROWTH=` denominator
+            # (SKILL.md `## Phase 3b` calls these two the same number, and they
+            # are) and `defer`'s `BLOCKER=` all count REVIEWER-RAISED blockers
+            # only, because a carried row is the loop's own bookkeeping and
+            # counting it as progress manufactures churn -- see
+            # `_blocker_fingerprints`. Two different questions, two different
+            # numbers, and an operator who reads `BLOCKER=1` on one line and
+            # `BLOCKERS=0` on the next deserves better than arithmetic on
+            # `BLOCKED=` to reconcile them. This key is that number, written
+            # down.
+            #
+            # IT IS WRITTEN FOR A HUMAN, NOT FOR A CHECKER. A repo-wide search
+            # finds one writer -- this line -- and no reader: no fence, no test
+            # and no agent parses it, and the loop's own progress arithmetic
+            # runs off `_blocker_fingerprints` and `_growth_ratio` instead. It
+            # still equals `blocker - blocked_on_admitted` by construction, so
+            # the three counts in this object can be reconciled by eye; nothing
+            # reconciles them automatically, and calling that self-checking
+            # overstates it.
+            #
+            # DERIVED THROUGH THE SAME FILTER THE OTHER TWO USE, not by
+            # subtracting `len(synthesised)` -- see `_reviewer_blockers` for the
+            # document shape on which the subtraction and the filter disagree.
+            "blocker_reviewer": len(_reviewer_blockers(blockers)),
             "suggestion": len(suggestions),
             # How many severities were machine-checked rather than judged. The
             # run summary prints this so an operator can see at a glance whether
@@ -1461,6 +2379,20 @@ def cmd_plan(args: argparse.Namespace) -> int:
             # "we filed 9 suggestions" can be told apart from "this review found
             # 9 suggestions" -- under a loop those are different numbers.
             "suggestion_carried": carried_count,
+            # How many paths this attempt's wave plan gained from the PREVIOUS
+            # attempt's `blocked_on_file` returns, and how many rows were
+            # refused by validation or displaced by a cap -- MAX_BLOCKED_ON, or
+            # whatever is left of MAX_FINDINGS -- on the way in. Reported so
+            # "the reviewer found 3 blockers" can be told apart from "the
+            # reviewer found 1 and the loop carried 2 cross-file consequences".
+            #
+            # NEITHER NUMBER IS THE OPERATOR'S ONLY NOTICE ANY MORE. This file
+            # is read by no fence and rendered by no run summary, so a fully
+            # refused artifact looked exactly like an empty one; every drop is
+            # now also announced on stderr with its own token. See
+            # `_read_blocked_on`.
+            "blocked_on_admitted": len(synthesised),
+            "blocked_on_dropped": blocked_dropped,
         },
         "blockers": blockers,
         "suggestions": suggestions,
@@ -1530,9 +2462,22 @@ def cmd_plan(args: argparse.Namespace) -> int:
     #
     # The first five fields are a pinned prefix (tests/premerge-findings.test.sh
     # matches on it): append, never reorder or insert.
+    #
+    # `BLOCKER=` IS THE ARTIFACT'S BLOCKER ARRAY, CARRIED ROWS INCLUDED, and it
+    # is deliberately not redefined to the reviewer-only count. `TOTAL = BLOCKER
+    # + SUGGESTION` is an invariant of this line, `counts.blocker` describes the
+    # population `classified.json` actually holds, and `assert-green` counts the
+    # same rows into `blockers_remaining=` -- so this line and the gate agree.
+    # `converge`'s `BLOCKERS=`, the `GROWTH=` denominator and `defer`'s
+    # `BLOCKER=` count reviewer-raised blockers ONLY; the difference between the
+    # two populations is exactly `BLOCKED=`, three fields along, and it is also
+    # written out as `counts.blocker_reviewer` for a reader who should not have
+    # to do the subtraction. Redefining `BLOCKER=` in place would have moved the
+    # divergence rather than documented it, under a field the Phase 5 fence and
+    # the run summary both parse.
     print(
         "PREMERGE_TRIAGE TOTAL=%d BLOCKER=%d SUGGESTION=%d WAVES=%d CATEGORY_BACKED=%d"
-        " ATTEMPT=%d CARRIED=%d"
+        " ATTEMPT=%d CARRIED=%d BLOCKED=%d"
         % (
             len(findings),
             len(blockers),
@@ -1541,6 +2486,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
             classified["counts"]["category_backed"],
             attempt,
             carried_count,
+            len(synthesised),
         )
     )
     return 0
@@ -1559,9 +2505,61 @@ def cmd_assert_green(args: argparse.Namespace) -> int:
     if not isinstance(blockers, list):
         fail("input_schema_invalid", "classified.json has no blockers array")
 
+    # CARRIED ROWS DO GATE, AND THIS IS THE ONE PLACE THEY MAY.
+    #
+    # A `blocked_on_carry` row is not a defect anyone reported -- it is the loop
+    # telling itself which extra file the NEXT fixer wave has to touch -- so it
+    # is inert for every question about PROGRESS: `_blocker_fingerprints` skips
+    # it, so it never inflates `BLOCKERS=`, `FIXED=`, `NEW=` or the
+    # STOP_NO_PROGRESS/STOP_REGRESSED multisets, and `_growth_ratio` skips it on
+    # both sides. Nothing below changes any of that. What it IS is an edit the
+    # run has not made yet, and this gate's question is not "did the reviewer
+    # find something" but "is this stack finished". It is not.
+    #
+    # EXCLUDING IT HERE LOSES THE WORK OUTRIGHT, which is why the exclusion is
+    # gone. Reproduced end to end against the shipped module: attempt 1 with one
+    # reviewer blocker in tests/premerge.test.sh, a `blocked_on_file` naming
+    # tests/goal.test.sh, attempt 2 with an empty reviewer findings array.
+    # `plan --carry-blocked` printed `BLOCKED=1` and wrote
+    # `fix-waves-02.json = [[tests/goal.test.sh]]`, and this gate answered
+    # `VERDICT=green REASONS=none` -- so `converge` said STOP_GREEN, that wave
+    # was never dispatched, Phase 5 ran with `PREMERGE_SURVIVORS=0`, and the
+    # consequence was discarded without a word. That is exactly the run shape
+    # SKILL.md `## Phase 2` advertises as the widening's payoff ("a `BLOCKED=`
+    # above zero on a run whose reviewer found nothing new is the loop finishing
+    # a cross-file fix"), so the feature was a no-op in precisely its own case.
+    #
+    # `blockers_remaining=` IS THE ONLY ROUTE TO A FIXER WAVE. SKILL.md `### 3c`
+    # dispatches the Phase 2a waves on that term and on no other, and a term it
+    # has never heard of is a STOP_UNREADABLE rather than a wave (see
+    # `GATE_REASONS_ROUTABLE`). So a carried row that does not land in this count
+    # cannot reach a fixer at all, and there is no second token to give it.
+    #
+    # THE COUNT IS NOT WHAT THE STOP CONDITIONS READ. `cmd_converge` strips every
+    # `blockers_remaining=` term out of `other` before routing precisely because
+    # the fingerprint multisets say the same thing more exactly -- so widening
+    # this number back out feeds the wave dispatch and feeds NOTHING that decides
+    # whether the loop has stalled. The two populations stay separate: this
+    # number is "edits the stack still needs", `BLOCKERS=` is "defects the
+    # reviewer raised", and `BLOCKED=` on the triage line is exactly the
+    # difference.
+    #
+    # AND IT STAYS BOUNDED. An attempt whose blockers are ALL carried has an
+    # empty reviewer multiset, so a second such attempt in a row is
+    # `current_prints == previous_prints` with an unchanged `other` --
+    # STOP_NO_PROGRESS, a not-green stop that hands Phase 5
+    # `--include-blockers`, where `cmd_defer` files the outstanding carried rows
+    # rather than dropping them. One round of chasing a cross-file chain, then a
+    # stop that loses nothing. The label is the loop's least precise, and a
+    # carried-set-changed escape from it is exactly the phantom churn
+    # `_BLOCKED_ON_SUMMARY` documents: b, c, b, c forever.
+    #
+    # Still FAIL-CLOSED on anything unreadable: every row counts here, so a
+    # non-object row cannot make this gate answer green.
     reasons = []
-    if blockers:
-        reasons.append("blockers_remaining=%d" % len(blockers))
+    remaining = len(blockers)
+    if remaining:
+        reasons.append("blockers_remaining=%d" % remaining)
 
     # ---- is this evidence about the code that is on the branch RIGHT NOW? ----
     # A refused re-plan (a >64-finding review, a finding the reviewer emitted
@@ -1673,7 +2671,16 @@ def cmd_defer(args: argparse.Namespace) -> int:
     for candidate in range(attempt, 0, -1):
         try:
             document = _read_attempt(run_dir, candidate, required=False)
-        except Refusal:
+        except Refusal as refusal:
+            # NAMED, not merely stepped over. `fail` no longer prints, so an
+            # unannounced absorption here would lose the only statement of WHY
+            # an attempt was unusable -- and `attempt_fallback` below reports
+            # the outcome, never the cause.
+            print(
+                "premerge-findings: attempt_unreadable_skipped: "
+                f"attempt {candidate} ({refusal.token}); it is not deferred from",
+                file=sys.stderr,
+            )
             document = None
         if document is not None:
             defer_attempt = candidate
@@ -1714,7 +2721,41 @@ def cmd_defer(args: argparse.Namespace) -> int:
     )
 
     if args.include_blockers:
-        rows.extend(_object_rows(document["blockers"], "blocker"))
+        # CARRIED ROWS ARE DEFERRED, AT CLEANUP TIER. This is the loop's LAST
+        # exit for one, and dropping it here is what made the widening lossy.
+        #
+        # A `blocked_on_carry` row reaching this verb is a file some fixer said
+        # it needed and that no wave ever got to: the run stopped not-green with
+        # the edit still outstanding. That is the definition of "a thing the
+        # machine could not fix", so it belongs in the aggregate. Skipping it
+        # discarded it silently -- the gate above is the loop's first mechanism
+        # for keeping it (it routes the row to a fixer wave), and this is the
+        # second, for the runs where the budget ran out before a wave could.
+        #
+        # IT IS FILED AS A SUGGESTION, NEVER A BLOCKER, and that is the half of
+        # the old exclusion worth keeping. No reviewer raised it, it names no
+        # line and its summary states a scheduling fact; at blocker tier it
+        # opened a BLOCKER-tier issue describing no defect, carrying the
+        # `Blocks: #<stack-pr>` backref `findings-to-issues` gives a real
+        # surviving blocker, and `severity_rank(blocker)=3` sorted it ABOVE
+        # every cleanup row, so up to MAX_BLOCKED_ON of them displaced real
+        # findings from the filer's `max_new` cap. Cleanup tier keeps the
+        # follow-up without either claim: it does not outrank a proven defect,
+        # and `PREMERGE_DEFER BLOCKER=` keeps meaning "reviewer-raised blockers
+        # this run could not clear" -- the same population `converge`'s
+        # `BLOCKERS=` and the GROWTH denominator measure, and the one the Phase 5
+        # fence's `CLASS=` arms branch on.
+        #
+        # A COPY, NEVER THE STORED ROW. `document` is re-read per invocation, so
+        # mutating in place would be invisible today -- and it would also make
+        # this verb's answer depend on how many times it had run.
+        #
+        # `_object_rows` still runs over the whole array, so a stored row that
+        # is not an object refuses here exactly as it always did.
+        rows.extend(
+            _as_deferred_carry_row(row) if _is_carried(row) else row
+            for row in _object_rows(document["blockers"], "blocker")
+        )
 
     if args.lens_findings is not None:
         rows.extend(_normalise_lens_findings(_load(args.lens_findings)))
@@ -1985,6 +3026,14 @@ def cmd_converge(args: argparse.Namespace) -> int:
     current_prints = _blocker_fingerprints(current)
     previous_prints = _blocker_fingerprints(previous) if previous is not None else None
 
+    # The self-referential-growth measurement, from artifacts the run already
+    # wrote: this attempt's `classified-NN.json` (already loaded above) and the
+    # previous attempt's `fix-scope-NN.modified` (already written by the commit
+    # fence, already inside --run-dir). No new argument, no new fence, no new
+    # phase.
+    repair_scope = _read_repair_scope(run_dir, attempt - 1) if attempt > 1 else None
+    growth = _growth_ratio(current, previous_prints, repair_scope)
+
     current_total = sum(current_prints.values())
     if previous_prints is None:
         previous_total = None
@@ -2025,6 +3074,25 @@ def cmd_converge(args: argparse.Namespace) -> int:
         frozenset(last_row.get("reasons_other") or []) if isinstance(last_row, dict) else None
     )
 
+    # WARN, THEN STOP. One round at or above the ceiling is consistent with a
+    # convergence whose repairs are concentrated in a few files; it is printed
+    # and recorded and changes nothing. The stop needs CONVERGE_GROWTH_RUNS
+    # consecutive ELIGIBLE rounds, read off the previous attempt's own ledger
+    # row rather than carried in a variable a fence could forget -- the same
+    # reasoning `_count_wait_rows` is built on.
+    #
+    # ELIGIBLE, not merely measured: `_growth_round_counts` holds both halves of
+    # the test, and it is called with THIS round's numbers and then with the
+    # previous round's own ledger columns, so the two rounds are judged by one
+    # predicate rather than by two hand-kept copies of it.
+    growth_streak = _growth_round_counts(
+        growth, current_total, previous_total
+    ) and _growth_round_counts(
+        last_row.get("growth") if isinstance(last_row, dict) else None,
+        last_row.get("blockers") if isinstance(last_row, dict) else None,
+        last_row.get("previous_blockers") if isinstance(last_row, dict) else None,
+    )
+
     # Every gate term this loop has no route for: `stale_evidence`, which is
     # unrepairable by definition, plus anything a fence invented that
     # GATE_REASONS_ROUTABLE has never heard of -- `gate_unreadable` above all,
@@ -2062,6 +3130,18 @@ def cmd_converge(args: argparse.Namespace) -> int:
         and other == previous_other
     ):
         decision = "STOP_NO_PROGRESS"
+    elif growth_streak:
+        # Two rounds running, most of what the reviewer returned did not exist
+        # before the loop's own repairs wrote it. Stopping ABOVE the budget
+        # check on purpose: "the loop was still winning, raise --converge" and
+        # "the loop was reviewing itself" are opposite operator responses, and
+        # STOP_EXHAUSTED says the first about a run that did the second.
+        #
+        # These findings are not discarded. This is a not-green stop, so the
+        # controller runs Phase 5 with PREMERGE_SURVIVORS=1 and `defer` gets
+        # --include-blockers: every surviving blocker becomes an issue. The
+        # claim is "not THIS loop's work", never "not work".
+        decision = "STOP_SELF_REFERENTIAL"
     elif attempt > max_repairs:
         # Strictly greater: attempt N is the review that verifies repair N-1, so
         # the budget is spent only once we are past it. `>=` here is the
@@ -2080,6 +3160,7 @@ def cmd_converge(args: argparse.Namespace) -> int:
             "blockers": current_total,
             "decision": decision,
             "fixed": fixed,
+            "growth": growth,
             "head_sha": current.get("head_sha"),
             "max_repairs": max_repairs,
             "new": appeared,
@@ -2093,7 +3174,7 @@ def cmd_converge(args: argparse.Namespace) -> int:
 
     print(
         "PREMERGE_CONVERGE ATTEMPT=%d DECISION=%s BLOCKERS=%d PREV=%s FIXED=%d NEW=%d"
-        " WAIT=%d MAXREPAIRS=%d REASONS=%s"
+        " GROWTH=%s WAIT=%d MAXREPAIRS=%d REASONS=%s"
         % (
             attempt,
             decision,
@@ -2101,6 +3182,7 @@ def cmd_converge(args: argparse.Namespace) -> int:
             "-" if previous_total is None else str(previous_total),
             fixed,
             appeared,
+            "-" if growth is None else "%.2f" % growth,
             wait_passes,
             max_repairs,
             ",".join(reasons) if reasons else "none",
@@ -2120,6 +3202,11 @@ def main(argv: "list[str]") -> int:
     plan.add_argument("--attempt", type=int, default=1)
     plan.add_argument("--head-sha", default=None)
     plan.add_argument("--carry-prior", action="store_true")
+    plan.add_argument("--carry-blocked", action="store_true")
+    # Only required WITH --carry-blocked, and `cmd_plan` refuses the pair rather
+    # than defaulting it: containment is a filesystem check and there is no safe
+    # root to guess. Left optional so every existing call site is unchanged.
+    plan.add_argument("--repo-root", default=None)
     plan.set_defaults(handler=cmd_plan)
 
     gate = sub.add_parser("assert-green", help="the pre-simplify clean gate")
@@ -2148,7 +3235,16 @@ def main(argv: "list[str]") -> int:
     loop.set_defaults(handler=cmd_converge)
 
     args = parser.parse_args(argv)
-    return args.handler(args)
+    # THE ONE PLACE A REFUSAL IS ANNOUNCED -- see `fail`. A `Refusal` that gets
+    # this far is one no caller absorbed, so it really is the process refusing
+    # and the `0|74` contract every fence branches on is what it means. Exit 74
+    # is `Refusal`'s own code, restated here rather than read off the exception
+    # so `main` keeps returning an int on every path.
+    try:
+        return args.handler(args)
+    except Refusal as refusal:
+        print(_refusal_line(refusal.token, refusal.detail), file=sys.stderr)
+        return 74
 
 
 if __name__ == "__main__":

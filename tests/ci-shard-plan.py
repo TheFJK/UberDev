@@ -91,6 +91,25 @@ def pack(fixtures, weights, shards):
 
 
 def main(argv):
+    # LF ON EVERY HOST, NOT THE HOST'S PREFERRED NEWLINE (#753). This function
+    # prints a wire format: the caller captures it, flattens it with
+    # `tr '\n' ' '` and hands it to a shard filter that tests membership with
+    # `case " $PLAN " in *" $name "*`. sys.stdout is a text stream, and the
+    # working model is that on Windows every `\n` below therefore leaves the
+    # process as `\r\n`; the capture strips only the LF, `tr` converts only the
+    # LF, and the CR that remains before each separator un-bounds every entry
+    # but the last -- one fixture per shard, six of seventy, reported green.
+    # That green run is MEASURED; the interpreter-level translation offered as
+    # its cause is MODELLED -- see "What is settled, and what is still a model"
+    # in plugins/uberdev/docs/testing.md. The pin below is sufficient against
+    # that translation either way. The protocol's newline is LF.
+    #
+    # Unguarded on purpose. sys.stdout is a TextIOWrapper on every path this is
+    # reachable from, and a host where it is not is a host whose newline this
+    # cannot pin -- which must raise here rather than emit an unpinned plan that
+    # tests/ci-shard-env.sh then has to refuse further downstream.
+    sys.stdout.reconfigure(newline="\n")
+
     parser = argparse.ArgumentParser(prog="ci-shard-plan.py", add_help=True)
     parser.add_argument("--shards", type=int, required=True)
     parser.add_argument("--shard", type=int, required=True, help="1-based")
