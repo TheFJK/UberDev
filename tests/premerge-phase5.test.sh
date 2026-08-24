@@ -30,6 +30,19 @@
 #       push, no gh call — proved by a recording git/gh shim rather than by the
 #       absence of an error, with a real emit run as the control that shows the
 #       shim can see a call at all (#716)
+#   B11 and each of that fence's refusal paths is actually taken: the combined_pr
+#       guard and the gated-HEAD binding, both of which fire before the first
+#       write; the two pre-push unwinds that put HEAD back on the gated parent;
+#       and the two post-push `gh` arms that report `TRAIL=half_emitted` and
+#       deliberately do NOT unwind
+#
+# B11 exists because B10 could not reach any of them. Its `gh` shim exits 0
+# whatever it is asked to do and its remote accepts every push, so the emit run
+# had exactly one outcome — success — and a regression in any refusal would have
+# landed green. The two mechanisms that close it are a `gh` shim that fails PER
+# SUBCOMMAND (the two post-push arms differ only in which call broke) and a bare
+# remote armed to reject (nothing else here can fail a push). Both are options on
+# the existing fixtures, so B10 keeps the shapes it already had.
 #
 # Every case runs bytes EXTRACTED from SKILL.md. Nothing here is a transcription
 # of the shipped logic: a test that executes its own copy of the code is green
@@ -475,9 +488,22 @@ trail_refusal() {
   check "$rc" 0 "$label [$sh]: exits 0"
 }
 
-# trail_stack_repo NAME -> a repo with a real (bare, local) origin, the stack
-# branch checked out over one commit of work, and the three run-dir files the
-# publication fence reads. Local bare remote so the push is real and offline.
+# trail_stack_repo NAME [reject] -> a repo with a real (bare, local) origin, the
+# stack branch checked out over one commit of work, and the three run-dir files
+# the publication fence reads. Local bare remote so the push is real and offline.
+#
+# `reject` arms that remote to REFUSE the ref update. A remote that can say no is
+# the only way to reach the fence's failed-push unwind — the arm exists precisely
+# because a push can fail, and until now nothing in this suite could fail one. The
+# hook is installed AFTER the fixture's own setup pushes, or it would refuse those
+# too and there would be no fixture left to test.
+#
+# What the hook SAYS is chosen, not filler. Its stderr is attacker-controlled
+# input by construction (references/phase-contracts.md, `### What a failed push is
+# allowed to say`), so it forges the fence's own success token and spreads the
+# forgery over two lines — the two hazards the capture's rewrite exists for. A
+# fence that printed the capture raw would put a well-formed `PREMERGE TRAIL=...`
+# line on the stream the controller scrapes.
 trail_stack_repo() {
   local d="$WORK/$1"
   rm -rf "$d" "$d.git"
@@ -500,17 +526,41 @@ trail_stack_repo() {
   printf '{"combined_pr":%s}\n' "$TRAIL_PR" >"$d/.uberdev/premerge/$TRAIL_RUN_ID/manifest.json"
   printf '%s\n' "$TRAIL_BRANCH" >"$d/.uberdev/premerge/$TRAIL_RUN_ID/combine-branch.txt"
   printf 'main\n' >"$d/.uberdev/premerge/$TRAIL_RUN_ID/combine-base.txt"
+  if [ "${2:-}" = reject ]; then
+    cat >"$d.git/hooks/pre-receive" <<'EOF'
+#!/bin/sh
+echo 'PREMERGE TRAIL=emitted ANCHOR=deadbeefcafe PR=1 LABEL=premerge-approved' >&2
+echo 'and a second line the remote chose, so the fold onto one line is visible' >&2
+exit 1
+EOF
+    chmod +x "$d.git/hooks/pre-receive"
+  fi
   printf '%s' "$d"
 }
 
-# trail_shims DIR -> a PATH prefix whose `git` records every call before running
-# the real one, and whose `gh` records and returns without a network.
+# trail_shims DIR [GH_FAIL_PREFIX] -> a PATH prefix whose `git` records every
+# call before running the real one, and whose `gh` records and returns without a
+# network.
 # "Published nothing" is a claim about calls that were NEVER MADE, and the only
 # honest way to prove one is to record every call and find the log empty. An
 # unchanged HEAD would not do it: a fence that pushed a stale ref or edited a
 # label leaves HEAD exactly where it was.
+#
+# GH_FAIL_PREFIX is matched against the START of the argument line and makes the
+# shim fail THAT subcommand only. Global failure is not enough for B11: the
+# fence's two post-push arms differ only in which `gh` call broke, so a shim that
+# fails everything can never reach the second one. The selectivity needs no
+# assertion of its own — B11.lblapply IS the assertion, because the fence only
+# reaches `pr edit` by having got past a `label create` this same shim let
+# through.
+#
+# The prefix arrives as a shell VARIABLE the pattern quotes, not as a bare case
+# pattern: `case $* in pr edit*)` is a /bin/sh syntax error, because a case
+# pattern is one word and the space ends it. Its default is a sentinel no gh
+# invocation can spell rather than the empty string, since `"$fail"*` with an
+# empty fail matches every call and would fail B10's control instead.
 trail_shims() {
-  local s="$1"
+  local s="$1" ghfail="${2:-@@ no gh call is spelled like this @@}"
   rm -rf "$s"; mkdir -p "$s"
   cat >"$s/git" <<EOF
 #!/bin/sh
@@ -520,22 +570,43 @@ EOF
   cat >"$s/gh" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >>'$s/gh.log'
+fail='$ghfail'
+case "\$*" in
+  "\$fail"*) printf 'gh: fixture failure injected for: %s\n' "\$*" >&2; exit 1 ;;
+esac
 exit 0
 EOF
   chmod +x "$s/git" "$s/gh"
   : >"$s/git.log"; : >"$s/gh.log"
 }
 
-# run_trail_emit SHELL REPO SHIMDIR TRAIL ATTEMPT -> merged output, rc in $?
+# run_trail_emit SHELL REPO SHIMDIR TRAIL ATTEMPT [HEAD] -> merged output, rc in $?
+#
+# HEAD is the gate line's `HEAD=` token, which the orchestrator transcribes into
+# this fence. It is an OPTION here rather than something derived on the spot, and
+# that is the point of it twice over: the fence declares the variable PAST the
+# emit guard because three of the gate's four skip lines print no HEAD= at all,
+# so a skipped call site must be able to run with none — and the mismatch row
+# must be able to pass one that is wrong. Omitted, the variable is UNSET in the
+# child rather than empty; `${VAR:?}` refuses both, but only one of them is the
+# state a real skipped call site is in.
 run_trail_emit() {
-  local sh="$1" repo="$2" shim="$3" trail="$4" attempt="$5"
+  local sh="$1" repo="$2" shim="$3" trail="$4" attempt="$5" head="${6:-}"
   case "$sh" in
     zsh) set -- zsh -f -c ;;
     *)   set -- bash -c ;;
   esac
-  ( cd "$repo" \
-    && PATH="$shim:$PATH" RUN_ID="$TRAIL_RUN_ID" PREMERGE_TRAIL="$trail" \
-       PREMERGE_TRAIL_ATTEMPT="$attempt" "$@" "$TRAIL_EMIT_FENCE" ) 2>&1
+  if [ -n "$head" ]; then
+    ( cd "$repo" \
+      && PATH="$shim:$PATH" RUN_ID="$TRAIL_RUN_ID" PREMERGE_TRAIL="$trail" \
+         PREMERGE_TRAIL_ATTEMPT="$attempt" PREMERGE_TRAIL_HEAD="$head" \
+         "$@" "$TRAIL_EMIT_FENCE" ) 2>&1
+  else
+    ( cd "$repo" \
+      && PATH="$shim:$PATH" RUN_ID="$TRAIL_RUN_ID" PREMERGE_TRAIL="$trail" \
+         PREMERGE_TRAIL_ATTEMPT="$attempt" \
+         env -u PREMERGE_TRAIL_HEAD "$@" "$TRAIL_EMIT_FENCE" ) 2>&1
+  fi
 }
 
 for TSH in bash zsh; do
@@ -607,6 +678,11 @@ for TSH in bash zsh; do
   R="$(trail_stack_repo "trailstack-$TSH-skip")"; S="$WORK/trailshim-$TSH-skip"
   trail_shims "$S"
   TRAIL_HEAD="$(git -C "$R" rev-parse HEAD)"
+  # Deliberately NO sixth argument: a skipped call site has no HEAD= token to
+  # transcribe, because three of the gate's four skip lines print none. So this
+  # row is also what holds `PREMERGE_TRAIL_HEAD`'s declaration BELOW the emit
+  # guard — move it up beside the other two and this call dies on the unset
+  # variable instead of exiting 0. Do not "fix" it by passing one.
   TRAIL_OUT="$(run_trail_emit "$TSH" "$R" "$S" skipped 02)"; RC=$?
   check "$RC" 0 "B10.skip [$TSH]: exits 0"
   if [ -s "$S/git.log" ]; then
@@ -634,7 +710,7 @@ for TSH in bash zsh; do
   trail_shims "$S"
   TRAIL_PARENT="$(git -C "$R" rev-parse HEAD)"
   TRAIL_BASE_OID="$(git -C "$R" rev-parse origin/main)"
-  TRAIL_OUT="$(run_trail_emit "$TSH" "$R" "$S" emit 02)"; RC=$?
+  TRAIL_OUT="$(run_trail_emit "$TSH" "$R" "$S" emit 02 "$TRAIL_PARENT")"; RC=$?
   check "$RC" 0 "B10.emit [$TSH]: exits 0"
   case "$TRAIL_OUT" in
     *"TRAIL=emitted"*"PR=$TRAIL_PR"*) ok "B10.emit [$TSH]: reports the emission" ;;
@@ -675,6 +751,258 @@ for TSH in bash zsh; do
   fi
   check "$(git -C "$R.git" rev-parse "refs/heads/$TRAIL_BRANCH")" "$(git -C "$R" rev-parse HEAD)" \
     "B10.emit [$TSH]: the remote branch now points at the anchor"
+
+  # --- B11: the same fence's five REFUSALS, each actually taken --------------
+  # B10 proves the fence's two ordinary outcomes. Everything below is a path it
+  # takes when something goes wrong, and until this block existed not one of them
+  # could be reached: the gh shim exited 0 whatever it was handed, and no remote
+  # here could reject. Each row drives the SHIPPED bytes into one path and then
+  # asserts BOTH halves of it — the typed line the controller reads, and the
+  # state the repo and the remote are left in. The second half carries the
+  # weight: every one of these arms exists to leave the world in a particular
+  # condition, and an arm that prints the right words while stranding an orphan
+  # anchor on the remote is the defect, not the fix.
+
+  echo
+  echo "== B11 [$TSH]: the combined_pr guard refuses BEFORE the first write =="
+  # `jq -r` is not a validator: a manifest with no `combined_pr` PRINTS the
+  # string `null` and EXITS 0, so the fence's `|| exit 2` cannot fire. Only an
+  # explicit numeric test stands between a missing key and an anchor pushed
+  # `for #null` that fails at `gh pr edit null` — leaving a branch on the remote
+  # nothing short of a force-push takes back. So this row asserts a NEGATIVE
+  # about writes, not just a message.
+  R="$(trail_stack_repo "trailstack-$TSH-prnull")"; S="$WORK/trailshim-$TSH-prnull"
+  trail_shims "$S"
+  printf '{"stack":[1,2]}\n' >"$R/.uberdev/premerge/$TRAIL_RUN_ID/manifest.json"
+  TRAIL_HEAD="$(git -C "$R" rev-parse HEAD)"
+  TRAIL_OUT="$(run_trail_emit "$TSH" "$R" "$S" emit 02 "$TRAIL_HEAD")"; RC=$?
+  check "$RC" 2 "B11.prnull [$TSH]: a manifest with no combined_pr is refused (exit 2)"
+  case "$TRAIL_OUT" in
+    *"combined_pr=null"*"refusing to anchor"*)
+      ok "B11.prnull [$TSH]: the refusal names the non-numeric value jq handed it" ;;
+    *) bad "B11.prnull [$TSH]: expected the combined_pr refusal, got: $TRAIL_OUT" ;;
+  esac
+  TRAIL_GIT_LOG="$(cat "$S/git.log")"
+  # Anti-vacuity for the negative below: the guard sits under a `git rev-parse
+  # --show-toplevel`, so a live shim always records something here. An empty log
+  # would satisfy "no writes" for the wrong reason — a shim nothing ever called.
+  if [ -s "$S/git.log" ]; then
+    ok "B11.prnull [$TSH]: the shim recorded the pre-guard read, so the log is live"
+  else
+    bad "B11.prnull [$TSH]: the git shim recorded nothing at all — the no-writes row below would be vacuous"
+  fi
+  case "$TRAIL_GIT_LOG" in
+    *commit*|*push*|*reset*)
+      bad "B11.prnull [$TSH]: a git WRITE got through before the guard: $TRAIL_GIT_LOG" ;;
+    *) ok "B11.prnull [$TSH]: no commit, no push, no reset — it refused before the first write" ;;
+  esac
+  if [ -s "$S/gh.log" ]; then
+    bad "B11.prnull [$TSH]: it called gh for a PR number it had already rejected: $(tr '\n' ';' <"$S/gh.log")"
+  else
+    ok "B11.prnull [$TSH]: and no gh call either"
+  fi
+  check "$(git -C "$R" rev-parse HEAD)" "$TRAIL_HEAD" "B11.prnull [$TSH]: HEAD did not move"
+  if git -C "$R.git" rev-parse --verify -q "refs/heads/$TRAIL_BRANCH" >/dev/null 2>&1; then
+    bad "B11.prnull [$TSH]: the stack branch reached the remote"
+  else
+    ok "B11.prnull [$TSH]: nothing reached the remote"
+  fi
+
+  # The same guard's other arm. An empty string is where a manifest written by a
+  # failed producer lands, and the refusal must not print a blank where a value
+  # belongs — `combined_pr=` reads as a formatting bug rather than as a refusal.
+  R="$(trail_stack_repo "trailstack-$TSH-prempty")"; S="$WORK/trailshim-$TSH-prempty"
+  trail_shims "$S"
+  printf '{"combined_pr":""}\n' >"$R/.uberdev/premerge/$TRAIL_RUN_ID/manifest.json"
+  TRAIL_OUT="$(run_trail_emit "$TSH" "$R" "$S" emit 02 "$(git -C "$R" rev-parse HEAD)")"; RC=$?
+  check "$RC" 2 "B11.prempty [$TSH]: an empty combined_pr is refused too (exit 2)"
+  case "$TRAIL_OUT" in
+    *"combined_pr=(empty)"*)
+      ok "B11.prempty [$TSH]: the empty arm says (empty) rather than printing a blank" ;;
+    *) bad "B11.prempty [$TSH]: expected combined_pr=(empty), got: $TRAIL_OUT" ;;
+  esac
+
+  echo
+  echo "== B11 [$TSH]: the gated HEAD is carried in, not re-derived =="
+  # Re-deriving HEAD here would answer about NOW; only the token carried from the
+  # fence that read the evidence answers about the GATE. B8.headmoved locks that
+  # binding on the gate side; these two rows lock it on the publication side, and
+  # they lock the DECLARATION SITE between them: required (so emit cannot publish
+  # without it) but below the emit guard (so B10.skip can still run with none).
+  R="$(trail_stack_repo "trailstack-$TSH-headmissing")"; S="$WORK/trailshim-$TSH-headmissing"
+  trail_shims "$S"
+  TRAIL_HEAD="$(git -C "$R" rev-parse HEAD)"
+  TRAIL_OUT="$(run_trail_emit "$TSH" "$R" "$S" emit 02)"; RC=$?
+  if [ "$RC" -ne 0 ]; then
+    ok "B11.headmissing [$TSH]: an emit call with no HEAD= token refuses (exit $RC)"
+  else
+    bad "B11.headmissing [$TSH]: it published without the gate token: $TRAIL_OUT"
+  fi
+  case "$TRAIL_OUT" in
+    *PREMERGE_TRAIL_HEAD*) ok "B11.headmissing [$TSH]: and names the input it was not given" ;;
+    *) bad "B11.headmissing [$TSH]: the refusal does not name PREMERGE_TRAIL_HEAD: $TRAIL_OUT" ;;
+  esac
+  case "$(cat "$S/git.log")" in
+    *commit*|*push*) bad "B11.headmissing [$TSH]: it wrote before refusing: $(tr '\n' ';' <"$S/git.log")" ;;
+    *) ok "B11.headmissing [$TSH]: no commit and no push" ;;
+  esac
+
+  # ...and a token that does not match the tree under it. This is a fixup, a
+  # hook, or a concurrent writer landing a commit between the two fences: HEAD is
+  # perfectly valid, it is simply not the tree any gate read.
+  R="$(trail_stack_repo "trailstack-$TSH-headstale")"; S="$WORK/trailshim-$TSH-headstale"
+  trail_shims "$S"
+  TRAIL_HEAD="$(git -C "$R" rev-parse HEAD)"
+  TRAIL_OUT="$(run_trail_emit "$TSH" "$R" "$S" emit 02 0000000000000000000000000000000000000000)"; RC=$?
+  check "$RC" 2 "B11.headstale [$TSH]: a HEAD= token that is not the live tree is refused (exit 2)"
+  case "$TRAIL_OUT" in
+    *"HEAD is $TRAIL_HEAD but the gate proved green on 0000000000000000000000000000000000000000"*)
+      ok "B11.headstale [$TSH]: the refusal names BOTH shas, so it is a comparison and not a constant" ;;
+    *) bad "B11.headstale [$TSH]: expected both shas in the refusal, got: $TRAIL_OUT" ;;
+  esac
+  case "$(cat "$S/git.log")" in
+    *commit*|*push*|*reset*)
+      bad "B11.headstale [$TSH]: a git WRITE got through before the binding check: $(tr '\n' ';' <"$S/git.log")" ;;
+    *) ok "B11.headstale [$TSH]: no commit, no push, no reset — it refused before the first write" ;;
+  esac
+  check "$(git -C "$R" rev-parse HEAD)" "$TRAIL_HEAD" "B11.headstale [$TSH]: HEAD did not move"
+  if git -C "$R.git" rev-parse --verify -q "refs/heads/$TRAIL_BRANCH" >/dev/null 2>&1; then
+    bad "B11.headstale [$TSH]: the stack branch reached the remote"
+  else
+    ok "B11.headstale [$TSH]: nothing reached the remote"
+  fi
+
+  echo
+  echo "== B11 [$TSH]: a non-empty anchor is unwound --soft, before any push =="
+  # `--allow-empty` ASKS for an empty commit; it does not PROVE one. Bytes staged
+  # by a concurrent writer — or by a pre-commit hook — ride into the anchor, and
+  # an anchor carrying a diff is exactly what /merge's evaluator reads as a
+  # cumulative delta nobody reviewed. Staging a file before the run IS that
+  # concurrent writer; nothing about the fence is simulated.
+  R="$(trail_stack_repo "trailstack-$TSH-dirty")"; S="$WORK/trailshim-$TSH-dirty"
+  trail_shims "$S"
+  TRAIL_PARENT="$(git -C "$R" rev-parse HEAD)"
+  printf 'bytes a concurrent writer staged\n' >"$R/concurrent.txt"
+  git -C "$R" add concurrent.txt >/dev/null
+  TRAIL_OUT="$(run_trail_emit "$TSH" "$R" "$S" emit 02 "$TRAIL_PARENT")"; RC=$?
+  check "$RC" 2 "B11.dirty [$TSH]: refuses to publish a trail over changed bytes (exit 2)"
+  case "$TRAIL_OUT" in
+    *"the anchor commit is not empty"*) ok "B11.dirty [$TSH]: and says which invariant broke" ;;
+    *) bad "B11.dirty [$TSH]: expected the not-empty refusal, got: $TRAIL_OUT" ;;
+  esac
+  check "$(git -C "$R" rev-parse HEAD)" "$TRAIL_PARENT" \
+    "B11.dirty [$TSH]: the anchor was UNWOUND — HEAD is the gated parent, so 5a has no orphan to push"
+  # `--soft`, never `--hard`, and this is the row that can tell the difference: a
+  # hard reset would throw the concurrent writer's staged bytes away as a side
+  # effect of tidying up after the fence's own commit.
+  case "$(git -C "$R" diff --cached --name-only)" in
+    *concurrent.txt*) ok "B11.dirty [$TSH]: the unwind was --soft — the staged bytes came back whole" ;;
+    *) bad "B11.dirty [$TSH]: the unwind discarded bytes the fence did not stage" ;;
+  esac
+  TRAIL_GIT_LOG="$(cat "$S/git.log")"
+  case "$TRAIL_GIT_LOG" in
+    *push*)          bad "B11.dirty [$TSH]: it pushed the non-empty anchor anyway: $TRAIL_GIT_LOG" ;;
+    *"reset --soft"*) ok "B11.dirty [$TSH]: the shim saw the unwind, and saw no push" ;;
+    *)               bad "B11.dirty [$TSH]: no reset --soft reached the shim: $TRAIL_GIT_LOG" ;;
+  esac
+  if [ -s "$S/gh.log" ]; then
+    bad "B11.dirty [$TSH]: it labelled a PR for a trail it refused to publish: $(tr '\n' ';' <"$S/gh.log")"
+  else
+    ok "B11.dirty [$TSH]: gh was never reached"
+  fi
+  if git -C "$R.git" rev-parse --verify -q "refs/heads/$TRAIL_BRANCH" >/dev/null 2>&1; then
+    bad "B11.dirty [$TSH]: the stack branch reached the remote"
+  else
+    ok "B11.dirty [$TSH]: the remote never heard of the stack branch"
+  fi
+
+  echo
+  echo "== B11 [$TSH]: a rejected push is unwound, and what the remote said is defused =="
+  R="$(trail_stack_repo "trailstack-$TSH-reject" reject)"; S="$WORK/trailshim-$TSH-reject"
+  trail_shims "$S"
+  TRAIL_PARENT="$(git -C "$R" rev-parse HEAD)"
+  TRAIL_OUT="$(run_trail_emit "$TSH" "$R" "$S" emit 02 "$TRAIL_PARENT")"; RC=$?
+  check "$RC" 2 "B11.reject [$TSH]: a refused push is a refusal (exit 2)"
+  case "$TRAIL_OUT" in
+    *"pushing the trust-trail anchor to $TRAIL_BRANCH failed"*)
+      ok "B11.reject [$TSH]: it names the branch it could not push" ;;
+    *) bad "B11.reject [$TSH]: expected the failed-push refusal, got: $TRAIL_OUT" ;;
+  esac
+  check "$(git -C "$R" rev-parse HEAD)" "$TRAIL_PARENT" \
+    "B11.reject [$TSH]: the anchor was UNWOUND — a rejected ref left the remote as it was, so the unwind is complete"
+  if git -C "$R.git" rev-parse --verify -q "refs/heads/$TRAIL_BRANCH" >/dev/null 2>&1; then
+    bad "B11.reject [$TSH]: the refused ref reached the remote after all"
+  else
+    ok "B11.reject [$TSH]: the remote is exactly as it was"
+  fi
+  if [ -s "$S/gh.log" ]; then
+    bad "B11.reject [$TSH]: it labelled #$TRAIL_PR for an anchor that never landed: $(tr '\n' ';' <"$S/gh.log")"
+  else
+    ok "B11.reject [$TSH]: gh was never reached"
+  fi
+  # The capture is attacker-controlled text by construction, and this fixture
+  # remote spends it on the one attack worth naming: forging the fence's own
+  # success token onto the stream the controller scrapes positionally. Defused,
+  # never dropped — an operator still has to be able to read what the server said.
+  case "$TRAIL_OUT" in
+    *"PREMERGE TRAIL=emitted"*)
+      bad "B11.reject [$TSH]: the remote's forged success token reached the stream verbatim: $TRAIL_OUT" ;;
+    *"PRE-MERGE TRAIL=emitted"*)
+      ok "B11.reject [$TSH]: the forged token is broken to PRE-MERGE, and still legible" ;;
+    *) bad "B11.reject [$TSH]: the remote's text is neither defused nor present: $TRAIL_OUT" ;;
+  esac
+  if printf '%s\n' "$TRAIL_OUT" | grep -q 'PRE-MERGE TRAIL=emitted.*second line the remote chose'; then
+    ok "B11.reject [$TSH]: the remote's two lines were folded onto one — it opened no line of its own"
+  else
+    bad "B11.reject [$TSH]: the remote's two lines were not folded onto one: $TRAIL_OUT"
+  fi
+
+  echo
+  echo "== B11 [$TSH]: the two post-push gh arms report half_emitted and do NOT unwind =="
+  # Past the push there is no unwind: the anchor is on the remote, and taking it
+  # back means force-pushing a branch other clones may already have fetched. So
+  # both arms report a STATE. `half_emitted` is a third TRAIL= value the gate
+  # fence never emits, and it carries the anchor sha that 5b's PARK row
+  # transcribes — which is why the sha is asserted against the live HEAD here
+  # rather than matched as a shape.
+  R="$(trail_stack_repo "trailstack-$TSH-lblcreate")"; S="$WORK/trailshim-$TSH-lblcreate"
+  trail_shims "$S" 'label create'
+  TRAIL_OUT="$(run_trail_emit "$TSH" "$R" "$S" emit 02 "$(git -C "$R" rev-parse HEAD)")"; RC=$?
+  check "$RC" 2 "B11.lblcreate [$TSH]: an unprovisionable label is a refusal (exit 2)"
+  TRAIL_ANCHOR="$(git -C "$R" rev-parse HEAD)"
+  case "$TRAIL_OUT" in
+    *"PREMERGE TRAIL=half_emitted REASON=label_unprovisioned ANCHOR=$TRAIL_ANCHOR PR=$TRAIL_PR"*)
+      ok "B11.lblcreate [$TSH]: half_emitted, carrying the live anchor sha and the PR" ;;
+    *) bad "B11.lblcreate [$TSH]: expected half_emitted/label_unprovisioned for ANCHOR=$TRAIL_ANCHOR, got: $TRAIL_OUT" ;;
+  esac
+  check "$(git -C "$R.git" rev-parse --verify -q "refs/heads/$TRAIL_BRANCH" 2>/dev/null)" "$TRAIL_ANCHOR" \
+    "B11.lblcreate [$TSH]: the anchor is on the remote and is NOT rolled back"
+  case "$(cat "$S/gh.log")" in
+    *"pr edit"*)     bad "B11.lblcreate [$TSH]: it applied a label it could not provision" ;;
+    *"label create"*) ok "B11.lblcreate [$TSH]: it stopped at the label it could not provision" ;;
+    *)               bad "B11.lblcreate [$TSH]: no gh call reached the shim: $(tr '\n' ';' <"$S/gh.log")" ;;
+  esac
+
+  R="$(trail_stack_repo "trailstack-$TSH-lblapply")"; S="$WORK/trailshim-$TSH-lblapply"
+  trail_shims "$S" 'pr edit'
+  TRAIL_OUT="$(run_trail_emit "$TSH" "$R" "$S" emit 02 "$(git -C "$R" rev-parse HEAD)")"; RC=$?
+  check "$RC" 2 "B11.lblapply [$TSH]: a label that cannot be applied is a refusal (exit 2)"
+  TRAIL_ANCHOR="$(git -C "$R" rev-parse HEAD)"
+  case "$TRAIL_OUT" in
+    *"PREMERGE TRAIL=half_emitted REASON=label_unapplied ANCHOR=$TRAIL_ANCHOR PR=$TRAIL_PR"*)
+      ok "B11.lblapply [$TSH]: half_emitted with the SECOND reason, distinct from the first" ;;
+    *) bad "B11.lblapply [$TSH]: expected half_emitted/label_unapplied for ANCHOR=$TRAIL_ANCHOR, got: $TRAIL_OUT" ;;
+  esac
+  check "$(git -C "$R.git" rev-parse --verify -q "refs/heads/$TRAIL_BRANCH" 2>/dev/null)" "$TRAIL_ANCHOR" \
+    "B11.lblapply [$TSH]: the anchor is on the remote and is NOT rolled back"
+  # Both calls reached the shim, in order — which is also the proof that the
+  # shim's failure is per-subcommand and not global: the fence could only reach
+  # `pr edit` by having got past a `label create` this same shim let through.
+  case "$(cat "$S/gh.log")" in
+    *"label create --force premerge-approved"*"pr edit $TRAIL_PR --add-label premerge-approved"*)
+      ok "B11.lblapply [$TSH]: label create SUCCEEDED under the same shim that failed pr edit" ;;
+    *) bad "B11.lblapply [$TSH]: the gh calls are missing or out of order: $(tr '\n' ';' <"$S/gh.log")" ;;
+  esac
 done
 
 echo ""

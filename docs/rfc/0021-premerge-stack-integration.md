@@ -276,12 +276,22 @@ needs; the third automatic attempt is where a fixer starts "fixing" the test.~~
 - **Multi-base stacks.** `review_consolidate_base` picks one base. A candidate
   set spanning `main` and `release/2.0` gets the majority base and the others are
   excluded by number. Reviewing two stacks in one run is out of scope.
-- **The trail and the version bump — OPEN (§10 A8).** `### 5a`'s release commit
-  is not inert to `skills/merge-pipeline/lib/release-anchor.sh` on this repo, so
-  emitting the trail before the bump leaves `TRUST_HEAD` on a trailer-less
-  commit and emitting it after trips the 5-trail fence's own `head_moved`.
-  Neither order yields a trail `/merge` can resolve. The repair belongs in the
-  anchor probe or in `5a`; the two trail fences are already correct.
+- **The trail and the version bump — RESOLVED 2026-08-24 (§10 A9).**
+  ~~`### 5a`'s release commit is not inert to
+  `skills/merge-pipeline/lib/release-anchor.sh` on this repo, so emitting the
+  trail before the bump leaves `TRUST_HEAD` on a trailer-less commit and emitting
+  it after trips the 5-trail fence's own `head_moved`. Neither order yields a
+  trail `/merge` can resolve.~~ The repair landed exactly where the struck text
+  said it belonged — in the anchor probe — later in the same run that opened this
+  item, and on this same branch. `release-anchor.sh` now splits one size cap into
+  three and judges CHANGELOG.md by section structure rather than line by line, so
+  a `### 5a` commit that keeps to the six version surfaces is tolerated: executed
+  on this branch, this repo's v0.56.0 returns `RELEASE_ANCHOR=tolerated` /
+  `inert_release_commit` and resolves `TRUST_HEAD` to the anchor commit, where the
+  revision A8 measured returned `diff_too_large`. The shipped emit order is
+  therefore the one that resolves, not the lesser of two failures, and the two
+  trail fences were already correct and are untouched. What survives is a
+  constraint on `5a` rather than an open repair — A9 states it.
 
 ---
 
@@ -1210,14 +1220,19 @@ tolerates one `chore(release): vX.Y.Z` commit above the anchor, but only once
 reviewed code, so anchoring first gets the release commit *proved* rather than
 merely tolerated.~~
 
-> **AMENDED 2026-08-24 — see §10 A8.** The order is what shipped; the struck
-> rationale for it is not. `release-anchor.sh` refuses this repo's release
-> commits rather than proving them inert, so emitting before `### 5a` buries the
-> trailer under a commit `/merge`'s trust-head resolution will not read through,
-> and emitting after the bump only trades that for the 5-trail fence's own
-> `head_moved`. Neither order resolves.
-> `skills/premerge-pipeline/SKILL.md`, at `### 5-trail — the premerge trust
-> trail`, now says exactly that at the code, and it is right.
+> **AMENDED 2026-08-24 — see §10 A8, then §10 A9.** The order is what shipped;
+> the struck rationale for it is not. ~~`release-anchor.sh` refuses this repo's
+> release commits rather than proving them inert, so emitting before `### 5a`
+> buries the trailer under a commit `/merge`'s trust-head resolution will not read
+> through, and emitting after the bump only trades that for the 5-trail fence's
+> own `head_moved`. Neither order resolves.~~
+>
+> **A9 supersedes that second half in turn.** The anchor probe was repaired later
+> in the same run and on this branch, and the shipped order now resolves: v0.56.0
+> is `tolerated`, so `TRUST_HEAD` lands on the anchor commit and the trailer is
+> read there. What A9 does **not** revive is the struck clause above — the probe's
+> success state is literally `tolerated`, so there was never a `proved` for
+> anchoring first to buy.
 
 #### What is dropped, and only for the `premerge` instrument
 
@@ -1321,7 +1336,7 @@ away: the emit ordering in particular is a decision a later reader will want to
 revisit, and they can only weigh it if the rationale that turned out to be wrong
 is still legible beside its refutation.
 
-#### 1. The emit ordering resolves nothing — it picks which failure to take
+#### 1. The emit ordering resolves nothing — it picks which failure to take *(superseded by A9; the claim is kept verbatim, the correction is below it)*
 
 A7 held that running the gate before the `### 5a` version bump *"gets the release
 commit proved rather than merely tolerated"*, on the reading that `/merge`
@@ -1340,15 +1355,26 @@ commit, so PATH_2 (b) fails `trust_trail_trailer_missing`.
 
 Emitting **after** the bump does not rescue it. The 5-trail decision fence binds
 the gate verdict to the SHA the gate read, so a release commit landing between the
-two turns on the fence's own `head_moved` arm and publishes nothing. Both orders
-end with no trail `/merge` can resolve; the shipped order is a choice between two
-failures, not a strengthening of either.
+two turns on the fence's own `head_moved` arm and publishes nothing. ~~Both
+orders end with no trail `/merge` can resolve; the shipped order is a choice
+between two failures, not a strengthening of either.~~
 
 **The repair is in `release-anchor.sh` or in `### 5a`, never in the trail
 fences** — either the anchor probe learns the shape of a real CHANGELOG notes
-edit, or `5a` stops producing a commit the probe cannot read through. Until one of
-those lands, a stack PR's premerge trail is resolvable only on a run whose bump
-was skipped. §9 carries it as open.
+edit, or `5a` stops producing a commit the probe cannot read through. ~~Until one
+of those lands, a stack PR's premerge trail is resolvable only on a run whose bump
+was skipped. §9 carries it as open.~~
+
+> **AMENDED 2026-08-24 — see §10 A9.** The struck conclusions expired inside the
+> same run that wrote them. This subsection measured the probe as it then stood
+> and measured it correctly — run that revision today and this repo's v0.56.0
+> still returns `diff_too_large`, v0.30.4 still returns `changelog_shape`. Then
+> the repair the *unstruck* sentence calls for landed in `release-anchor.sh`, on
+> this branch, later in the same run: v0.56.0 now returns `tolerated` /
+> `inert_release_commit`, no commit in this repo's release history refuses for
+> either cited reason any more, and emitting before `### 5a` resolves. What is
+> still live is a narrower rule about what `5a` may edit, which A9 carries along
+> with the measurement.
 
 #### 2. The corroborator search is four layouts, not the repo root
 
@@ -1372,3 +1398,113 @@ proved rather than merely tolerated"*, and the root-only reading of the
 corroborator glob. The rest of A7 stands unchanged — the instrument-as-data
 design, the `gate=green attempt=NN` token in the commit body, the Absent-arm
 tradeoff and its bound, and the three things the amendment declines to do.
+
+### A9 — A8's first correction expired inside its own run (2026-08-24)
+
+A8 corrected two A7 claims against the shipped gate. Its second correction stands
+— re-checked below, unchanged. Its first has itself been overtaken: the repair it
+called for landed later in the same run, on this same branch, so the subsection
+recording the premerge trail as structurally unresolvable now describes a probe
+revision that is no longer in the tree.
+
+A8 is not being called wrong. It measured, and it was right about what it
+measured, which is precisely why this is a third note on the thread rather than a
+rewrite of the second. A7 reasoned without measuring; A8 measured and corrected
+A7; A9 re-measures after the code moved. What expired is A8's premise, not its
+method.
+
+#### What was executed
+
+`skills/merge-pipeline/lib/release-anchor.sh` was run over every
+`chore(release): vX.Y.Z` commit reachable in this repo — 74 of them — in both the
+revision A8 measured and the revision on this branch.
+
+| `RELEASE_ANCHOR` outcome | A8's revision | this branch |
+| --- | --- | --- |
+| `tolerated` / `inert_release_commit` | 4 | 42 |
+| `non_version_paths` | 21 | 21 |
+| `content_not_version_only` | 1 | 7 |
+| `changelog_deletions` | 8 | 3 |
+| `changelog_too_large` | 20 | — |
+| `changelog_shape` | 18 | — |
+| `diff_too_large` | 1 | — |
+| `version_not_advanced` | 1 | 1 |
+
+Both reasons A8 cited are now extinct across the whole corpus: no release commit
+in this repo's history refuses for `changelog_shape`, `changelog_too_large` or
+`diff_too_large`. The two worked cases A8 named moved in different directions,
+and the difference matters.
+
+- **v0.56.0** — `diff_too_large` then; `tolerated` / `inert_release_commit` now,
+  with `TRUST_HEAD` resolved to the release commit's parent, which is the anchor
+  commit carrying the trailer. This is the case A8's whole argument rested on, and
+  it inverted.
+- **v0.30.4** — `changelog_shape` then; `content_not_version_only` now. Still a
+  refusal, so A8's use of it survives as an example of *a* refusal — but not of
+  the one it named, and the replacement reason is the informative one. Its
+  README.md hunk rewrites a documentation sentence beside the badge bump, so the
+  refusal is about reviewed content changing under the trail, never about
+  CHANGELOG formatting. `changelog_shape` was merely reached first and masked it.
+
+#### Why the probe's answer moved
+
+Two changes, and only one of them loosens anything.
+
+**One size cap became three.** The revision A8 measured bounded the whole diff at
+400 lines and inserted CHANGELOG lines at 40 — one number doing two unrelated
+jobs, and set by the tighter of them. This branch bounds inert CHANGELOG prose at
+2000, the whole diff walk at 4000, and the **code-bearing** half — everything
+except CHANGELOG.md — at 200. That last bound is the one that carries security
+weight, and it is **half** the 400 it replaces. The prose half widened and the
+code half narrowed; describing this as the gate being relaxed reads only the first
+of those.
+
+**Condition (7) stopped policing CHANGELOG prose line by line.** It now asserts
+that the commit opens exactly one `## ` section and that it is the one the subject
+names. That asserts strictly more about structure than the old per-line regex did,
+and the regex was never a content control to begin with — any text behind a
+two-byte bullet prefix satisfied it. What it actually policed was house
+formatting, which is why `### 5a`'s real notes tripped it and why the trail looked
+structurally dead.
+
+Neither change touches the boundary A7 and A8 both lean on: the path set is still
+confined to the six version surfaces with rename detection disabled, and every
+line of the five non-CHANGELOG surfaces must still be a pure version-token
+substitution in the same order.
+
+#### What this leaves for the emit ordering
+
+The shipped order — gate and emit **before** `### 5a` — is the order that
+resolves. A release commit that `bump-version.sh` produced and `5a` filled in with
+real notes is tolerated, so `TRUST_HEAD` lands on the anchor commit and PATH_2 (b)
+reads the trailer there rather than off a trailer-less head.
+
+A8's strike of A7's clause nevertheless stands, for a reason A8 did not give. A7
+argued that anchoring first gets the release commit *"proved rather than merely
+tolerated"*. The probe has no such pair of states: `tolerated` **is** its success
+value and the only alternative is `none`. The distinction that clause drew never
+existed in any revision, so correcting the ordering's outcome does not revive it.
+
+What is left is a constraint on `5a`, not an open repair, and v0.30.4 is its
+worked case: `5a` may touch the six version surfaces and, outside CHANGELOG.md,
+may change nothing but version tokens. A bump that also rewrites a README sentence
+refuses — correctly, because that sentence is reviewed content the trail would
+otherwise carry across unreviewed. That is a rule for `5a` to keep, not a defect
+for a later reader to go fix.
+
+#### A8's second correction, re-checked
+
+Accurate as written and unamended. Sub-condition (d) in
+`skills/merge-pipeline/SKILL.md` enumerates the canonical root alongside
+`.claude/worktrees/*/`, `.worktrees/*/` and `worktrees/*/`, each carrying the same
+`.uberdev/premerge/*/gate-<NN>.json` tail, and still keeps a candidate only when it
+parses *and* its `head_sha` equals the trailer's SHA. Widening the pool still
+widens no acceptance.
+
+**Supersedes:** in A8, the conclusions of §1 as struck there — that both emit
+orders fail, that a stack PR's premerge trail is resolvable only on a run whose
+bump was skipped, and that §9 carries the item as open — together with
+`diff_too_large` and `changelog_shape` as descriptions of the shipped probe. A8
+§1 remains accurate about the revision it measured, and it is kept for that. A8
+§2 and everything A8 left of A7 stand untouched. §9 now records the item as
+resolved.

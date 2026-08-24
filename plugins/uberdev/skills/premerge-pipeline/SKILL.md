@@ -2323,14 +2323,23 @@ attempt's `gate-NN.json` carries `verdict=green` bound to the branch's current
 HEAD. A run that stopped any other way emits nothing at all and parks exactly as
 it did before — no anchor commit, no label, no push.
 
-**It runs BEFORE `### 5a`, and that does not resolve.** 5a stacks a release commit
+**It runs BEFORE `### 5a`, and that now resolves.** 5a stacks a release commit
 above the anchor, which `/merge` reads through only if
-`skills/merge-pipeline/lib/release-anchor.sh` proves it inert — it does not: 5a
-replaces the CHANGELOG stub with real notes, and this repo's v0.56.0 and v0.30.4
-both return `RELEASE_ANCHOR=none` (`diff_too_large`, `changelog_shape`).
-`TRUST_HEAD` stays on the trailer-less release commit, so PATH_2 (b) fails
-`trust_trail_trailer_missing`; emitting AFTER the bump only trades that for this
-fence's own `head_moved`. The repair is in that script or 5a, not here.
+`skills/merge-pipeline/lib/release-anchor.sh` proves it inert. Until this stack it
+did not, and this section recorded the trail as structurally unresolvable on that
+measurement — v0.56.0 and v0.30.4 both `RELEASE_ANCHOR=none`, blamed on
+`diff_too_large` and `changelog_shape`. That helper was repaired in this same
+stack and both halves of the claim are now false, re-measured by executing the
+shipped script against those two commits: **v0.56.0** — 843 CHANGELOG lines
+inserted, 13 pending-notes stubs removed, exactly the six version surfaces
+touched, which is 5a's own shape — returns `tolerated`/`inert_release_commit`, so
+`TRUST_HEAD` resolves to the release commit's parent, the anchor that carries the
+trailer; **v0.30.4** still returns `none`, but for `content_not_version_only`, not
+the `changelog_shape` the old text named, and it earns the refusal — its README
+hunk rewrites a documentation sentence beside the badge bump, which is an
+unreviewed edit and not the shape 5a writes. The residual condition is on 5a, not
+on this fence: a bump that touches anything outside the six surfaces resolves
+`none` and PATH_2 (b) fails `trust_trail_trailer_missing` again.
 
 **What the trail claims and what it does not** — `references/phase-contracts.md`,
 `### What the Phase 5-trail fences require at their call sites`, which also states
@@ -2395,8 +2404,9 @@ printf 'PREMERGE TRAIL=emit ATTEMPT=%s HEAD=%s\n' "$PREMERGE_ATTEMPT_PAD" "$PREM
 exit 0
 ```
 
-Publish only on `TRAIL=emit`. The orchestrator carries the decision across the
-fence boundary because a fence is a fresh shell.
+Publish only on `TRAIL=emit`, carrying that line's `ATTEMPT=` **and** `HEAD=`
+tokens across with it. A fence is a fresh shell: the second one must bind to the
+head the first one gated, not to whatever HEAD reads by the time it runs.
 
 ```bash uberdev-executable origin=premerge-trail-emit
 set -u
@@ -2406,6 +2416,12 @@ RUN_ID="${RUN_ID:?RUN_ID must be prefixed onto this fence by the orchestrator}"
 PREMERGE_TRAIL="${PREMERGE_TRAIL:?PREMERGE_TRAIL must be prefixed onto this fence by the orchestrator}"
 PREMERGE_TRAIL_ATTEMPT="${PREMERGE_TRAIL_ATTEMPT:?PREMERGE_TRAIL_ATTEMPT must be prefixed onto this fence by the orchestrator}"
 [ "$PREMERGE_TRAIL" = "emit" ] || exit 0
+# The gate fence's `HEAD=` token, transcribed. Required PAST the emit guard and
+# not beside the two above: three of the gate's four skip lines print no HEAD= at
+# all, so a skipped call site has none to pass and would have to invent one. No
+# apostrophe in a :? word -- bash reads it as an opening quote and dies on EOF,
+# while zsh accepts it, so the fence would parse here and fail only on CI.
+PREMERGE_TRAIL_HEAD="${PREMERGE_TRAIL_HEAD:?PREMERGE_TRAIL_HEAD must be prefixed onto this fence by the orchestrator, transcribed from the HEAD= token the gate fence printed}"
 case "$PREMERGE_TRAIL_ATTEMPT" in [0-9][0-9]) ;; *) printf 'error: PREMERGE_TRAIL_ATTEMPT=%s is not the two-digit form; /merge matches the trailer suffix against ^gate=green attempt=[0-9]{2}$, so publishing would emit a trail nothing can resolve\n' "$PREMERGE_TRAIL_ATTEMPT" >&2; exit 2 ;; esac
 PREMERGE_ROOT="$(git rev-parse --show-toplevel)" || exit 2
 PREMERGE_RUN_DIR="$PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
@@ -2431,6 +2447,13 @@ PREMERGE_HEAD_BRANCH="$(git symbolic-ref -q --short HEAD)" || PREMERGE_HEAD_BRAN
 # endpoint names a delta with one end, and that survives a base retarget
 # untouched -- the reasoning #440 put the base half in the commit body for.
 PREMERGE_TRAIL_PARENT="$(git rev-parse HEAD)" || exit 2
+# ...and the head endpoint must be the tree the GATE read, not merely the one
+# checked out now. Re-deriving answers about NOW; only the token carried in from
+# the fence that read the evidence answers about the gate. A commit landing
+# between the two -- a hook, a fixup, a concurrent writer -- makes them differ,
+# and the same rule as the branch check above applies: a fence is a fresh shell
+# and may assume nothing about what moved before it started.
+[ "$PREMERGE_TRAIL_PARENT" = "$PREMERGE_TRAIL_HEAD" ] || { printf 'error: HEAD is %s but the gate proved green on %s; the checkout moved between the two fences -- refusing to trailer a tree no gate read. Re-run the gate fence\n' "$PREMERGE_TRAIL_PARENT" "$PREMERGE_TRAIL_HEAD" >&2; exit 2; }
 PREMERGE_TRAIL_BASE_OID="$(git rev-parse "origin/$PREMERGE_BASE")" || exit 2
 PREMERGE_ANCHOR_MESSAGE="$(printf 'chore(premerge): trust trail anchor for #%s\n\nReviewed-by: uberdev/premerge@%s gate=green attempt=%s\nReviewed-base: uberdev/premerge@%s ref=%s' \
   "$PREMERGE_PR" "$PREMERGE_TRAIL_PARENT" "$PREMERGE_TRAIL_ATTEMPT" \
