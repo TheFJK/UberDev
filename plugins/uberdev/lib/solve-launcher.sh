@@ -152,12 +152,12 @@ if [ "$FIX_MODE" = "1" ]; then
   # this file, in either direction (RFC 0022 section 3.6).
   # Default: one round.
   UBERDEV_FIX_ROUNDS_RESOLVED="${UBERDEV_FIX_FIX_ROUNDS:-1}"
-  # Two gates, and the second is not redundant. The glob rejects the empty
-  # string, any non-digit and the literal `0` — but `0` there is a STRING
-  # match, so `00` and `000` sail through it and `int("00")` is 0: exactly the
-  # value this guard exists to refuse. The numeric test is what actually
-  # enforces "positive". It runs second because `-ge` on a non-numeric string
-  # is a shell error, not a false.
+  # Two gates, and neither is redundant. The glob rejects the empty string and
+  # anything with a non-digit — that is ALL it does; it accepts `0`, `00` and
+  # `000` alike. The numeric test below is what enforces "positive", and it has
+  # to run second because `-lt` on a non-numeric string is a shell error rather
+  # than a false. Deleting either one reopens the hole: a string-glob `|0` arm
+  # would still pass `00`, whose int value is the very number being refused.
   #
   # The canonical form is also what gets emitted. The resolved value is
   # interpolated into a JSON literal in the audit row below, and JSON forbids a

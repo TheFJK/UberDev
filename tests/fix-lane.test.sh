@@ -325,6 +325,9 @@ ck "invokes it through bash -c (the zsh trap)" \
 # the findings.
 ck "reads only the verdict line"           "grep -q \"grep -m1 '^verdict:'\" '$SKILL'"
 ck "counts blockers rather than reading them" "grep -q 'severity:\\[\\[:space:\\]\\]\\*blocker' '$SKILL'"
+# `grep -c` exits 1 on zero matches, and zero blockers IS the success path, so
+# the clean review would report itself as a failed probe.
+ck "counts with awk, never grep -c"           "! grep -q \"grep -cE '^  - severity\" '$SKILL'"
 ck "states findings travel on disk only"   "grep -qi 'never the findings text' '$SKILL'"
 # The boundary this row guards really exists where the skill says it does.
 ck "the validator is defined in lib/child-dispatch.sh" \

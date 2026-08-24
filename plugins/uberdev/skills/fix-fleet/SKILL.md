@@ -303,8 +303,13 @@ file:
 
 ```bash
 grep -m1 '^verdict:' <report_path>
-grep -cE '^  - severity:[[:space:]]*blocker' <report_path>
+awk '/^  - severity:[[:space:]]*blocker/{n++} END{print n+0}' <report_path>
 ```
+
+`awk` for the count, not `grep -c`: `grep -c` exits **1** when it matches
+nothing, and matching nothing is the SUCCESS path here — a clean review is zero
+blockers. Run as the last command of a fence, `grep -c` would report the good
+outcome as a failed probe.
 
 `APPROVE` with zero blockers → Phase 5. `REVISIONS_REQUIRED` or `REJECT` →
 Phase 4.
