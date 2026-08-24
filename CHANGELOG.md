@@ -4,6 +4,79 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.56.2] — 2026-08-24
+
+### Fixed — `/premerge` 4c reviewed the whole stack, so a resampled blocker reverted a correct refactor (#795)
+
+`### 4c — VERIFY` dispatched `Skill("code-review", "<level> <PREMERGE_PR>")` while
+its own prose claimed the call was *"scoped to the refactor"*. `<PREMERGE_PR>` is
+the stack PR, so nothing was scoped: the verify step re-reviewed the entire stack
+and the built-in reviewer treated that whole diff as its scope.
+
+4c is not a discovery pass — it asks *"did the polish do harm"*. Asking a critic
+*"what is wrong with this stack"* answers from an unbounded set, so any blocker
+that sample happened to roll — including one present all along that the green gate
+had simply not sampled — reached the table's third arm as *"a blocker the polish
+introduced"* and **reverted a correct, behaviour-preserving refactor**, reporting
+`simplify=reverted` to an operator whose polish was fine.
+
+**The scope now comes from the checkout, not from an argument.** `### 4b` commits
+the polish and deliberately does **not** push it; `### 4c` reviews with a level and
+no target at all, so the reviewer's own default — `git diff @{upstream}...HEAD`,
+with upstream still at the pre-simplify SHA — resolves to exactly the polish
+commit. 4c then pushes (a new `premerge-simplify-push` fence, carrying the branch
+assertion and the bounded stderr capture the old inline push had) and gates.
+
+That push runs **regardless of `--no-post-simplify-review`**, and only the review,
+triage and gate steps are gated on it. Moving the push into 4c without that carve-out
+would have put the *only* push of the simplify commit behind the flag: on
+`/premerge --no-post-simplify-review --no-bump`, or on any repo without the version
+ratchet, the polish would be committed locally, never pushed, absent from the stack
+PR, and destroyed by the next `git reset --hard origin/...`. Both `commands/premerge.md`
+and RFC 0021 document that flag as costing the verification, never the polish.
+
+4c also gained a third arm for `### 4b` **exiting non-zero** (wrong branch, untracked
+files, absent allowed set, stray files). Each of those leaves the lens edits
+uncommitted in a dirty tree, where the reviewer's empty-range fallback would sweep
+the scope-rejected edits into the review; the arm stops the run instead.
+
+Passing the range explicitly was tried first and rejected. On the default cell the
+target is prose the model may or may not honour, and an **ignored target does not
+degrade to a wider review — it degrades to an empty one**: it falls back to that
+same default, which on an already-pushed branch is an empty range over a clean
+tree, so zero findings and a vacuous green from the phase whose whole job is to
+catch a bad polish. Leaving the commit unpushed is what makes the default correct
+rather than empty.
+
+Also fixed while here: 4c had no arm for `### 4b`'s `COMMIT=none REASON=no-edits`
+early exit, so a lens pass that applied nothing sent 4c to verify a commit that was
+never made. It now skips to Phase 5.
+
+### Fixed — a claim about the built-in reviewer that was asserted rather than executed
+
+RFC 0021 A3 **C8** recorded *"a two-SHA range is not in that surface"*, and
+`## Phase 3b — CONVERGE` plus `references/common-mistakes.md` both repeated it.
+It had been read off the review prompt's own enumeration rather than executed
+against the invocation path. Read out of the shipped binary (`2.1.241`):
+
+- the argument parser (`hLs` → `qau`) joins every post-level token into one
+  free-text target and rejects no shape;
+- `o30` takes either no target or one matching
+  `^[@\w][@\w./~^-]*\.\.\.?[@\w][@\w./~^-]*$` and returns on everything else — so
+  a range is the **only** target form that code parses; a PR number, a branch and
+  a path all fall through it. "Not in that surface" is backwards.
+
+The bound matters as much as the retraction, and is recorded with it: `o30` runs
+only when the cell sets `finderBudgetHint`, which `O_e` sets **false** for
+`o48-xhigh-v1` — the cell `claude-opus-5` xhigh resolves to, and `xhigh` is
+`PREMERGE_DEFAULT_LEVEL`. On /premerge's own default cell the CLI never parses the
+target at all. That bound is why 4c passes no target rather than a range.
+
+What survives of C8 is the point the growth ratio actually needs: a range would
+scope the *review*, but findings come back carrying `file` and `line` and no hunk
+provenance — so file-membership stays the honest proxy. C8 is amended in place
+rather than rewritten, and the two downstream copies now say the same thing.
+
 ## [0.56.1] — 2026-08-24
 
 ### Changed — the project rule file is `CLAUDE.md`, not `AGENTS.md`
