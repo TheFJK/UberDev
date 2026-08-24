@@ -29,8 +29,11 @@
 #   P7   — vendor.json carries the new skill directory (C-COVER would red without it)
 #   P8   — docs/rfc/0021-premerge-stack-integration.md exists, non-empty, unique
 #   P9   — README carries the TL;DR row and the per-command section
-#   P10  — no trust-trail emission: /premerge must not claim review evidence
-#          /merge's PATH_2 would accept
+#   P10  — instrument honesty: /premerge emits its OWN trust trail and never
+#          claims the review-pr instrument. The negative half is what catches a
+#          regression that forges the higher tier; the positive half is what
+#          keeps the negative half from being satisfied by a file that emits
+#          nothing at all
 #   P11  — the convergence loop's surfaces (RFC 0021 Amendment A1): the CONVERGE
 #          and VERIFY headings, the repair routing, the CI-repair agents
 #   P11b — every uberdev:<agent> the SKILL dispatches resolves to an agent card
@@ -108,10 +111,15 @@ VENDOR="$REPO_ROOT/plugins/uberdev/vendor.json"
 RFC="$REPO_ROOT/docs/rfc/0021-premerge-stack-integration.md"
 README="$REPO_ROOT/README.md"
 GOAL_STATE="$REPO_ROOT/plugins/uberdev/lib/goal-state.sh"
+# #716 — the CONSUMER of the trail this pipeline emits. P10 compares the two
+# files on the two literals /merge actually reads: a label the emitter and the
+# consumer spell differently is a trail nobody can resolve, and each file passes
+# its own grep while the pair is broken.
+MERGE_SKILL_FILE="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/SKILL.md"
 
 # Pre-flight: refuse to run if any asserted-against file is missing. A shape test
 # whose subject vanished must fail loudly, never report zero findings.
-for f in "$CMD" "$SKILL" "$SKILL_CONTRACTS" "$SKILL_MISTAKES" "$SKILL_OVERFLOW" "$LIB" "$PRIMITIVES" "$F2I" "$SYNC" "$VENDOR" "$RFC" "$README" "$GOAL_STATE"; do
+for f in "$CMD" "$SKILL" "$SKILL_CONTRACTS" "$SKILL_MISTAKES" "$SKILL_OVERFLOW" "$LIB" "$PRIMITIVES" "$F2I" "$SYNC" "$VENDOR" "$RFC" "$README" "$GOAL_STATE" "$MERGE_SKILL_FILE"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -333,6 +341,12 @@ echo "== P4: premerge-aggregate declared in all three sites =="
 assert_fixed "$PRIMITIVES" '"premerge-aggregate",' "P4: report_primitives ACCEPTED_SOURCES"
 assert_fixed "$F2I" 'premerge-aggregate' "P4: findings-to-issues closed source set"
 assert_fixed "$LIB" 'premerge-aggregate' "P4: premerge-findings.py"
+# The emitter's constant and the consumer's constant are the same claim written
+# in two files. Comparing them is the only thing that keeps them equal.
+assert_fixed "$SKILL" 'PREMERGE_TRUST_LABEL      = premerge-approved' \
+  "P4/#716: the SKILL declares its trust label as a constant"
+assert_fixed "$SKILL" 'PREMERGE_TRUST_INSTRUMENT = premerge' \
+  "P4/#716: and the instrument value it writes into the trailer"
 
 echo "== P5: findings-to-issues SUGGESTION tier =="
 assert_fixed "$F2I" 'row_tier="SUGGESTION"' "P5: the SUGGESTION arm exists"
@@ -380,12 +394,38 @@ echo "== P9: README surfaces =="
 assert_fixed "$README" '**`/premerge [<level>]`**' "P9: TL;DR table row"
 assert_grep "$README" '^## `/premerge` — ' "P9: per-command section"
 
-echo "== P10: no trust trail =="
+echo "== P10: instrument honesty =="
+# The negative half, unchanged in force and narrowed in target. /premerge did not
+# run the seven-lens fanout, the finding-verification gate or the CI-health phase,
+# so it must never write the label or the trailer that claim they did — not in a
+# fence, and not in prose either, because a whole-file grep cannot tell the two
+# apart and a file is free to be honest without naming the thing it refuses.
+#
+# The target narrowed from `Reviewed-by:` to `Reviewed-by: uberdev/review-pr@`
+# for one reason only: the instrument became DATA, so the bare prefix now names
+# BOTH tiers and banning it would ban the honest trail along with the forged one.
+# The forgery it was written to catch is caught exactly as before — measured by
+# inserting a review-pr trailer into each file and confirming this row REDS.
 for f in "$CMD" "$SKILL"; do
   base="${f##*/}"
-  assert_no_grep "$f" 'uberdev-approved' "P10: $base emits no approval label"
-  assert_no_grep "$f" '^[^#]*Reviewed-by:' "P10: $base emits no Reviewed-by trailer"
+  assert_no_grep "$f" 'uberdev-approved' "P10: $base emits no review-pr approval label"
+  assert_no_grep "$f" '^[^#]*Reviewed-by: uberdev/review-pr@' "P10: $base emits no review-pr trailer"
 done
+# The positive half. Without it every row above is satisfied by a /premerge that
+# emits nothing — which is precisely the state this issue exists to end, and
+# precisely what the old P10 could not distinguish from correct behaviour.
+assert_fixed "$SKILL" 'Reviewed-by: uberdev/premerge@' "P10: the SKILL emits the premerge instrument"
+assert_fixed "$SKILL" 'Reviewed-base: uberdev/premerge@' "P10: and both endpoints of the delta, not one"
+assert_fixed "$SKILL" 'premerge-approved' "P10: the SKILL names its own trust label"
+assert_grep "$SKILL" '^### 5-trail — the premerge trust trail$' "P10: the emission step has a heading"
+# The two files must agree on the two literals /merge reads. A label the emitter
+# and the consumer spell differently is a trail nobody can resolve, and each file
+# passes its own grep while the pair is broken.
+if grep -qF 'premerge-approved' "$MERGE_SKILL_FILE" && grep -qF 'Reviewed-by: uberdev/premerge@' "$MERGE_SKILL_FILE"; then
+  echo "  PASS  P10: /merge declares the same label and trailer prefix the emitter writes"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  P10: /merge does not declare the label or trailer prefix /premerge emits"; FAIL=$((FAIL + 1))
+fi
 
 echo "== P11: the convergence loop's surfaces =="
 assert_grep "$SKILL" '^## Phase 3b — CONVERGE$' "P11: the CONVERGE phase heading"
@@ -433,6 +473,21 @@ assert_fixed "$FENCES" 'PREMERGE_GATE_SAID" != "not_green"' "P11c: the fix commi
 # or dropping the `!`) left all of them green — the guard was only half-locked.
 assert_fixed "$FENCES" '[ ! -s "$PREMERGE_GATE_FILE" ]' "P11c: the missing-gate-file predicate itself is locked"
 assert_grep "$SKILL" '^## The order within one attempt$' "P11c: the load-bearing ordering is written down, not inferred"
+# #716 — the trail is gated on the loop's own stop decision AND on this attempt's
+# gate verdict AND on the head the gate read. Each is a separate way for the trail
+# to describe something other than what would land, and a whole-file grep for any
+# of them is satisfied by the paragraph that explains them.
+assert_fixed "$FENCES" 'PREMERGE_STOP:?' "P11c/#716: the trail fence requires the stop decision, never defaults it"
+assert_fixed "$FENCES" '[ "$PREMERGE_STOP" != "STOP_GREEN" ]' "P11c/#716: a non-green stop emits nothing"
+assert_fixed "$FENCES" 'REASON=not_green' "P11c/#716: a not-green gate verdict emits nothing, with a typed reason"
+assert_fixed "$FENCES" '[ "$PREMERGE_TRAIL_GATE_SHA" != "$PREMERGE_TRAIL_HEAD" ]' \
+  "P11c/#716: the trail is SHA-bound — a head that moved after the gate emits nothing"
+assert_fixed "$FENCES" '[ "$PREMERGE_TRAIL" = "emit" ] || exit 0' \
+  "P11c/#716: the publication fence refuses without the gate fence's own verdict"
+assert_fixed "$FENCES" 'git diff --quiet "$PREMERGE_TRAIL_PARENT" "$PREMERGE_TRAIL_ANCHOR"' \
+  "P11c/#716: --allow-empty is not proof; the anchor's emptiness is verified"
+assert_fixed "$FENCES" 'gh label create --force premerge-approved' \
+  "P11c/#716: the label is provisioned before it is added (#170 class)"
 
 echo "== P11b: every dispatched agent resolves to a card on disk =="
 # EVERY `uberdev:<name>` the file mentions, not only the `subagent_type:` ones.

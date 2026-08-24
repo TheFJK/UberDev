@@ -56,6 +56,14 @@
 #         without conflating absent telemetry with a legacy audit.
 #   M93 — Phase 1.4 consumes typed discovery/parser results safely, reuses the
 #         selected artifact, and documents structural-probe failures.
+#   (This index stops at M93, but the body already runs through M99 — M94..M99
+#    were added without index entries. The next free section id is therefore
+#    M100, not M94, and #716's block below takes it.)
+#   M100 — the trust instrument is a FIELD: TRUST_INSTRUMENT_ENUM, TRUST_LABEL_ENUM,
+#         the generalised trailer regexes and the premerge gate token are declared;
+#         Phase 1.4 resolves the instrument from BOTH the label and the trailer and
+#         refuses when they disagree; the Phase 2.5 discovery is instrument-scoped;
+#         and the enum row count is UNCHANGED at 15 (no new gate-fail reason).
 
 set -u
 set -o pipefail
@@ -109,6 +117,55 @@ assert_no_grep() {
     echo "        pattern (must NOT appear): $pattern"
   else
     pass "$desc"
+  fi
+}
+
+# Fixed-string presence helper — mirrors `assert_fixed` in
+# tests/premerge.test.sh so the convention stays one-name across the suite.
+#
+# WHY A FIXED-STRING FAMILY AT ALL. `assert_grep` compiles its argument as an
+# ERE, and several things this suite has to lock are shell literals:
+# `${TRUST_TRAILER_BODY%%@*}`, `uberdev/(review-pr|premerge)@[a-f0-9]{40}( .*)?$`,
+# `data.trust_anchor="uberdev_premerge_trail"`. Escaping `$`, `|`, `(`, `)`,
+# `{`, `}` and `.` into an ERE is unreadable, and it is unsafe in exactly one
+# direction: a missed backslash WIDENS the pattern, so the row keeps passing
+# against text it was never meant to accept. `grep -F` compares bytes and has
+# no way to widen.
+#
+# These are real functions, and that is the point. An assertion helper that
+# does not exist is not a failing row: this file runs `set -u` and
+# `set -o pipefail` but deliberately NOT `set -e`, so a call to a missing
+# helper is a `command not found` that touches NEITHER counter — the suite
+# still prints "0 failed" and exits 0 while the row never ran. Define the
+# helper before the call site, never the other way round.
+assert_fixed() {
+  local file="$1" literal="$2" desc="$3"
+  if grep -qF -e "$literal" "$file"; then
+    pass "$desc"
+  else
+    fail "$desc"
+    echo "        file:    $file"
+    echo "        literal: $literal"
+  fi
+}
+
+# Same byte comparison, against an already-extracted BLOCK of text instead of a
+# whole file. SKILL.md holds Step 1.4's implementation, the Constants table AND
+# the `## Common Mistakes` paragraphs that discuss both, so a whole-file grep
+# for a BEHAVIOUR is satisfied by the prose explaining the behaviour long after
+# the step that performed it is gone. Scope every "Phase 1.4 does X" row to the
+# extracted step body; keep whole-file scope for "the document declares X".
+#
+# Herestring, never `printf ... | grep -qF`: `grep -q` exits on its first match
+# and the writer then takes EPIPE, which `set -o pipefail` promotes into a false
+# failure on CI — see tests/epipe-guard.test.sh for the measured behaviour.
+assert_fixed_in() {
+  local block="$1" literal="$2" desc="$3"
+  if grep -qF -e "$literal" <<<"$block"; then
+    pass "$desc"
+  else
+    fail "$desc"
+    echo "        literal (absent from the extracted block): $literal"
   fi
 }
 
@@ -684,6 +741,7 @@ echo "== M36: SKILL.md gate_pass.data.trust_anchor enum values present (AC5) =="
 assert_grep "$SKILL_FILE" 'reviewDecision_approved' "M36.tea1 — TRUST_ANCHOR_ENUM value reviewDecision_approved"
 assert_grep "$SKILL_FILE" 'uberdev_review_trail'    "M36.tea2 — TRUST_ANCHOR_ENUM value uberdev_review_trail"
 assert_grep "$SKILL_FILE" 'bypass_with_waiver'      "M36.tea3 — TRUST_ANCHOR_ENUM value bypass_with_waiver"
+assert_grep "$SKILL_FILE" 'uberdev_premerge_trail'  "M36.tea4 — TRUST_ANCHOR_ENUM value uberdev_premerge_trail (#716)"
 
 echo
 echo "== M37: SKILL.md GATE_FAIL_REASON_ENUM — 15 members (issue #52, narrowed by #78, +2 by #437) =="
@@ -774,6 +832,85 @@ echo
 echo "== M41: SKILL.md REVIEW_PR_TRAILER_PREFIX constant present (AC13) =="
 assert_grep "$SKILL_FILE" '\| `REVIEW_PR_TRAILER_PREFIX` \|.*Reviewed-by: uberdev/review-pr@' \
   "M41 — REVIEW_PR_TRAILER_PREFIX constant declared with literal trailer prefix"
+
+echo
+echo "== M100: the trust instrument is a field, not a hardcoded prefix (#716) =="
+# #716's plan calls this section M94 because the `# Sections:` index above stops
+# at M93. The index is stale: the body already carries an unrelated M94 — the
+# closed-capture-receipt rows, `M94.closed-discovery` and friends — and runs on
+# through M99, so M94 here would have put two different sections behind one id.
+# M100 is the next genuinely free number.
+#
+# Re-derived here rather than inherited from M35's binding: these rows are the
+# only reason this extraction exists at this point in the file, and a row whose
+# scope is set a hundred lines above it, in a section about something else, is a
+# row that silently changes meaning when that section moves.
+M100_PHASE_14_BODY=$(awk '/^### Step 1\.4/,/^### Step 1\.5/' "$SKILL_FILE")
+if [ -n "$M100_PHASE_14_BODY" ]; then
+  pass "M100.extract — the Step 1.4 body extracted non-empty (the scope every behaviour row below reads)"
+else
+  fail "M100.extract — the Step 1.4 body extracted EMPTY; every scoped row below is vacuous until the heading anchors are repaired"
+fi
+# The Constants rows. A helper nobody can find is a helper the next edit
+# re-inlines. These are declarations, so whole-file is the correct scope by
+# construction: the Constants table sits above Step 1.4, never inside it.
+assert_grep "$SKILL_FILE" '\| `TRUST_INSTRUMENT_ENUM` \|' \
+  "M100.const1 — TRUST_INSTRUMENT_ENUM constant row declared"
+assert_grep "$SKILL_FILE" '\| `TRUST_LABEL_ENUM` \|' \
+  "M100.const2 — TRUST_LABEL_ENUM constant row declared"
+assert_grep "$SKILL_FILE" '\| `PREMERGE_APPROVED_LABEL` \|.*premerge-approved' \
+  "M100.const3 — PREMERGE_APPROVED_LABEL declared with its literal value"
+assert_grep "$SKILL_FILE" '\| `PREMERGE_TRAILER_PREFIX` \|.*Reviewed-by: uberdev/premerge@' \
+  "M100.const4 — PREMERGE_TRAILER_PREFIX declared with its literal value"
+assert_grep "$SKILL_FILE" '\| `PREMERGE_GATE_TOKEN_REGEX` \|' \
+  "M100.const5 — the premerge gate-token regex is a declared constant"
+# The generalised regexes must admit BOTH instruments. A test for the word
+# `premerge` alone would pass on a file that documents it and matches only
+# review-pr, so anchor on the alternation itself. Whole-file is the honest scope
+# for these two: the Constants table's copies escape the alternation as `\|` for
+# the Markdown table and so cannot satisfy a byte-for-byte match, leaving a real
+# `grep -E` invocation as the only thing in the document that can.
+assert_fixed "$SKILL_FILE" 'uberdev/(review-pr|premerge)@[a-f0-9]{40}( .*)?$' \
+  "M100.re1 — the Reviewed-by extraction admits both instruments"
+assert_fixed "$SKILL_FILE" 'uberdev/(review-pr|premerge)@[a-f0-9]{40} ref=.+$' \
+  "M100.re2 — the Reviewed-base extraction admits both instruments"
+# The instrument is PARSED, never assumed. This is the binding that makes the
+# field a field; a fence that still strips a fixed prefix has documented the
+# generalisation without performing it.
+assert_fixed_in "$M100_PHASE_14_BODY" 'TRUST_INSTRUMENT="${TRUST_TRAILER_BODY%%@*}"' \
+  "M100.bind — the b.5 fence binds the instrument out of the trailer body"
+# The agreement check. Either half alone is forgeable: a label is a bare literal
+# with no payload, and a trailer is bytes anyone can write into a commit body.
+assert_fixed_in "$M100_PHASE_14_BODY" 'LABEL_INSTRUMENT' \
+  "M100.agree1 — the label resolves an instrument rather than a presence bit"
+assert_fixed_in "$M100_PHASE_14_BODY" "instrument and the trailer's instrument must agree" \
+  "M100.agree2 — the disagreement between the two halves is an explicit refusal"
+# The premerge tier's payload. Without it the tier rests on two bare literals.
+assert_fixed_in "$M100_PHASE_14_BODY" 'gate=green attempt=' \
+  "M100.token — the premerge trailer must carry a green gate token"
+# The dropped check, and the reason it is not spelled `absent`.
+assert_fixed_in "$M100_PHASE_14_BODY" 'audit_state=not_applicable' \
+  "M100.na1 — a non-review-pr instrument dispatches audit_state=not_applicable"
+assert_fixed_in "$M100_PHASE_14_BODY" '`not_applicable` is a distinct value from `absent`' \
+  "M100.na2 — the distinction from absent is stated, not left to be re-discovered"
+assert_fixed_in "$M100_PHASE_14_BODY" 'regardless of what the operator typed on the command line' \
+  "M100.na3 — the three acknowledgement flags are forced false for other instruments"
+# The anchor split, which is what lets an audit consumer tell the tiers apart.
+assert_fixed_in "$M100_PHASE_14_BODY" 'data.trust_anchor="uberdev_premerge_trail"' \
+  "M100.anchor — a premerge trail lands its own trust anchor"
+# The regression this issue was one edit away from shipping: a new
+# `premerge_gate_not_green` reason. M37.count already pins 15, but it reads as a
+# historical ratchet; this row states the CURRENT reason, so the next reader
+# knows the count is a decision rather than an accident.
+M100_ENUM_ROW=$(grep -E '\| `GATE_FAIL_REASON_ENUM` \|' "$SKILL_FILE" || true)
+M100_ENUM_COUNT=$(echo "$M100_ENUM_ROW" | grep -oE '`[a-z_]+`' | wc -l | tr -d ' ')
+if [ "$M100_ENUM_COUNT" -eq 15 ]; then
+  echo "  PASS  M100.noenum — the premerge tier adds no gate-fail reason (row still 15)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  M100.noenum — GATE_FAIL_REASON_ENUM row moved to $M100_ENUM_COUNT; the premerge tier must reuse existing reasons"
+  FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== M42: SKILL.md TRUST_ANCHOR_ENUM constant present (AC5) =="

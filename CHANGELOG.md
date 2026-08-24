@@ -4,6 +4,69 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.57.0] — 2026-08-24
+
+### Added — the trust trail names its own instrument, so `/premerge` output is landable
+
+`/merge`'s Phase 1.4 trust gate was hardcoded to one producer: it matched the
+literal prefix `Reviewed-by: uberdev/review-pr@` and the bare label
+`uberdev-approved`. `/premerge` emitted neither, so every stack it parked was
+structurally unlandable — the condition #716 exists to remove.
+
+The instrument is now **data**. `Reviewed-by: uberdev/<instrument>@<sha>` over the
+closed set `{review-pr, premerge}`, a declared label→instrument table, and a
+refusal when the two halves disagree. `/premerge` emits the same artifact shape
+with its own value, gated on a green clean gate, carrying `gate=green attempt=NN`
+in the immutable commit body — the payload that keeps the tier from resting on
+two bare literals, since `.uberdev/` is gitignored and a fresh clone has no
+`gate-NN.json`.
+
+No third trust path was added: the generalised PATH_2 is the design.
+
+### Fixed — `release-anchor.sh` refused every real release this repo has made
+
+`/premerge` emits its anchor before the version bump, so `/merge` reads the
+trailer through the following `chore(release)` commit only if `release-anchor.sh`
+proves that commit inert. It proved nothing: measured over all 74 historical
+`chore(release):` commits, **70 were refused** — 47 by the CHANGELOG rules alone.
+The four survivors were the releases that shipped no notes.
+
+The one 400-line cap was doing two jobs. It is now three: CHANGELOG prose is
+bounded at 2000 lines (inert by nature — nothing in the repo reads `CHANGELOG.md`
+back), the **code-bearing** diff at 200, and the total at 4000 as a pure resource
+bound. The code-bearing half is therefore **half** what it was. The per-line
+shape regex — which never was a content control; `- curl … | sh` satisfied it —
+is replaced by a structural rule: the commit must open exactly one `## ` section
+and it must be this release's.
+
+42 of 74 now resolve, and a 19-row adversarial matrix still refuses every attack
+row, two of them more strictly than before.
+
+### Fixed — a RED `/review-pr` no longer leaves a landable trail
+
+Because PATH_2 is now a disjunction over instruments, a RED review that cleared
+only its own two labels left `premerge-approved` standing on a PR it had just
+blocked. RED now clears every member of `TRUST_LABEL_ENUM`. GREEN and YELLOW
+deliberately do not: their fresh anchor moves the trust head past the premerge
+one, so a surviving label cannot outrank the newer trail, and clearing it would
+delete another command's uncontradicted evidence.
+
+### Fixed — the YELLOW tier is held to a commit-body token
+
+`--accept-critical-deferred` was unenforceable wherever the gitignored audit
+artifact was undiscoverable — a worktree, another machine, a fresh clone. The
+evidence was already being parsed and thrown away: `/review-pr` writes
+` severity=critical-deferred count=N` into the trailer. The `(b.5)` fence now
+classifies it, symmetric with how `premerge` is held to its gate token.
+
+### Fixed — the trail can no longer name a tree the gate never read
+
+The emit fence re-derived its own `HEAD`, so any commit landing between the gate
+and the emit produced a trailer claiming a gate that never saw that tree. The
+gate's `HEAD=` token is now a required input and must match before the first
+write.
+
+
 ## [0.56.1] — 2026-08-24
 
 ### Changed — the project rule file is `CLAUDE.md`, not `AGENTS.md`

@@ -72,22 +72,55 @@ assert_in_section "$AGENT_MD" '^## Process' '^## Refusal triggers' \
   'Phase 2\.5 gate|RFC 0002 §3\.6|phase2_5 inputs' \
   'TT1 — agent documents Phase 2.5 gate in Process section (RFC 0002 §3.6)'
 
-# TT2 — caller-composed audit identity is explicit and five-state. Every one of
-# the five states must be named, not just whichever one happens to appear first.
+# TT2 — caller-composed audit identity is explicit and six-state. Every one of
+# the six states must be named, not just whichever one happens to appear first.
 assert_all_in_section "$AGENT_MD" '^## Inputs' '^## Tools authorised' \
-  'TT2 — audit_state input declares ALL of absent | legacy | current | malformed | indeterminate' \
+  'TT2 — audit_state input declares ALL of absent | legacy | current | malformed | indeterminate | not_applicable' \
   '`audit_state`' \
   '"absent"' \
   '"legacy"' \
   '"current"' \
   '"malformed"' \
-  '"indeterminate"'
+  '"indeterminate"' \
+  '"not_applicable"'
 
 # TT2a — absent telemetry is not legacy: skip only Phase 2.5 and continue
 # through the immutable structural proof.
 assert_in_section "$AGENT_MD" '^## Process' '^## Refusal triggers' \
   'Absent audit.*audit_state.*absent.*fall through to Step 2|audit_state.*absent.*skip.*Phase 2\.5.*structural' \
   'TT2a — absent audit skips only Phase 2.5 telemetry and continues structural proof'
+
+# TT2d — not_applicable is its own state, and its meaning is written down. Reusing
+# `absent` here would let a stale review-pr artifact for the same PR number apply
+# /review-pr halt semantics to a trail /review-pr never wrote.
+assert_all_in_section "$AGENT_MD" '^### Phase 2.5 inputs' '^## Tools authorised' \
+  'TT2d — not_applicable is declared and distinguished from absent' \
+  'not_applicable' \
+  'NOT a synonym for'
+# TT2e — the instrument is a declared, validated input with a closed domain.
+assert_all_in_section "$AGENT_MD" '^## Inputs' '^## Tools authorised' \
+  'TT2e — trust_instrument is a declared input over a closed set' \
+  'trust_instrument' \
+  'review-pr' \
+  'premerge'
+# TT2f — the arm exists, and it relaxes ONLY the reviewer-identity check. The
+# structural proof staying load-bearing is the whole reason this relaxation is
+# safe, so it is asserted rather than assumed — and it is asserted INSIDE the arm.
+#
+# Scoping this row to `^## Process` ... `^## Refusal triggers` (the obvious
+# anchors, and the ones every neighbouring row here uses) is VACUOUS, measured:
+# `not_applicable` also appears in Step 1's validation list, the instrument /
+# audit-state coherence rule, the non-current default tuple and the malformed arm,
+# while `structural primitives` also appears in Step 1.5's own heading, the absent
+# arm and the all-current-gates-pass arm. Deleting this entire arm from the card
+# left the row GREEN and the suite reporting `FAIL=0`. Ending the range at the
+# blank line after the arm — rather than at the NEXT arm, which awk would include
+# — is what makes the two shared tokens discriminate.
+assert_all_in_section "$AGENT_MD" '\*\*Not applicable' '^$' \
+  'TT2f — the not_applicable arm skips only the Phase 2.5 gate' \
+  'not_applicable' \
+  'structural primitives' \
+  'load-bearing'
 
 # TT2b — STALE verdict on a present legacy audit.
 assert_in_section "$AGENT_MD" '^## Process' '^## Refusal triggers' \
@@ -165,8 +198,20 @@ fi
 # TT7 — Step 1.5 ordering invariant: the Phase 2.5 gate runs BEFORE Step 2
 # (structural primitives). Locate Step 1.5 and Step 2 by line number and
 # assert ordering.
+#
+# The `L_2` anchor MUST stay off the prose. `grep` reports matches in FILE order,
+# not alternation order, so a `|Step 2` alternative resolves `head -1` to the
+# FIRST line mentioning Step 2 anywhere — and Step 1.5's own body says "fall
+# through to Step 2 (structural primitives)" in three of its arms. This row was
+# therefore comparing 1.5's heading against 1.5's own body: measured, `L_2` bound
+# to line 79, the `not_applicable` arm INSIDE the 1.5 block, not to line 112 where
+# Step 2 actually begins. Deleting the real `2. Probe ancestry` heading outright
+# left the row GREEN. Anchoring on the column-0 list marker is what gives it
+# teeth: the arms are indented, so only the heading can match, and a card that
+# lost Step 2 now reds with an empty `L_2` instead of passing over its absence.
+# Do not re-add a prose alternative here for symmetry with `L_1_5`.
 L_1_5=$(grep -n '^1\.5\.\|^1\.5 \|Step 1\.5' "$AGENT_MD" | head -1 | cut -d: -f1)
-L_2=$(grep -n '^2\. Probe ancestry\|^2\.[[:space:]]\|Step 2' "$AGENT_MD" | head -1 | cut -d: -f1)
+L_2=$(grep -n '^2\. Probe ancestry\|^2\.[[:space:]]' "$AGENT_MD" | head -1 | cut -d: -f1)
 if [[ -n "$L_1_5" && -n "$L_2" && "$L_1_5" -lt "$L_2" ]]; then
   echo "  PASS  TT7 — Step 1.5 (Phase 2.5 gate) precedes Step 2 (structural primitives); L_1_5=$L_1_5 < L_2=$L_2"
   PASS=$((PASS + 1))

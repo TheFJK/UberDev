@@ -467,6 +467,24 @@ if [ "$E_READY" = yes ]; then
     -m "$(printf 'chore(review-pr): trust trail anchor for #440\n\nReviewed-by: uberdev/review-pr@%s severity=critical-deferred count=2\nReviewed-base: uberdev/review-pr@%s ref=feat/A' \
             "$B_TIP" "$REVIEWED_BASE")" >/dev/null 2>&1
   E_YELLOW_HEAD="$(git -C "$MATRIX_ROOT" rev-parse HEAD)"
+  # A premerge-instrument anchor: same artifact SHAPE, different instrument value,
+  # and the gate token in the suffix slot the deferred-critical fixture above
+  # proves is tolerated. This is the scenario the whole generalisation exists for,
+  # and it is EXECUTED against the shipped fence rather than grepped: a regex that
+  # documents `premerge` and matches only `review-pr` passes every grep in this file.
+  git -C "$MATRIX_ROOT" commit -q --allow-empty --cleanup=verbatim \
+    -m "$(printf 'chore(premerge): trust trail anchor for #716\n\nReviewed-by: uberdev/premerge@%s gate=green attempt=02\nReviewed-base: uberdev/premerge@%s ref=feat/A' \
+            "$B_TIP" "$REVIEWED_BASE")" >/dev/null 2>&1
+  E_PREMERGE_HEAD="$(git -C "$MATRIX_ROOT" rev-parse HEAD)"
+  # A MIXED-instrument anchor: the head half names `premerge`, the base half names
+  # `review-pr`. No command emits that pair, so it can only be hand-assembled — and
+  # a fence that accepted it would let one command's head endpoint be paired with
+  # an unrelated trail's base endpoint, which is exactly the forgery the agreement
+  # check exists for. Refusal has to be EXECUTED, not merely written down.
+  git -C "$MATRIX_ROOT" commit -q --allow-empty --cleanup=verbatim \
+    -m "$(printf 'chore(premerge): trust trail anchor for #716\n\nReviewed-by: uberdev/premerge@%s gate=green attempt=01\nReviewed-base: uberdev/review-pr@%s ref=feat/A' \
+            "$B_TIP" "$REVIEWED_BASE")" >/dev/null 2>&1
+  E_MIXED_HEAD="$(git -C "$MATRIX_ROOT" rev-parse HEAD)"
 
   E_RUNNER="$CARRIER_TMP/b5-runner.sh"
   cat >"$E_RUNNER" <<'E_RUNNER_EOF'
@@ -480,6 +498,7 @@ set -eu -o pipefail
 # The fence may assume ONLY CLAUDE_PLUGIN_ROOT, TRUST_HEAD, PR_JSON and the cwd.
 . "$UBERDEV_FENCE_BODY"
 printf 'TRAILER_SHA=%s\n'             "${TRAILER_SHA-<unset>}"
+printf 'TRUST_INSTRUMENT=%s\n'        "${TRUST_INSTRUMENT-<unset>}"
 printf 'REVIEWED_BASE_SHA=%s\n'       "${REVIEWED_BASE_SHA-<unset>}"
 printf 'REVIEWED_BASE_REF=%s\n'       "${REVIEWED_BASE_REF-<unset>}"
 printf 'CURRENT_BASE_REF=%s\n'        "${CURRENT_BASE_REF-<unset>}"
@@ -551,6 +570,32 @@ E_RUNNER_EOF
       BASE_IDENTITY_REFUSAL ""
     _fence_row "$E_SHELL.yellow-suffix-probe-runs" "$E_SHELL" "$E_YELLOW_HEAD" main "$S2_BASE" \
       BASE_DELTA_EQUIVALENCE match
+    # PREMERGE instrument — the scenario the whole generalisation exists for, and
+    # the one no grep in this file can reach: a regex that merely DOCUMENTS
+    # `premerge` while still matching only `review-pr` satisfies every literal
+    # assertion in TB-S4. A fence that stripped a fixed `review-pr@` prefix would
+    # leave the entire `premerge@<sha> gate=…` body in TRAILER_SHA, refuse at the
+    # 40-hex domain check, and STALE every premerge trail while wearing the costume
+    # of correct fail-closed behaviour — #418/#419, one instrument along.
+    _fence_row "$E_SHELL.premerge-instrument-parsed" "$E_SHELL" "$E_PREMERGE_HEAD" main "$S2_BASE" \
+      TRUST_INSTRUMENT premerge
+    _fence_row "$E_SHELL.premerge-trailer-sha" "$E_SHELL" "$E_PREMERGE_HEAD" main "$S2_BASE" \
+      TRAILER_SHA "$B_TIP"
+    _fence_row "$E_SHELL.premerge-no-refusal" "$E_SHELL" "$E_PREMERGE_HEAD" main "$S2_BASE" \
+      BASE_IDENTITY_REFUSAL ""
+    # ...and the base probe must reach the SAME answer the review-pr anchor reaches
+    # on the identical scenario (S2, the automatic squash retarget). The instrument
+    # records WHO vouched; it may not change WHAT the base gate concludes.
+    _fence_row "$E_SHELL.premerge-S2-automatic-squash" "$E_SHELL" "$E_PREMERGE_HEAD" main "$S2_BASE" \
+      BASE_DELTA_EQUIVALENCE match
+    # MIXED instruments: head half `premerge`, base half `review-pr`. Not a trail
+    # either command emitted, so it is refused rather than resolved — and the
+    # refusal must propagate to the value the evaluator actually consumes, exactly
+    # as the no-trailer rows above require.
+    _fence_row "$E_SHELL.mixed-instrument-refuses" "$E_SHELL" "$E_MIXED_HEAD" main "$S2_BASE" \
+      BASE_IDENTITY_REFUSAL trust_trail_trailer_missing
+    _fence_row "$E_SHELL.mixed-instrument-unavailable" "$E_SHELL" "$E_MIXED_HEAD" main "$S2_BASE" \
+      BASE_DELTA_EQUIVALENCE unavailable
   done
 fi
 
@@ -696,8 +741,8 @@ assert_grep_fixed "TB-S4.1: the cached PR projection now includes baseRefOid" \
   "$MERGE_SKILL" 'baseRefOid'
 assert_grep_fixed "TB-S4.2: the lib projection asks gh for baseRefOid" \
   "$DISCOVER_LIB" 'baseRefOid'
-assert_grep_fixed "TB-S4.3: the caller extracts the Reviewed-base trailer" \
-  "$MERGE_SKILL" 'Reviewed-base: uberdev/review-pr@'
+assert_grep_fixed "TB-S4.3: the caller extracts the Reviewed-base trailer for either instrument" \
+  "$MERGE_SKILL" 'Reviewed-base: uberdev/(review-pr|premerge)@'
 assert_grep_fixed "TB-S4.4: the caller computes base delta equivalence itself" \
   "$MERGE_SKILL" 'merge_resolve_base_delta_equivalence'
 assert_grep "TB-S4.5: the four base inputs are threaded into the dispatch prompt" \
@@ -727,9 +772,16 @@ assert_grep "TB-S4.12: the naive merge-base predicate is explicitly forbidden" \
 # claiming, on no evidence, exactly what the gate exists to check.
 assert_grep_fixed "TB-S4.13: the fast path also requires the base OID to be unchanged" \
   "$MERGE_SKILL" '[ "$REVIEWED_BASE_SHA" != "$CURRENT_BASE_OID" ]'
-# The probe must be reachable with a trailer SHA THIS fence bound.
-assert_grep_fixed "TB-S4.14: the b.5 fence binds TRAILER_SHA itself" \
-  "$MERGE_SKILL" 'TRAILER_SHA="${TRUST_TRAILER_LINE#Reviewed-by: uberdev/review-pr@}"'
+# The probe must be reachable with a trailer SHA THIS fence bound — and the
+# instrument must be PARSED out of the same body rather than assumed. A fence
+# that still strips a fixed `review-pr` prefix documents the generalisation
+# without performing it, and every premerge trail would arrive with an empty
+# SHA, resolve `unavailable`, and fail closed while wearing the costume of
+# correct fail-closed behaviour — the #418/#419 class, one instrument along.
+assert_grep_fixed "TB-S4.14: the b.5 fence binds TRAILER_SHA itself, off the parsed body" \
+  "$MERGE_SKILL" 'TRAILER_SHA="${TRUST_TRAILER_BODY#*@}"'
+assert_grep_fixed "TB-S4.14b: and binds the instrument from the same body" \
+  "$MERGE_SKILL" 'TRUST_INSTRUMENT="${TRUST_TRAILER_BODY%%@*}"'
 assert_grep_fixed "TB-S4.15: a missing/short trailer REFUSES rather than degrading" \
   "$MERGE_SKILL" 'BASE_IDENTITY_REFUSAL=trust_trail_trailer_missing'
 # The gate's own scenario is the one where the clone is most likely stale, and
