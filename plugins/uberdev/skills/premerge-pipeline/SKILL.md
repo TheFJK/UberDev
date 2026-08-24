@@ -2410,6 +2410,13 @@ case "$PREMERGE_TRAIL_ATTEMPT" in [0-9][0-9]) ;; *) printf 'error: PREMERGE_TRAI
 PREMERGE_ROOT="$(git rev-parse --show-toplevel)" || exit 2
 PREMERGE_RUN_DIR="$PREMERGE_ROOT/.uberdev/premerge/$RUN_ID"
 PREMERGE_PR="$(jq -r '.combined_pr' <"$PREMERGE_RUN_DIR/manifest.json")" || exit 2
+# `jq -r` is not a validator: a manifest lacking `combined_pr` PRINTS the string
+# `null` and EXITS 0, so the `|| exit 2` never fires and the fence would anchor
+# `... for #null`, push it, and fail only at `gh pr edit null` -- leaving an
+# unlabelled anchor on the remote that nothing short of a force-push removes.
+# Same shape and reason as the PREMERGE_TRAIL_ATTEMPT guard above: assert BEFORE
+# the first write, never repair after it.
+case "$PREMERGE_PR" in ''|*[!0-9]*) printf 'error: manifest.json gave combined_pr=%s, which is not a PR number; refusing to anchor a trail nothing can resolve\n' "${PREMERGE_PR:-(empty)}" >&2; exit 2 ;; esac
 PREMERGE_BRANCH="$(cat "$PREMERGE_RUN_DIR/combine-branch.txt")" || exit 2
 PREMERGE_BASE="$(cat "$PREMERGE_RUN_DIR/combine-base.txt")" || exit 2
 # Refuse to anchor from anywhere but the stack branch. A fence is a fresh shell
@@ -2441,12 +2448,20 @@ git commit --allow-empty --cleanup=verbatim -m "$PREMERGE_ANCHOR_MESSAGE" >/dev/
 # `HEAD~1` rather than `HEAD^`: `^` is a glob metacharacter under zsh with
 # EXTENDED_GLOB, and these fences run through /bin/zsh.
 PREMERGE_TRAIL_ANCHOR="$(git rev-parse HEAD)" || exit 2
+# Every refusal from here to the push UNWINDS its own anchor: it is still local,
+# and 5a pushes this branch a few steps later, so one left behind is one 5a
+# publishes -- a premerge trailer with no label and no gate anyone consented to.
+# `--soft`, never `--hard`: it moves the branch pointer and touches neither the
+# index nor the working tree, so the pre-commit state comes back whole, including
+# staged bytes. The parent-mismatch arm alone does NOT unwind -- a branch whose
+# shape this fence cannot account for is one it must not rewrite.
 [ "$(git rev-parse HEAD~1)" = "$PREMERGE_TRAIL_PARENT" ] || {
-  printf 'error: the anchor commit parent is not the gated head; refusing to publish\n' >&2
+  printf 'error: the anchor commit parent is not the gated head; refusing to publish, and refusing to unwind a branch this fence cannot account for -- inspect it by hand\n' >&2
   exit 2
 }
 git diff --quiet "$PREMERGE_TRAIL_PARENT" "$PREMERGE_TRAIL_ANCHOR" || {
   printf 'error: the anchor commit is not empty; refusing to publish a trail over changed bytes\n' >&2
+  git reset --soft "$PREMERGE_TRAIL_PARENT" || printf 'error: and the anchor could not be unwound; drop it by hand before 5a pushes\n' >&2
   exit 2
 }
 PREMERGE_PUSH_ERR="$(git push origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
@@ -2454,19 +2469,36 @@ PREMERGE_PUSH_ERR="$(git push origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
   PREMERGE_PUSH_ERR="$(printf '%s' "${PREMERGE_PUSH_ERR//PREMERGE/PRE-MERGE}" | tr -s '\n\r\t' ' ' | cut -c1-200)"
   printf 'error: pushing the trust-trail anchor to %s failed: %s\n' \
     "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2
+  # A rejected ref update leaves the remote as it was, so this unwind is complete.
+  # The exception is a remote hook failing AFTER accepting the ref: the reset then
+  # leaves this branch behind the remote and 5a's push fails non-FF -- loudly.
+  git reset --soft "$PREMERGE_TRAIL_PARENT" || printf 'error: and the anchor could not be unwound; drop it by hand before 5a pushes\n' >&2
   exit 2
 }
 # `gh pr edit --add-label` cannot auto-create a repo label and exits non-zero when
 # it is missing, so a fresh repo would fail on the label rather than on the trail.
 # `--force` is idempotent and never errors on "already exists". The description
 # stays under GitHub's 100-character ceiling, which 422s on update as well.
+#
+# PAST THE PUSH THERE IS NO UNWIND: the anchor is on the remote, and taking it
+# back means force-pushing a branch other clones may already have fetched. So
+# both arms report a STATE instead of pretending to undo one. `half_emitted` is
+# a third TRAIL= value, outside the gate fence's four skip reasons -- those name
+# a trail never started, this one one started and stopped halfway -- and it
+# carries the anchor sha that `### 5b — PARK`'s trust-trail row transcribes. It
+# fails CLOSED: /merge resolves PATH_2 from the label AND the trailer, so an
+# anchor wearing no label resolves nothing. Hence the push runs first -- of the
+# two artifacts the irreversible one is the inert one, and the one carrying the
+# visible claim is the one a re-run can still fix.
 gh label create --force premerge-approved --color 1D76DB \
   --description 'Premerge trust trail: /premerge clean gate green. Set by /premerge, read by /merge.' >/dev/null || {
-  printf 'error: failed to provision the premerge-approved trust label; check gh auth and repo write permission\n' >&2
+  printf 'PREMERGE TRAIL=half_emitted REASON=label_unprovisioned ANCHOR=%s PR=%s\n' "$PREMERGE_TRAIL_ANCHOR" "$PREMERGE_PR" >&2
+  printf 'error: failed to provision the premerge-approved trust label; check gh auth and repo write permission. The anchor is already on %s and is NOT rolled back\n' "$PREMERGE_BRANCH" >&2
   exit 2
 }
 gh pr edit "$PREMERGE_PR" --add-label premerge-approved >/dev/null || {
-  printf 'error: adding the premerge-approved label to #%s failed; the anchor is pushed but the trail is half-emitted\n' "$PREMERGE_PR" >&2
+  printf 'PREMERGE TRAIL=half_emitted REASON=label_unapplied ANCHOR=%s PR=%s\n' "$PREMERGE_TRAIL_ANCHOR" "$PREMERGE_PR" >&2
+  printf 'error: adding the premerge-approved label to #%s failed; the anchor is pushed and the trail is half-emitted -- re-run the idempotent label step rather than rewriting the branch\n' "$PREMERGE_PR" >&2
   exit 2
 }
 printf 'PREMERGE TRAIL=emitted ANCHOR=%s PR=%s LABEL=premerge-approved\n' \
@@ -2586,7 +2618,7 @@ Print the run summary and **stop**:
   blockers      <n> found / <n> fixed / <n> surviving
   ci            <state> before simplify / <state> after
   clean gate    green | not_green (<reasons>)
-  trust trail   premerge-approved @ <anchor-sha> | none (<reason>)
+  trust trail   premerge-approved @ <anchor-sha> | none (<reason>) | half_emitted @ <anchor-sha> (<reason>)
   simplify      applied <n> / deferred <n> | skipped (<reason>) | reverted (<reason>)
   issues filed  <n> created, <n> commented, <n> deduped  (<n> blocker, <n> suggestion)
                   <n> owning files — one issue each, at most max_new=10 of them
@@ -2609,8 +2641,21 @@ that collapses both to `not_green` withholds the one thing the operator needs.
 (stop_not_green)` and `none (head_moved)` call for different next moves — the
 first says the stack still has work in it, the second says something touched the
 branch after the gate read it — and a row that collapses both to a blank withholds
-the one thing the operator needs to act. The four reasons are exactly the ones
-`### 5-trail — the premerge trust trail`'s decision fence can print.
+the one thing the operator needs to act. The four reasons behind `none` are
+exactly the ones `### 5-trail — the premerge trust trail`'s decision fence can
+print, and no others: each describes a trail that was never started.
+
+**`half_emitted` is a third form, and none of those four.** The publication fence
+pushes the anchor before it touches the label, so a `gh` failure after that push
+leaves the anchor on the remote wearing none — `REASON=label_unprovisioned` or
+`label_unapplied`, printed with the anchor sha on a `PREMERGE TRAIL=half_emitted`
+line this row transcribes. It is reported and not undone on purpose: the anchor
+is published, taking it back needs a force-push, and the state fails closed at
+`/merge` anyway (label *and* trailer, so an unlabelled anchor resolves nothing) —
+so the move is to re-run the idempotent label step, never to rewrite the branch.
+The fence's *pre-push* refusals are a different state again: they unwind their
+own local anchor and publish nothing, which is `none`. Never collapse the two —
+`none` says nothing reached the remote, `half_emitted` says half of it did.
 
 **Every attempt's row carries its `growth=`**, transcribed from that attempt's
 `converge.jsonl` row, because "it was still converging" and "it was reviewing

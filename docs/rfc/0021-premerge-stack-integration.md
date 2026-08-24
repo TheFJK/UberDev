@@ -276,6 +276,12 @@ needs; the third automatic attempt is where a fixer starts "fixing" the test.~~
 - **Multi-base stacks.** `review_consolidate_base` picks one base. A candidate
   set spanning `main` and `release/2.0` gets the majority base and the others are
   excluded by number. Reviewing two stacks in one run is out of scope.
+- **The trail and the version bump — OPEN (§10 A8).** `### 5a`'s release commit
+  is not inert to `skills/merge-pipeline/lib/release-anchor.sh` on this repo, so
+  emitting the trail before the bump leaves `TRUST_HEAD` on a trailer-less
+  commit and emitting it after trips the 5-trail fence's own `head_moved`.
+  Neither order yields a trail `/merge` can resolve. The repair belongs in the
+  anchor probe or in `5a`; the two trail fences are already correct.
 
 ---
 
@@ -1198,11 +1204,20 @@ consumer can tell the two tiers apart without re-reading the trailer.
 Emission is split across two fences, `premerge-trail-gate` (a pure decision — no
 git write, no network) and `premerge-trail-emit`, so the *not-green emits nothing*
 property is executable in a throwaway repo rather than only grep-provable. The
-gate runs **before** the `### 5a` version bump: `/merge`'s trust-head resolution
+gate runs **before** the `### 5a` version bump: ~~`/merge`'s trust-head resolution
 tolerates one `chore(release): vX.Y.Z` commit above the anchor, but only once
 `skills/merge-pipeline/lib/release-anchor.sh` has proved it inert with respect to
 reviewed code, so anchoring first gets the release commit *proved* rather than
-merely tolerated.
+merely tolerated.~~
+
+> **AMENDED 2026-08-24 — see §10 A8.** The order is what shipped; the struck
+> rationale for it is not. `release-anchor.sh` refuses this repo's release
+> commits rather than proving them inert, so emitting before `### 5a` buries the
+> trailer under a commit `/merge`'s trust-head resolution will not read through,
+> and emitting after the bump only trades that for the 5-trail fence's own
+> `head_moved`. Neither order resolves.
+> `skills/premerge-pipeline/SKILL.md`, at `### 5-trail — the premerge trust
+> trail`, now says exactly that at the code, and it is right.
 
 #### What is dropped, and only for the `premerge` instrument
 
@@ -1257,6 +1272,14 @@ attempt number; choosing by attempt would pick an unrelated run's evidence, find
 `head_sha` naming a different commit, and refuse a perfectly good trail as stale.
 Only candidates that parse *and* bind to the trailer's SHA are classified.
 
+> **AMENDED 2026-08-24 — see §10 A8.** The glob quoted above is the
+> canonical-root layout alone. Sub-condition (d) in
+> `skills/merge-pipeline/SKILL.md` now enumerates four layouts — the same set the
+> `review-pr` arm's verdict search already covers — so a `/premerge` run made
+> inside a git worktree stays reachable when `/merge` runs from the main
+> checkout. Widening the pool never widens acceptance: the `head_sha` binding
+> this paragraph describes is still what selects.
+
 **The property a later reader should weigh before calling this a bug.** When no
 candidate survives — the ordinary state on a clone that never ran `/premerge`, and
 also the state when two bound candidates disagree — (d) emits an advisory `error`
@@ -1289,3 +1312,63 @@ convergence read by construction rather than by convention.
 **Supersedes:** §7's first paragraph, as struck there. §7's second paragraph
 stands unchanged — `/premerge` and `/review-pr` still compose in that order, and
 running `/review-pr` on a parked stack PR still upgrades the tier.
+
+### A8 — two A7 claims corrected against the shipped gate (2026-08-24)
+
+A7 was written in the same run as the code it documents and drifted from it
+twice inside that run. Both corrections are recorded here rather than edited
+away: the emit ordering in particular is a decision a later reader will want to
+revisit, and they can only weigh it if the rationale that turned out to be wrong
+is still legible beside its refutation.
+
+#### 1. The emit ordering resolves nothing — it picks which failure to take
+
+A7 held that running the gate before the `### 5a` version bump *"gets the release
+commit proved rather than merely tolerated"*, on the reading that `/merge`
+tolerates one `chore(release): vX.Y.Z` commit above the anchor once
+`skills/merge-pipeline/lib/release-anchor.sh` has proved it inert. The tolerance
+is real, and the ordering is what shipped. The conclusion drawn from them is not.
+
+`release-anchor.sh` is a refusal-first probe: it emits `RELEASE_ANCHOR=none` with
+`diff_too_large` when the release commit's diff exceeds its bound, and with
+`changelog_shape` when an inserted CHANGELOG line is not header-, bullet-, stub-
+or blank-shaped. `### 5a` replaces the dated stub with real notes, which is the
+shape that reason rejects. `skills/premerge-pipeline/SKILL.md`, under `### 5-trail
+— the premerge trust trail`, records this repo's v0.56.0 and v0.30.4 as the worked
+cases and states the consequence: `TRUST_HEAD` stays on the trailer-less release
+commit, so PATH_2 (b) fails `trust_trail_trailer_missing`.
+
+Emitting **after** the bump does not rescue it. The 5-trail decision fence binds
+the gate verdict to the SHA the gate read, so a release commit landing between the
+two turns on the fence's own `head_moved` arm and publishes nothing. Both orders
+end with no trail `/merge` can resolve; the shipped order is a choice between two
+failures, not a strengthening of either.
+
+**The repair is in `release-anchor.sh` or in `### 5a`, never in the trail
+fences** — either the anchor probe learns the shape of a real CHANGELOG notes
+edit, or `5a` stops producing a commit the probe cannot read through. Until one of
+those lands, a stack PR's premerge trail is resolvable only on a run whose bump
+was skipped. §9 carries it as open.
+
+#### 2. The corroborator search is four layouts, not the repo root
+
+A7's second deviation from #716's AC3 quoted the corroborator as
+`.uberdev/premerge/*/gate-<NN>.json`, root-relative and alone. Sub-condition (d)
+in `skills/merge-pipeline/SKILL.md` enumerates four layouts — the canonical root,
+`.claude/worktrees/*/`, `.worktrees/*/` and `worktrees/*/`, each carrying the same
+`.uberdev/premerge/*/gate-<NN>.json` tail — which is the set the `review-pr` arm's
+verdict search already covered.
+
+The root-only reading is not merely narrower than the gate; for the ordinary case
+it is dead. `/premerge` writes its run dir under the checkout it ran in, so a run
+made in a worktree leaves nothing at the main checkout's root: every such trail
+falls down the Absent arm, and the `head_sha` selection A7 spends a paragraph
+justifying never executes. Widening the pool changes no verdict — a candidate is
+kept only if it parses *and* its `head_sha` equals the trailer's SHA — so what
+A7 got wrong here is where the gate looks, never what it accepts.
+
+**Supersedes:** in A7, the clause *"so anchoring first gets the release commit
+proved rather than merely tolerated"*, and the root-only reading of the
+corroborator glob. The rest of A7 stands unchanged — the instrument-as-data
+design, the `gate=green attempt=NN` token in the commit body, the Absent-arm
+tradeoff and its bound, and the three things the amendment declines to do.
