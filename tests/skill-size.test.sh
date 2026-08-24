@@ -72,8 +72,8 @@ LIMIT=500
 # extraction is right for material a reader consults on demand, and wrong for
 # material the runtime obeys.
 WAIVERS="$(cat <<'EOF'
-premerge-pipeline	2486	~54% fenced (1332/2486); rose 2323->2486 for #754 and #755 together — the GROWTH= line shape, the STOP_SELF_REFERENTIAL routing row and the blocked_on_file wave-return contract are all read at runtime, so none can move to references/
-merge-pipeline	1778	~27% fenced, no references/ yet — prose extraction is open work
+premerge-pipeline	2664	~55% fenced (1461/2664); rose 2486->2664 for #716 — the `### 5-trail` section added two `uberdev-executable` fences that the orchestrator env-prefixes and RUNS, one to decide the premerge trust trail and one to publish it, so like the #754/#755 additions before them they are obeyed at runtime and cannot move to references/
+merge-pipeline	1835	~27% fenced, no references/ yet — prose extraction is open work; rose 1778->1835 for #716, which generalised Phase 1.4 PATH_2 over the trust instrument — the added sub-condition text is the gate's own decision procedure, read and acted on at runtime, so it cannot move to references/
 subagent-driven-dev	1019	~64% fenced — one ~450-line bash block plus dispatch examples
 orchestrator	1012	~53% fenced, 26 executable blocks; 2 reference files already split out
 cluster-pipeline	1012	~90% fenced — almost entirely shipped bash
