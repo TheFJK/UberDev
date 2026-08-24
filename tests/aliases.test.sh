@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# Tests for issue #16 — top-level aliases for the thirteen most-used uberdev
-# commands (/issue, /solve, /turbo, /simplify, /review-pr, /merge, /premerge, /dev,
-# /testers, /ubergoal, /uberscan, /ubersimplify, /uberthink, /ubercluster).
+# Tests for issue #16 — top-level aliases for the sixteen most-used uberdev
+# commands (/issue, /solve, /turbo, /turbox, /fix, /simplify, /review-pr, /merge,
+# /premerge, /dev, /testers, /ubergoal, /uberscan, /ubersimplify, /uberthink,
+# /ubercluster).
 # The count and the list are both derived from the ALIASES table in
-# lib/aliases-sync.sh (the SSOT) — if you add row 15 there, this comment,
-# section A1's expectation and the five alias surfaces move together.
+# lib/aliases-sync.sh (the SSOT) — if you add row 17 there, this comment,
+# section A1's expectation and the SIX alias surfaces move together. Six, not
+# five: the recipe repeated across docs/rfc/0005/0007/0008/0009/0010 omits
+# skills/using-uberdev/references/configuration.md, which docs-accuracy T6b
+# provably enforces — following the RFC recipe lands a red build.
 #
 # Plugin commands are addressed as `/uberdev:<command>` because Claude Code's
 # plugin manifest enforces the `<plugin-name>:` prefix on every plugin
@@ -20,7 +24,7 @@
 # in CI before merge without an interactive harness.
 #
 # Sections:
-#   A1 — install-aliases.md exists, references all 15 aliases, has marker
+#   A1 — install-aliases.md exists, references all 16 aliases, has marker
 #   A2 — install-aliases.md performs collision detection (skip-if-exists)
 #   A3 — install-aliases.md generates ONE-WAY forwarders, not duplicates
 #   A4 — uninstall-aliases.md exists and only removes marker-tagged files
@@ -43,6 +47,7 @@ CANON_DIR="$REPO_ROOT/plugins/uberdev/commands"
 # pre-flighted too.
 for f in "$INSTALL_CMD" "$UNINSTALL_CMD" "$README" \
          "$CANON_DIR/issue.md" "$CANON_DIR/solve.md" "$CANON_DIR/turbo.md" \
+         "$CANON_DIR/turbox.md" "$CANON_DIR/fix.md" \
          "$CANON_DIR/simplify.md" "$CANON_DIR/review-pr.md" \
          "$CANON_DIR/merge.md" "$CANON_DIR/premerge.md" \
          "$CANON_DIR/dev.md" "$CANON_DIR/testers.md" \
@@ -91,12 +96,12 @@ HOOK="$REPO_ROOT/plugins/uberdev/hooks/session-start"
 PLUGIN_JSON="$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json"
 PLUGIN_VERSION="$(jq -r .version "$PLUGIN_JSON")"
 
-echo "== A1: install-aliases command exists and registers all 15 aliases =="
+echo "== A1: install-aliases command exists and registers all 16 aliases =="
 # Each canonical /uberdev:<name> must be wired up. We grep for the literal
 # canonical command names since those are the targets the forwarders must
 # point at; if any is missing, the user-visible alias for that command
 # silently won't be installed.
-for canonical in issue solve turbo simplify review-pr merge dev testers goal uberscan ubersimplify uberthink cluster; do
+for canonical in issue solve turbo turbox fix simplify review-pr merge premerge dev testers goal uberscan ubersimplify uberthink cluster; do
   assert_grep "$INSTALL_CMD" \
     "uberdev:${canonical}\\b" \
     "install-aliases references canonical /uberdev:${canonical}"
@@ -219,7 +224,7 @@ assert_grep "$REPO_ROOT/plugins/uberdev/lib/aliases-sync.sh" \
 # both the canonical name and the same JSON array. The check is
 # fixed-string (-F) on the JSON tail, so trivial reformatting that
 # preserves byte-equality stays green.
-for canonical in issue solve turbo simplify review-pr merge dev testers goal uberscan ubersimplify uberthink cluster; do
+for canonical in issue solve turbo turbox fix simplify review-pr merge premerge dev testers goal uberscan ubersimplify uberthink cluster; do
   canon_file="$CANON_DIR/${canonical}.md"
   # Strip the `allowed-tools: ` prefix, leaving just the JSON array.
   canon_tools=$(grep -E '^allowed-tools:[[:space:]]*' "$canon_file" \
@@ -264,11 +269,11 @@ else
   echo "  FAIL  S1: version marker missing or wrong"
   FAIL=$((FAIL + 1))
 fi
-# Verify the canonical "installed 15 aliases" summary line appears verbatim
+# Verify the canonical "installed 16 aliases" summary line appears verbatim
 # on stderr. The grep below uses a substring; the doubled-quote literal is
-# pinned in a comment so the harness's drift-check grep -cF '"installed 15 aliases"'
+# pinned in a comment so the harness's drift-check grep -cF '"installed 16 aliases"'
 # matches even after future edits to the assertion phrasing.
-if grep -q "first run: installed 15 aliases" "$S1_STDERR"; then
+if grep -q "first run: installed 16 aliases" "$S1_STDERR"; then
   echo "  PASS  S1: first-run summary line on stderr"
   PASS=$((PASS + 1))
 else
@@ -618,7 +623,7 @@ S11_GOT="$(
   printf '%s' "${UBERDEV_ALIAS_NOTICE:-}"
 )"
 case "$S11_GOT" in
-  *"installed 15 short-form aliases"*)
+  *"installed 16 short-form aliases"*)
     echo "  PASS  S11: first-run notice composed"; PASS=$((PASS + 1)) ;;
   *)
     echo "  FAIL  S11: UBERDEV_ALIAS_NOTICE='$S11_GOT'"; FAIL=$((FAIL + 1)) ;;
@@ -699,7 +704,7 @@ S14_HOME="$(mktemp -d)"
 S14_STDOUT="$(mktemp)"
 HOME="$S14_HOME" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
   bash "$HOOK" >"$S14_STDOUT" 2>/dev/null || true
-if grep -q 'installed 15 short-form aliases' "$S14_STDOUT"; then
+if grep -q 'installed 16 short-form aliases' "$S14_STDOUT"; then
   echo "  PASS  S14: first-run notice present in context injection"; PASS=$((PASS + 1))
 else
   echo "  FAIL  S14: first-run notice missing from context"; FAIL=$((FAIL + 1))

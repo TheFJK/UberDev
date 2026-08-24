@@ -663,26 +663,38 @@ _tbx_cmd_worktree_add() {
 }
 
 # ---------------------------------------------------------------------------
-# audit --run-dir <d> --event <name> [--data <json>]
-#   One JSONL line per event into <run-dir>/turbox-audit.jsonl. Degradation is
-#   recorded, never silent: a skipped task, an exhausted cap and a refused wave
-#   each leave a line behind, because the controller's own memory of the run is
-#   a context that can be compacted away.
+# audit --run-dir <d> --event <name> [--data <json>] [--basename <file>]
+#   One JSONL line per event into <run-dir>/<basename>, default
+#   `turbox-audit.jsonl`. Degradation is recorded, never silent: a skipped
+#   task, an exhausted cap and a refused wave each leave a line behind,
+#   because the controller's own memory of the run is a context that can be
+#   compacted away.
+#
+#   --basename exists because this executable is shared with the /fix lean
+#   lane (RFC 0022), which writes `fix-audit.jsonl`. It is a BASENAME, not a
+#   path: a `/` or a `..` in it would let a caller write outside the run dir,
+#   which is the one thing an audit sink must not do.
 # ---------------------------------------------------------------------------
 _tbx_cmd_audit() {
-  local run_dir="" event="" data="{}" file
+  # `audit_name`, not `basename`: a local that shadows a command name is the
+  # kind of thing that reads fine here and bites in a shell nobody tested.
+  local run_dir="" event="" data="{}" audit_name="turbox-audit.jsonl" file
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --run-dir) run_dir="${2:-}"; shift 2 || _tbx_die "audit: --run-dir needs a value" 2 ;;
-      --event)   event="${2:-}";   shift 2 || _tbx_die "audit: --event needs a value" 2 ;;
-      --data)    data="${2:-}";    shift 2 || _tbx_die "audit: --data needs a value" 2 ;;
+      --run-dir)  run_dir="${2:-}";    shift 2 || _tbx_die "audit: --run-dir needs a value" 2 ;;
+      --event)    event="${2:-}";      shift 2 || _tbx_die "audit: --event needs a value" 2 ;;
+      --data)     data="${2:-}";       shift 2 || _tbx_die "audit: --data needs a value" 2 ;;
+      --basename) audit_name="${2:-}"; shift 2 || _tbx_die "audit: --basename needs a value" 2 ;;
       *) _tbx_die "audit: unknown option '$1'" 2 ;;
     esac
   done
   [ -n "$run_dir" ] || _tbx_die "audit: --run-dir is required" 2
   [ -n "$event" ]   || _tbx_die "audit: --event is required" 2
+  case "$audit_name" in
+    ''|*/*|.|..) _tbx_die "audit: --basename must be a plain file name inside the run dir (got '$audit_name')" 2 ;;
+  esac
   [ -d "$run_dir" ] || mkdir -p "$run_dir" || _tbx_die "audit: cannot create $run_dir" 2
-  file="$run_dir/turbox-audit.jsonl"
+  file="$run_dir/$audit_name"
   python3 -I -B - "$file" "$event" "$data" <<'PY'
 import json, sys
 path, event, data = sys.argv[1], sys.argv[2], sys.argv[3]

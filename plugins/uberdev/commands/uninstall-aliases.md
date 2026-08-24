@@ -1,5 +1,5 @@
 ---
-description: "Remove short-form aliases (/issue, /solve, /turbo, /turbox, /simplify, /review-pr, /merge, /premerge, /dev, /testers, /ubergoal, /uberscan, /ubersimplify, /uberthink, /ubercluster) installed by /uberdev:install-aliases"
+description: "Remove short-form aliases (/issue, /solve, /turbo, /turbox, /fix, /simplify, /review-pr, /merge, /premerge, /dev, /testers, /ubergoal, /uberscan, /ubersimplify, /uberthink, /ubercluster) installed by /uberdev:install-aliases"
 argument-hint: "[--dry-run]"
 allowed-tools: ["Bash"]
 ---
@@ -24,7 +24,28 @@ DRY_RUN=0
 [[ " $ARGUMENTS " == *" --dry-run "* ]] && DRY_RUN=1
 
 DEST_DIR="$HOME/.claude/commands"
-SHORTS='issue solve turbo turbox simplify review-pr merge premerge dev testers ubergoal uberscan ubersimplify uberthink ubercluster'
+# NEWLINE-delimited, and read through a here-doc rather than walked with
+# `for SHORT in $SHORTS`. This fence runs under the Bash tool's /bin/zsh, where
+# an unquoted scalar does NOT word-split: the `for` form iterates exactly once
+# over the whole string, every `[ -e "$DEST_DIR/${SHORT}.md" ]` misses, and the
+# command reports "not installed" for all of them while removing nothing. Same
+# shape as the `done <<< "$ALIASES"` reader in lib/aliases-sync.sh.
+SHORTS='issue
+solve
+turbo
+turbox
+fix
+simplify
+review-pr
+merge
+premerge
+dev
+testers
+ubergoal
+uberscan
+ubersimplify
+uberthink
+ubercluster'
 
 REMOVED=0
 KEPT=0
@@ -34,7 +55,8 @@ echo "  scan:  $DEST_DIR"
 [ "$DRY_RUN" = "1" ] && echo "  mode:  dry-run (no files removed)"
 echo
 
-for SHORT in $SHORTS; do
+while IFS= read -r SHORT; do
+  [ -n "$SHORT" ] || continue
   TARGET="$DEST_DIR/${SHORT}.md"
 
   if [ ! -e "$TARGET" ]; then
@@ -60,7 +82,9 @@ for SHORT in $SHORTS; do
   rm -f "$TARGET"
   echo "  GONE  /$SHORT — removed"
   REMOVED=$((REMOVED + 1))
-done
+done <<EOF
+$SHORTS
+EOF
 
 echo
 echo "Summary: $REMOVED removed, $KEPT kept"

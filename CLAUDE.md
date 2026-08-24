@@ -9,17 +9,18 @@
 
 **Every user-facing change MUST arrive on `main` with the project version advanced.** The invariant binds the **landing commit** — the commit that actually puts the change on `main` — not every pull request along the way. If users never see a version change they never pull the update from the marketplace, and the change is invisible to them no matter how good it is.
 
-Which commit that is depends on the lane the change came through, and one lane deliberately forbids the PR author from bumping at all. Check the lane before reading the diff.
+Which commit that is depends on the lane the change came through, and two of them deliberately forbid the PR author from bumping at all. Check the lane before reading the diff.
 
-### Which commit carries the bump — the three lanes
+### Which commit carries the bump — the four lanes
 
 | Lane | Commit that carries the bump | What guarantees it |
 |---|---|---|
 | **`/goal`** | a `chore(release): vX.Y.Z` commit the pipeline pushes onto the PR branch on an **earlier pass** — the pass that pushes it deliberately withholds `/merge`, so the checks the push restarted can settle, and the dispatch happens on a later pass | `_uberdev_goal_ensure_version_bump` (`plugins/uberdev/lib/goal-state.sh`), called from the barrier-gated merge dispatch in `plugins/uberdev/lib/goal-watch.sh` (step 2c). It **fails closed**: any status it does not recognise as "bumped" withholds the `/merge` dispatch, and each failure stage it *does* recognise writes a `goal_merge_deferred` audit row with `reason=version_bump_failed` — the caller's catch-all arm withholds on an unrecognised status without writing a row of its own. Landing unbumped is the bug, so merging is never the fallback. |
 | **`/solve` + `/turbo` fleet PRs** | the integration commit that lands the stack — `chore(stack): land #A #B … (vX.Y.Z)` — **once per stack**, never once per PR | `plugins/uberdev/skills/solve-fleet/workflow.js` tells every solver, in the dispatch prompt itself: *Do NOT bump the project version.* N solvers cut from one base all resolve the **same** next version; git auto-merges that identical edit with no conflict, so two intended releases collapse into one and a release is lost silently. |
+| **`/turbox` + `/fix` session-fleet PRs** | the commit that lands that PR — a `/premerge` stack commit, or a `chore(release): vX.Y.Z` commit on the branch before a direct merge | `plugins/uberdev/skills/turbox-fleet/SKILL.md` Phase 6 and `plugins/uberdev/skills/fix-fleet/SKILL.md` Phase 5 each forbid the writer from bumping. These lanes open **one PR per issue**, not a stack, so there is no once-per-stack commit to carry it — the bump rides whatever lands the PR. |
 | **Hand-authored PR landed directly** | the PR's own commits, or an immediately-preceding `chore(release): vX.Y.Z` commit on the same branch | the author. Nothing automated covers this lane. |
 
-**A fleet PR whose diff carries no version surface is compliant.** Its bump belongs to the landing commit, and `plugins/uberdev/skills/solve-fleet/workflow.js` forbids the solver from writing one — so reviewing such a PR as an unbumped user-facing change is a false positive, not a blocker.
+**A fleet PR whose diff carries no version surface is compliant.** Its bump belongs to the landing commit, and the writer is forbidden from producing one — `plugins/uberdev/skills/solve-fleet/workflow.js` for `/solve` and `/turbo`, `skills/turbox-fleet/SKILL.md` Phase 6 for `/turbox`, `skills/fix-fleet/SKILL.md` Phase 5 for `/fix`. Reviewing such a PR as an unbumped user-facing change is a false positive, not a blocker.
 
 The lane carve-out governs **which commit carries the bump**, never **whether** a user-facing change may ship unbumped. **No exception for "small fixes" — even one-line patches get a patch-version bump on the commit that lands them.**
 

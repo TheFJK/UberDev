@@ -4,6 +4,87 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.57.0] — 2026-08-24
+
+### Added — `/fix`, the lean single-issue lane (RFC 0022)
+
+`/fix <issue#>` solves exactly one issue with **one** implementer, **one**
+`code-reviewer` over the whole diff, at most one fix round, and a PR this
+session pushes and parks. Two sequential agent rungs on the happy path, three
+when the review comes back red — against `/turbox`'s eight or more.
+
+It is a **narrowing of standard mode**, not a new transport: `commands/fix.md`
+passes `--auto-mode=1 --turbo --standard --fix` to the same launcher, and
+`skills/fix-fleet/SKILL.md` reuses `lib/turbox-fleet.sh` for `worktree-add`,
+`stage-commit`, `round-permitted` and `audit` rather than forking them.
+
+**What it drops** is design: no risk-gated security lens, no design-planner, no
+plan-reviewer, no wave decomposition, no per-task `spec-compliance-reviewer`.
+**What it keeps** is diligence: the full launcher preflight and claim protocol,
+worktree isolation, the explicit-path staging refusal, an independent reviewer
+validated through the canonical `uberdev_child_validate_phase1_review_result`
+boundary, the project's full test suite, and the park-the-PR rule.
+
+The lane's own failure mode is answered structurally rather than hoped away:
+the implementer's return vocabulary carries **`TOO_BIG`**, a first-class answer
+meaning *this issue wants a decomposition — run `/turbox`*. It ends the run with
+the worktree and the claim intact, and the controller is told never to argue an
+agent out of it.
+
+Four circuit breakers, FX1–FX4:
+
+- **FX1** — a second issue number is refused **before `gh` runs**, and therefore
+  before Step 4.5 can write a claim. A lane that discovered its second issue
+  after claiming both would leave `uberdev:active` labels behind with nothing
+  running.
+- **FX2** — `fixRounds`, its own knob defaulting to **1**
+  (`UBERDEV_FIX_FIX_ROUNDS`), deliberately not turbox's `fix_rounds` of 3: that
+  cap bounds a per-task ladder inside a wave loop. Resolved and validated
+  beside FX1, before any claim.
+- **FX3** — `retest_rounds`, shared with `/turbox` because it bounds the same
+  thing on both lanes.
+- **FX4** — an unparseable implementer return, or a review result the canonical
+  validator rejects: one re-prompt, then stop or count the run `UNREVIEWED`.
+
+Three things open the PR as a **draft** — a red suite, blockers still standing
+after FX2's cap, or a run counted `UNREVIEWED` because the review result never
+validated — each named in both the body and the report. Committed work never strands in a worktree, and the lane
+never re-runs a suite hoping for a different answer.
+
+### Changed
+
+- `lib/turbox-fleet.sh` — `audit` gained an optional `--basename` (default
+  `turbox-audit.jsonl`; `/fix` passes `fix-audit.jsonl`). It is a basename, not
+  a path: a `/` or `..` is refused, because the one thing an audit sink must
+  not do is write outside the run dir.
+- `lib/solve-launcher.sh` — the `--fix` launcher option (requires
+  `--standard`), the FX1 arity refusal and the FX2 knob validation ahead of the
+  first `gh` call, and Step 5f's `FIX_PLAN_BEGIN`/`FIX_PLAN_END` envelope. A
+  third marker pair on purpose: each marker names exactly one executor, and
+  relaying a fix plan into `Workflow()` or into the turbox lane would run the
+  wrong pipeline rather than produce an error message.
+- `CLAUDE.md` — the bump-lane table gained a fourth row. `/turbox` and `/fix`
+  open one PR per issue rather than a stack, so there is no once-per-stack
+  commit to carry the bump; it rides whatever lands the PR. Reviewing such a PR
+  as an unbumped user-facing change is a false positive.
+- The short-form alias set is now **sixteen**. `/fix` was added across all six
+  alias surfaces — `lib/aliases-sync.sh` (the SSOT row **and** the notice
+  string), `commands/install-aliases.md`, `commands/uninstall-aliases.md`,
+  `README.md`, `skills/using-uberdev/references/configuration.md`, and
+  `tests/aliases.test.sh`. The five-surface recipe repeated across RFCs 0005,
+  0007, 0008, 0009 and 0010 omits `configuration.md`, which `docs-accuracy` T6b
+  provably enforces; the correction is now recorded in `tests/aliases.test.sh`'s
+  header.
+
+### Fixed
+
+- Pre-existing alias drift, surfaced by making the count correct: `/turbox` was
+  missing from the README alias table and the `UBERDEV_NO_AUTO_ALIAS` row while
+  the prose claimed fifteen forwarders, and `/turbox` and `/premerge` were
+  missing from `tests/aliases.test.sh`'s A1 and A6 enumeration loops — so
+  neither command's forwarder nor its `allowed-tools` byte-equality was ever
+  checked.
+
 ## [0.56.1] — 2026-08-24
 
 ### Changed — the project rule file is `CLAUDE.md`, not `AGENTS.md`

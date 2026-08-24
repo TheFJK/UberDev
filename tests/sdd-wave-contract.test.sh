@@ -616,6 +616,9 @@ FLEET_JS = "plugins/uberdev/skills/solve-fleet/workflow.js"
 FLEET_SKILL = "plugins/uberdev/skills/solve-fleet/SKILL.md"
 RFC20 = "docs/rfc/0020-turbox-standard-mode-fleet.md"
 RFC12 = "docs/rfc/0012-ultracode-workflow-orchestration.md"
+FIX_SKILL = "plugins/uberdev/skills/fix-fleet/SKILL.md"
+RFC22 = "docs/rfc/0022-fix-lean-lane.md"
+LAUNCHER = "plugins/uberdev/lib/solve-launcher.sh"
 
 # (cap_name, regex, expected_match_count, which_occurrence)
 # `cap_name` None means the site is FROZEN: presence is asserted, the value is
@@ -679,12 +682,14 @@ REGISTER = [
 ]
 
 # The reasoned ignore-list. The sweep predicate needs a cap NAME and a DIGIT on
-# the same line, so a name-only mention never trips it. Exactly nine lines do.
+# the same line, so a name-only mention never trips it. Exactly twenty-one lines
+# do.
 # Every key is (root-relative path, value-agnostic regex) — value-agnostic so a
 # §C6 scratch mutation cannot turn a registered line into an unregistered one
 # and make the mutant "disagree" for the wrong reason.
 IGNORED = [
-    # the digit is a sys.argv slice index
+    # the digit is a sys.argv slice index. Matches BOTH plan composers since
+    # RFC 0022: the turbox envelope and the /fix one unpack argv the same way.
     ("plugins/uberdev/lib/solve-launcher.sh", r"fix_rounds\) = sys\.argv\["),
     # the digit is the ${UBERDEV_TURBOX_MAX_AGENTS:-600} default; the loop-cap
     # call on the same line is the DERIVATION call, not a declaration
@@ -705,6 +710,25 @@ IGNORED = [
     # a rule id and a line-range citation, on a line naming all three caps with
     # no value
     (RFC12, r"Unconditional do-first, retained permanently"),
+    # --- RFC 0022, the /fix lean lane ----------------------------------------
+    # `/fix` has its OWN review->fix ceiling, deliberately not the turbox
+    # per-task ladder (RFC 0022 section 3.6). Its knob is spelled
+    # UBERDEV_FIX_FIX_ROUNDS and its resolved variable UBERDEV_FIX_ROUNDS_RESOLVED,
+    # so every line that mentions either carries the substring this sweep keys
+    # on while declaring nothing about sdd_loop_cap. The digits on those lines
+    # are the lane default, the `-lt 1` positivity test and the canonicalising
+    # `+ 0` — never a cap value. One regex, because the same name recurs across
+    # the guard, both error strings and the operator line, and a row per line
+    # would rot on the next reflow.
+    (LAUNCHER, r"UBERDEV_FIX_(?:FIX_)?ROUNDS"),
+    # the digit is an rc from round-permitted, not a cap value; same shape as
+    # the turbox `cap exhausted: audit` row above
+    (FIX_SKILL, r"fix_retest_rounds_exhausted"),
+    (FIX_SKILL, r"round-permitted --loop retest_rounds` rc"),
+    (RFC22, r"round-permitted --loop retest_rounds` rc"),
+    # the acceptance criterion names the lane knob and its default; the cap it
+    # is NOT is named in the same RFC without a value
+    (RFC22, r"honours `UBERDEV_FIX_FIX_ROUNDS`"),
 ]
 
 # Deliberately excluded, and STRUCTURALLY unreachable by the sweep predicate:
@@ -906,21 +930,21 @@ for _v in "$c5_total" "$c5_registered" "$c5_ignored"; do
   esac
 done
 
-[ "${c5_total:-0}" -eq 31 ] \
-  || fail "§C5 VACUOUS or drifted: the sweep harvested ${c5_total:-0} hit line(s), the register dispositions exactly 31"
-row "§C5 the sweep harvested exactly 31 cap-name-plus-digit lines"
+[ "${c5_total:-0}" -eq 43 ] \
+  || fail "§C5 VACUOUS or drifted: the sweep harvested ${c5_total:-0} hit line(s), the register dispositions exactly 43"
+row "§C5 the sweep harvested exactly 43 cap-name-plus-digit lines"
 
 [ "$c5_registered" -eq 22 ] \
   || fail "§C5 $c5_registered hit line(s) were dispositioned by a register site, the register declares 22"
 row "§C5 22 hit lines dispositioned by a register site"
 
-[ "$c5_ignored" -eq 9 ] \
-  || fail "§C5 $c5_ignored hit line(s) were dispositioned by the ignore-list, it declares 9"
-row "§C5 9 hit lines dispositioned by the reasoned ignore-list"
+[ "$c5_ignored" -eq 21 ] \
+  || fail "§C5 $c5_ignored hit line(s) were dispositioned by the ignore-list, it declares 21"
+row "§C5 21 hit lines dispositioned by the reasoned ignore-list"
 
 [ "$((c5_registered + c5_ignored))" -eq "$c5_total" ] \
   || fail "§C5 partition broken: $c5_registered + $c5_ignored != $c5_total"
-row "§C5 the partition closes: 22 + 9 == 31, every hit dispositioned exactly once"
+row "§C5 the partition closes: 22 + 21 == 43, every hit dispositioned exactly once"
 
 # ---------------------------------------------------------------------------
 # §C6 — mutation anti-vacuity over scratch copy trees.
