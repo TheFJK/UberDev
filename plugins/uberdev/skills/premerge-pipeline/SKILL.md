@@ -119,7 +119,17 @@ PREMERGE_WAIT_CI_CEILING = 8              # WAIT_CI re-probes before the loop ca
 PREMERGE_GROWTH_CEILING  = 0.50           # self-referential growth that stops the loop
 PREMERGE_GROWTH_RUNS     = 2              # consecutive attempts at/above it before it stops
 PREMERGE_RERUN_FLAKY_CAP = 1              # `gh run rerun` attempts per RUN
+PREMERGE_MAX_BLOCKED_ON  = 8              # blocked_on_file paths one attempt may add — see `### 2a — The fixer-wave mechanism`
 ```
+
+`PREMERGE_MAX_BLOCKED_ON` is **declared in `lib/premerge-findings.py`**
+(`MAX_BLOCKED_ON`) and restated here for the reader. It is equal to
+`PREMERGE_MAX_FIX_WAVE` on purpose: one attempt's `blocked_on_file` returns may
+add at most one extra wave's worth of files to the next attempt's plan, so the
+widening is bounded by something a reader can check rather than by a number
+someone picked. Rows past the cap are **dropped and counted**, never refused —
+a dropped path is simply a path no fixer may touch, and the finding survives to
+the next attempt exactly as it does today.
 
 `PREMERGE_REPAIR_CEILING` and `PREMERGE_WAIT_CI_CEILING` are **declared in
 `lib/premerge-findings.py`** (`CONVERGE_REPAIR_CEILING`, `CONVERGE_WAIT_CI_CEILING`)
@@ -748,14 +758,25 @@ python3 -I -B "$UBERDEV_PREMERGE_PLUGIN_ROOT/lib/premerge-findings.py" plan \
   --attempt "$PREMERGE_ATTEMPT" \
   --head-sha "$PREMERGE_HEAD_SHA" \
   --carry-prior \
+  --carry-blocked \
+  --repo-root "$PREMERGE_ROOT" \
   --max-per-wave 8 || exit 74
 ```
 
 The fence prints one line:
 
 ```
-PREMERGE_TRIAGE TOTAL=<n> BLOCKER=<n> SUGGESTION=<n> WAVES=<n> CATEGORY_BACKED=<n> ATTEMPT=<n> CARRIED=<n>
+PREMERGE_TRIAGE TOTAL=<n> BLOCKER=<n> SUGGESTION=<n> WAVES=<n> CATEGORY_BACKED=<n> ATTEMPT=<n> CARRIED=<n> BLOCKED=<n>
 ```
+
+`--carry-blocked` is why `BLOCKED` exists: it is how many paths the PREVIOUS
+attempt's `blocked_on_file` returns added to this attempt's wave plan. It counts
+admitted paths only; rows refused by validation or displaced by
+`PREMERGE_MAX_BLOCKED_ON` are counted in `classified.json` under
+`counts.blocked_on_dropped`. A `BLOCKED=` above zero on a run whose reviewer
+found nothing new is the loop finishing a cross-file fix the previous attempt
+could only report — the round that would otherwise have been spent
+rediscovering the block.
 
 `--carry-prior` is why `CARRIED` exists. Blockers are things the loop is actively
 removing, so only the latest review's blocker set means anything. **Suggestions
@@ -802,7 +823,17 @@ Fix the code-review findings listed below in the single file <path>.
 
 Rules:
   * Edit ONLY <path>. If the honest fix requires touching another file, do not
-    make it — return `status: REFUSED` naming the file you would have needed.
+    make it — return `status: REFUSED` and name that file under
+    `blocked_on_file`. That is the FIRST emission case.
+  * The SECOND emission case is `status: APPLIED`. If your fix is correct and
+    complete in <path> but leaves a CONSEQUENCE in another file — a comment,
+    a doc line or a sibling half of a two-way contract that your edit has just
+    made false — name that file under `blocked_on_file` too. Nobody else is
+    scoped to it, so a consequence you do not report is a consequence that
+    survives the round untouched.
+  * Give the REASON, never a line range. Other agents are editing their own
+    files in this same wave, so the coordinates you read may already have
+    moved by the time anyone acts on them.
   * Do NOT run git. No add, no commit, no stash, no checkout, no push.
   * Do NOT create new files.
   * If a finding is wrong, already handled, or would change intended behaviour
@@ -824,7 +855,44 @@ outcomes:
   - rank: <the finding's rank>
     outcome: fixed | skipped | no_change_needed
     reason: <one line>
+blocked_on_file:          # OPTIONAL, repeatable. Omit the key entirely when empty.
+  - file: <repo-relative POSIX path of the OTHER file>
+    reason: <one line: why the two files must move together. NEVER a line number.>
 ```
+
+**Before that commit, write what the wave reported.** Collect every
+`blocked_on_file` entry from every agent in every wave of this attempt into
+`$PREMERGE_RUN_DIR/blocked-on-<NN>.json`, `<NN>` zero-padded to this attempt's
+index, in exactly this shape:
+
+```json
+{
+  "schema_version": 1,
+  "attempt": 3,
+  "blocked_on": [
+    { "file": "tests/agent-description-budget.test.sh",
+      "from_file": ".github/workflows/test.yml",
+      "reason": "the windows-skip-list is a two-way runtime contract; the marker block and the fixture's own guard must move together" }
+  ]
+}
+```
+
+Write `"blocked_on": []` when the wave reported nothing, and **do not skip the
+artifact** — an absent file and an empty array must never be the same
+observable state, for the same reason `review-input.json` may not be skipped.
+
+**This file does not widen anything by itself.** The next attempt's `plan`
+reads it, validates every value, caps the count at `PREMERGE_MAX_BLOCKED_ON`,
+and turns each survivor into a blocker finding on that file — which
+`_fix_waves` then groups into a wave like any other, with exactly one owner.
+The commit fence below keeps deriving its allowed set from
+`fix-waves-<NN>.json` and from nothing else, which is what keeps "committable"
+and "owned by exactly one agent" the same set. Never add a path to the fence's
+allowed list directly: that is the one edit this whole design exists to avoid.
+
+**Only the immediately preceding attempt is read.** `plan` opens
+`blocked-on-<N-1>.json` by name and never a range, so the set cannot accumulate
+across the repair budget into an allow-list that constrains nothing.
 
 After the last wave returns, **the controller makes exactly one commit** —
 agents never touch git, and the fence checks what they actually changed against

@@ -4811,6 +4811,92 @@ else
 fi
 
 echo
+echo "== G56: the PR file-collision detector compares paths as BYTES (#755) =="
+# Scoped to the FUNCTION BODY, never the whole file: goal-state.sh is 3800+
+# lines and a whole-file grep for LC_ALL=C is satisfied by any other call site
+# in it. The predicate lives in ONE function so the anti-vacuity rows below
+# drive the SAME code the live row does -- a probe that re-implements the rule
+# it checks is permanently green no matter what the shipped rule does.
+g56_body() {  # g56_body FILE OPENER -> the function body, opener to its closing brace
+  awk -v opener="$2" '
+    index($0, opener) == 1 { inf = 1; next }
+    inf && /^}/ { exit }
+    inf { print }
+  ' "$1"
+}
+g56_unpinned() {  # g56_unpinned FILE OPENER -> offending lines, empty when clean
+  # Comment lines are stripped first: the shipped guard carries its own
+  # rationale, and that paragraph says the words "sort" and "comm", so a probe
+  # over the raw body is satisfied by the code's own prose.
+  #
+  # THEN NEUTRALISE PINNED PAIRS PER TOKEN -- NEVER PER LINE. A trailing
+  # `grep -v 'LC_ALL=C'` was the first shape tried and it CANNOT SEE the defect
+  # it exists for: the `intersection=` line runs TWO commands, so pinning only
+  # the `comm` leaves the string `LC_ALL=C` on the line and `grep -v` then
+  # discards the whole line, unpinned `sort` and all. Measured on the
+  # half-pinned body: zero hits. Rewriting each PINNED pair into a single token
+  # instead leaves every still-UNPINNED `sort`/`comm` on that same line visible
+  # to the offender grep -- which is what the G56.mutation-half row proves.
+  #
+  # `sed -E` rather than a BRE `\(sort\|comm\)`: `\|` is a GNU extension that
+  # BSD sed matches as a LITERAL pipe, so the BRE form silently neutralises
+  # nothing on macOS and reds the live row there. Measured, not assumed.
+  g56_body "$1" "$2" \
+    | grep -vE '^[[:space:]]*#' \
+    | sed -E 's/LC_ALL=C[[:space:]]+(sort|comm)/PINNED_\1/g' \
+    | grep -nE '(^|[^=[:alnum:]_./-])(sort|comm)[[:space:]]' || :
+}
+G56_OPENER='_uberdev_goal_rebase_collision_chain() {'
+G56_LINES="$(g56_body "$GOAL_LIB" "$G56_OPENER" | grep -c . || :)"
+if [ "${G56_LINES:-0}" -ge 10 ]; then
+  echo "  PASS  G56.extract: the collision-chain body extracted $G56_LINES lines"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  G56.extract: extracted only ${G56_LINES:-0} lines — every row below is vacuous"; FAIL=$((FAIL + 1))
+fi
+G56_HITS="$(g56_unpinned "$GOAL_LIB" "$G56_OPENER")"
+if [ -z "$G56_HITS" ]; then
+  echo "  PASS  G56.live: every sort/comm in the collision detector is LC_ALL=C-pinned"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  G56.live: unpinned sort/comm in the collision detector: $G56_HITS"; FAIL=$((FAIL + 1))
+fi
+# ANTI-VACUITY: TWO MUTANTS, THE SAME PREDICATE FUNCTION. Without these a typo
+# in the grep would make G56.live pass forever.
+G56_MUTANT="$(mktemp)"
+cat >"$G56_MUTANT" <<'EOF_G56_FULL'
+_uberdev_goal_rebase_collision_chain() {
+  local merged_sorted
+  merged_sorted="$(printf '%s\n' "$merged_diff" | sort -u)"
+  intersection="$(comm -12 <(printf '%s\n' "$merged_sorted") <(printf '%s\n' "$pr_diff" | sort -u))"
+}
+EOF_G56_FULL
+G56_MUTANT_HITS="$(g56_unpinned "$G56_MUTANT" "$G56_OPENER")"
+rm -f "$G56_MUTANT"
+if [ -n "$G56_MUTANT_HITS" ]; then
+  echo "  PASS  G56.mutation: a fully unpinned body reds through the same predicate"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  G56.mutation: the predicate cannot see an unpinned sort/comm — G56.live is vacuous"; FAIL=$((FAIL + 1))
+fi
+# THE HALF-PINNED MUTANT IS THE ONE THAT MATTERS. It is the shipped
+# `intersection=` line with the `comm` pinned and the inner `sort` left bare --
+# the exact half-fix a reviewer waves through, and the exact body the rejected
+# line-level predicate scored as CLEAN. A predicate that greens here is a
+# predicate that would have shipped the very defect this section is named for.
+G56_MUTANT_HALF="$(mktemp)"
+cat >"$G56_MUTANT_HALF" <<'EOF_G56_HALF'
+_uberdev_goal_rebase_collision_chain() {
+  local merged_sorted
+  merged_sorted="$(printf '%s\n' "$merged_diff" | LC_ALL=C sort -u)"
+  intersection="$(LC_ALL=C comm -12 <(printf '%s\n' "$merged_sorted") <(printf '%s\n' "$pr_diff" | sort -u))"
+}
+EOF_G56_HALF
+G56_HALF_HITS="$(g56_unpinned "$G56_MUTANT_HALF" "$G56_OPENER")"
+rm -f "$G56_MUTANT_HALF"
+if [ -n "$G56_HALF_HITS" ]; then
+  echo "  PASS  G56.mutation-half: a half-pinned line still reds — the predicate is per-token, not per-line"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  G56.mutation-half: a pinned comm hides an unpinned sort on the same line — G56.live is vacuous"; FAIL=$((FAIL + 1))
+fi
+
 echo "== Summary =="
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 

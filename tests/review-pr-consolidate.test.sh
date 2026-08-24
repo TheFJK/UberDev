@@ -887,6 +887,84 @@ RCXZ_EOF
   fi
 fi
 
+# ---------------------------------------------------------------------------
+echo "== RCX15: the staged-set scope guard compares paths as BYTES (#755) =="
+# Scoped to the FUNCTION BODY. review-consolidate.sh is long and a whole-file
+# grep for LC_ALL=C is satisfied by any other call site in it. ONE predicate
+# function, driven over the live body AND over two deliberately-broken ones, so
+# no row below can be green merely because the grep is wrong — a transcribed
+# copy of the rule would be permanently green no matter what the guard does.
+rcx15_body() {  # rcx15_body FILE OPENER -> the function body, opener to its closing brace
+  awk -v opener="$2" '
+    index($0, opener) == 1 { inf = 1; next }
+    inf && /^}/ { exit }
+    inf { print }
+  ' "$1"
+}
+rcx15_unpinned() {  # rcx15_unpinned FILE OPENER -> offending lines, empty when clean
+  # NEUTRALISE PER TOKEN, NEVER PER LINE. Filtering the offender lines through a
+  # line-level `grep -v LC_ALL=C` is blind to a line carrying TWO commands with
+  # only one of them pinned: `LC_ALL=C comm -13 <(…) <(… | sort -u)` still holds
+  # the string LC_ALL=C, so the whole line is discarded and the unpinned `sort`
+  # never reaches the verdict. Rewriting each PINNED pair to `PINNED_<cmd>`
+  # first leaves every UNPINNED occurrence exactly where it stood, so a
+  # half-pinned line reds on its unpinned half. RCX15.mutation-half is the row
+  # that proves it, and a fully-unpinned mutant cannot: it carries no pinned
+  # token for the line-level filter to be fooled by.
+  #
+  # Full-line comments are stripped first — the guard carries its own rationale
+  # and that paragraph says the words "sort" and "comm" in prose.
+  rcx15_body "$1" "$2" \
+    | grep -vE '^[[:space:]]*#' \
+    | sed -E 's/LC_ALL=C[[:space:]]+(sort|comm)/PINNED_\1/g' \
+    | grep -nE '(^|[^=[:alnum:]_./-])(sort|comm)[[:space:]]' || :
+}
+RCX15_OPENER='review_consolidate_continue() {'
+RCX15_LINES="$(rcx15_body "$CONSOLIDATE_LIB" "$RCX15_OPENER" | grep -c . || :)"
+if [ "${RCX15_LINES:-0}" -ge 20 ]; then
+  pass "RCX15.extract: review_consolidate_continue extracted $RCX15_LINES lines"
+else
+  fail "RCX15.extract: extracted only ${RCX15_LINES:-0} lines — every row below is vacuous"
+fi
+RCX15_HITS="$(rcx15_unpinned "$CONSOLIDATE_LIB" "$RCX15_OPENER")"
+if [ -z "$RCX15_HITS" ]; then
+  pass "RCX15.live: every sort/comm in the staged-set guard is LC_ALL=C-pinned"
+else
+  fail "RCX15.live: unpinned sort/comm in the staged-set guard" \
+    "(line numbers index the comment-stripped body; pinned pairs read as PINNED_*)" \
+    "$RCX15_HITS"
+fi
+# ANTI-VACUITY. Both rows run through the SAME rcx15_unpinned defined above.
+RCX15_MUTANT="$TMP/rcx15-mutant-none.sh"
+cat >"$RCX15_MUTANT" <<'EOF_RCX15'
+review_consolidate_continue() {
+  local allowed staged extra
+  allowed="$(cat "$scan_dir/x.txt" | sort -u)"
+  extra="$(comm -13 <(printf '%s\n' "$allowed") <(printf '%s\n' "$staged"))"
+}
+EOF_RCX15
+RCX15_MUTANT_HITS="$(rcx15_unpinned "$RCX15_MUTANT" "$RCX15_OPENER")"
+if [ -n "$RCX15_MUTANT_HITS" ]; then
+  pass "RCX15.mutation-none: a fully unpinned body reds through the same predicate"
+else
+  fail "RCX15.mutation-none: the predicate cannot see an unpinned sort/comm — RCX15.live is vacuous"
+fi
+# THE ROW A FULLY-UNPINNED MUTANT CANNOT PRODUCE: one line, two commands, only
+# the `comm` pinned. That is the shape the next edit to that line will have.
+RCX15_HALF="$TMP/rcx15-mutant-half.sh"
+cat >"$RCX15_HALF" <<'EOF_RCX15H'
+review_consolidate_continue() {
+  local allowed staged extra
+  extra="$(LC_ALL=C comm -13 <(printf '%s\n' "$allowed") <(printf '%s\n' "$staged" | sort -u))"
+}
+EOF_RCX15H
+RCX15_HALF_HITS="$(rcx15_unpinned "$RCX15_HALF" "$RCX15_OPENER")"
+if [ -n "$RCX15_HALF_HITS" ]; then
+  pass "RCX15.mutation-half: a pinned comm and an unpinned sort on ONE line still reds"
+else
+  fail "RCX15.mutation-half: a half-pinned line reads as clean — the predicate is line-level, so RCX15.live is blind to the next edit to that line"
+fi
+
 echo
 echo "== Summary =="
 echo "  passed: $PASS"

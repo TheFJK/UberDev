@@ -3859,14 +3859,22 @@ _uberdev_goal_rebase_collision_chain() {
   # comm -12 cares only about set contents, not iteration count, so this
   # saves one `sort -u` per remaining-PR iteration.
   local merged_sorted
-  merged_sorted="$(printf '%s\n' "$merged_diff" | sort -u)"
+  # LC_ALL=C ON EVERY MEMBER OF THE sort/comm TRIO, INCLUDING `comm` ITSELF.
+  # This compares PATHS AS BYTES. `sort` orders by the ambient collation and
+  # `comm`'s merge walk assumes the order its own collation would produce; when
+  # the two disagree the walk desynchronises. Here that fails OPEN -- a `comm
+  # -12` intersection that misses a shared path reports NO collision between two
+  # PRs that do collide, and the rebase this function exists to trigger never
+  # fires. The sorts happen to share a shell today, so they agree by accident;
+  # pinning makes it a property of the code.
+  merged_sorted="$(printf '%s\n' "$merged_diff" | LC_ALL=C sort -u)"
   local pr
   while IFS= read -r pr; do
     [ -n "$pr" ] || continue
     [ "$pr" = "$merged_pr" ] && continue
     local pr_diff intersection
     pr_diff="$(gh pr diff "$pr" --name-only 2>/dev/null || true)"
-    intersection="$(comm -12 <(printf '%s\n' "$merged_sorted") <(printf '%s\n' "$pr_diff" | sort -u))"
+    intersection="$(LC_ALL=C comm -12 <(printf '%s\n' "$merged_sorted") <(printf '%s\n' "$pr_diff" | LC_ALL=C sort -u))"
     if [ -n "$intersection" ]; then
       # Collision detected — refresh main and audit the transition.
       git fetch origin main 2>/dev/null || true

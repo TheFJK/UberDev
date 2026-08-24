@@ -72,7 +72,7 @@ LIMIT=500
 # extraction is right for material a reader consults on demand, and wrong for
 # material the runtime obeys.
 WAIVERS="$(cat <<'EOF'
-premerge-pipeline	2418	~54% fenced (1310/2418); rose 2323->2418 for #754 — the GROWTH= line shape and the STOP_SELF_REFERENTIAL routing row are read at runtime, so neither can move to references/
+premerge-pipeline	2486	~54% fenced (1332/2486); rose 2323->2486 for #754 and #755 together — the GROWTH= line shape, the STOP_SELF_REFERENTIAL routing row and the blocked_on_file wave-return contract are all read at runtime, so none can move to references/
 merge-pipeline	1778	~27% fenced, no references/ yet — prose extraction is open work
 subagent-driven-dev	1019	~64% fenced — one ~450-line bash block plus dispatch examples
 orchestrator	1012	~53% fenced, 26 executable blocks; 2 reference files already split out

@@ -655,11 +655,22 @@ review_consolidate_continue() {
   # The staged set may not have grown past what the merge itself staged plus the
   # conflicted paths.
   local allowed staged extra
+  # LC_ALL=C ON EVERY MEMBER OF THE sort/comm TRIO, INCLUDING `comm` ITSELF.
+  # This guard compares PATHS AS BYTES. `sort` orders by the ambient collation
+  # and `comm`'s merge walk assumes the order its own collation would produce;
+  # when the two disagree the walk desynchronises and reports a path present in
+  # BOTH lists as extra -- refusing a merge whose staged set was correct. That
+  # consequence is not theoretical: feed `comm -13` two lists holding the SAME
+  # three paths in two different orders and it names one of them as extra.
+  # The two sorts share a shell today and so agree by accident; pinning makes
+  # the guard's correctness a property of the code rather than of whatever
+  # LC_ALL / LC_COLLATE / LANG the operator's shell happened to inherit, which
+  # varies by platform -- and this guard runs on every platform UberDev does.
   allowed="$(
-    { cat "$scan_dir/staged-at-conflict-$number.txt" 2>/dev/null || :; tr '\0' '\n' <"$conflicts"; } | sort -u
+    { cat "$scan_dir/staged-at-conflict-$number.txt" 2>/dev/null || :; tr '\0' '\n' <"$conflicts"; } | LC_ALL=C sort -u
   )"
-  staged="$(git -C "$worktree" diff --cached --name-only 2>/dev/null | sort -u)"
-  extra="$(comm -13 <(printf '%s\n' "$allowed") <(printf '%s\n' "$staged"))"
+  staged="$(git -C "$worktree" diff --cached --name-only 2>/dev/null | LC_ALL=C sort -u)"
+  extra="$(LC_ALL=C comm -13 <(printf '%s\n' "$allowed") <(printf '%s\n' "$staged"))"
   if [ -n "$extra" ]; then
     _uberdev_consolidate_error "#$number: the staged set grew beyond the merge's own set plus the conflicted paths: $(tr '\n' ' ' <<<"$extra")"
     return 2

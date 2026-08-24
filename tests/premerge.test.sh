@@ -57,6 +57,15 @@
 #          declared. The fence re-assigns the number, so editing the Constants
 #          block -- the only copy the prose points at -- changed nothing at
 #          runtime and no test noticed (#724)
+#   P21  — the fixer-wave return contract names `blocked_on_file` and BOTH of
+#          its emission cases, scoped to the §2a prompt block rather than to the
+#          whole file
+#   P21b — the security row: the commit fence's allowed set STILL derives only
+#          from `fix-waves-<NN>.json`, so a path is committable only while
+#          exactly one agent owns it. Exactly one producer, and no fence names
+#          the blocked-on artifact
+#   P21c — the widening is declared on both surfaces, capped, and reads exactly
+#          one predecessor; both bypass entries are in common-mistakes.md
 #   P20  — every backticked heading reference in the Constants block resolves to
 #          a heading that exists in this file (#724)
 #   P21  — the growth ratio's surfaces: the library declares the ceiling and the
@@ -1251,6 +1260,105 @@ assert_fixed "$RFC" '### A5 — the growth ratio is computed and stops the loop'
 # predicate is the drift this suite exists to prevent.
 assert_no_grep "$FENCES" '^[^#]*[^-[:alnum:]]--growth([^[:alnum:]_-]|$)' \
   "P21: no fence passes a growth argument — the inputs are in the run dir"
+
+echo "== P22: the fixer-wave return contract names blocked_on_file (#755) =="
+# AC 1: the field and BOTH emission cases. Scoped to the §2a prompt block, not
+# to the whole file — SKILL.md holds the contract AND the paragraphs about it,
+# and a whole-file grep for the field name is satisfied by the paragraph that
+# explains it after the contract itself has gone.
+P22_PROMPT="$(awk '
+  $0 == "### 2a — The fixer-wave mechanism" { in2a = 1 }
+  in2a && $0 == "Return exactly this YAML and nothing else:" { infield = 1 }
+  infield && index($0, "```") == 1 { exit }
+  infield { print }
+' "$SKILL")"
+P22_PROMPT_LINES="$(grep -c . <<<"$P22_PROMPT")"
+if [ "$P22_PROMPT_LINES" -ge 6 ]; then
+  echo "  PASS  P22: the §2a return block extracted $P22_PROMPT_LINES lines"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  P22: the §2a return block extracted $P22_PROMPT_LINES lines — every row below is vacuous"; FAIL=$((FAIL + 1))
+fi
+assert_in "$P22_PROMPT" 'blocked_on_file:' "P22: the return contract declares the field"
+assert_in "$P22_PROMPT" '- file:' "P22: and it carries a path"
+assert_in "$P22_PROMPT" 'reason:' "P22: and a reason"
+# BOTH emission cases, against the RULES block that the agent actually obeys.
+P22_RULES="$(awk '
+  $0 == "### 2a — The fixer-wave mechanism" { in2a = 1 }
+  in2a && $0 == "Rules:" { inrules = 1; next }
+  inrules && $0 == "Return exactly this YAML and nothing else:" { exit }
+  inrules { print }
+' "$SKILL")"
+P22_RULE_LINES="$(grep -c . <<<"$P22_RULES")"
+if [ "$P22_RULE_LINES" -ge 8 ]; then
+  echo "  PASS  P22: the §2a rules block extracted $P22_RULE_LINES lines"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  P22: the §2a rules block extracted $P22_RULE_LINES lines — the rows below are vacuous"; FAIL=$((FAIL + 1))
+fi
+assert_in "$P22_RULES" 'status: REFUSED' "P22: the REFUSED emission case is stated in the rules"
+assert_in "$P22_RULES" 'status: APPLIED' "P22: the APPLIED emission case is stated in the rules"
+assert_in "$P22_RULES" 'blocked_on_file' "P22: both cases name the field the agent must emit"
+assert_in "$P22_RULES" 'never a line range' "P22: the reason is carried, the coordinates are not"
+
+echo "== P22b: the allowed set still derives ONLY from the wave plan (#755) =="
+# THE SECURITY ROW. `blocked_on_file` must reach the next attempt through
+# `_fix_waves`, so a path is committable only while exactly one agent owns it.
+# A fence that reads the blocked-on artifact directly has bypassed that, and
+# the symptom is two agents editing one file with the disjointness guard silent.
+#
+# The two bypass patterns are HOISTED into variables because P22c drives the
+# SAME strings over a body that does bypass. A second, freshly-typed copy of a
+# pattern down there would make that anti-vacuity row constant-true: a typo in
+# either pattern here leaves the row it guards matching nothing, and the row
+# that exists to catch exactly that stays green because it reads its own copy.
+# One string, two readers — that is the whole mechanism.
+P22B_BYPASS_RE='blocked.on'
+P22B_APPEND_RE='PREMERGE_ASSIGNED_LIST"$'
+assert_in "$FIX_FENCE" 'jq -r '"'"'.waves[][].file'"'"' <"$PREMERGE_WAVES_FILE" >"$PREMERGE_SCOPE_RAW" || exit 2' \
+  "P22b: the allowed set is still derived from the wave plan, unchanged"
+assert_not_in "$FIX_FENCE" "$P22B_BYPASS_RE" \
+  "P22b: and the fix-commit fence names no blocked-on artifact"
+assert_not_in "$FIX_FENCE" "$P22B_APPEND_RE" \
+  "P22b: nothing appends to the assigned list after it is built"
+# Exactly ONE producer for the assigned list. A second `>>` or a second `jq`
+# writing it is the widening this design refuses, and a row asserting only that
+# the first producer survives would pass with both present.
+P22B_PRODUCERS="$(grep -cE '>+[[:space:]]*"\$PREMERGE_ASSIGNED_LIST"' <<<"$FIX_FENCE")"
+if [ "$P22B_PRODUCERS" = "1" ]; then
+  echo "  PASS  P22b: the assigned list has exactly one producer"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  P22b: the assigned list has $P22B_PRODUCERS producers, wanted 1"; FAIL=$((FAIL + 1))
+fi
+
+echo "== P22c: the widening is declared, bounded and non-accumulating (#755) =="
+assert_fixed "$FENCES" '--carry-blocked' "P22c: a fence turns the widening on"
+assert_fixed "$FENCES" '--repo-root "$PREMERGE_ROOT"' "P22c: and hands it a root to contain against"
+assert_fixed "$SKILL" 'PREMERGE_MAX_BLOCKED_ON' "P22c: the SKILL declares the cap"
+assert_fixed "$LIB" 'MAX_BLOCKED_ON' "P22c: the library declares the cap it enforces"
+assert_fixed "$LIB" 'blocked-on-%02d.json' "P22c: the library reads ONE predecessor by name, not a range"
+assert_fixed "$LIB" '_beneath_repo_root' "P22c: containment is a filesystem check the library actually has"
+assert_fixed "$SKILL" 'blocked-on-<NN>.json' "P22c: the SKILL names the artifact the controller writes"
+assert_fixed "$SKILL" 'BLOCKED=<n>' "P22c: the triage line documents the new field"
+assert_grep "$SKILL_MISTAKES" 'Adding a `blocked_on_file` path straight to the commit fence' \
+  "P22c: the bypass is written down as a mistake, not left to be rediscovered"
+assert_grep "$SKILL_MISTAKES" 'Unioning `blocked_on_file` across every earlier attempt' \
+  "P22c: and so is the accumulating union"
+# ANTI-VACUITY for the two assert_not_in rows above: the SAME two patterns —
+# read out of $P22B_BYPASS_RE and $P22B_APPEND_RE, never re-typed — over a body
+# that DOES bypass. Both must match here, or the row they guard is asserting
+# nothing about the real fence. Herestrings, not pipes: an early-exiting reader
+# behind a pipe is the EPIPE class tests/epipe-guard.test.sh bans.
+P22C_MUTANT='PREMERGE_ASSIGNED_LIST="$PREMERGE_RUN_DIR/x.assigned"
+jq -r ".blocked_on[].file" <"$PREMERGE_RUN_DIR/blocked-on-01.json" >>"$PREMERGE_ASSIGNED_LIST"'
+if grep -qE -e "$P22B_BYPASS_RE" <<<"$P22C_MUTANT"; then
+  echo "  PASS  P22c: the bypass detector sees a bypass when there is one"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  P22c: the bypass detector cannot see a bypass — P22b is vacuous"; FAIL=$((FAIL + 1))
+fi
+if grep -qE -e "$P22B_APPEND_RE" <<<"$P22C_MUTANT"; then
+  echo "  PASS  P22c: the append detector sees an append when there is one"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  P22c: the append detector cannot see an append — P22b is vacuous"; FAIL=$((FAIL + 1))
+fi
 
 echo ""
 echo "== Summary =="

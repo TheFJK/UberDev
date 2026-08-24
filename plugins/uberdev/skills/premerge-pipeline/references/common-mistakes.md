@@ -130,6 +130,30 @@ puts agent-authored commits on the stack PR unexamined.
 **Two agents in one wave sharing a file.** `_fix_waves` groups by path so this
 cannot happen — do not "optimise" it into one-agent-per-finding.
 
+**Adding a `blocked_on_file` path straight to the commit fence's allowed set.**
+The smallest possible diff, and wrong twice over. The fence derives the
+committable set from `fix-waves-<NN>.json` and nothing else, which is what keeps
+"committable" and "owned by exactly one agent" the same set. A path in the
+allowed list with no wave entry is committable while nobody owns it, and
+`_fix_waves` never grouped it, so the disjointness above says nothing about the
+two next-wave agents that may now both edit it against the one worktree those
+waves share with no isolation. Worse, the wave plan is also what DISPATCHES the
+fixers, so a `blocked_on_file` path that reached only the allowed list is edited
+by nobody: the cross-file consequence survives the round untouched — the very
+failure the widening was reaching for. The paths go through `_fix_waves` as
+synthesised blocker findings, never around it.
+
+**Unioning `blocked_on_file` across every earlier attempt.** The sibling in the
+same file invites it — `_carry_prior_suggestions` walks `range(1, attempt)` —
+and copying that shape reads as consistency. It is correct there because a
+suggestion is never fixed and must not be lost. A blocked-on path is the
+opposite: it WIDENS what a fixer may edit, so a union over every earlier attempt
+only ever grows, and the repair budget runs to `PREMERGE_REPAIR_CEILING` rounds
+— a set that grows every round is no longer a guard by the last of them. Exactly
+one predecessor: `plan --carry-blocked` opens `blocked-on-<N-1>.json` by name,
+never a range, and what survives validation is capped at
+`PREMERGE_MAX_BLOCKED_ON`.
+
 **Trusting "Edit ONLY `<path>`" because the prompt says it.** The prompt is the
 instruction; the commit fence's scope check is the enforcement. `git add -u`
 stages every tracked modification in the tree, so without that comparison
