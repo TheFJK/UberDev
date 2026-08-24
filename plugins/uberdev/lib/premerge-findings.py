@@ -1095,10 +1095,39 @@ def _carry_prior_suggestions(out_dir: str, attempt: int) -> "list[dict]":
     return carried
 
 
+# The controller-authored identity text of a carried cross-file consequence.
+#
+# NO ATTEMPT NUMBER IN IT, DELIBERATELY. This string becomes the row's
+# `summary`, and `_fingerprint` hashes the summary into the cross-attempt
+# identity `_blocker_fingerprints` counts on. It used to interpolate the
+# reporting attempt, so one consequence that persisted across two attempts
+# arrived under two different fingerprints: `_blocker_fingerprints` counted the
+# old one as `fixed` and the new one as `new` on every single round, which is
+# manufactured progress. STOP_NO_PROGRESS needs an UNCHANGED multiset and could
+# therefore never fire while such a row was carried, and STOP_REGRESSED needs
+# `fixed == 0`, which the phantom made false every time. The comment on the old
+# site called this summary "controller-authored and deterministic"; the attempt
+# number made it the opposite of deterministic across the only axis that
+# mattered.
+#
+# The attempt number is not lost. It goes into `failure_scenario`, which is
+# where the agent's own words already live precisely because nothing keys on
+# them.
+#
+# `from_file` STAYS in it, and that is why `_read_blocked_on` checks the
+# envelope tag in `from_file` as well as in `file` and `reason`: this is the
+# one field of the three that reaches an untrusted-input envelope through the
+# summary rather than through the path.
+_BLOCKED_ON_SUMMARY = (
+    "cross-file consequence: the fixer for %s reported this file as one it "
+    "needed in order to finish the fix"
+)
+
+
 def _read_blocked_on(
-    out_dir: str, attempt: int, repo_root: str, already: "set[str]"
+    out_dir: str, attempt: int, repo_root: str, findings: "list[dict]"
 ) -> "tuple[list[dict], int]":
-    """Attempt N-1's `blocked_on_file` rows: validated, deduped, capped.
+    """Attempt N-1's `blocked_on_file` rows, as blocker findings.
 
     EXACTLY ONE PREDECESSOR, NEVER A RANGE. `_carry_prior_suggestions` walks
     `range(1, attempt)` because a suggestion is never fixed and must not be
@@ -1111,13 +1140,68 @@ def _read_blocked_on(
     the trade `_drop_unfilable` already declines. Dropping is also the
     fail-CLOSED direction: a dropped path is a path no fixer may touch.
 
-    Returns (rows, dropped).
+    THE WHOLE ROW IS BUILT HERE, not by the caller, because every check that
+    makes a row publishable is a check that has to be able to DROP it. The
+    synthesised finding used to be assembled in `cmd_plan` after this function
+    returned, which put its two agent-derived strings outside the only region
+    that tolerates a bad one:
+
+      * `summary` interpolates `from_file`, which `_repo_path` admits at up to
+        MAX_PATH_CHARS. A 4000-character path therefore wrote a 4109-byte
+        summary into `classified-NN.json` -- valid nowhere, refused by nothing
+        until the Phase 5 `defer` called `_encode_aggregate` on it, exited 74
+        behind `|| exit 74`, and filed NOTHING: every surviving blocker, every
+        carried suggestion and every simplify-lens row, gone at the last step.
+        `cmd_plan` calls `_encode_aggregate` on the suggestion union for exactly
+        that reason and the synthesised rows were appended after it.
+      * `_repo_path` is lexical and has no control-character check at all, so a
+        `from_file` of `lib/\\x01a.sh` reached the summary, the fingerprint and
+        the deferred issue text intact. `_bounded_text` on the composed string
+        closes both halves at once, and closes them where a failure is a drop.
+
+    IT IS ALSO WHERE THE TWO GUARANTEES `_normalise_findings` GIVES THE
+    REVIEWER'S OWN ROWS ARE GIVEN TO THESE. That function refuses above
+    MAX_FINDINGS records and refuses a repeated `(file, line, normalised
+    summary)` triple; rows appended after it went through neither, so a
+    64-finding review plus 8 admitted paths wrote `counts.total = 72` and a wave
+    plan with more owners than the reviewer contract admits -- which `cmd_defer`
+    then truncated back to 64 at the FAR end, discarding rows instead of
+    refusing them at the near one. Both bounds are enforced here, in the
+    direction this function already stands for: displaced rows are dropped and
+    counted, never fatal.
+
+    EVERY DROP IS ANNOUNCED, and so is an absent artifact. `counts.blocked_on_*`
+    lives in `classified.json`, which no fence reads and no run summary renders,
+    so a fully-refused artifact and an empty one were the same observable state
+    on the operator's line -- `BLOCKED=0` either way. Every sibling refusal in
+    this module announces itself with a stable token
+    (`attempt_unreadable_skipped`, `blocked_on_unreadable_skipped`,
+    `repair_scope_unreadable`, `attempt_fallback`); these two now do too.
+
+    Returns (synthesised blocker findings, dropped).
     """
     prior = attempt - 1
     if prior < 1:
         return [], 0
     path = os.path.join(out_dir, "blocked-on-%02d.json" % prior)
     if not os.path.exists(path):
+        # ANNOUNCED, because SKILL.md `### 2a` makes the artifact MANDATORY:
+        # "Write `"blocked_on": []` when the wave reported nothing, and do not
+        # skip the artifact -- an absent file and an empty array must never be
+        # the same observable state." Returning ([], 0) in silence made them
+        # exactly that, so a controller that forgot the hand-written JSON got a
+        # widening that no-oped and a `BLOCKED=0` indistinguishable from "the
+        # wave reported nothing to widen".
+        #
+        # Only reachable when the widening was actually REQUESTED: `cmd_plan`
+        # calls this function only under `--carry-blocked`, and an absent
+        # artifact on a run that never asked for one is legitimate.
+        print(
+            "premerge-findings: blocked_on_artifact_absent: "
+            "%s is missing; SKILL.md requires it even when the wave reported "
+            "nothing, so nothing is widened from attempt %d" % (path, prior),
+            file=sys.stderr,
+        )
         return [], 0
     try:
         document = _load(path)
@@ -1138,12 +1222,29 @@ def _read_blocked_on(
         )
         return [], 0
 
+    # Seeded with the files THIS attempt's reviewer blockers already own, so a
+    # path the reviewer named cannot gain a second owner in the wave plan.
+    seen: "set[str]" = {f["file"] for f in findings if f.get("severity") == "blocker"}
+    # And the uniqueness triple `_normalise_findings` refuses a repeat of, so a
+    # synthesised row cannot collide with a reviewer row on the very key that
+    # function calls a duplicate. Synthesised rows carry `line: None`, which is
+    # a real value in this key and not a wildcard.
+    keys = {
+        (f["file"], f["line"], _normalised_summary(f["summary"])) for f in findings
+    }
+    # The widening's own bound AND what is left of the document-wide cap,
+    # whichever is smaller. MAX_BLOCKED_ON alone let a full review overflow
+    # MAX_FINDINGS; MAX_FINDINGS alone would let one attempt widen by 63 paths.
+    cap = min(MAX_BLOCKED_ON, max(0, MAX_FINDINGS - len(findings)))
+
     kept: "list[dict]" = []
-    seen: "set[str]" = set(already)
-    dropped = 0
+    # WHY a tally and not a bare count: "the artifact was written with absolute
+    # paths" and "the fixers deleted the files it names" are different operator
+    # actions, and both look like `BLOCKED=0` without it.
+    refused: "collections.Counter[str]" = collections.Counter()
     for record in rows:
         if not isinstance(record, dict):
-            dropped += 1
+            refused["not_an_object"] += 1
             continue
         try:
             target = _repo_path(record.get("file"))
@@ -1154,8 +1255,27 @@ def _read_blocked_on(
                 "blocked_on_schema_invalid",
                 "blocked_on reason",
             )
+            # BOUNDED HERE, where a failure is a drop -- see the docstring.
+            # `_bounded_text` rejects a control character in the composed string
+            # BEFORE it collapses whitespace, so the half of the check
+            # `_repo_path` does not do reaches `from_file` through this call.
+            summary = _bounded_text(
+                _BLOCKED_ON_SUMMARY % origin,
+                MAX_SUMMARY_BYTES,
+                "blocked_on_schema_invalid",
+                "blocked_on summary",
+            )
+            # The reporting attempt lives here and nowhere else: this field is
+            # the one nothing keys on, which is what lets the summary above stay
+            # identical across attempts.
+            detail = _bounded_text(
+                "attempt %d's fixer for %s reported: %s" % (prior, origin, reason),
+                MAX_DETAIL_BYTES,
+                "blocked_on_schema_invalid",
+                "blocked_on failure_scenario",
+            )
         except Refusal:
-            dropped += 1
+            refused["invalid_field"] += 1
             continue
         # The wave prompt pastes finding objects VERBATIM into an
         # `<external-untrusted-input>` envelope with no encoder between them,
@@ -1174,10 +1294,10 @@ def _read_blocked_on(
             "external-untrusted-input" in value.casefold()
             for value in (reason, origin, target)
         ):
-            dropped += 1
+            refused["envelope_tag"] += 1
             continue
         if not _beneath_repo_root(repo_root, target):
-            dropped += 1
+            refused["outside_repo_root"] += 1
             continue
         # It must already exist. A widened path that does not is a path no
         # commit could carry anyway -- the fix commit fence refuses on
@@ -1188,17 +1308,64 @@ def _read_blocked_on(
         # newline would split into two entries. No such file exists on disk, so
         # the row dies here.
         if not os.path.isfile(os.path.join(repo_root, target)):
-            dropped += 1
+            refused["absent_file"] += 1
             continue
         if target in seen:
-            dropped += 1
+            refused["already_owned"] += 1
             continue
-        if len(kept) >= MAX_BLOCKED_ON:
-            dropped += 1
+        key = (target, None, _normalised_summary(summary))
+        if key in keys:
+            refused["duplicate_finding"] += 1
+            continue
+        if len(kept) >= cap:
+            refused["over_cap"] += 1
             continue
         seen.add(target)
+        keys.add(key)
         kept.append(
-            {"file": target, "from_file": origin, "reason": reason, "attempt": prior}
+            {
+                # After every reviewer finding, so `_fix_waves`'
+                # first-appearance ordering puts the reviewer's own blockers in
+                # the earlier waves.
+                "rank": len(findings) + len(kept) + 1,
+                "file": target,
+                # NEVER A LINE. The consequence was observed at coordinates
+                # other wave members have already moved; the reason survives a
+                # rewrite and a line number does not.
+                "line": None,
+                "summary": summary,
+                "failure_scenario": detail,
+                "category": None,
+                "verdict": None,
+                "fingerprint": _fingerprint(target, summary),
+                "severity": "blocker",
+                "severity_source": "controller",
+                # THE MARKER `_growth_ratio` READS. This row is not something a
+                # reviewer reported and not something the previous repair wrote
+                # -- it is the loop carrying its own bookkeeping forward, and by
+                # construction it names a file that repair did NOT modify. Left
+                # in the GROWTH denominator it can only ever dilute the ratio
+                # downward: three genuinely self-referential blockers plus three
+                # carried consequences measured 0.50 instead of 1.00, and the
+                # suppression is largest on the runs with the most cross-file
+                # churn -- the runs the detector exists for. An additive key, so
+                # a pre-loop artifact that lacks it reads exactly as it did.
+                "blocked_on_carry": True,
+            }
+        )
+    dropped = sum(refused.values())
+    if dropped:
+        print(
+            "premerge-findings: blocked_on_rows_dropped: "
+            "attempt %d: %d of %d rows dropped (%s); %d path(s) widened"
+            % (
+                prior,
+                dropped,
+                len(rows),
+                ",".join("%s=%d" % item for item in sorted(refused.items())),
+                len(kept),
+            ),
+            file=sys.stderr,
         )
     return kept, dropped
 
@@ -1344,8 +1511,23 @@ def _growth_ratio(
 
     numerator   -- blockers whose `file` is in `scope` AND whose fingerprint
                    the previous attempt's evidence did not carry.
-    denominator -- every blocker in this attempt's evidence, i.e. the number
-                   already printed as BLOCKERS=.
+    denominator -- every blocker in this attempt's evidence that a REVIEWER
+                   raised. That is `BLOCKERS=` minus the carried cross-file
+                   consequences -- see the carried-row exclusion below.
+
+    THE CARRIED-ROW EXCLUSION. `_read_blocked_on` turns the previous attempt's
+    `blocked_on_file` returns into blocker findings, stamped
+    `blocked_on_carry: True`. A path is reported that way precisely BECAUSE the
+    previous fixer could not edit it, so it is never in
+    `fix-scope-<N-1>.modified` and can never enter the numerator -- while, left
+    in the denominator, it dilutes the ratio on every round. Three genuinely
+    self-referential blockers alongside three carried consequences measured
+    0.50 where the honest answer is 1.00, and MAX_BLOCKED_ON lets one attempt
+    add eight such rows. The suppression is largest on the runs with the most
+    cross-file churn, which are exactly the runs STOP_SELF_REFERENTIAL exists
+    for, and two suppressed rounds in a row is all it takes for it never to
+    fire. So a carried row counts on NEITHER side: it is not the reviewer's
+    finding and it is not work the previous repair authored.
 
     THE FINGERPRINT EXCLUSION IS NOT AN OPTIMISATION. The wave plan assigns
     exactly the files this attempt's blockers named, so a SURVIVOR -- a blocker
@@ -1363,26 +1545,29 @@ def _growth_ratio(
     CONVERGE_GROWTH_RUNS requires two consecutive rounds rather than one.
 
     None when the ratio is undefined: no previous attempt, no measured repair
-    scope, or no blockers to divide by.
+    scope, or no reviewer-raised blocker to divide by.
     """
     if scope is None or previous_prints is None:
         return None
-    blockers = document["blockers"]
-    if not blockers:
-        return None
     grown = 0
-    for finding in blockers:
+    measured = 0
+    for finding in document["blockers"]:
         if not isinstance(finding, dict):
             fail("finding_schema_invalid", "a blocker is not an object")
+        if finding.get("blocked_on_carry") is True:
+            continue
+        measured += 1
         if _repo_path(finding.get("file")) not in scope:
             continue
         if finding.get("fingerprint") in previous_prints:
             continue
         grown += 1
+    if not measured:
+        return None
     # ROUNDED BEFORE THE COMPARISON, not after. The threshold test below uses
     # the same two-decimal value the line prints, so an operator reading
     # `GROWTH=0.50` and the decision the run took can never disagree.
-    return round(grown / len(blockers), 2)
+    return round(grown / measured, 2)
 
 
 def _converge_ledger(run_dir: str) -> str:
@@ -1718,41 +1903,19 @@ def cmd_plan(args: argparse.Namespace) -> int:
             "blocked_on_root_missing",
             "--carry-blocked requires --repo-root: containment is a filesystem check",
         )
-    blocked, blocked_dropped = (
-        _read_blocked_on(out_dir, attempt, args.repo_root, {f["file"] for f in blockers})
+    # THE ROWS ARRIVE FULLY FORMED AND FULLY CHECKED -- see `_read_blocked_on`.
+    # Assembling them here, after `_normalise_findings` and after the
+    # `_encode_aggregate` validation above, is what let an over-long or
+    # control-charactered `from_file` write a summary into `classified.json`
+    # that only detonated at the Phase 5 `defer`, and what let the widening
+    # push the document past MAX_FINDINGS and past the uniqueness key. Both
+    # bounds now belong to the reader, where a violation is a counted drop
+    # rather than a dead attempt.
+    synthesised, blocked_dropped = (
+        _read_blocked_on(out_dir, attempt, args.repo_root, findings)
         if args.carry_blocked
         else ([], 0)
     )
-    synthesised: "list[dict]" = []
-    for offset, row in enumerate(blocked, start=1):
-        # CONTROLLER-AUTHORED AND DETERMINISTIC. `summary` feeds `_fingerprint`,
-        # which is the cross-attempt identity `_blocker_fingerprints` counts on;
-        # letting an agent author it would make that identity agent-authored
-        # too. The agent's own words go in `failure_scenario`, where nothing
-        # keys on them.
-        summary = (
-            "cross-file consequence: attempt %d's fixer for %s reported this file "
-            "as one it needed in order to finish the fix" % (row["attempt"], row["from_file"])
-        )
-        synthesised.append(
-            {
-                # After every reviewer finding, so `_fix_waves`' first-appearance
-                # ordering puts the reviewer's own blockers in the earlier waves.
-                "rank": len(findings) + offset,
-                "file": row["file"],
-                # NEVER A LINE. The consequence was observed at coordinates other
-                # wave members have already moved; the reason survives a rewrite
-                # and a line number does not.
-                "line": None,
-                "summary": summary,
-                "failure_scenario": row["reason"],
-                "category": None,
-                "verdict": None,
-                "fingerprint": _fingerprint(row["file"], summary),
-                "severity": "blocker",
-                "severity_source": "controller",
-            }
-        )
     # Both lists, so `counts.total`, `counts.blocker` and `counts.category_backed`
     # keep describing the same population the artifact actually holds.
     findings = findings + synthesised
@@ -1785,9 +1948,16 @@ def cmd_plan(args: argparse.Namespace) -> int:
             "suggestion_carried": carried_count,
             # How many paths this attempt's wave plan gained from the PREVIOUS
             # attempt's `blocked_on_file` returns, and how many rows were
-            # refused or displaced by MAX_BLOCKED_ON on the way in. Reported so
+            # refused by validation or displaced by a cap -- MAX_BLOCKED_ON, or
+            # whatever is left of MAX_FINDINGS -- on the way in. Reported so
             # "the reviewer found 3 blockers" can be told apart from "the
             # reviewer found 1 and the loop carried 2 cross-file consequences".
+            #
+            # NEITHER NUMBER IS THE OPERATOR'S ONLY NOTICE ANY MORE. This file
+            # is read by no fence and rendered by no run summary, so a fully
+            # refused artifact looked exactly like an empty one; every drop is
+            # now also announced on stderr with its own token. See
+            # `_read_blocked_on`.
             "blocked_on_admitted": len(synthesised),
             "blocked_on_dropped": blocked_dropped,
         },

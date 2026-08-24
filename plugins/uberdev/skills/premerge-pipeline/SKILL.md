@@ -966,24 +966,22 @@ if [ ! -s "$PREMERGE_WAVES_FILE" ]; then
   exit 2
 fi
 PREMERGE_ASSIGNED_LIST="$PREMERGE_RUN_DIR/fix-scope-$PREMERGE_ATTEMPT_PAD.assigned"
-PREMERGE_MODIFIED_LIST="$PREMERGE_RUN_DIR/fix-scope-$PREMERGE_ATTEMPT_PAD.modified"
+PREMERGE_MODIFIED_LIST="$PREMERGE_RUN_DIR/fix-scope-$PREMERGE_ATTEMPT_PAD.pending"  # .modified is published after the push
 PREMERGE_SCOPE_RAW="$PREMERGE_RUN_DIR/fix-scope-$PREMERGE_ATTEMPT_PAD.raw"
-# NEITHER list may be produced by a pipeline. `<producer> | sort -u >LIST || exit 2`
-# binds the `||` to the PIPELINE's status, which is `sort`'s -- and `sort`
-# succeeds on empty input. A `git diff` that failed (index.lock contention from a
-# concurrent agent, a corrupt index, a `$PREMERGE_ROOT` that moved under the
-# fence) therefore produced an EMPTY modified list, an empty `comm -23`, an empty
-# `PREMERGE_STRAY`, and this fence fell through to `git add -u` and swept every
-# tracked modification in the tree into the stack commit. That is the exact
-# fail-OPEN the scope guard exists to prevent, inside the guard itself, on the
-# half `## Common Mistakes` calls "the enforcement".
-#
-# Worse, the two halves failed in OPPOSITE directions under the identical shape:
-# an empty ASSIGNED makes every file stray (loud, closed), an empty MODIFIED
-# makes none (silent, open). So both are written the same way -- a producer whose
-# own status is checked, then a `sort` whose own status is checked.
-# `LC_ALL=C` ON EVERY MEMBER OF THE sort/comm TRIO, INCLUDING `comm` ITSELF.
-#
+# NEITHER list may be produced by a pipeline. `<producer> | sort -u >LIST ||
+# exit 2` binds the `||` to the PIPELINE's status, which is `sort`'s -- and
+# `sort` succeeds on empty input. A `git diff` that failed (index.lock
+# contention from a concurrent agent, a corrupt index, a `$PREMERGE_ROOT` that
+# moved under the fence) therefore produced an EMPTY modified list, an empty
+# `comm -23`, an empty `PREMERGE_STRAY`, and this fence fell through to `git add
+# -u` and swept every tracked modification in the tree into the stack commit.
+# That is the exact fail-OPEN the scope guard exists to prevent, inside the
+# guard itself, on the half `## Common Mistakes` calls "the enforcement". Worse,
+# the two halves failed in OPPOSITE directions under the identical shape: an
+# empty ASSIGNED makes every file stray (loud, closed), an empty MODIFIED makes
+# none (silent, open). So both are written the same way -- a producer whose own
+# status is checked, then a `sort` whose own status is checked. `LC_ALL=C` ON
+# EVERY MEMBER OF THE sort/comm TRIO, INCLUDING `comm` ITSELF.
 # This guard compares PATHS AS BYTES, and locale collation has no business in
 # it. `sort` orders by the ambient collation and `comm`'s merge walk assumes the
 # order its own collation would produce; when the two disagree the walk
@@ -1025,6 +1023,8 @@ PREMERGE_PUSH_ERR="$(git push origin "$PREMERGE_BRANCH" 2>&1 1>/dev/null)" || {
     "$PREMERGE_ATTEMPT" "$PREMERGE_BRANCH" "$PREMERGE_PUSH_ERR" >&2
   exit 2
 }
+# The durable publish: the next attempt's GROWTH reads `fix-scope-<NN>.modified`, so only a pushed repair may write it.
+mv "$PREMERGE_MODIFIED_LIST" "$PREMERGE_RUN_DIR/fix-scope-$PREMERGE_ATTEMPT_PAD.modified" || exit 2
 printf 'PREMERGE FIX COMMIT=%s ATTEMPT=%s\n' "$(git rev-parse HEAD)" "$PREMERGE_ATTEMPT" >&2
 ```
 

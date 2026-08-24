@@ -41,6 +41,11 @@
 #          argument-hint starts advertising a refusal
 #   P13  — the loop is bounded: a ceiling is named and the never-merge and
 #          never-loop-forever claims are both stated
+#   P16  — repo-agnosticism: Phase 5's bump probes the TARGET repo (not the
+#          plugin install), passes that root through to bump-version.sh, and
+#          skips with a typed reason elsewhere; Phase 0 publishes the private
+#          ignore policy that keeps the run dir out of a foreign repo's
+#          cleanliness gate
 #   P17  — the stack-gate blockers, every row scoped to an extracted fence body:
 #          the scope guard's two halves fail in the same direction (#693), one
 #          rule for advancing PREMERGE_ATTEMPT (#692), one aggregate_path (#694),
@@ -57,15 +62,6 @@
 #          declared. The fence re-assigns the number, so editing the Constants
 #          block -- the only copy the prose points at -- changed nothing at
 #          runtime and no test noticed (#724)
-#   P21  — the fixer-wave return contract names `blocked_on_file` and BOTH of
-#          its emission cases, scoped to the §2a prompt block rather than to the
-#          whole file
-#   P21b — the security row: the commit fence's allowed set STILL derives only
-#          from `fix-waves-<NN>.json`, so a path is committable only while
-#          exactly one agent owns it. Exactly one producer, and no fence names
-#          the blocked-on artifact
-#   P21c — the widening is declared on both surfaces, capped, and reads exactly
-#          one predecessor; both bypass entries are in common-mistakes.md
 #   P20  — every backticked heading reference in the Constants block resolves to
 #          a heading that exists in this file (#724)
 #   P21  — the growth ratio's surfaces: the library declares the ceiling and the
@@ -74,11 +70,15 @@
 #          is computed, that one round warns and two stop, and that repointing
 #          the repair scope moves the decision — is driven in B32 of
 #          tests/premerge-findings.test.sh, which executes the module
-#   P16  — repo-agnosticism: Phase 5's bump probes the TARGET repo (not the
-#          plugin install), passes that root through to bump-version.sh, and
-#          skips with a typed reason elsewhere; Phase 0 publishes the private
-#          ignore policy that keeps the run dir out of a foreign repo's
-#          cleanliness gate
+#   P22  — the fixer-wave return contract names `blocked_on_file` and BOTH of
+#          its emission cases, scoped to the §2a prompt block rather than to the
+#          whole file
+#   P22b — the security row: the commit fence's allowed set STILL derives only
+#          from `fix-waves-<NN>.json`, so a path is committable only while
+#          exactly one agent owns it. Exactly one producer, and no fence names
+#          the blocked-on artifact
+#   P22c — the widening is declared on both surfaces, capped, and reads exactly
+#          one predecessor; both bypass entries are in common-mistakes.md
 
 set -u
 
